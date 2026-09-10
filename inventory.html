@@ -1260,6 +1260,7 @@
     // daftar yang tumbuh seiring bertambahnya transaksi.
     // Dibangun ulang otomatis kalau daftar diganti (sinkronisasi) atau jumlahnya berubah, dan
     // dibatalkan secara eksplisit tiap kali data disimpan.
+    let dataVersi = 0; // dinaikkan tiap data disimpan -> cache jangkar saldo dibangun ulang
     let __skuIndex = null, __skuIndexSrc = null, __skuIndexLen = -1;
     function invalidateSkuIndex(){ __skuIndex = null; }
     function itemBySku(sku){
@@ -1331,6 +1332,7 @@
 
     function persistLocal() {
         invalidateSkuIndex(); // master mungkin baru berubah -> indeks kode bahan harus dibangun ulang
+        dataVersi++;
         if (!storageOK) return; // data tetap tersimpan di memori selama halaman terbuka
         try {
             localStorage.setItem(STORAGE.SKU, JSON.stringify(masterSKU));
@@ -1362,6 +1364,25 @@
     // Dengan `|| DEFAULT_SYNC_URL`, pilihan "kosongkan untuk mode lokal saja" tidak pernah bertahan:
     // string kosong dianggap falsy sehingga sinkronisasi menyala lagi setiap halaman dimuat ulang.
     try { let u = localStorage.getItem("sync_url"); SYNC_URL = (u===null) ? DEFAULT_SYNC_URL : u; } catch(e) {}
+    // ===== IDENTITAS PERANGKAT & ID UNIK GLOBAL =====
+    // nextLogId/nextTransferId hanyalah pencacah LOKAL. Dua perangkat yang input bersamaan pasti
+    // menghasilkan id yang sama untuk transaksi yang berbeda, sehingga saat digabung salah satunya
+    // hilang atau tertimpa. `uid` di bawah unik lintas perangkat dan jadi kunci penggabungan.
+    let deviceId = '';
+    try {
+        deviceId = localStorage.getItem('device_id') || '';
+        if(!deviceId){ deviceId = 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+                       localStorage.setItem('device_id', deviceId); }
+    } catch(e) { deviceId = 'd' + Math.random().toString(36).slice(2,9); }
+    let uidSeq = 0;
+    function newUid(){ return deviceId + '.' + Date.now().toString(36) + '.' + (uidSeq++).toString(36); }
+    // Mutasi yang dibuat di perangkat ini dan belum dipastikan tersimpan di server.
+    let mutasiLokal = [];   // [{jenis:'log'|'transfer', uid}]
+    function catatMutasiLokal(jenis, uid){ if(uid) mutasiLokal.push({jenis, uid}); }
+    // Selama sebuah transaksi sedang diproses, data dari server TIDAK boleh menimpa state —
+    // kalau menimpa, batch hasil mutasi hilang sementara lognya terlanjur tercatat.
+    let sedangTransaksi = 0;
+
     let serverVersion = 0;      // versi data terakhir yang diketahui dari server
     let pushTimer = null;       // debounce
     let pushing = false;
@@ -1463,6 +1484,49 @@
         pushTimer = setTimeout(pushToServer, 1500);
     }
 
+    // Mutasi yang dibuat di perangkat ini tapi TIDAK ada di data server (dibandingkan lewat uid).
+    // Diambil SEBELUM applyState, karena applyState mengganti transactionLog & transfers.
+    function kumpulkanMutasiTertinggal(serverState){
+        const uidLog = new Set((serverState.transactionLog||[]).map(l=>l.uid).filter(Boolean));
+        const uidTr  = new Set((serverState.transfers||[]).map(t=>t.uid).filter(Boolean));
+        const logs=[], trs=[];
+        mutasiLokal.forEach(m=>{
+            if(m.jenis==='log'){
+                if(uidLog.has(m.uid)) return;
+                const l=transactionLog.find(x=>x.uid===m.uid); if(l) logs.push(JSON.parse(JSON.stringify(l)));
+            } else {
+                if(uidTr.has(m.uid)) return;
+                const t=transfers.find(x=>x.uid===m.uid); if(t) trs.push(JSON.parse(JSON.stringify(t)));
+            }
+        });
+        return { logs, trs };
+    }
+    // Memasang kembali mutasi lokal di atas data server: efek stoknya diterapkan ulang dari
+    // rincian batch yang sudah tercatat di log itu sendiri, lalu id lokal dinomori ulang supaya
+    // tidak bentrok dengan id milik perangkat lain.
+    function pasangUlangMutasiLokal(pulih){
+        if(!pulih) return 0;
+        let n=0;
+        (pulih.logs||[]).forEach(l=>{
+            if(transactionLog.some(x=>x.uid===l.uid)) return;
+            l.id = nextLogId++;
+            try { reapplyLogStockEffect(l); } catch(e){ console.warn('reapply gagal', l.uid, e); }
+            transactionLog.unshift(l);
+            n++;
+        });
+        (pulih.trs||[]).forEach(t=>{
+            if(transfers.some(x=>x.uid===t.uid)) return;
+            t.id = nextTransferId++;
+            transfers.unshift(t);
+            n++;
+        });
+        // Pencacah id harus di atas seluruh id yang kini ada, termasuk milik perangkat lain.
+        nextLogId = Math.max(nextLogId, ...transactionLog.map(l=>(l.id||0)+1), 1);
+        nextTransferId = Math.max(nextTransferId, ...transfers.map(t=>(t.id||0)+1), 1);
+        nextBatchId = Math.max(nextBatchId, ...Object.values(stockBatches||{}).flat().map(b=>(b.id||0)+1), 1);
+        if(n) persistLocal();
+        return n;
+    }
     async function pushToServer() {
         if (!SYNC_URL || pushing) return;
         pushing = true;
@@ -1471,12 +1535,22 @@
             var srv = null;
             try { srv = await window.__jsonpGet(SYNC_URL); } catch(e) {}
             if (srv && srv.ok && srv.version > serverVersion && srv.state && srv.state.masterSKU && srv.state.masterSKU.length) {
+                // Perangkat lain menyimpan lebih dulu. JANGAN buang input lokal: ambil data server,
+                // lalu pasang kembali mutasi lokal yang belum ada di sana berdasarkan uid, baru kirim ulang.
+                const pulih = kumpulkanMutasiTertinggal(srv.state);
                 serverVersion = srv.version;
                 applyState(srv.state);
+                const n = pasangUlangMutasiLokal(pulih);
                 refreshUI();
-                setBadge('🟢 Tersinkron','#10b981');
-                notify('Data Diperbarui','Perangkat lain baru saja menyimpan. Data terbaru dimuat — ulangi input terakhir Anda jika perlu.','warning');
-                dirty = false;
+                if (n > 0) {
+                    setBadge('🟡 Menggabungkan...','#f59e0b');
+                    notify('Data Digabung', n+' transaksi dari perangkat ini dipasang kembali di atas data terbaru dan sedang dikirim ulang. Tidak ada input yang hilang.', 'info');
+                    dirty = true;
+                    schedulePush();
+                } else {
+                    setBadge('🟢 Tersinkron','#10b981');
+                    dirty = false;
+                }
                 return;
             }
             // 2) Kirim data (fire-and-forget, kebal blokir CORS webview)
@@ -1492,6 +1566,7 @@
             var chk = await window.__jsonpGet(SYNC_URL);
             if (chk && chk.ok && chk.version > serverVersion) {
                 serverVersion = chk.version;
+                mutasiLokal = []; // sudah pasti tersimpan di server
                 setBadge('🟢 Tersinkron','#10b981');
             } else {
                 throw new Error('data terkirim tapi belum terverifikasi');
@@ -1540,7 +1615,7 @@
     // kiriman baru "tidak muncul" sampai harus logout dulu. Ditarik hanya kalau tidak ada perubahan lokal
     // yang belum terkirim (dirty=false), supaya tidak menimpa input yang sedang berjalan.
     setInterval(async ()=>{
-        if (!SYNC_URL || dirty || pushing) return;
+        if (!SYNC_URL || dirty || pushing || sedangTransaksi) return;
         let changed = await pullFromServer(true);
         if (changed) refreshUI();
     }, 30000);
@@ -1549,7 +1624,7 @@
     // tiap 6 detik selama ada sesi Stok Opname aktif (mis. 2 orang menghitung bersamaan
     // pakai 1 akun petugas di 2 HP berbeda), supaya hitungan satu sama lain cepat kelihatan.
     async function pollFromServer(){
-        if (!SYNC_URL || dirty || pushing) { scheduleNextPoll(); return; }
+        if (!SYNC_URL || dirty || pushing || sedangTransaksi) { scheduleNextPoll(); return; }
         try {
             const data = await window.__jsonpGet(SYNC_URL);
             if (data.ok && data.version > serverVersion && data.state) {
@@ -1930,6 +2005,11 @@
     }
     async function processTransaction(sku, type, qty, price, supplierId, divisionId, ref, isAdjustment, opts) {
         opts = opts || {};
+        sedangTransaksi++;
+        try { return await _processTransaction(sku, type, qty, price, supplierId, divisionId, ref, isAdjustment, opts); }
+        finally { sedangTransaksi--; }
+    }
+    async function _processTransaction(sku, type, qty, price, supplierId, divisionId, ref, isAdjustment, opts) {
         const item = itemBySku(sku);
         if (!item) return { success:false, msg:`SKU ${sku} tidak ditemukan` };
         const gudang = opts.gudang || DEFAULT_GUDANG;
@@ -1983,11 +2063,17 @@
             let deficitVariance = 0;
             let negBatches = stockBatches[sku].filter(b=>(b.gudang||DEFAULT_GUDANG)===gudang && b.qty<0).sort((a,b)=>a.dateIn-b.dateIn);
             let li = 0;
+            // Penutupan batch minus dicatat lengkap supaya bisa DIBATALKAN. Tanpa catatan ini,
+            // membatalkan transaksi masuk akan menghapus stoknya tapi meninggalkan defisit yang
+            // sudah terlanjur tertutup -> qty dan nilai tidak pernah kembali ke keadaan semula.
+            let negSettlements = [];
             for (let nb of negBatches) {
                 while (nb.qty < 0 && li < layers.length) {
                     if (layers[li].qty <= 0) { li++; continue; }
                     let closeQty = Math.min(layers[li].qty, -nb.qty);
                     deficitVariance += closeQty * (layers[li].price - (nb.price||0));
+                    negSettlements.push({ batchId: nb.id, qty: closeQty, batchPrice: nb.price||0,
+                                          inPrice: layers[li].price, dateIn: nb.dateIn });
                     nb.qty += closeQty;          // bergerak menuju 0 (misal -5 + 3 = -2)
                     layers[li].qty -= closeQty;
                 }
@@ -2014,8 +2100,9 @@
             // Seluruh stok masuk habis menutup batch minus -> tidak ada batch baru, tapi transaksinya
             // tetap dicatat apa adanya supaya histori & rekonsiliasi tidak kehilangan jejak.
             sortBatches(sku);
-            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price:hargaRata, total:totalIn, by:opts.by||deviceOperator, exp:opts.exp||null, source:opts.source||'beli', uploadId:opts.uploadId||null, ppn:Math.round((opts.ppn||0)*100)/100, supplier:supName, division:opts.divisionLabel||"", ref, batchIds:(dibuat.length?dibuat.map(b=>b.id):[null]), createdBatches:dibuat.map(b=>({ id:b.id, qty:b.qty })), costLayers:layersAsli, gudang, batchId:opts.batchId||null, deficitVariance, costUnknown:!!opts.costUnknown, beforeStock:getStock(sku,gudang).qty-qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
+            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price:hargaRata, total:totalIn, by:opts.by||deviceOperator, exp:opts.exp||null, source:opts.source||'beli', uploadId:opts.uploadId||null, ppn:Math.round((opts.ppn||0)*100)/100, supplier:supName, division:opts.divisionLabel||"", ref, uid:newUid(), effectiveTimestamp:opts.effectiveTimestamp||null, batchIds:dibuat.map(b=>b.id), createdBatches:dibuat.map(b=>({ id:b.id, qty:b.qty })), negSettlements, costLayers:layersAsli, gudang, batchId:opts.batchId||null, deficitVariance, costUnknown:!!opts.costUnknown, beforeStock:getStock(sku,gudang).qty-qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
             transactionLog.unshift(log);
+            catatMutasiLokal('log', log.uid);
             persist();
             return { success:true, msg:`✅ Masuk ${qty} ${item.baseUnit} @ Rp${Math.round(hargaRata).toLocaleString('id')} (${gudangName(gudang)})` };
         } else {
@@ -2070,8 +2157,9 @@
             // menerima harga asli tiap lapisan, bukan satu harga rata-rata yang menghapus jejak FIFO.
             const costLayers = deducted.map(d=>({ batchId:d.batchId, qtyTaken:d.qtyTaken, price:d.price, dateIn:d.dateIn }));
             const divName = divisions.find(d=>d.id==divisionId)?.name||"";
-            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price:avgPrice, total:totalCost, by:opts.by||deviceOperator, outType:opts.outType||'pakai', desc:opts.desc||'', area:opts.area||'', supplier:"", division:divName, ref, batchIds:deducted.map(d=>d.batchId), deducted, costLayers, gudang, transferTo:opts.transferTo||null, resetAdjustment:!!opts.resetAdjustment, batchId:opts.batchId||null, beforeStock:getStock(sku,gudang).qty+qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
+            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price:avgPrice, total:totalCost, by:opts.by||deviceOperator, outType:opts.outType||'pakai', desc:opts.desc||'', area:opts.area||'', supplier:"", division:divName, uid:newUid(), effectiveTimestamp:opts.effectiveTimestamp||null, ref, batchIds:deducted.map(d=>d.batchId), deducted, costLayers, gudang, transferTo:opts.transferTo||null, resetAdjustment:!!opts.resetAdjustment, batchId:opts.batchId||null, beforeStock:getStock(sku,gudang).qty+qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
             transactionLog.unshift(log);
+            catatMutasiLokal('log', log.uid);
             persist();
             return { success:true, msg:`✅ Keluar ${qty} ${item.baseUnit} (HPP Rp${avgPrice.toFixed(0)}, ${gudangName(gudang)})` };
         }
@@ -2090,7 +2178,7 @@
         const outLog = transactionLog[0];
         // Transfer WAJIB membawa lapisan biaya FIFO dari gudang asal. `price` di bawah hanya angka
         // ringkas untuk tampilan kartu kiriman; yang menentukan harga di gudang tujuan adalah costLayers.
-        const tr = { id: nextTransferId++, sku, itemName: item.name, qty, price: outLog.price, fromGudang, toGudang, ref: ref||'',
+        const tr = { id: nextTransferId++, uid: newUid(), sku, itemName: item.name, qty, price: outLog.price, fromGudang, toGudang, ref: ref||'',
             costLayers: (outLog.costLayers||[]).map(L=>({ batchId:L.batchId, qtyTaken:L.qtyTaken, price:L.price, dateIn:L.dateIn })),
             status:'pending', sentAt: Date.now(), sentBy: opts.by||deviceOperator, outLogId: outLog.id,
             confirmedAt:null, confirmedBy:null, confirmedQty:null, inLogId:null, note:'' };
@@ -2100,6 +2188,7 @@
         if(opts.invoiceId) tr.invoiceId = opts.invoiceId;
         if(opts.jenis) tr.jenis = opts.jenis; // 'retur_divisi' -> dibedakan di kartu konfirmasi gudang
         transfers.unshift(tr);
+        catatMutasiLokal('transfer', tr.uid);
         persist();
         return { success:true, msg:`🚚 ${qty} ${item.baseUnit} ${item.name} dikirim dari ${gudangName(fromGudang)} ke ${gudangName(toGudang)} — menunggu konfirmasi terima`, transfer: tr };
     }
@@ -2286,7 +2375,8 @@
         const dibuat = (Array.isArray(log.createdBatches) && log.createdBatches.length)
             ? log.createdBatches
             : (log.batchIds||[]).filter(id=>id!=null).map(id=>({ id, qty: log.qty }));
-        if (!dibuat.length) return { success:false, msg:"Transaksi masuk ini tidak membuat batch baru (habis menutup stok minus). "+ekor };
+        const settle = Array.isArray(log.negSettlements) ? log.negSettlements : [];
+        if (!dibuat.length && !settle.length) return { success:false, msg:"Transaksi masuk lama ini tidak menyimpan rincian batch, sehingga tidak bisa dibalik dengan aman. "+ekor };
         for (const cb of dibuat){
             const b = batches.find(bb=>bb.id===cb.id);
             if (!b) return { success:false, msg:"Batch barang masuk ini sudah terpakai transaksi keluar berikutnya. "+ekor };
@@ -2297,6 +2387,14 @@
             b.qty -= cb.qty;
         }
         stockBatches[log.sku] = batches.filter(bb=> !(Math.abs(bb.qty)<1e-9 && dibuat.some(c=>c.id===bb.id)));
+        // Buka kembali defisit yang dulu ditutup oleh transaksi masuk ini.
+        settle.forEach(st=>{
+            const arr = stockBatches[log.sku];
+            const nb = arr.find(x=>x.id===st.batchId);
+            if (nb) nb.qty -= st.qty;
+            else arr.push({ id:st.batchId, qty:-st.qty, price:st.batchPrice, dateIn:st.dateIn||log.timestamp,
+                            exp:null, supplier:'', ref:log.ref||'', gudang:log.gudang||DEFAULT_GUDANG });
+        });
         return { success:true };
     }
     function transferLinkedTo(logId){
@@ -2368,6 +2466,11 @@
             dibuat.forEach(cb=>{
                 stockBatches[log.sku].push({ id: cb.id, qty: cb.qty, price: cb.price, dateIn: cb.dateIn,
                     exp: log.exp||null, supplier: log.supplier||"", ref: log.ref, gudang: log.gudang||DEFAULT_GUDANG });
+            });
+            // Tutup ulang defisit yang dulu ditutup transaksi ini (kebalikan dari pembalikannya).
+            (log.negSettlements||[]).forEach(st=>{
+                const nb = stockBatches[log.sku].find(x=>x.id===st.batchId);
+                if (nb) { nb.qty += st.qty; if (Math.abs(nb.qty)<1e-9) stockBatches[log.sku] = stockBatches[log.sku].filter(x=>x!==nb); }
             });
             sortBatches(log.sku);
         } else {
@@ -2645,14 +2748,13 @@
         // stok akhir bulan tersebut — persis komplain "dashboard bulan lalu ikut ambil transaksi bulan berjalan".
         // getStockValueAt() adalah SATU-SATUNYA helper titik-waktu (dipakai juga oleh getStokAwal),
         // dipakai di sini juga supaya seluruh Dashboard konsisten dengan satu logic yang sama.
-        let endVals=new Array(data.length);
-        let running=getStockValueAt(data[data.length-1].end);
-        for(let i=data.length-1;i>=0;i--){
-            let official=(closings||[]).find(c=>Math.abs(c.cutoff-(data[i].end+1))<86400000*2);
-            endVals[i]=Math.round(official?official.valueAtCutoff:Math.max(0,running));
-            // stok akhir bulan sebelumnya = stok awal bulan ini = stok akhir - masuk + keluar (total sesungguhnya)
-            running = endVals[i] - data[i].inV + data[i].outV;
-        }
+        // Tiap titik dihitung langsung dari sumber tunggal getStockValueAt(). Rantai hitung mundur
+        // yang lama (stok akhir - masuk + keluar) menumpuk galat tiap bulan dan bisa menegatifkan
+        // saldo sehingga harus di-clamp ke nol — itu menyembunyikan masalah, bukan menyelesaikannya.
+        let endVals=data.map(d=>{
+            let snap=getInventorySnapshotAt(d.end);
+            return snap.ok ? Math.round(snap.totalValue) : 0;
+        });
         return { labels:data.map(d=>d.label), inV:data.map(d=>d.dispIn), outV:data.map(d=>d.dispOut), endVals };
     }
     function renderKpiBreakdown(elId, list, emptyLabel){
@@ -2699,150 +2801,170 @@
         let totalValue=rows.reduce((s,r)=>s+r.batches.reduce((x,b)=>x+b.qty*(b.price||0),0),0);
         return { timestamp: ts||Date.now(), totalValue, rows };
     }
-    // Snapshot turunan dari RIWAYAT STOK OPNAME yang sudah ada di sistem.
-    // Hasil SO adalah saldo fisik terverifikasi SETELAH adjustment, jadi sah dipakai sebagai
-    // stok akhir bulan tsb sekaligus stok awal bulan berikutnya — tanpa perlu SO diulang.
-    // Kuantitas diambil apa adanya dari hitungan fisik; nilainya memakai harga batch barang tsb.
-    function snapshotDariRiwayatSO(){
-        let out=[];
-        (soHistory||[]).forEach(h=>{
-            let rows0 = (h.allCounts && h.allCounts.length) ? h.allCounts : null;
-            if(!rows0) return;
-            let g = h.gudang || DEFAULT_GUDANG;
-            let cd = h.countDate || h.date;
-            if(!cd) return;
-            let d=new Date(cd);
-            let openingTs=new Date(d.getFullYear(), d.getMonth()+1, 1, 0,0,0,0).getTime();
-            let rows=[];
-            rows0.forEach(r=>{
-                let qty = (r.phys!==undefined && r.phys!==null) ? r.phys : r.sys;
-                if(!(qty>0)) return;
-                let it=itemBySku(r.sku)||{};
-                let st=getStock(r.sku,g);
-                let unit = st.qty>0 ? st.value/st.qty
-                         : ((it.lastBuyPrice>0 && it.buyContent>0) ? it.lastBuyPrice/it.buyContent : 0);
-                rows.push({ sku:r.sku, gudang:g, batches:[{qty, price:unit, dateIn:cd, exp:null}] });
-            });
-            if(!rows.length) return;
-            out.push({ timestamp:openingTs, source:'stock_opname', dariRiwayatSO:true, gudang:g, countDate:cd,
-                       rows, totalValue: rows.reduce((s,r)=>s+r.batches[0].qty*r.batches[0].price,0) });
-        });
-        return out;
+    // ===== TANGGAL EFEKTIF =====
+    // Tanggal yang menentukan sebuah mutasi masuk periode mana adalah tanggal BERLAKUNYA, bukan
+    // tanggal ia diketik. Adjustment Agustus yang baru diposting 2 September tetap milik Agustus.
+    function effTs(l){ return (l && (l.effectiveTimestamp || l.timestamp)) || 0; }
+    function akhirHari(ts){ let d=new Date(ts); d.setHours(23,59,59,999); return d.getTime(); }
+
+    // Hanya baris yang benar-benar menggerakkan stok yang boleh direplay.
+    function mutasiStok(){
+        return transactionLog.filter(l=>!(l.inventoryMovement===false || l.nonStockMovement));
     }
-    function daftarSnapshot(){
-        let list=[];
-        (inventoryBaselines||[]).forEach(s=>{ if(s && s.rows) list.push(s); });
-        (closings||[]).forEach(cl=>{ if(cl && cl.snapshotRows) list.push({timestamp:cl.cutoff, totalValue:cl.valueAtCutoff, rows:cl.snapshotRows, dariTutupBuku:true}); });
-        // snapshot eksplisit (hasil soFinish versi baru) menang atas turunan riwayat pada cutoff+gudang sama
-        let sudah={}; list.forEach(s=>{ if(s.source==='stock_opname' && s.gudang) sudah[s.timestamp+'|'+s.gudang]=1; });
-        snapshotDariRiwayatSO().forEach(s=>{ if(!sudah[s.timestamp+'|'+s.gudang]) list.push(s); });
-        return list.sort((a,b)=>a.timestamp-b.timestamp);
-    }
-    function snapshotTerdekatSebelum(ts){
-        let l=daftarSnapshot().filter(s=>s.timestamp<=ts);
-        if(!l.length) return null;
-        let terbaru=l[l.length-1];
-        // Snapshot per gudang (mis. hasil SO tiap lokasi) pada cutoff yang SAMA digabung jadi satu
-        // saldo perusahaan. Prioritas: Tutup Buku > SO akhir bulan > baseline manual.
-        let seCutoff=l.filter(s=>s.timestamp===terbaru.timestamp);
-        if(seCutoff.length===1) return terbaru;
-        let tutup=seCutoff.filter(s=>s.dariTutupBuku);
-        if(tutup.length) return tutup[tutup.length-1]; // tutup buku sudah mencakup semua lokasi
-        let rows=[], seen={};
-        // gudang spesifik dipakai sekali; snapshot tanpa gudang (baseline global) jadi pelengkap
-        seCutoff.filter(s=>s.gudang).forEach(s=>{ if(!seen[s.gudang]){ seen[s.gudang]=1; rows=rows.concat(s.rows||[]); } });
-        seCutoff.filter(s=>!s.gudang).forEach(s=>{
-            (s.rows||[]).forEach(r=>{ if(!seen[r.gudang]) rows.push(r); });
-        });
-        return { timestamp: terbaru.timestamp, rows,
-                 totalValue: rows.reduce((a,r)=>a+(r.batches||[]).reduce((x,b)=>x+b.qty*(b.price||0),0),0),
-                 gabungan:true, sumberSO: seCutoff.some(s=>s.source==='stock_opname') };
-    }
-    // Hasil: {ok, rows:[{sku,gudang,qty,value}], totalValue, dasar, warning}
-    function getInventorySnapshotAt(ts){
-        let base = snapshotTerdekatSebelum(ts);
-        let mulai, dasar, warning='';
-        if(base){
-            mulai = JSON.parse(JSON.stringify(base.rows));
-            dasar = base.dariTutupBuku ? `Snapshot Tutup Buku ${new Date(base.timestamp).toLocaleDateString('id')}`
-                  : (base.sumberSO||base.source==='stock_opname') ? `Hasil Stok Opname (saldo akhir bulan sebelumnya)`
-                  : `Baseline ${new Date(base.timestamp).toLocaleDateString('id')}`;
-        } else if(ts >= Date.now()-60000){
-            let s=snapshotDariBatchSaatIni(ts); mulai=s.rows; dasar='Kondisi stok saat ini';
+    function urutLapisan(a,b){ return (a.dateIn||0)-(b.dateIn||0); } // seri -> urutan sisip (sort JS stabil)
+
+    // Menerapkan SATU log ke peta lapisan biaya. Aturannya dibuat sama persis dengan mesin stok
+    // yang berjalan di processTransaction: masuk menutup lapisan minus tertua dulu, keluar
+    // mengonsumsi lapisan urut dateIn. Tanpa kesamaan itu, hasil rekonstruksi tidak akan pernah
+    // cocok dengan saldo batch yang sebenarnya.
+    function terapkanLogKeLapisan(peta, l){
+        const g=l.gudang||DEFAULT_GUDANG, k=l.sku+'|'+g, t=effTs(l);
+        if(!peta[k]) peta[k]={sku:l.sku, gudang:g, layers:[]};
+        const arr=peta[k].layers;
+        const buang0=()=>{ for(let i=arr.length-1;i>=0;i--) if(Math.abs(arr[i].qty)<1e-9) arr.splice(i,1); };
+        if(l.type==='in'){
+            const cocok = Array.isArray(l.costLayers) && l.costLayers.length &&
+                Math.abs(l.costLayers.reduce((s,L)=>s+(Number(L.qtyTaken)||0),0) - l.qty) < 1e-6;
+            const src = cocok
+                ? l.costLayers.map(L=>({ qty:Number(L.qtyTaken)||0, price:Number(L.price)||0, dateIn:Number(L.dateIn)||t }))
+                : [{ qty:l.qty, price:(l.qty>0 ? (l.total||l.qty*(l.price||0))/l.qty : 0), dateIn:t }];
+            // Kiriman antar gudang mulai mengantre di gudang tujuan sejak DITERIMA, bukan sejak
+            // masuk gudang asal — sama seperti perilaku confirmTransfer.
+            const pakaiT = (l.source==='transfer');
+            for(const L of src){
+                let sisa=L.qty;
+                arr.sort(urutLapisan);
+                while(sisa>1e-9){
+                    const neg=arr.find(x=>x.qty<0); if(!neg) break;
+                    const amb=Math.min(-neg.qty, sisa); neg.qty+=amb; sisa-=amb;
+                    if(Math.abs(neg.qty)<1e-9) arr.splice(arr.indexOf(neg),1);
+                }
+                if(sisa>1e-9) arr.push({ qty:sisa, price:L.price, dateIn: pakaiT ? t : L.dateIn });
+            }
         } else {
+            let sisa=l.qty;
+            arr.sort(urutLapisan);
+            for(const b of arr){
+                if(sisa<=1e-9) break;
+                if(b.qty<=0) continue;
+                const amb=Math.min(b.qty,sisa); b.qty-=amb; sisa-=amb;
+            }
+            buang0();
+            if(sisa>1e-9) arr.push({ qty:-sisa, price:(l.qty>0 ? (l.total||0)/l.qty : 0), dateIn:t });
+        }
+        buang0();
+    }
+    function salinPeta(p){
+        const o={}; for(const k in p) o[k]={ sku:p[k].sku, gudang:p[k].gudang, layers:p[k].layers.map(x=>({...x})) };
+        return o;
+    }
+    // Menyetel saldo satu gudang ke hasil hitung fisik Stok Opname, dengan tetap memakai harga
+    // lapisan FIFO yang ada. SO menentukan KUANTITAS; biayanya tetap dari lapisan, bukan ditebak.
+    function setSaldoDariSO(peta, anchor){
+        const g=anchor.gudang;
+        (anchor.counts||[]).forEach(r=>{
+            const target = (r.phys!==undefined && r.phys!==null) ? Number(r.phys) : Number(r.sys);
+            if(!isFinite(target)) return;
+            const k=r.sku+'|'+g;
+            if(!peta[k]) peta[k]={sku:r.sku, gudang:g, layers:[]};
+            const arr=peta[k].layers;
+            let kini=arr.reduce((s,b)=>s+b.qty,0);
+            let selisih=Math.round((target-kini)*1e6)/1e6;
+            if(Math.abs(selisih)<1e-9) return;
+            if(selisih<0){
+                let sisa=-selisih; arr.sort(urutLapisan);
+                for(const b of arr){ if(sisa<=1e-9) break; if(b.qty<=0) continue;
+                    const amb=Math.min(b.qty,sisa); b.qty-=amb; sisa-=amb; }
+                for(let i=arr.length-1;i>=0;i--) if(Math.abs(arr[i].qty)<1e-9) arr.splice(i,1);
+                if(sisa>1e-9) arr.push({ qty:-sisa, price:bestKnownUnitCost(r.sku,g), dateIn:anchor.ts });
+            } else {
+                const nilai=arr.reduce((s,b)=>s+b.qty*(b.price||0),0);
+                const harga = kini>0 ? nilai/kini : bestKnownUnitCost(r.sku,g);
+                arr.push({ qty:selisih, price:harga>0?harga:0, dateIn:anchor.ts });
+            }
+        });
+    }
+    function gantiDariRows(peta, anchor){
+        if(anchor.gudang){ for(const k in peta) if(peta[k].gudang===anchor.gudang) delete peta[k]; }
+        else { for(const k in peta) delete peta[k]; }
+        (anchor.rows||[]).forEach(r=>{
+            const g=r.gudang||DEFAULT_GUDANG, k=r.sku+'|'+g;
+            peta[k]={ sku:r.sku, gudang:g, layers:(r.batches||[]).map(b=>({ qty:b.qty, price:b.price||0, dateIn:b.dateIn||anchor.ts })) };
+        });
+    }
+    // Titik jangkar saldo terverifikasi, urut waktu. Stok Opname dijangkarkan pada TANGGAL HITUNG
+    // FISIK — bukan awal bulan berikutnya. Itu yang membuat mutasi 30-31 Agustus setelah SO 29
+    // Agustus tetap ikut terhitung ke Opening September.
+    function daftarAnchor(){
+        let out=[];
+        (inventoryBaselines||[]).forEach(s=>{
+            if(!s || !s.rows || s.source==='stock_opname') return; // turunan SO dipakai lewat soHistory
+            out.push({ ts:s.timestamp, jenis:'baseline', gudang:s.gudang||null, rows:s.rows,
+                       label:'Baseline '+new Date(s.timestamp).toLocaleDateString('id') });
+        });
+        (closings||[]).forEach(c=>{ if(c && c.snapshotRows)
+            out.push({ ts:c.cutoff, jenis:'tutupbuku', gudang:null, rows:c.snapshotRows,
+                       label:'Snapshot Tutup Buku '+(c.period||new Date(c.cutoff).toLocaleDateString('id')) }); });
+        (soHistory||[]).forEach(h=>{
+            const cd=h.countDate||h.date; if(!cd || !(h.allCounts&&h.allCounts.length)) return;
+            out.push({ ts:akhirHari(cd), jenis:'so', gudang:h.gudang||DEFAULT_GUDANG, counts:h.allCounts,
+                       label:'Hasil Stok Opname '+gudangName(h.gudang||DEFAULT_GUDANG)+' '+new Date(cd).toLocaleDateString('id') });
+        });
+        return out.sort((a,b)=> (a.ts-b.ts) || ((a.jenis==='so'?1:0)-(b.jenis==='so'?1:0)));
+    }
+    let __anchorCache=null, __anchorVer=-1;
+    function bangunAnchor(){
+        if(__anchorCache && __anchorVer===dataVersi) return __anchorCache;
+        const anchors=daftarAnchor();
+        const logs=mutasiStok().slice().sort((a,b)=> (effTs(a)-effTs(b)) || ((a.id||0)-(b.id||0)));
+        let peta={}, li=0, hasil=[];
+        for(const a of anchors){
+            while(li<logs.length && effTs(logs[li])<=a.ts){ terapkanLogKeLapisan(peta, logs[li]); li++; }
+            if(a.jenis==='so') setSaldoDariSO(peta, a); else gantiDariRows(peta, a);
+            hasil.push({ ts:a.ts, jenis:a.jenis, label:a.label, state:salinPeta(peta) });
+        }
+        __anchorCache={ anchors:hasil, logs };
+        __anchorVer=dataVersi;
+        return __anchorCache;
+    }
+
+    // ===== SATU-SATUNYA SUMBER SALDO PERSEDIAAN PADA SUATU TITIK WAKTU =====
+    // Dipakai oleh KPI Stok Awal, rincian, Excel/PDF, Stok Akhir, grafik bulanan, dan Tutup Buku.
+    // Caranya: mulai dari jangkar terverifikasi terdekat (<= ts), lalu replay mutasi setelahnya
+    // per SKU x Gudang x lapisan biaya FIFO. Tidak memakai harga rata-rata berjalan, tidak
+    // menghitung mundur dari stok hari ini, dan tidak pernah di-clamp ke nol.
+    function getInventorySnapshotAt(ts){
+        const { anchors, logs } = bangunAnchor();
+        let base=null;
+        for(const a of anchors){ if(a.ts<=ts) base=a; else break; }
+        if(!base){
             return { ok:false, rows:[], totalValue:0, dasar:'-',
-                warning:'Belum ada baseline/snapshot Tutup Buku sebelum tanggal ini, sehingga stok historis tidak bisa direkonstruksi akurat. Buat Baseline di Master Data → Backup, atau lakukan Tutup Buku.' };
+                warning:'Belum ada jangkar saldo (Stok Opname / Tutup Buku / Baseline) sebelum tanggal ini, sehingga saldo historis tidak bisa disusun ulang dengan jujur. Lakukan Stok Opname atau Tutup Buku dulu.' };
         }
-        let mulaiTs = base ? base.timestamp : 0;
-        let peta={};
-        mulai.forEach(r=>{ peta[r.sku+'|'+r.gudang]={sku:r.sku, gudang:r.gudang, batches:(r.batches||[]).map(b=>({...b}))}; });
-        if(base){
-            let soGudang = {};
-            (base.gabungan ? [] : [base]).concat(base.gabungan? daftarSnapshot().filter(s=>s.timestamp===base.timestamp && s.source==='stock_opname') : [])
-                .forEach(s=>{ if(s && s.source==='stock_opname' && s.gudang) soGudang[s.gudang]=s.timestamp; });
-            transactionLog.filter(l=>{
-                    if(!(l.timestamp>mulaiTs && l.timestamp<=ts)) return false;
-                    if(l.inventoryMovement===false || l.nonStockMovement) return false;
-                    // Adjustment SO lama diposting bertanggal hari input (bisa SETELAH cutoff), padahal
-                    // saldonya sudah termasuk di snapshot. Kalau ikut direplay -> dobel.
-                    let g=l.gudang||DEFAULT_GUDANG;
-                    if(soGudang[g] && String(l.ref||'').includes('Adjustment SO') && l.timestamp <= soGudang[g]+14*86400000) return false;
-                    return true;
-                })
-                .slice().sort((a,b)=>a.timestamp-b.timestamp || (a.id||0)-(b.id||0))
-                .forEach(l=>{
-                    let g=l.gudang||DEFAULT_GUDANG, k=l.sku+'|'+g;
-                    if(!peta[k]) peta[k]={sku:l.sku, gudang:g, batches:[]};
-                    let arr=peta[k].batches;
-                    if(l.type==='in'){
-                        let sisa=l.qty;
-                        while(sisa>0 && arr.length && arr[0].qty<0){ let n=arr[0], t=Math.min(-n.qty,sisa); n.qty+=t; sisa-=t; if(Math.abs(n.qty)<1e-9) arr.shift(); }
-                        if(sisa>0) arr.push({qty:sisa, price:l.price||0, dateIn:l.timestamp, exp:l.exp||null});
-                    } else {
-                        let sisa=l.qty;
-                        while(sisa>0 && arr.length && arr[0].qty>0){ let b=arr[0], t=Math.min(b.qty,sisa); b.qty-=t; sisa-=t; if(b.qty<1e-9) arr.shift(); }
-                        if(sisa>0) arr.push({qty:-sisa, price:l.price||0, dateIn:l.timestamp});
-                    }
-                });
-        }
+        const peta=salinPeta(base.state);
+        for(const l of logs){ const t=effTs(l); if(t>base.ts && t<=ts) terapkanLogKeLapisan(peta, l); }
         let rows=[];
         Object.values(peta).forEach(r=>{
-            let qty=r.batches.reduce((s,b)=>s+b.qty,0);
-            let value=r.batches.reduce((s,b)=>s+b.qty*(b.price||0),0);
-            if(Math.abs(qty)<1e-9) return;
-            rows.push({sku:r.sku, gudang:r.gudang, qty, value});
+            const qty=r.layers.reduce((s,b)=>s+b.qty,0);
+            const value=r.layers.reduce((s,b)=>s+b.qty*(b.price||0),0);
+            if(Math.abs(qty)<1e-9 && Math.abs(value)<1e-9) return;
+            rows.push({ sku:r.sku, gudang:r.gudang, qty, value,
+                        batches:r.layers.map(b=>({ qty:b.qty, price:b.price||0, dateIn:b.dateIn })) });
         });
-        return { ok:true, rows, totalValue: rows.reduce((s,r)=>s+r.value,0), dasar, warning };
+        rows.sort((a,b)=> a.gudang.localeCompare(b.gudang) || a.sku.localeCompare(b.sku));
+        return { ok:true, rows, totalValue: rows.reduce((s,r)=>s+r.value,0), dasar:base.label, warning:'' };
     }
     function stokAwalRows(ts){
-        let snap=getInventorySnapshotAt(ts);
+        const snap=getInventorySnapshotAt(ts);
         return snap.rows.map(r=>{
-            let it=itemBySku(r.sku)||{};
+            const it=itemBySku(r.sku)||{};
             return { gudang:r.gudang, gudangNama:gudangName(r.gudang), sku:r.sku,
                      nama:it.name||r.sku, satuan:it.baseUnit||'', qty:r.qty,
                      cost: r.qty!==0 ? r.value/r.qty : 0, nilai:r.value };
         }).sort((a,b)=> a.gudangNama.localeCompare(b.gudangNama) || b.nilai-a.nilai);
     }
-
-    // ROLLBACK: kembali ke logic lama yang sudah menghasilkan angka sesuai data produksi.
-    // Snapshot/baseline/SO-opening TIDAK dipakai lagi untuk perhitungan ini.
-    function getStockValueAt(ts){
-        let official=(closings||[]).find(c=>Math.abs(c.cutoff-ts)<86400000*2);
-        if(official) return official.valueAtCutoff;
-
-        let cur=0;
-        masterSKU.forEach(i=>cur+=getStock(i.sku).value);
-
-        let afterIn=0, afterOut=0;
-        transactionLog.forEach(l=>{
-            if(l.timestamp>=ts){
-                if(l.type==='in') afterIn+=l.total;
-                else afterOut+=l.total;
-            }
-        });
-
-        return Math.max(0, cur-afterIn+afterOut);
-    }
+    // Nilai persediaan pada suatu titik waktu — alias tipis dari sumber tunggal di atas.
+    function getStockValueAt(ts){ return getInventorySnapshotAt(ts).totalValue; }
 
     function rangeFromInputs(startId,endId){
         let sv=document.getElementById(startId).value, ev=document.getElementById(endId).value;
@@ -4909,23 +5031,12 @@
             diffCount:diffs.length, totalDiffValue:totalDiff, differences:diffs, allCounts:allCounts };
         soHistory.unshift(hist);
         // ===== SO AKHIR BULAN -> SNAPSHOT RESMI = OPENING BULAN BERIKUTNYA =====
-        // Saldo hasil SO (setelah adjustment diposting bertanggal countDate) dibawa maju memakai
-        // mutasi countDate..akhir bulan, lalu disimpan sebagai snapshot cutoff 1 bulan berikutnya.
-        // Snapshot = SALDO; adjustment = MOVEMENT. Keduanya tidak dobel karena replay opening
-        // dimulai DARI snapshot ini, bukan dari sebelum SO.
-        try{
-            let cd=new Date(countDate);
-            let akhirBulan=new Date(cd.getFullYear(), cd.getMonth()+1, 0, 23,59,59,999).getTime();
-            let openingTs=new Date(cd.getFullYear(), cd.getMonth()+1, 1, 0,0,0,0).getTime();
-            // saldo per lokasi ini pada akhir bulan (termasuk mutasi 30-31 kalau SO tgl 29)
-            let sampai=Math.min(akhirBulan, Date.now());
-            let rowsAll=snapshotDariBatchSaatIni(sampai).rows.filter(r=>r.gudang===gudang);
-            let lama=(inventoryBaselines||[]).find(s=>s.source==='stock_opname' && s.gudang===gudang && s.timestamp===openingTs);
-            let snap={ timestamp: openingTs, source:'stock_opname', gudang, countDate,
-                       rows: rowsAll,
-                       totalValue: rowsAll.reduce((s,r)=>s+r.batches.reduce((x,b)=>x+b.qty*(b.price||0),0),0) };
-            if(lama) Object.assign(lama, snap); else inventoryBaselines.push(snap);
-        }catch(e){ console.warn('snapshot SO gagal', e); }
+        // Hasil SO TIDAK lagi disalin jadi snapshot bertanggal awal bulan berikutnya. Salinan itu
+        // dulu diambil dari kondisi batch saat tombol ditekan, lalu diberi tanggal historis — jadi
+        // SO yang dihitung 29 Agustus tapi ditutup 2 September membawa saldo 2 September ke dalam
+        // saldo awal September, dan mutasi 30-31 Agustus ikut hilang. Sekarang soHistory (tanggal
+        // hitung fisik + hasil hitungannya) langsung jadi jangkar saldo di daftarAnchor(), dan
+        // mutasi setelah tanggal hitung direplay di atasnya.
         soSession={active:false,startedAt:0,scope:'all',gudang,snapshot:{},counts:{}};
         soSessions[gudang]=soSession;
         persist(); updateSOUI(); refreshUI();
@@ -5420,11 +5531,11 @@
         let cutoff=new Date(y, m, 1, 0,0,0,0).getTime(); // awal bulan berikutnya
         let toArchive=transactionLog.filter(l=>l.timestamp<cutoff);
         if(!toArchive.length){ notify('Kosong','Tidak ada transaksi sebelum akhir periode ini','warning'); return; }
-        // Nilai stok pada cutoff dihitung mundur dari batch berjalan
-        let nowVal=0; masterSKU.forEach(i=>nowVal+=getStock(i.sku).value);
-        let afterIn=0, afterOut=0;
-        transactionLog.forEach(l=>{ if(l.timestamp>=cutoff){ if(l.type==='in') afterIn+=l.total; else afterOut+=l.total; } });
-        let valueAtCutoff=Math.max(0, nowVal - afterIn + afterOut);
+        // Saldo pada cutoff diambil dari sumber tunggal getInventorySnapshotAt — sama persis dengan
+        // yang dipakai KPI Stok Awal, sehingga Closing bulan ini = Opening bulan berikutnya.
+        const snapCutoff = getInventorySnapshotAt(cutoff);
+        if(!snapCutoff.ok){ notify('Tidak bisa tutup buku', snapCutoff.warning, 'warning'); return; }
+        let valueAtCutoff = snapCutoff.totalValue;
         let inTotal=0, hppTotal=0, susutTotal=0;
         toArchive.forEach(l=>{ if(l.type==='in') inTotal+=l.total; else if(l.outType==='susut' && !l.resetAdjustment) susutTotal+=l.total; else if(!l.resetAdjustment) hppTotal+=l.total; });
         // Kiriman yang belum dikonfirmasi = barang sudah keluar gudang asal tapi belum masuk gudang tujuan.
@@ -5459,7 +5570,7 @@
         }
         transactionLog=transactionLog.filter(l=>l.timestamp>=cutoff);
         lockBefore=Math.max(lockBefore, cutoff);
-        closings.push({ snapshotRows: snapshotDariBatchSaatIni(cutoff).rows, period, closedAt:Date.now(), cutoff, txCount:toArchive.length, inTotal, hppTotal, susutTotal, valueAtCutoff, by:deviceOperator||'' });
+        closings.push({ snapshotRows: snapCutoff.rows, period, closedAt:Date.now(), cutoff, txCount:toArchive.length, inTotal, hppTotal, susutTotal, valueAtCutoff, by:deviceOperator||'' });
         persist(); refreshUI();
         notify('Tutup Buku Selesai',`${period}: ${toArchive.length} transaksi diarsip & terkunci. Stok awal resmi bulan berikutnya: Rp ${Math.round(valueAtCutoff).toLocaleString('id')}.`,'success');
     });
@@ -7418,9 +7529,9 @@
     function saPeriodeStr(){ let d=getMonthStart(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; }
     function renderBaselineInfo(){
         let el=document.getElementById('baselineInfo'); if(!el) return;
-        let list=daftarSnapshot();
+        let list=daftarAnchor();
         el.innerHTML = list.length
-            ? `${list.length} snapshot tersedia. Terbaru: <strong>${new Date(list[list.length-1].timestamp).toLocaleString('id')}</strong> (Rp ${Math.round(list[list.length-1].totalValue).toLocaleString('id')}). Stok historis sebelum snapshot paling awal tidak bisa direkonstruksi.`
+            ? `${list.length} jangkar saldo tersedia. Terbaru: <strong>${new Date(list[list.length-1].ts).toLocaleString('id')}</strong> (Rp ${Math.round(getInventorySnapshotAt(list[list.length-1].ts).totalValue).toLocaleString('id')}). Stok historis sebelum snapshot paling awal tidak bisa direkonstruksi.`
             : '<span style="color:#f59e0b;">⚠️ Belum ada baseline. Stok historis periode lampau belum bisa direkonstruksi — buat baseline sekarang supaya periode ke depan akurat.</span>';
     }
     document.getElementById('buatBaselineBtn')?.addEventListener('click', ()=>{
@@ -7506,7 +7617,10 @@
             byG[g].forEach(r=>data.push([r.gudangNama,r.sku,r.nama,r.qty,r.satuan,Math.round(r.cost*100)/100,Math.round(r.nilai)]));
             data.push([`Subtotal ${gudangName(g)}`,'','','','','',Math.round(byG[g].reduce((s,r)=>s+r.nilai,0))]);
         });
-        data.push([]); data.push(['GRAND TOTAL','','','','','',Math.round(rows.reduce((s,r)=>s+r.nilai,0))]);
+        data.push([]);
+        // Dua angka dipisah supaya tidak rancu saat filter aktif: yang tampil vs yang jadi KPI.
+        data.push(['GRAND TOTAL (sesuai filter)','','','','','',Math.round(rows.reduce((s,r)=>s+r.nilai,0))]);
+        data.push(['GRAND TOTAL (seluruh gudang = KPI Stok Awal)','','','','','',Math.round(saRowsCache.reduce((s,r)=>s+r.nilai,0))]);
         let ws=XLSX.utils.aoa_to_sheet(data); ws['!cols']=[{wch:26},{wch:16},{wch:40},{wch:16},{wch:10},{wch:14},{wch:18}];
         let wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Stok Awal');
         XLSX.writeFile(wb, `stok_awal_${per}.xlsx`);
@@ -7516,7 +7630,9 @@
         let rows=saFiltered(), per=saPeriodeStr();
         let {jsPDF}=window.jspdf; let doc=new jsPDF({orientation:'landscape'});
         doc.setFontSize(13); doc.text(`Rincian Stok Awal — ${document.getElementById('saPeriodeLbl').textContent}`, 14, 12);
-        doc.setFontSize(9); doc.text(`${rows.length} baris · Total Rp ${Math.round(rows.reduce((s,r)=>s+r.nilai,0)).toLocaleString('id')}`, 14, 18);
+        doc.setFontSize(9);
+        doc.text(`${rows.length} baris · Total sesuai filter Rp ${Math.round(rows.reduce((s,r)=>s+r.nilai,0)).toLocaleString('id')}`
+               + ` · Grand Total (KPI Stok Awal) Rp ${Math.round(saRowsCache.reduce((s,r)=>s+r.nilai,0)).toLocaleString('id')}`, 14, 18);
         doc.autoTable({ startY:23,
             head:[['Area/Gudang','SKU','Nama Barang','Qty','Satuan','Harga/Cost','Nilai']],
             body: rows.map(r=>[r.gudangNama,r.sku,r.nama,(Math.round(r.qty*1000)/1000).toLocaleString('id'),r.satuan,
