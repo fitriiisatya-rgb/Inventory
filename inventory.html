@@ -1504,16 +1504,91 @@
     // Memasang kembali mutasi lokal di atas data server: efek stoknya diterapkan ulang dari
     // rincian batch yang sudah tercatat di log itu sendiri, lalu id lokal dinomori ulang supaya
     // tidak bentrok dengan id milik perangkat lain.
+    // Menerapkan ulang efek stok sebuah log LOKAL di atas batch versi server yang baru saja ditarik.
+    // Untuk transaksi KELUAR, batch yang dulu dipotong di perangkat ini bisa saja sudah habis dipakai
+    // perangkat lain. Karena itu batchId lama TIDAK boleh dipakai lagi begitu saja — FIFO dihitung
+    // ULANG terhadap batch server terbaru, lalu deducted/costLayers/total/price ditulis ulang.
+    // Kalau stoknya tidak cukup, log TIDAK disisipkan setengah jadi; dikembalikan sebagai konflik.
+    function terapkanUlangEfekStok(l){
+        const g=l.gudang||DEFAULT_GUDANG;
+        if(!stockBatches[l.sku]) stockBatches[l.sku]=[];
+        const arr=stockBatches[l.sku];
+        if(l.type==='in'){
+            const cocok = Array.isArray(l.costLayers) && l.costLayers.length &&
+                Math.abs(l.costLayers.reduce((a,L)=>a+(Number(L.qtyTaken)||0),0) - l.qty) < 1e-6;
+            const layers = cocok
+                ? l.costLayers.map(L=>({ qty:Number(L.qtyTaken)||0, price:Number(L.price)||0, dateIn:Number(L.dateIn)||effTs(l) }))
+                : [{ qty:l.qty, price:(l.qty>0?(l.total||0)/l.qty:0), dateIn:effTs(l) }];
+            const neg = arr.filter(b=>(b.gudang||DEFAULT_GUDANG)===g && b.qty<0).sort((a,b)=>a.dateIn-b.dateIn);
+            let settle=[], li=0;
+            for(const nb of neg){
+                while(nb.qty<0 && li<layers.length){
+                    if(layers[li].qty<=0){ li++; continue; }
+                    const c=Math.min(layers[li].qty, -nb.qty);
+                    settle.push({ batchId:nb.id, qty:c, batchPrice:nb.price||0, inPrice:layers[li].price, dateIn:nb.dateIn });
+                    nb.qty+=c; layers[li].qty-=c;
+                }
+                if(li>=layers.length) break;
+            }
+            for(let i=arr.length-1;i>=0;i--) if(Math.abs(arr[i].qty)<1e-9) arr.splice(i,1);
+            const dibuat=[];
+            layers.forEach(L=>{ if(L.qty>1e-9){
+                const b={ id:nextBatchId++, qty:L.qty, price:L.price, dateIn:L.dateIn, exp:l.exp||null,
+                          supplier:l.supplier||'', ref:l.ref||'', gudang:g };
+                arr.push(b); dibuat.push(b);
+            }});
+            l.batchIds=dibuat.map(b=>b.id);
+            l.createdBatches=dibuat.map(b=>({ id:b.id, qty:b.qty }));
+            l.negSettlements=settle;
+            sortBatches(l.sku);
+            return { ok:true };
+        }
+        const antre = arr.filter(b=>(b.gudang||DEFAULT_GUDANG)===g && b.qty>0)
+                         .sort((x,y)=>(x.dateIn-y.dateIn)||((x.id||0)-(y.id||0)));
+        const tersedia = antre.reduce((a,b)=>a+b.qty,0);
+        if(tersedia + 1e-9 < l.qty) return { ok:false, msg:'stok di data terbaru tinggal '+tersedia.toLocaleString('id')+', butuh '+l.qty.toLocaleString('id') };
+        let sisa=l.qty, totalCost=0, ded=[], habis=new Set();
+        for(const b of antre){
+            if(sisa<=1e-9) break;
+            const t=Math.min(b.qty, sisa);
+            totalCost += t*b.price;
+            ded.push({ batchId:b.id, qtyTaken:t, price:b.price, dateIn:b.dateIn, exp:b.exp||null, supplier:b.supplier, ref:b.ref, gudang:g });
+            b.qty-=t; sisa-=t;
+            if(Math.abs(b.qty)<1e-9) habis.add(b);
+        }
+        stockBatches[l.sku]=arr.filter(b=>!habis.has(b));
+        totalCost=Math.round(totalCost*100)/100;
+        l.deducted=ded;
+        l.costLayers=ded.map(d=>({ batchId:d.batchId, qtyTaken:d.qtyTaken, price:d.price, dateIn:d.dateIn }));
+        l.batchIds=ded.map(d=>d.batchId);
+        l.total=totalCost;
+        l.price=l.qty>0 ? totalCost/l.qty : 0;
+        l.rehitungKonflik=true; // HPP dihitung ulang karena batch asalnya sudah berubah di server
+        sortBatches(l.sku);
+        return { ok:true };
+    }
+    let konflikSync = [];
     function pasangUlangMutasiLokal(pulih){
         if(!pulih) return 0;
-        let n=0;
+        let n=0; const gagal=[];
         (pulih.logs||[]).forEach(l=>{
             if(transactionLog.some(x=>x.uid===l.uid)) return;
+            const r = terapkanUlangEfekStok(l);
+            if(!r.ok){ gagal.push({ log:l, msg:r.msg }); return; } // jangan sisipkan log setengah jadi
             l.id = nextLogId++;
-            try { reapplyLogStockEffect(l); } catch(e){ console.warn('reapply gagal', l.uid, e); }
             transactionLog.unshift(l);
             n++;
         });
+        if(gagal.length){
+            konflikSync = konflikSync.concat(gagal);
+            try {
+                notify('Konflik Sinkronisasi',
+                    gagal.length+' transaksi dari perangkat ini TIDAK bisa dipasang di atas data terbaru dan belum tersimpan: '
+                    + gagal.slice(0,4).map(x=>`${x.log.itemName||x.log.sku} ${x.log.qty} (${x.msg})`).join('; ')
+                    + (gagal.length>4?', dst':'')
+                    + '. Silakan input ulang setelah memeriksa stoknya.', 'error');
+            } catch(e){}
+        }
         (pulih.trs||[]).forEach(t=>{
             if(transfers.some(x=>x.uid===t.uid)) return;
             t.id = nextTransferId++;
@@ -2018,7 +2093,8 @@
         if (!(qty>0)) return { success:false, msg:"Jumlah harus >0" };
         // Tanggal mundur tidak boleh menembus periode yang sudah Tutup Buku — kalau tidak, angka periode
         // yang sudah dikunci dan diarsipkan masih bisa berubah dan tidak akan pernah cocok lagi.
-        if (opts.timestamp && lockBefore && opts.timestamp < lockBefore) {
+        const tsBerlaku = opts.effectiveTimestamp || opts.timestamp;
+        if (tsBerlaku && lockBefore && tsBerlaku < lockBefore) {
             return { success:false, msg:"Tanggal transaksi berada di periode yang sudah TUTUP BUKU. Gunakan tanggal setelah periode itu, atau catat sebagai koreksi di periode berjalan." };
         }
         if (type==='in') {
@@ -2412,7 +2488,7 @@
         const idx = transactionLog.findIndex(l=>l.id===logId);
         if (idx===-1) return { success:false, msg:"Transaksi tidak ditemukan" };
         const log = transactionLog[idx];
-        if (log.timestamp < lockBefore) return { success:false, msg:"Transaksi berada di periode yang sudah TUTUP BUKU dan terkunci permanen. Koreksi hanya lewat transaksi adjustment di periode berjalan." };
+        if (effTs(log) < lockBefore) return { success:false, msg:"Transaksi berada di periode yang sudah TUTUP BUKU dan terkunci permanen. Koreksi hanya lewat transaksi adjustment di periode berjalan." };
         const tLink = transferLinkedTo(logId);
         if (tLink && !undoTransaction._allowTransferInternal) return { success:false, msg: transferGuardMsg(tLink, logId) };
         if (!log.canUndoUntil || Date.now() > log.canUndoUntil) return { success:false, msg:"Batas waktu undo (15 menit) sudah lewat" };
@@ -2486,7 +2562,7 @@
     function editTransactionEntry(logId, newData) {
         const log = transactionLog.find(l=>l.id===logId);
         if (!log) return { success:false, msg:"Transaksi tidak ditemukan" };
-        if (log.timestamp < lockBefore) return { success:false, msg:"Transaksi berada di periode yang sudah TUTUP BUKU dan terkunci permanen. Tidak bisa diedit." };
+        if (effTs(log) < lockBefore) return { success:false, msg:"Transaksi berada di periode yang sudah TUTUP BUKU dan terkunci permanen. Tidak bisa diedit." };
         if (editLocked) return { success:false, msg:"Fitur edit transaksi sedang DIKUNCI oleh Admin. Buka kuncinya dulu di Tutup Buku." };
         const tLinkE = transferLinkedTo(logId);
         if (tLinkE) return { success:false, msg: transferGuardMsg(tLinkE, logId) };
@@ -2582,7 +2658,7 @@
     function deleteTransactionEntry(logId, reason) {
         const log = transactionLog.find(l=>l.id===logId);
         if (!log) return { success:false, msg:"Transaksi tidak ditemukan" };
-        if (log.timestamp < lockBefore) return { success:false, msg:"Transaksi berada di periode yang sudah TUTUP BUKU dan terkunci permanen. Tidak bisa dihapus." };
+        if (effTs(log) < lockBefore) return { success:false, msg:"Transaksi berada di periode yang sudah TUTUP BUKU dan terkunci permanen. Tidak bisa dihapus." };
         if (editLocked) return { success:false, msg:"Fitur edit/hapus transaksi sedang DIKUNCI oleh Admin. Buka kuncinya dulu di Tutup Buku." };
         // Pengaman yang sama dengan undoTransaction & editTransactionEntry. Tanpa ini, menghapus log
         // keluar milik sebuah transfer akan mengembalikan stok ke gudang asal sementara gudang tujuan
@@ -2612,14 +2688,14 @@
     }
     function getMonthStart() { let d=dashRefDate(); d.setDate(1); d.setHours(0,0,0,0); return d; }
     function getMonthEnd() { let d=dashRefDate(); d.setMonth(d.getMonth()+1); d.setDate(0); d.setHours(23,59,59,999); return d; }
-    function getPembelian() { let start=getMonthStart(), end=getMonthEnd(); let total=0; transactionLog.forEach(l=>{ if(l.type==='in' && (l.source||'beli')==='beli'){ let t=new Date(l.timestamp); if(t>=start && t<=end) total+=l.total; } }); return total; }
-    function getPembelianPPN() { let start=getMonthStart(), end=getMonthEnd(); let total=0; transactionLog.forEach(l=>{ if(l.type==='in' && (l.source||'beli')==='beli'){ let t=new Date(l.timestamp); if(t>=start && t<=end) total+=(l.ppn||0); } }); return total; }
+    function getPembelian() { let start=getMonthStart(), end=getMonthEnd(); let total=0; transactionLog.forEach(l=>{ if(l.type==='in' && (l.source||'beli')==='beli'){ let t=new Date(effTs(l)); if(t>=start && t<=end) total+=l.total; } }); return total; }
+    function getPembelianPPN() { let start=getMonthStart(), end=getMonthEnd(); let total=0; transactionLog.forEach(l=>{ if(l.type==='in' && (l.source||'beli')==='beli'){ let t=new Date(effTs(l)); if(t>=start && t<=end) total+=(l.ppn||0); } }); return total; }
     function getPembelianByVendor(){
         let start=getMonthStart(), end=getMonthEnd();
         let map={};
         transactionLog.forEach(l=>{
             if(l.type!=='in' || (l.source||'beli')!=='beli') return;
-            let t=new Date(l.timestamp); if(t<start||t>end) return;
+            let t=new Date(effTs(l)); if(t<start||t>end) return;
             let key=l.supplier||'(Tanpa Supplier)';
             if(!map[key]) map[key]={ name:key, total:0, n:0 };
             map[key].total+=l.total; map[key].n++;
@@ -2627,10 +2703,10 @@
         return Object.values(map).sort((a,b)=>b.total-a.total);
     }
     // Hasil produksi/racik internal (barang setengah jadi masuk stok) — TIDAK dihitung sebagai Pembelian
-    function getProduksiMasuk(){ let start=getMonthStart(), end=getMonthEnd(); let total=0, n=0; transactionLog.forEach(l=>{ if(l.type==='in' && l.source==='produksi'){ let t=new Date(l.timestamp); if(t>=start&&t<=end){ total+=l.total; n++; } } }); return {total,n}; }
+    function getProduksiMasuk(){ let start=getMonthStart(), end=getMonthEnd(); let total=0, n=0; transactionLog.forEach(l=>{ if(l.type==='in' && l.source==='produksi'){ let t=new Date(effTs(l)); if(t>=start&&t<=end){ total+=l.total; n++; } } }); return {total,n}; }
     // HPP murni: hanya keluar untuk pemakaian/produksi akhir (bukan susut, bukan konsumsi internal racik —
     // agar biaya bahan racik tidak terhitung dobel saat hasil racik-nya nanti ikut keluar sebagai pemakaian)
-    function getHpp(divId=null) { let start=getMonthStart(), end=getMonthEnd(); let total=0; transactionLog.forEach(l=>{ if(l.type==='out' && l.outType==='pakai'){ let t=new Date(l.timestamp); if(t>=start && t<=end){ if(divId===null) total+=l.total; else { let d=divisions.find(d=>d.id==divId); if(d && l.division===d.name) total+=l.total; } } } }); return total; }
+    function getHpp(divId=null) { let start=getMonthStart(), end=getMonthEnd(); let total=0; transactionLog.forEach(l=>{ if(l.type==='out' && l.outType==='pakai'){ let t=new Date(effTs(l)); if(t>=start && t<=end){ if(divId===null) total+=l.total; else { let d=divisions.find(d=>d.id==divId); if(d && l.division===d.name) total+=l.total; } } } }); return total; }
     // Nilai barang yang DIKIRIM (Transfer Antar Gudang) bulan ini, dikelompokkan per gudang TUJUAN.
     // Terpisah dari HPP per Divisi supaya transfer ke Cibadak/Karang Tengah tidak tercampur/hilang
     // di dalam angka "Produksi Karangtengah" — transfer bukan pemakaian/produksi, jadi harus kelihatan sendiri.
@@ -2639,7 +2715,7 @@
         let map={};
         transactionLog.forEach(l=>{
             if(l.type!=='out' || l.outType!=='transfer') return;
-            let t=new Date(l.timestamp); if(t<start||t>end) return;
+            let t=new Date(effTs(l)); if(t<start||t>end) return;
             let key = gudangName(l.transferTo||'');
             if(!map[key]) map[key]={ name:key, total:0, n:0, areas:{} };
             map[key].total+=l.total; map[key].n++;
@@ -2651,7 +2727,7 @@
         let map={};
         transactionLog.forEach(l=>{
             if(l.type!=='out' || l.outType!=='pakai') return;
-            let t=new Date(l.timestamp); if(t<start||t>end) return;
+            let t=new Date(effTs(l)); if(t<start||t>end) return;
             let key=l.division||'(Tanpa Divisi)';
             if(!map[key]) map[key]={ name:key, total:0, n:0, areas:{} };
             map[key].total+=l.total; map[key].n++;
@@ -2663,9 +2739,9 @@
         });
         return Object.values(map).map(d=>({ ...d, areas: Object.values(d.areas).sort((a,b)=>b.total-a.total) })).sort((a,b)=>b.total-a.total);
     }
-    function getSusut(){ let start=getMonthStart(), end=getMonthEnd(); let total=0, n=0; transactionLog.forEach(l=>{ if(l.type==='out' && l.outType==='susut' && !l.resetAdjustment){ let t=new Date(l.timestamp); if(t>=start&&t<=end){ total+=l.total; n++; } } }); return {total,n}; }
+    function getSusut(){ let start=getMonthStart(), end=getMonthEnd(); let total=0, n=0; transactionLog.forEach(l=>{ if(l.type==='out' && l.outType==='susut' && !l.resetAdjustment){ let t=new Date(effTs(l)); if(t>=start&&t<=end){ total+=l.total; n++; } } }); return {total,n}; }
     // Bahan baku yang dipakai untuk meracik barang setengah jadi (transfer internal, bukan biaya pemakaian akhir)
-    function getRacikKonsumsi(){ let start=getMonthStart(), end=getMonthEnd(); let total=0, n=0; transactionLog.forEach(l=>{ if(l.type==='out' && l.outType==='produksi'){ let t=new Date(l.timestamp); if(t>=start&&t<=end){ total+=l.total; n++; } } }); return {total,n}; }
+    function getRacikKonsumsi(){ let start=getMonthStart(), end=getMonthEnd(); let total=0, n=0; transactionLog.forEach(l=>{ if(l.type==='out' && l.outType==='produksi'){ let t=new Date(effTs(l)); if(t>=start&&t<=end){ total+=l.total; n++; } } }); return {total,n}; }
     // ========================= LAPORAN PRODUKSI SCALLING (bahan baku -> barang jadi, khusus admin) =========================
     // Racik/Scalling murni memindahkan nilai dari bahan baku (out, outType='produksi') menjadi barang jadi/semi-jadi (in, source='produksi'),
     // di gudang yang sama -> TIDAK dihitung sebagai pembelian (getPembelian sudah filter source==='beli') dan TIDAK mengubah total nilai stok gudang tsb.
@@ -2683,8 +2759,8 @@
         let dari=dariEl.value, sampai=sampaiEl.value;
         let startTs = dari? new Date(dari+'T00:00:00').getTime() : 0;
         let endTs = sampai? new Date(sampai+'T23:59:59').getTime() : Date.now();
-        let bahanRows = transactionLog.filter(l=> l.type==='out' && l.outType==='produksi' && l.timestamp>=startTs && l.timestamp<=endTs).slice().sort((a,b)=>b.timestamp-a.timestamp);
-        let barangRows = transactionLog.filter(l=> l.type==='in' && l.source==='produksi' && l.timestamp>=startTs && l.timestamp<=endTs).slice().sort((a,b)=>b.timestamp-a.timestamp);
+        let bahanRows = transactionLog.filter(l=> l.type==='out' && l.outType==='produksi' && effTs(l)>=startTs && effTs(l)<=endTs).slice().sort((a,b)=>b.timestamp-a.timestamp);
+        let barangRows = transactionLog.filter(l=> l.type==='in' && l.source==='produksi' && effTs(l)>=startTs && effTs(l)<=endTs).slice().sort((a,b)=>b.timestamp-a.timestamp);
         let bahanTotal = bahanRows.reduce((s,l)=>s+(l.total||0),0);
         let barangTotal = barangRows.reduce((s,l)=>s+(l.total||0),0);
         let bt=document.getElementById('scBahanTotal'), bs=document.getElementById('scBahanSub');
@@ -2734,7 +2810,7 @@
             let end=new Date(m.getFullYear(), m.getMonth()+1, 1).getTime()-1;
             let inV=0, outV=0, dispIn=0, dispOut=0;
             transactionLog.forEach(l=>{
-                if(l.timestamp<start || l.timestamp>end) return;
+                if(effTs(l)<start || effTs(l)>end) return;
                 if(l.type==='in'){ inV+=l.total; if((l.source||'beli')==='beli') dispIn+=l.total; }
                 else { outV+=l.total; if(l.outType==='pakai') dispOut+=l.total; }
             });
@@ -2787,7 +2863,7 @@
     // masih ada transaksi setelah timestamp itu, transaksi tsb akan direplay di atas snapshot yang
     // sudah memuatnya -> dobel. Karena itu timestamp dinaikkan ke transaksi terakhir.
     function snapshotDariBatchSaatIni(ts){
-        let tsMin = transactionLog.reduce((m,l)=>Math.max(m, l.timestamp||0), 0);
+        let tsMin = transactionLog.reduce((m,l)=>Math.max(m, effTs(l)), 0);
         if(ts && ts < tsMin) ts = tsMin;
         let rows=[];
         Object.keys(stockBatches||{}).forEach(sku=>{
@@ -2982,7 +3058,7 @@
         let vendorName = vendorId ? (suppliers.find(s=>s.id==vendorId)||{}).name : null;
         return transactionLog.filter(l=>{
             if(l.type!=='in') return false;
-            if(l.timestamp<start||l.timestamp>end) return false;
+            if(effTs(l)<start||effTs(l)>end) return false;
             let ls = l.source||'beli';
             if(src!=='all' && ls!==src) return false;
             if(vendorName && ls==='beli' && l.supplier!==vendorName) return false;
@@ -2994,7 +3070,7 @@
         return transactionLog.filter(l=>{
             if(l.type!=='out') return false;
             if(l.resetAdjustment) return false; // penyesuaian "Reset Stok Gudang" (isi ulang stok awal) — bukan penyusutan/pengeluaran nyata, tidak dihitung di laporan manapun
-            if(l.timestamp<start||l.timestamp>end) return false;
+            if(effTs(l)<start||effTs(l)>end) return false;
             // FIX: 'lj' dulu dipakai tanpa didefinisikan -> filter jenis di getPengeluaranDetail tidak pernah bekerja.
             let lj = l.outType==='susut' ? 'susut' : (l.outType==='produksi' ? 'produksi' : (l.outType==='transfer' ? 'transfer' : 'pakai'));
             if(jenis && jenis!=='all' && lj!==jenis) return false;
@@ -3089,7 +3165,7 @@
         let kat=(document.getElementById('pgAreaKategori')||{}).value||'';
         let rows = transactionLog.filter(l=>{
             if(l.type!=='out' || l.outType!=='pakai') return false;
-            if(l.timestamp<start || l.timestamp>end) return false;
+            if(effTs(l)<start || effTs(l)>end) return false;
             if(kat){ let it=itemBySku(l.sku); if(!it || it.category!==kat) return false; }
             return true;
         });
@@ -3156,7 +3232,7 @@
         let dari=document.getElementById('skDariTanggal').value, sampai=document.getElementById('skSampaiTanggal').value;
         let startTs = dari? new Date(dari+'T00:00:00').getTime() : 0;
         let endTs = sampai? new Date(sampai+'T23:59:59').getTime() : Date.now();
-        let rows = transactionLog.filter(l=> l.type==='out' && (l.gudang||DEFAULT_GUDANG)===gudang && l.timestamp>=startTs && l.timestamp<=endTs);
+        let rows = transactionLog.filter(l=> l.type==='out' && (l.gudang||DEFAULT_GUDANG)===gudang && effTs(l)>=startTs && effTs(l)<=endTs);
         rows = rows.slice().sort((a,b)=>b.timestamp-a.timestamp);
         let totalNominal = rows.reduce((s,l)=>s+(l.total||0),0);
         let jt=document.getElementById('skJumlahTrx'), tn=document.getElementById('skTotalNominal');
@@ -3165,8 +3241,8 @@
         let body=document.getElementById('skTableBody'); if(!body) return;
         if(!rows.length){ body.innerHTML=`<tr><td colspan="5" style="text-align:center; color:var(--text3); padding:20px;">Tidak ada transaksi pengeluaran pada periode ini.</td></tr>`; return; }
         body.innerHTML = rows.map(l=>{
-            let canUndo = l.canUndoUntil && Date.now()<l.canUndoUntil && !(l.timestamp<lockBefore);
-            let locked = l.timestamp<lockBefore;
+            let canUndo = l.canUndoUntil && Date.now()<l.canUndoUntil && !(effTs(l)<lockBefore);
+            let locked = effTs(l)<lockBefore;
             let act = locked ? '<span style="color:var(--text3); font-size:0.7rem;">🔒</span>'
                 : `<button class="btn btn-sm btn-secondary gEditBtn" data-id="${l.id}" title="Perbaiki jumlah kalau salah input">✏️</button> <button class="btn btn-sm btn-warning gDelBtn" data-id="${l.id}" title="Hapus transaksi (stok dikembalikan)">🗑️</button>`;
             return `<tr><td>${skFmtDate(l.timestamp)}</td><td>${l.itemName||l.sku}</td><td style="text-align:right; color:#f87171; font-weight:700;">-${qtyLbl(l.sku, l.qty)}</td><td style="text-align:right;">Rp ${Math.round(l.total||0).toLocaleString('id')}</td><td style="text-align:right; white-space:nowrap;">${act}</td></tr>`;
@@ -3320,7 +3396,7 @@
         let dari=document.getElementById('smDariTanggal').value, sampai=document.getElementById('smSampaiTanggal').value;
         let startTs = dari? new Date(dari+'T00:00:00').getTime() : 0;
         let endTs = sampai? new Date(sampai+'T23:59:59').getTime() : Date.now();
-        let rows = transactionLog.filter(l=> l.type==='in' && (l.gudang||DEFAULT_GUDANG)===gudang && l.timestamp>=startTs && l.timestamp<=endTs);
+        let rows = transactionLog.filter(l=> l.type==='in' && (l.gudang||DEFAULT_GUDANG)===gudang && effTs(l)>=startTs && effTs(l)<=endTs);
         rows = rows.slice().sort((a,b)=>b.timestamp-a.timestamp);
         let totalNominal = rows.reduce((s,l)=>s+(l.total||0),0);
         let jt=document.getElementById('smJumlahTrx'), tn=document.getElementById('smTotalNominal');
@@ -3329,7 +3405,7 @@
         let body=document.getElementById('smTableBody'); if(!body) return;
         if(!rows.length){ body.innerHTML=`<tr><td colspan="6" style="text-align:center; color:var(--text3); padding:20px;">Tidak ada transaksi masuk pada periode ini.</td></tr>`; return; }
         body.innerHTML = rows.map(l=>{
-            let locked = l.timestamp<lockBefore;
+            let locked = effTs(l)<lockBefore;
             let act = locked ? '<span style="color:var(--text3); font-size:0.7rem;">🔒</span>'
                 : `<button class="btn btn-sm btn-secondary gEditBtn" data-id="${l.id}" title="Perbaiki jumlah/harga kalau salah input">✏️</button> <button class="btn btn-sm btn-warning gDelBtn" data-id="${l.id}" title="Hapus transaksi">🗑️</button>`;
             return `<tr><td>${skFmtDate(l.timestamp)}</td><td>${l.itemName||l.sku}</td><td style="text-align:right; color:#4ade80; font-weight:700;">+${qtyLbl(l.sku, l.qty)}</td><td style="text-align:right;">Rp ${Math.round(l.total||0).toLocaleString('id')}</td><td style="font-size:0.78rem;">${smSourceLabel(l)}</td><td style="text-align:right; white-space:nowrap;">${act}</td></tr>`;
@@ -3354,7 +3430,7 @@
         let startTs = dari? new Date(dari+'T00:00:00').getTime() : 0;
         let endTs = sampai? new Date(sampai+'T23:59:59').getTime() : Date.now();
         return { gudang, dari, sampai,
-            rows: transactionLog.filter(l=> l.type===type && (l.gudang||DEFAULT_GUDANG)===gudang && l.timestamp>=startTs && l.timestamp<=endTs)
+            rows: transactionLog.filter(l=> l.type===type && (l.gudang||DEFAULT_GUDANG)===gudang && effTs(l)>=startTs && effTs(l)<=endTs)
                 .slice().sort((a,b)=>b.timestamp-a.timestamp) };
     }
     function keluarJenisLabel(l){
@@ -3659,7 +3735,7 @@
             // 7 hari terakhir bulan tersebut.
             let last7Anchor = Math.min(getMonthEnd().getTime(), Date.now());
             let last7 = [...Array(7)].map((_,i)=>tglLokal(new Date(last7Anchor-i*86400000))).reverse();
-            let values = last7.map(d=>{ let sum=0; transactionLog.filter(l=>l.type==='in' && (l.source||'beli')==='beli' && new Date(l.timestamp).toISOString().slice(0,10)===d).forEach(l=>sum+=l.total); return sum; });
+            let values = last7.map(d=>{ let sum=0; transactionLog.filter(l=>l.type==='in' && (l.source||'beli')==='beli' && tglLokal(effTs(l))===d).forEach(l=>sum+=l.total); return sum; });
             if(trendChart) trendChart.destroy();
             let ctx = document.getElementById('trendChart').getContext('2d');
             trendChart = new Chart(ctx, { type:'line', data:{ labels:last7, datasets:[{ label:'Nilai Masuk (Rp)', data:values, borderColor:'#10b981', tension:0.3, fill:false }] } });
@@ -3847,7 +3923,7 @@
         let areas=[...new Set([...DEFAULT_BAKERY_AREAS, ...fromHistory])].sort((a,b)=>a.localeCompare(b));
         dl.innerHTML = areas.map(a=>`<option value="${a}"></option>`).join('');
     }
-    function isEditLocked(log){ return (log.timestamp < lockBefore) || editLocked; }
+    function isEditLocked(log){ return (effTs(log) < lockBefore) || editLocked; }
     function renderLog() {
         let cont=document.getElementById('quickLogContainer'); if(!cont) return;
         let q=(document.getElementById('quickLogSearch')?.value||'').trim().toLowerCase();
@@ -3868,8 +3944,8 @@
             if(jenis!=='all' && l.type!==jenis) return false;
             if(divName && l.division!==divName) return false;
             if(orphanOnly && !isOrphanDiv(l)) return false;
-            if(startTs && l.timestamp<startTs) return false;
-            if(endTs && l.timestamp>endTs) return false;
+            if(startTs && effTs(l)<startTs) return false;
+            if(endTs && effTs(l)>endTs) return false;
             return true;
         });
         list = hasFilter ? list.slice(0,100) : list.slice(0,20);
@@ -3944,7 +4020,7 @@
         if(reportFilter){
             const f=reportFilter;
             logs=logs.filter(l=>{
-                let t=new Date(l.timestamp);
+                let t=new Date(effTs(l));
                 if(f.start && t < f.start) return false;
                 if(f.end && t > f.end) return false;
                 if(f.item){ let q=f.item.toLowerCase(); if(!l.sku.toLowerCase().includes(q) && !(l.itemName||'').toLowerCase().includes(q)) return false; }
@@ -5371,7 +5447,7 @@
         let mut={};
         transactionLog.forEach(l=>{
             if((l.gudang||DEFAULT_GUDANG)!==gudang) return;
-            if(l.timestamp<=bridgeStart || l.timestamp>endTs) return;
+            if(effTs(l)<=bridgeStart || effTs(l)>endTs) return;
             if(!mut[l.sku]) mut[l.sku]={in:0,out:0,n:0};
             if(l.type==='in') mut[l.sku].in+=l.qty; else mut[l.sku].out+=l.qty;
             mut[l.sku].n++;
@@ -5512,7 +5588,7 @@
         if(!sel||!list) return;
         let months=new Set();
         let nowMonthStart=getMonthStart().getTime();
-        transactionLog.forEach(l=>{ if(l.timestamp>=lockBefore && l.timestamp<nowMonthStart){ let d=new Date(l.timestamp); months.add(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')); } });
+        transactionLog.forEach(l=>{ if(effTs(l)>=lockBefore && effTs(l)<nowMonthStart){ let d=new Date(effTs(l)); months.add(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')); } });
         let arr=[...months].sort();
         sel.innerHTML=arr.length?arr.map(m=>`<option value="${m}">${m}</option>`).join(''):'<option value="">— tidak ada periode siap tutup —</option>';
         let btn=document.getElementById('closeBookBtn');
@@ -5529,7 +5605,7 @@
         if(pin!==soPins.admin){ notify('PIN Salah','','error'); return; }
         let parts=period.split('-'); let y=parseInt(parts[0]), m=parseInt(parts[1]);
         let cutoff=new Date(y, m, 1, 0,0,0,0).getTime(); // awal bulan berikutnya
-        let toArchive=transactionLog.filter(l=>l.timestamp<cutoff);
+        let toArchive=transactionLog.filter(l=>effTs(l)<cutoff);
         if(!toArchive.length){ notify('Kosong','Tidak ada transaksi sebelum akhir periode ini','warning'); return; }
         // Saldo pada cutoff diambil dari sumber tunggal getInventorySnapshotAt — sama persis dengan
         // yang dipakai KPI Stok Awal, sehingga Closing bulan ini = Opening bulan berikutnya.
@@ -5568,7 +5644,7 @@
             notify('Tutup Buku DIBATALKAN','Arsip gagal terkonfirmasi ('+e.message+'). Tidak ada data yang dihapus — coba lagi.','error');
             return;
         }
-        transactionLog=transactionLog.filter(l=>l.timestamp>=cutoff);
+        transactionLog=transactionLog.filter(l=>effTs(l)>=cutoff);
         lockBefore=Math.max(lockBefore, cutoff);
         closings.push({ snapshotRows: snapCutoff.rows, period, closedAt:Date.now(), cutoff, txCount:toArchive.length, inTotal, hppTotal, susutTotal, valueAtCutoff, by:deviceOperator||'' });
         persist(); refreshUI();
@@ -5729,7 +5805,7 @@
         let search=(document.getElementById('hjOutdatedSearch')?.value||'').toLowerCase().trim();
         let range=document.getElementById('hjOutdatedRange')?.value||'90';
         let cutoff = range==='all' ? 0 : Date.now()-parseInt(range)*86400000;
-        let rows = transactionLog.filter(l=> l.type==='out' && l.outType==='pakai' && isPenjualanDivisi(l.division) && l.sellPrice!==undefined && l.timestamp>=cutoff);
+        let rows = transactionLog.filter(l=> l.type==='out' && l.outType==='pakai' && isPenjualanDivisi(l.division) && l.sellPrice!==undefined && effTs(l)>=cutoff);
         if(search) rows = rows.filter(l=> l.sku.toLowerCase().includes(search) || (l.itemName||'').toLowerCase().includes(search));
         let outdated = [];
         rows.forEach(l=>{
@@ -5777,7 +5853,7 @@
     function updateLogMarginToCurrent(logId){
         const log = transactionLog.find(l=>l.id===logId);
         if(!log) return { success:false, msg:"Transaksi tidak ditemukan" };
-        if(log.timestamp < lockBefore) return { success:false, msg:"Transaksi berada di periode yang sudah TUTUP BUKU dan terkunci permanen." };
+        if(effTs(log) < lockBefore) return { success:false, msg:"Transaksi berada di periode yang sudah TUTUP BUKU dan terkunci permanen." };
         if(editLocked) return { success:false, msg:"Mode Koreksi Data sedang terkunci. Buka dulu di menu Tutup Buku." };
         const item = itemBySku(log.sku);
         if(!item) return { success:false, msg:"Master barang tidak ditemukan" };
@@ -7645,7 +7721,7 @@
         let start=getMonthStart(), end=getMonthEnd();
         let rows=transactionLog.filter(l=>{
             if(l.type!=='in' || (l.source||'beli')!=='beli') return false;
-            let t=new Date(l.timestamp); return t>=start && t<=end;
+            let t=new Date(effTs(l)); return t>=start && t<=end;
         });
         let total=rows.reduce((s,l)=>s+(l.total||0),0);
         let list=rows.map(l=>{
@@ -7751,7 +7827,7 @@
     function openEditLog(id) {
         const log=transactionLog.find(l=>l.id===id); if(!log) return;
         if (currentRole!=='admin') return;
-        if (log.timestamp < lockBefore) { notify('Terkunci','Transaksi berada di periode yang sudah tutup buku, tidak bisa diedit.','warning'); return; }
+        if (effTs(log) < lockBefore) { notify('Terkunci','Transaksi berada di periode yang sudah tutup buku, tidak bisa diedit.','warning'); return; }
         if (editLocked) { notify('Mode Koreksi Terkunci','Buka dulu Mode Koreksi Data (tombol 🔓/🔒 di tab Transaksi) sebelum mengedit.','warning'); return; }
         editingLogId=id;
         const item=itemBySku(log.sku);
@@ -7817,7 +7893,7 @@
     window.deleteLogEntry=function(id){
         const log=transactionLog.find(l=>l.id===id); if(!log) return;
         if (currentRole!=='admin') return;
-        if (log.timestamp < lockBefore) { notify('Terkunci','Transaksi berada di periode yang sudah tutup buku, tidak bisa dihapus.','warning'); return; }
+        if (effTs(log) < lockBefore) { notify('Terkunci','Transaksi berada di periode yang sudah tutup buku, tidak bisa dihapus.','warning'); return; }
         if (editLocked) { notify('Mode Koreksi Terkunci','Buka dulu Mode Koreksi Data (tombol 🔓/🔒 di tab Transaksi) sebelum menghapus.','warning'); return; }
         let item=itemBySku(log.sku);
         let reason=prompt(`Alasan menghapus transaksi ini (WAJIB, tercatat di Riwayat Edit & Hapus):\n${log.type==='in'?'📥 Masuk':'📤 Keluar'} ${log.sku} ${log.itemName||''} — ${log.qty.toLocaleString('id')} ${item?item.baseUnit:''}`);
@@ -8226,7 +8302,7 @@
 
         // riwayat 7 hari
         let batas=Date.now()-7*24*3600*1000;
-        let riw=transactionLog.filter(function(l){ return l.gudang===id && new Date(l.timestamp).getTime()>=batas; }).slice(0,80);
+        let riw=transactionLog.filter(function(l){ return l.gudang===id && effTs(l)>=batas; }).slice(0,80);
         document.getElementById('dvzRiwayat').innerHTML = riw.length
             ? riw.map(function(l){
                 let it=itemBySku(l.sku);
