@@ -1488,18 +1488,33 @@
     // Diambil SEBELUM applyState, karena applyState mengganti transactionLog & transfers.
     function kumpulkanMutasiTertinggal(serverState){
         const uidLog = new Set((serverState.transactionLog||[]).map(l=>l.uid).filter(Boolean));
-        const uidTr  = new Set((serverState.transfers||[]).map(t=>t.uid).filter(Boolean));
-        const logs=[], trs=[];
+        const trSrv  = new Map((serverState.transfers||[]).filter(t=>t.uid).map(t=>[t.uid,t]));
+        const logs=[], trs=[], trUbah=[], buangLog=new Set();
+        const sudahLihat=new Set();
         mutasiLokal.forEach(m=>{
-            if(m.jenis==='log'){
-                if(uidLog.has(m.uid)) return;
-                const l=transactionLog.find(x=>x.uid===m.uid); if(l) logs.push(JSON.parse(JSON.stringify(l)));
-            } else {
-                if(uidTr.has(m.uid)) return;
-                const t=transfers.find(x=>x.uid===m.uid); if(t) trs.push(JSON.parse(JSON.stringify(t)));
+            if(m.jenis!=='transfer') return;
+            if(sudahLihat.has(m.uid)) return; sudahLihat.add(m.uid);
+            const lokal=transfers.find(x=>x.uid===m.uid); if(!lokal) return;
+            const srv=trSrv.get(m.uid);
+            if(!srv){ trs.push(JSON.parse(JSON.stringify(lokal))); return; }
+            if(srv.status==='pending' && lokal.status!=='pending'){
+                // perangkat ini menyelesaikan kiriman yang di server masih pending -> bawa hasilnya.
+                trUbah.push(JSON.parse(JSON.stringify(lokal)));
+            } else if(srv.status!=='pending' && lokal.status!=='pending'){
+                // DOUBLE-CONFIRM: server sudah menyelesaikannya lebih dulu. Server menang, dan log
+                // penerimaan/pembatalan lokal HARUS dibuang — kalau ikut dipasang, stok tujuan
+                // bertambah dua kali padahal barangnya cuma satu kiriman.
+                if(lokal.confirmUid) buangLog.add(lokal.confirmUid);
+                if(lokal.cancelUid) buangLog.add(lokal.cancelUid);
             }
         });
-        return { logs, trs };
+        mutasiLokal.forEach(m=>{
+            if(m.jenis!=='log') return;
+            if(uidLog.has(m.uid) || buangLog.has(m.uid)) return;
+            const l=transactionLog.find(x=>x.uid===m.uid);
+            if(l && !logs.some(x=>x.uid===l.uid)) logs.push(JSON.parse(JSON.stringify(l)));
+        });
+        return { logs, trs, trUbah, buangLog:[...buangLog] };
     }
     // Memasang kembali mutasi lokal di atas data server: efek stoknya diterapkan ulang dari
     // rincian batch yang sudah tercatat di log itu sendiri, lalu id lokal dinomori ulang supaya
@@ -1594,6 +1609,24 @@
             t.id = nextTransferId++;
             transfers.unshift(t);
             n++;
+        });
+        // Kiriman yang di server masih pending tapi sudah diselesaikan di perangkat ini.
+        (pulih.trUbah||[]).forEach(t=>{
+            const srv = transfers.find(x=>x.uid===t.uid);
+            if(!srv || srv.status!=='pending') return; // status server menang kalau sudah tidak pending
+            srv.status=t.status; srv.confirmedAt=t.confirmedAt; srv.confirmedBy=t.confirmedBy;
+            srv.confirmedQty=t.confirmedQty; srv.note=t.note; srv.confirmUid=t.confirmUid; srv.cancelUid=t.cancelUid;
+            n++;
+        });
+        // Log OUT milik transfer yang tadi di-FIFO ulang: tautkan kembali ke transfernya, dan bawa
+        // lapisan biaya baru supaya gudang tujuan menerima harga yang benar-benar dipotong.
+        transactionLog.forEach(l=>{
+            if(!l.uid || !l.rehitungKonflik || l.type!=='out') return;
+            const tr = transfers.find(x=>x.outUid===l.uid);
+            if(!tr) return;
+            tr.outLogId = l.id;
+            tr.costLayers = (l.costLayers||[]).map(L=>({ batchId:L.batchId, qtyTaken:L.qtyTaken, price:L.price, dateIn:L.dateIn }));
+            tr.price = l.price;
         });
         // Pencacah id harus di atas seluruh id yang kini ada, termasuk milik perangkat lain.
         nextLogId = Math.max(nextLogId, ...transactionLog.map(l=>(l.id||0)+1), 1);
@@ -2256,6 +2289,7 @@
         // ringkas untuk tampilan kartu kiriman; yang menentukan harga di gudang tujuan adalah costLayers.
         const tr = { id: nextTransferId++, uid: newUid(), sku, itemName: item.name, qty, price: outLog.price, fromGudang, toGudang, ref: ref||'',
             costLayers: (outLog.costLayers||[]).map(L=>({ batchId:L.batchId, qtyTaken:L.qtyTaken, price:L.price, dateIn:L.dateIn })),
+            outUid: outLog.uid,   // tautan tahan-gabung: id numerik bisa dinomori ulang, uid tidak
             status:'pending', sentAt: Date.now(), sentBy: opts.by||deviceOperator, outLogId: outLog.id,
             confirmedAt:null, confirmedBy:null, confirmedQty:null, inLogId:null, note:'' };
         // Hanya diisi kalau pengirim benar-benar mengelompokkan (satu proses kirim = satu invoiceId).
@@ -2302,7 +2336,8 @@
         const inRes = await processTransaction(tr.sku, 'in', qty, price, null, null, tr.ref||`Transfer dari ${gudangName(tr.fromGudang)}`, false, { gudang: tr.toGudang, source:'transfer', by: confirmedBy||deviceOperator, costLayers: terimaLayers });
         if (!inRes.success) return inRes;
         tr.status='confirmed'; tr.confirmedAt=Date.now(); tr.confirmedBy=confirmedBy||deviceOperator;
-        tr.confirmedQty=qty; tr.note=note||''; tr.inLogId=transactionLog[0].id;
+        tr.confirmedQty=qty; tr.note=note||''; tr.inLogId=transactionLog[0].id; tr.confirmUid=transactionLog[0].uid;
+        catatMutasiLokal('transfer', tr.uid);
         if (costUnknown) tr.costUnknown = true;
         // Kalau yang diterima KURANG dari yang dikirim, selisihnya tidak boleh hilang begitu saja:
         // barang sudah keluar dari gudang asal tapi tidak pernah sampai. Catat sebagai penyusutan resmi
@@ -2348,6 +2383,8 @@
             if (!backRes.success) return backRes;
         }
         tr.status='cancelled'; tr.note=reason||''; tr.confirmedAt=Date.now(); tr.confirmedBy=deviceOperator;
+        if(transactionLog[0] && String(transactionLog[0].ref||'').startsWith('Batal transfer')) tr.cancelUid=transactionLog[0].uid;
+        catatMutasiLokal('transfer', tr.uid);
         persist();
         return { success:true, msg:"Transfer dibatalkan, stok dikembalikan ke gudang asal." };
     }
@@ -5091,11 +5128,11 @@
                 let res = row.diff>0
                     // Kelebihan fisik: masuk sebagai penyesuaian, ditandai sumber 'opname' supaya TIDAK
                     // ikut terhitung sebagai Pembelian di dashboard/laporan (bukan barang dibeli, temuan opname).
-                    ? await processTransaction(i.sku,'in',row.diff,avgPrice>0?avgPrice:0.01,null,null,'Adjustment SO: '+reason,true,{gudang, source:'opname', timestamp:countDate, costUnknown:!(avgPrice>0)})
+                    ? await processTransaction(i.sku,'in',row.diff,avgPrice>0?avgPrice:0.01,null,null,'Adjustment SO: '+reason,true,{gudang, source:'opname', effectiveTimestamp:countDate, costUnknown:!(avgPrice>0)})
                     // Kekurangan fisik: dicatat sebagai KELUAR jenis Pemakaian (bukan Susut) — supaya
                     // masuk ke angka pemakaian/HPP yang jadi tanggung jawab gudang tsb, bukan langsung
                     // dihapuskan sebagai kerugian. Sebabnya tetap tercatat di keterangan untuk penelusuran.
-                    : await processTransaction(i.sku,'out',Math.abs(row.diff),0,null,null,'Adjustment SO: '+reason,true,{gudang, outType:'pakai', desc:'Selisih opname: '+reason, timestamp:countDate});
+                    : await processTransaction(i.sku,'out',Math.abs(row.diff),0,null,null,'Adjustment SO: '+reason,true,{gudang, outType:'pakai', desc:'Selisih opname: '+reason, effectiveTimestamp:countDate});
                 if(res.success){ totalDiff+=row.diff*avgPrice; diffs.push(row); }
             }
         }
@@ -5626,8 +5663,9 @@
         if(!confirm(`Tutup buku ${period}?\n• ${toArchive.length} transaksi diarsip ke sheet "Arsip ${period}"\n• Periode terkunci PERMANEN (tanpa undo/edit)\n• Nilai stok akhir resmi: Rp ${Math.round(valueAtCutoff).toLocaleString('id')}`)) return;
         notify('Mengarsipkan...','Jangan tutup aplikasi sampai selesai','info');
         let id=String(Date.now())+Math.floor(Math.random()*1e6);
-        let header=['Tanggal','Jenis','SKU','Nama','Jumlah','Harga Satuan','Total','Supplier','Divisi','Ref','Deskripsi','Petugas'];
-        let rows=toArchive.map(l=>[new Date(l.timestamp).toLocaleString('id'), l.type==='in'?'MASUK':(l.outType==='susut'?'SUSUT':'KELUAR'), l.sku, l.itemName||'', l.qty, l.price||0, l.total, l.supplier||'', l.division||'', l.ref||'', l.desc||'', l.by||'']);
+        // Dua kolom tanggal dipisah: yang menentukan periode (efektif) dan jejak kapan diketik (posting).
+        let header=['Tanggal Efektif','Tanggal Posting','Jenis','SKU','Nama','Jumlah','Harga Satuan','Total','Supplier','Divisi','Ref','Deskripsi','Petugas'];
+        let rows=toArchive.map(l=>[new Date(effTs(l)).toLocaleString('id'), new Date(l.timestamp).toLocaleString('id'), l.type==='in'?'MASUK':(l.outType==='susut'?'SUSUT':'KELUAR'), l.sku, l.itemName||'', l.qty, l.price||0, l.total, l.supplier||'', l.division||'', l.ref||'', l.desc||'', l.by||'']);
         try{
             for(let i=0;i<rows.length;i+=400){
                 let chunkId=id+'_'+i;
@@ -8259,7 +8297,7 @@
 
         // diterima hari ini
         let t0=dvzHariIni();
-        let masuk=transactionLog.filter(function(l){ return l.type==='in' && l.gudang===id && new Date(l.timestamp).getTime()>=t0; });
+        let masuk=transactionLog.filter(function(l){ return l.type==='in' && l.gudang===id && effTs(l)>=t0; });
         let mAgg={};
         masuk.forEach(function(l){ mAgg[l.sku]=(mAgg[l.sku]||0)+l.qty; });
         let mKeys=Object.keys(mAgg);
@@ -8490,7 +8528,7 @@
         let masuk=0, pakai=0, retur=0, perBahan={};
         transactionLog.forEach(function(l){
             if(l.gudang!==divisiId) return;
-            let t=new Date(l.timestamp).getTime();
+            let t=effTs(l);
             if(t<per.s || t>per.e) return;
             if(!perBahan[l.sku]) perBahan[l.sku]={ masuk:0, pakai:0, retur:0, nilai:0 };
             if(l.type==='in'){ masuk+=l.total||0; perBahan[l.sku].masuk+=l.qty; }
