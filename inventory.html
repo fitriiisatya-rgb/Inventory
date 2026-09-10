@@ -1121,7 +1121,7 @@
             <div class="kpi-card" style="padding:12px;"><div class="kpi-label">Total Masuk (log)</div><div class="kpi-value" id="ihTotalIn" style="font-size:1.1rem; color:var(--green);">-</div></div>
             <div class="kpi-card" style="padding:12px;"><div class="kpi-label">Total Keluar (log)</div><div class="kpi-value" id="ihTotalOut" style="font-size:1.1rem; color:var(--orange);">-</div></div>
         </div>
-        <div class="table-wrapper" style="max-height:45vh; overflow-y:auto;"><table><thead><tr><th>Tgl</th><th>Jenis</th><th>Jumlah</th><th>Harga Satuan</th><th>Total</th><th>Supplier/Divisi</th><th>Ref</th><th id="ihColAksi" style="display:none;">Aksi</th></tr></thead><tbody id="ihBody"></tbody></table></div>
+        <div class="table-wrapper" style="max-height:45vh; overflow-y:auto;"><table><thead><tr><th>Tgl</th><th>Jenis</th><th>Jumlah</th><th>Avg HPP</th><th>Total</th><th>Supplier/Divisi</th><th>Ref</th><th id="ihColAksi" style="display:none;">Aksi</th></tr></thead><tbody id="ihBody"></tbody></table></div>
         <div style="font-size:0.72rem; color:var(--text3); margin-top:8px;" id="ihFootNote">Histori mencakup transaksi yang masih ada di log aktif. Transaksi periode yang sudah ditutup buku telah diarsipkan ke spreadsheet dan tidak tampil di sini.</div>
     </div>
 </div>
@@ -2001,8 +2001,13 @@
             let dibuat = [];
             for (let L of layers) {
                 if (!(L.qty > 0)) continue;
-                let b = { id:nextBatchId++, qty:L.qty, price:L.price, dateIn: pakaiDateInAsal ? L.dateIn : txTs,
+                // FIFO di gudang ini berjalan menurut KAPAN barang diterima di sini (dateIn = txTs),
+                // bukan tanggal masuk di gudang asal — kalau dipakai tanggal asal, kiriman lama bisa
+                // menyalip stok yang sudah lebih dulu ada di sini. Harga tetap harga lapisan asal,
+                // dan umur aslinya disimpan di sourceDateIn untuk penelusuran.
+                let b = { id:nextBatchId++, qty:L.qty, price:L.price, dateIn: txTs,
                           exp:opts.exp||null, supplier:supName, ref, gudang };
+                if (pakaiDateInAsal) { b.sourceDateIn = L.dateIn; b.receivedAt = txTs; }
                 stockBatches[sku].push(b);
                 dibuat.push(b);
             }
@@ -2169,7 +2174,12 @@
         undoTransaction._allowTransferInternal = false;
         if (!undoRes.success) {
             // Window undo sudah lewat: kembalikan via transaksi masuk kompensasi ke gudang asal
-            const backRes = await processTransaction(tr.sku, 'in', tr.qty, tr.price>0?tr.price:(bestKnownUnitCost(tr.sku, tr.fromGudang)||0.01), null, null, 'Batal transfer: '+(reason||''), false, { gudang: tr.fromGudang, source:'transfer', by: deviceOperator });
+            // Pemulihan WAJIB memakai lapisan biaya kiriman itu sendiri. Kalau dikembalikan dengan
+            // satu harga rata-rata, gudang asal menerima kembali barangnya tapi kehilangan komposisi
+            // FIFO-nya — nilai persediaan bergeser walau qty-nya kembali utuh.
+            const backLayers = (Array.isArray(tr.costLayers) && tr.costLayers.length &&
+                Math.abs(tr.costLayers.reduce((a,L)=>a+(Number(L.qtyTaken)||0),0) - tr.qty) < 1e-6) ? tr.costLayers : null;
+            const backRes = await processTransaction(tr.sku, 'in', tr.qty, tr.price>0?tr.price:(bestKnownUnitCost(tr.sku, tr.fromGudang)||0.01), null, null, 'Batal transfer: '+(reason||''), false, { gudang: tr.fromGudang, source:'transfer', by: deviceOperator, costLayers: backLayers });
             if (!backRes.success) return backRes;
         }
         tr.status='cancelled'; tr.note=reason||''; tr.confirmedAt=Date.now(); tr.confirmedBy=deviceOperator;
@@ -2422,18 +2432,24 @@
             log.afterStock=getStock(log.sku,gudang).qty;
             log.edited=true; log.editedAt=Date.now();
         } else {
-            sortBatches(log.sku);
+            // Hitung ulang dengan aturan yang SAMA PERSIS seperti processTransaction: urut dateIn,
+            // lalu id batch. Sebelumnya edit memakai urutan array (FEFO), sehingga mengedit qty saja
+            // bisa diam-diam mengubah lapisan mana yang terpakai dan menggeser HPP transaksi itu.
             let batches = stockBatches[log.sku]||[];
-            let remaining=newQty, totalCost=0, deducted=[], newBatches=[];
-            for (let b of batches) {
-                let bGudang = b.gudang||DEFAULT_GUDANG;
-                if (remaining<=0 || bGudang!==gudang || b.qty<=0) { newBatches.push(b); continue; } // lewati batch minus (lihat processTransaction)
+            let antreE = batches
+                .filter(b => (b.gudang||DEFAULT_GUDANG)===gudang && b.qty>0)
+                .sort((x,y) => (x.dateIn - y.dateIn) || ((x.id||0) - (y.id||0)));
+            let remaining=newQty, totalCost=0, deducted=[], habisE=new Set();
+            for (let b of antreE) {
+                if (remaining<=0) break;
                 let take = Math.min(b.qty, remaining);
                 totalCost += take*b.price;
-                deducted.push({ batchId:b.id, qtyTaken:take, price:b.price, dateIn:b.dateIn, exp:b.exp||null, supplier:b.supplier, ref:b.ref, gudang:bGudang });
+                deducted.push({ batchId:b.id, qtyTaken:take, price:b.price, dateIn:b.dateIn, exp:b.exp||null, supplier:b.supplier, ref:b.ref, gudang:b.gudang||DEFAULT_GUDANG });
+                b.qty -= take;
                 remaining -= take;
-                if (b.qty-take>0) newBatches.push({...b, qty:b.qty-take});
+                if (b.qty===0) habisE.add(b);
             }
+            let newBatches = batches.filter(b => !habisE.has(b));
             if (remaining>0) {
                 let estPrice = (newQty-remaining)>0 ? totalCost/(newQty-remaining) : 0;
                 if (!(estPrice>0)) estPrice = bestKnownUnitCost(item, gudang);
@@ -2444,10 +2460,12 @@
                 remaining = 0;
             }
             stockBatches[log.sku] = newBatches;
+            sortBatches(log.sku); // urutan tampilan saja; costing di atas sudah final
             totalCost = Math.round(totalCost*100)/100;
             const avgPrice = totalCost/newQty;
             const divName = newData.divisionId ? (divisions.find(d=>d.id==newData.divisionId)?.name||'') : '';
             log.qty=newQty; log.price=avgPrice; log.total=totalCost; log.deducted=deducted; log.batchIds=deducted.map(d=>d.batchId);
+            log.costLayers = deducted.map(d=>({ batchId:d.batchId, qtyTaken:d.qtyTaken, price:d.price, dateIn:d.dateIn }));
             log.outType=newData.outType||'pakai'; log.desc=newData.desc||''; log.division=divName; log.area=newData.outType==='susut'?'':(newData.area||''); log.ref=newData.ref||'';
             log.afterStock=getStock(log.sku,gudang).qty;
             log.edited=true; log.editedAt=Date.now();
@@ -4365,6 +4383,25 @@
                        : `Belum ada rujukan harga sama sekali — isi Harga Beli Terakhir di Master Data dulu.`) });
         });
 
+        // ===== TRANSAKSI KELUAR LAMA TANPA COST LAYER (READ-ONLY) =====
+        // Transaksi yang dibuat sebelum cost layer ada hanya menyimpan satu harga rata-rata.
+        // Lapisan aslinya TIDAK bisa direkonstruksi dengan jujur, dan menebaknya lalu menulis ulang
+        // ke data akan memalsukan riwayat. Jadi di sini hanya DILAPORKAN, tidak pernah diperbaiki
+        // otomatis. Angkanya tetap sah; yang hilang cuma rincian per lapisannya.
+        let tanpaLayer = transactionLog.filter(l=>
+            l.type==='out' && !l.nonStockMovement && l.inventoryMovement!==false &&
+            !(Array.isArray(l.costLayers) && l.costLayers.length) &&
+            Array.isArray(l.deducted) && l.deducted.length);
+        if (tanpaLayer.length){
+            let awal = tanpaLayer.reduce((m,l)=>Math.min(m,l.timestamp||Infinity), Infinity);
+            let akhir = tanpaLayer.reduce((m,l)=>Math.max(m,l.timestamp||0), 0);
+            orphans.push({ jenis:'Tanpa Cost Layer', ref:tanpaLayer.length+' transaksi keluar',
+                gudang: DEFAULT_GUDANG,
+                ket:`Dibuat sebelum rincian lapisan FIFO dicatat (${new Date(awal).toLocaleDateString('id')} s/d ${new Date(akhir).toLocaleDateString('id')}). `
+                   + `Total & HPP-nya tetap sah, hanya rincian per lapisan yang tidak tersedia. `
+                   + `TIDAK diperbaiki otomatis — merekonstruksi lapisannya berarti menebak dan memalsukan riwayat.` });
+        }
+
         // Pending transfer (in-transit)
         let pending = transfers.filter(t=>t.status==='pending').map(t=>({
             ...t, waitMs: Date.now()-t.sentAt
@@ -4374,7 +4411,7 @@
         let totalLogVal = Object.values(logMap).reduce((s,v)=>s+v.value,0);
         let transit = getInTransit();
 
-        invDiagLastResult = { mismatchQty, mismatchValue, negBatches, orphans, pending, totalBatchVal, totalLogVal, transit, suspectCost,
+        invDiagLastResult = { mismatchQty, mismatchValue, negBatches, orphans, pending, totalBatchVal, totalLogVal, transit, suspectCost, tanpaLayer:tanpaLayer.length,
                               suspectTotal: suspectCost.reduce((s,x)=>s+x.selisih,0) };
         return invDiagLastResult;
     }
