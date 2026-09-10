@@ -1955,52 +1955,90 @@
             // Selisih itu nyata dan harus dicatat, bukan dibiarkan menguap — kalau menguap, nilai
             // batch dan nilai hasil replay log tidak akan pernah cocok lagi dan Diagnostic Inventory
             // akan terus menunjukkan "Selisih Nilai" yang tidak bisa dijelaskan siapa pun.
-            let incomingQty = qty;
+            const supName = suppliers.find(s=>s.id==supplierId)?.name||"";
+            // ===== LAPISAN BIAYA MASUK =====
+            // Pembelian biasa = satu lapisan berharga `price`. Penerimaan transfer membawa costLayers
+            // dari gudang asal, dan tiap lapisan HARUS jadi batch tersendiri dengan harga aslinya.
+            // Kalau digabung jadi satu batch rata-rata, jejak FIFO putus di perbatasan gudang dan
+            // harga pokok di gudang tujuan tidak akan pernah cocok dengan harga di gudang asal.
+            let layers = null;
+            if (Array.isArray(opts.costLayers) && opts.costLayers.length) {
+                let cand = opts.costLayers
+                    .map(L=>({ qty:Number(L.qtyTaken!=null?L.qtyTaken:L.qty)||0, price:Number(L.price)||0, dateIn:Number(L.dateIn)||txTs }))
+                    .filter(L=>L.qty>0)
+                    .sort((a,b)=>(a.dateIn-b.dateIn));
+                let jml = cand.reduce((s,L)=>s+L.qty,0);
+                // Kalau jumlah lapisan tidak cocok dengan qty yang diterima, JANGAN dipaksakan —
+                // lebih baik jatuh ke satu lapisan daripada menciptakan/menghilangkan stok diam-diam.
+                if (cand.length && Math.abs(jml-qty) < 1e-6) layers = cand;
+            }
+            if (!layers) layers = [{ qty, price, dateIn: txTs }];
+            const pakaiDateInAsal = layers.length>1 || (Array.isArray(opts.costLayers) && opts.costLayers.length>0);
+            // Rekam lapisan APA ADANYA sebelum sebagian termakan penutupan batch minus di bawah,
+            // supaya costLayers pada log tetap menjumlah persis sebanyak qty yang diterima.
+            const layersAsli = layers.map(L=>({ qtyTaken:L.qty, price:L.price, dateIn:L.dateIn }));
+            const totalIn = Math.round(layers.reduce((s,L)=>s+L.qty*L.price,0)*100)/100;
+            const hargaRata = qty>0 ? totalIn/qty : price;
+
             let deficitVariance = 0;
             let negBatches = stockBatches[sku].filter(b=>(b.gudang||DEFAULT_GUDANG)===gudang && b.qty<0).sort((a,b)=>a.dateIn-b.dateIn);
+            let li = 0;
             for (let nb of negBatches) {
-                if (incomingQty<=0) break;
-                let closeQty = Math.min(incomingQty, -nb.qty);
-                deficitVariance += closeQty * (price - (nb.price||0));
-                nb.qty += closeQty; // bergerak menuju 0 (misal -5 + 3 = -2)
-                incomingQty -= closeQty;
+                while (nb.qty < 0 && li < layers.length) {
+                    if (layers[li].qty <= 0) { li++; continue; }
+                    let closeQty = Math.min(layers[li].qty, -nb.qty);
+                    deficitVariance += closeQty * (layers[li].price - (nb.price||0));
+                    nb.qty += closeQty;          // bergerak menuju 0 (misal -5 + 3 = -2)
+                    layers[li].qty -= closeQty;
+                }
+                if (li >= layers.length) break;
             }
             deficitVariance = Math.round(deficitVariance*100)/100;
             // Buang batch minus yang sudah lunas (qty jadi 0) supaya tidak menumpuk & tidak mengganggu FEFO/FIFO.
             stockBatches[sku] = stockBatches[sku].filter(b=> !(negBatches.includes(b) && b.qty===0));
-            let batch = null;
-            if (incomingQty>0) {
-                batch = { id:nextBatchId++, qty:incomingQty, price, dateIn:txTs, exp:opts.exp||null, supplier:suppliers.find(s=>s.id==supplierId)?.name||"", ref, gudang };
-                stockBatches[sku].push(batch);
-            } else {
-                // Seluruh stok masuk habis menutup batch minus — tetap catat sebagai transaksi masuk
-                // (transactionLog) apa adanya supaya histori & rekonsiliasi tidak kehilangan jejak,
-                // tapi tidak ada batch baru yang perlu dibuat.
-                batch = { id:null, qty, price, dateIn:txTs, exp:opts.exp||null, supplier:suppliers.find(s=>s.id==supplierId)?.name||"", ref, gudang };
+            // Sisa tiap lapisan jadi batch tersendiri. dateIn lapisan asal dipertahankan untuk
+            // penerimaan transfer supaya umur lapisan (dasar urutan FIFO) tidak ter-reset di gudang tujuan.
+            let dibuat = [];
+            for (let L of layers) {
+                if (!(L.qty > 0)) continue;
+                let b = { id:nextBatchId++, qty:L.qty, price:L.price, dateIn: pakaiDateInAsal ? L.dateIn : txTs,
+                          exp:opts.exp||null, supplier:supName, ref, gudang };
+                stockBatches[sku].push(b);
+                dibuat.push(b);
             }
+            // Seluruh stok masuk habis menutup batch minus -> tidak ada batch baru, tapi transaksinya
+            // tetap dicatat apa adanya supaya histori & rekonsiliasi tidak kehilangan jejak.
             sortBatches(sku);
-            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price, total:Math.round(qty*price*100)/100, by:opts.by||deviceOperator, exp:opts.exp||null, source:opts.source||'beli', uploadId:opts.uploadId||null, ppn:Math.round((opts.ppn||0)*100)/100, supplier:batch.supplier, division:opts.divisionLabel||"", ref, batchIds:[batch.id], gudang, batchId:opts.batchId||null, deficitVariance, costUnknown:!!opts.costUnknown, beforeStock:getStock(sku,gudang).qty-qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
+            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price:hargaRata, total:totalIn, by:opts.by||deviceOperator, exp:opts.exp||null, source:opts.source||'beli', uploadId:opts.uploadId||null, ppn:Math.round((opts.ppn||0)*100)/100, supplier:supName, division:opts.divisionLabel||"", ref, batchIds:(dibuat.length?dibuat.map(b=>b.id):[null]), createdBatches:dibuat.map(b=>({ id:b.id, qty:b.qty })), costLayers:layersAsli, gudang, batchId:opts.batchId||null, deficitVariance, costUnknown:!!opts.costUnknown, beforeStock:getStock(sku,gudang).qty-qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
             transactionLog.unshift(log);
             persist();
-            return { success:true, msg:`✅ Masuk ${qty} ${item.baseUnit} @ Rp${price.toLocaleString()} (${gudangName(gudang)})` };
+            return { success:true, msg:`✅ Masuk ${qty} ${item.baseUnit} @ Rp${Math.round(hargaRata).toLocaleString('id')} (${gudangName(gudang)})` };
         } else {
-            sortBatches(sku); // pastikan FIFO berdasarkan tanggal masuk
             const txTs = opts.timestamp || Date.now(); // izinkan tanggal transaksi custom (admin/stok) — log memakai tanggal ini, bukan waktu proses
             let batches = stockBatches[sku]||[];
-            let remaining = qty, totalCost=0, deducted=[], newBatches=[];
-            for (let b of batches) {
-                let bGudang = b.gudang||DEFAULT_GUDANG;
-                // ROOT CAUSE FIX: batch dengan qty<=0 (batch minus/defisit) WAJIB dilewati di sini.
-                // Sebelumnya batch minus ikut diproses FEFO/FIFO dan menghasilkan `take` negatif —
-                // itu justru MENAMBAH `remaining` (bukan mengurangi), sehingga pengeluaran berikutnya
-                // menyedot lebih banyak batch positif dari yang sebenarnya diminta dan merusak HPP/nilai stok.
-                if (remaining<=0 || bGudang!==gudang || b.qty<=0) { newBatches.push(b); continue; }
+            // ===== URUTAN COSTING = FIFO MURNI BERDASARKAN dateIn =====
+            // sortBatches() mengurutkan FEFO (expiry terdekat keluar duluan) untuk keperluan tampilan
+            // dan peringatan kedaluwarsa. Urutan itu TIDAK boleh menentukan costing: batch yang datang
+            // belakangan tapi expiry-nya lebih dekat akan terpakai lebih dulu, sehingga harga pokok
+            // yang dibebankan bukan harga lapisan tertua dan HPP jadi tidak bisa ditelusuri.
+            // Costing selalu urut dateIn, lalu id batch sebagai pemecah seri.
+            // Batch minus (qty<0) tidak ikut diantre — kalau ikut, `take` jadi negatif dan justru
+            // MENAMBAH sisa permintaan, menyedot batch positif lebih banyak dari yang diminta.
+            let antre = batches
+                .map(b => b)
+                .filter(b => (b.gudang||DEFAULT_GUDANG)===gudang && b.qty>0)
+                .sort((p,q) => (p.dateIn - q.dateIn) || ((p.id||0) - (q.id||0)));
+            let remaining = qty, totalCost=0, deducted=[], habis=new Set();
+            for (let b of antre) {
+                if (remaining<=0) break;
                 let take = Math.min(b.qty, remaining);
                 totalCost += take * b.price;
-                deducted.push({ batchId:b.id, qtyTaken:take, price:b.price, dateIn:b.dateIn, exp:b.exp||null, supplier:b.supplier, ref:b.ref, gudang:bGudang });
+                deducted.push({ batchId:b.id, qtyTaken:take, price:b.price, dateIn:b.dateIn, exp:b.exp||null, supplier:b.supplier, ref:b.ref, gudang:b.gudang||DEFAULT_GUDANG });
+                b.qty -= take;
                 remaining -= take;
-                if (b.qty-take>0) newBatches.push({...b, qty:b.qty-take});
+                if (b.qty===0) habis.add(b);
             }
+            let newBatches = batches.filter(b => !habis.has(b));
             // Stok gudang ini tidak cukup untuk menutupi seluruhnya. Kebijakan: TETAP DIIZINKAN —
             // produksi/pengeluaran tidak boleh berhenti hanya karena stok tercatat 0/kurang. Sisa
             // kekurangan dicatat sebagai batch minus dengan estimasi harga terbaik yang tersedia,
@@ -2018,10 +2056,16 @@
                 remaining = 0;
             }
             stockBatches[sku] = newBatches;
+            sortBatches(sku); // rapikan urutan tampilan (FEFO) — costing di atas sudah selesai & tidak terpengaruh
             totalCost = Math.round(totalCost*100)/100; // hilangkan sisa desimal floating point
+            // HPP transaksi ini = SUM(qtyTaken x harga batch asal). `avgPrice` HANYA untuk tampilan
+            // ringkas satu baris; costing dan penerusan ke gudang lain memakai costLayers di bawah.
             const avgPrice = totalCost/qty;
+            // Lapisan biaya FIFO apa adanya — inilah yang dibawa saat transfer, supaya gudang tujuan
+            // menerima harga asli tiap lapisan, bukan satu harga rata-rata yang menghapus jejak FIFO.
+            const costLayers = deducted.map(d=>({ batchId:d.batchId, qtyTaken:d.qtyTaken, price:d.price, dateIn:d.dateIn }));
             const divName = divisions.find(d=>d.id==divisionId)?.name||"";
-            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price:avgPrice, total:totalCost, by:opts.by||deviceOperator, outType:opts.outType||'pakai', desc:opts.desc||'', area:opts.area||'', supplier:"", division:divName, ref, batchIds:deducted.map(d=>d.batchId), deducted, gudang, transferTo:opts.transferTo||null, resetAdjustment:!!opts.resetAdjustment, batchId:opts.batchId||null, beforeStock:getStock(sku,gudang).qty+qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
+            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price:avgPrice, total:totalCost, by:opts.by||deviceOperator, outType:opts.outType||'pakai', desc:opts.desc||'', area:opts.area||'', supplier:"", division:divName, ref, batchIds:deducted.map(d=>d.batchId), deducted, costLayers, gudang, transferTo:opts.transferTo||null, resetAdjustment:!!opts.resetAdjustment, batchId:opts.batchId||null, beforeStock:getStock(sku,gudang).qty+qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
             transactionLog.unshift(log);
             persist();
             return { success:true, msg:`✅ Keluar ${qty} ${item.baseUnit} (HPP Rp${avgPrice.toFixed(0)}, ${gudangName(gudang)})` };
@@ -2039,7 +2083,10 @@
         const outRes = await processTransaction(sku, 'out', qty, 0, null, null, ref||`Transfer ke ${gudangName(toGudang)}`, false, { gudang: fromGudang, outType: opts.outType||'transfer', transferTo: toGudang, by: opts.by||deviceOperator, timestamp: opts.timestamp||undefined, batchId: opts.invoiceId||undefined });
         if (!outRes.success) return outRes;
         const outLog = transactionLog[0];
+        // Transfer WAJIB membawa lapisan biaya FIFO dari gudang asal. `price` di bawah hanya angka
+        // ringkas untuk tampilan kartu kiriman; yang menentukan harga di gudang tujuan adalah costLayers.
         const tr = { id: nextTransferId++, sku, itemName: item.name, qty, price: outLog.price, fromGudang, toGudang, ref: ref||'',
+            costLayers: (outLog.costLayers||[]).map(L=>({ batchId:L.batchId, qtyTaken:L.qtyTaken, price:L.price, dateIn:L.dateIn })),
             status:'pending', sentAt: Date.now(), sentBy: opts.by||deviceOperator, outLogId: outLog.id,
             confirmedAt:null, confirmedBy:null, confirmedQty:null, inLogId:null, note:'' };
         // Hanya diisi kalau pengirim benar-benar mengelompokkan (satu proses kirim = satu invoiceId).
@@ -2068,7 +2115,21 @@
         let price = tr.price>0 ? tr.price : bestKnownUnitCost(tr.sku, tr.fromGudang);
         const costUnknown = !(price>0);
         if (costUnknown) price = 0.01; // benar-benar tidak ada rujukan harga; ditandai supaya kelihatan di Diagnostic
-        const inRes = await processTransaction(tr.sku, 'in', qty, price, null, null, tr.ref||`Transfer dari ${gudangName(tr.fromGudang)}`, false, { gudang: tr.toGudang, source:'transfer', by: confirmedBy||deviceOperator });
+        // ===== ALOKASI FIFO UNTUK PENERIMAAN SEBAGIAN =====
+        // Yang diterima diambil dari lapisan TERTUA dulu, persis seperti barangnya dimuat.
+        // Tanpa ini, penerimaan sebagian akan memakai satu harga rata-rata dan lapisan mana yang
+        // benar-benar sampai jadi tidak bisa ditelusuri lagi.
+        let terimaLayers = null;
+        if (Array.isArray(tr.costLayers) && tr.costLayers.length) {
+            let sisa = qty, out = [];
+            for (const L of tr.costLayers.slice().sort((a,b)=>(a.dateIn-b.dateIn))) {
+                if (sisa <= 1e-9) break;
+                const ambil = Math.min(Number(L.qtyTaken)||0, sisa);
+                if (ambil > 0) { out.push({ qtyTaken:ambil, price:Number(L.price)||0, dateIn:L.dateIn }); sisa -= ambil; }
+            }
+            if (out.length && Math.abs(sisa) < 1e-6) terimaLayers = out;
+        }
+        const inRes = await processTransaction(tr.sku, 'in', qty, price, null, null, tr.ref||`Transfer dari ${gudangName(tr.fromGudang)}`, false, { gudang: tr.toGudang, source:'transfer', by: confirmedBy||deviceOperator, costLayers: terimaLayers });
         if (!inRes.success) return inRes;
         tr.status='confirmed'; tr.confirmedAt=Date.now(); tr.confirmedBy=confirmedBy||deviceOperator;
         tr.confirmedQty=qty; tr.note=note||''; tr.inLogId=transactionLog[0].id;
@@ -2206,6 +2267,28 @@
     // Log yang terikat ke record transfer TIDAK boleh di-undo/edit lewat jalur biasa:
     // kalau dibatalkan sepihak, stok gudang asal kembali sementara gudang tujuan tetap memegang barangnya
     // (atau sebaliknya) -> stok tercipta/hilang dari udara dan laporan tidak akan pernah cocok.
+    // Menarik kembali seluruh batch yang dibuat oleh SATU log barang masuk.
+    // Sejak penerimaan transfer membawa cost layer, satu log masuk bisa melahirkan BEBERAPA batch
+    // (satu per lapisan harga), jadi pembalikannya tidak boleh lagi menganggap hanya ada batchIds[0].
+    // Diperiksa lengkap dulu, baru diterapkan — supaya tidak ada pembalikan setengah jalan.
+    function tarikKembaliBatchMasuk(log, ekor){
+        const batches = stockBatches[log.sku]||[];
+        const dibuat = (Array.isArray(log.createdBatches) && log.createdBatches.length)
+            ? log.createdBatches
+            : (log.batchIds||[]).filter(id=>id!=null).map(id=>({ id, qty: log.qty }));
+        if (!dibuat.length) return { success:false, msg:"Transaksi masuk ini tidak membuat batch baru (habis menutup stok minus). "+ekor };
+        for (const cb of dibuat){
+            const b = batches.find(bb=>bb.id===cb.id);
+            if (!b) return { success:false, msg:"Batch barang masuk ini sudah terpakai transaksi keluar berikutnya. "+ekor };
+            if (b.qty < cb.qty - 1e-9) return { success:false, msg:"Sebagian batch sudah terpakai transaksi keluar. "+ekor };
+        }
+        for (const cb of dibuat){
+            const b = batches.find(bb=>bb.id===cb.id);
+            b.qty -= cb.qty;
+        }
+        stockBatches[log.sku] = batches.filter(bb=> !(Math.abs(bb.qty)<1e-9 && dibuat.some(c=>c.id===bb.id)));
+        return { success:true };
+    }
     function transferLinkedTo(logId){
         return transfers.find(t=> t.outLogId===logId || t.inLogId===logId );
     }
@@ -2226,12 +2309,8 @@
         if (tLink && !undoTransaction._allowTransferInternal) return { success:false, msg: transferGuardMsg(tLink, logId) };
         if (!log.canUndoUntil || Date.now() > log.canUndoUntil) return { success:false, msg:"Batas waktu undo (15 menit) sudah lewat" };
         if (log.type==='in') {
-            const batches = stockBatches[log.sku]||[];
-            const b = batches.find(bb=>bb.id===log.batchIds[0]);
-            if (!b) return { success:false, msg:"Batch sudah terpakai transaksi keluar. Undo tidak bisa dilakukan." };
-            if (b.qty < log.qty) return { success:false, msg:"Sebagian batch sudah terpakai. Undo tidak bisa dilakukan." };
-            stockBatches[log.sku] = batches.filter(bb=>bb.id!==b.id);
-            if (b.qty > log.qty) stockBatches[log.sku].push({...b, qty:b.qty-log.qty});
+            const rv = tarikKembaliBatchMasuk(log, "Undo tidak bisa dilakukan.");
+            if (!rv.success) return rv;
         } else {
             if (!log.deducted) return { success:false, msg:"Transaksi lama tanpa detail batch, tidak bisa di-undo" };
             if (!stockBatches[log.sku]) stockBatches[log.sku]=[];
@@ -2251,12 +2330,8 @@
     // Membalik efek stok dari sebuah log (identik dengan logika undo), tanpa menghapus/mengecek batas waktu.
     function reverseLogStockEffect(log) {
         if (log.type==='in') {
-            const batches = stockBatches[log.sku]||[];
-            const b = batches.find(bb=>bb.id===log.batchIds[0]);
-            if (!b) return { success:false, msg:"Batch barang masuk ini sudah terpakai transaksi keluar berikutnya. Tidak bisa diedit lagi." };
-            if (b.qty < log.qty) return { success:false, msg:"Sebagian batch sudah terpakai transaksi keluar. Tidak bisa diedit." };
-            stockBatches[log.sku] = batches.filter(bb=>bb.id!==b.id);
-            if (b.qty > log.qty) stockBatches[log.sku].push({...b, qty:b.qty-log.qty});
+            const rv = tarikKembaliBatchMasuk(log, "Tidak bisa diedit lagi.");
+            if (!rv.success) return rv;
         } else {
             if (!log.deducted) return { success:false, msg:"Transaksi lama tanpa detail batch, tidak bisa diedit." };
             if (!stockBatches[log.sku]) stockBatches[log.sku]=[];
@@ -2272,9 +2347,18 @@
     // Menerapkan kembali efek stok ASLI dari sebuah log (kebalikan dari reverseLogStockEffect), dipakai untuk rollback jika edit gagal di tengah jalan.
     function reapplyLogStockEffect(log) {
         if (log.type==='in') {
-            const batch = { id: log.batchIds[0], qty: log.qty, price: log.price, dateIn: log.timestamp, exp: log.exp||null, supplier: log.supplier||"", ref: log.ref, gudang: log.gudang||DEFAULT_GUDANG };
+            // Satu log masuk bisa melahirkan beberapa batch (satu per lapisan harga pada penerimaan
+            // transfer), jadi pemulihannya harus mengembalikan setiap batch dengan harga aslinya.
+            const dibuat = (Array.isArray(log.createdBatches) && log.createdBatches.length)
+                ? log.createdBatches.map((cb,i)=>({ id:cb.id, qty:cb.qty,
+                        price:(log.costLayers&&log.costLayers[i]?log.costLayers[i].price:log.price),
+                        dateIn:(log.costLayers&&log.costLayers[i]?log.costLayers[i].dateIn:log.timestamp) }))
+                : [{ id: log.batchIds[0], qty: log.qty, price: log.price, dateIn: log.timestamp }];
             stockBatches[log.sku] = stockBatches[log.sku]||[];
-            stockBatches[log.sku].push(batch);
+            dibuat.forEach(cb=>{
+                stockBatches[log.sku].push({ id: cb.id, qty: cb.qty, price: cb.price, dateIn: cb.dateIn,
+                    exp: log.exp||null, supplier: log.supplier||"", ref: log.ref, gudang: log.gudang||DEFAULT_GUDANG });
+            });
             sortBatches(log.sku);
         } else {
             if (!stockBatches[log.sku]) stockBatches[log.sku]=[];
@@ -2331,6 +2415,10 @@
             log.qty=newQty; log.price=newPrice; log.total=Math.round(newQty*newPrice*100)/100;
             log.exp=newData.exp||null; log.supplier=newData.supplier||''; log.ref=newData.ref||'';
             log.batchIds=[batch.id];
+            // Edit manual selalu menghasilkan SATU batch dengan satu harga — lapisan biaya lama
+            // (mis. bawaan transfer) tidak berlaku lagi dan harus diganti, bukan ditinggal basi.
+            log.createdBatches = (batch.id!=null) ? [{ id:batch.id, qty:batch.qty }] : [];
+            log.costLayers = [{ qtyTaken:newQty, price:newPrice, dateIn:log.timestamp }];
             log.afterStock=getStock(log.sku,gudang).qty;
             log.edited=true; log.editedAt=Date.now();
         } else {
@@ -4123,11 +4211,19 @@
             let pihak=(currentReportGudang==='all' ? `[${gudangName(l.gudang||DEFAULT_GUDANG)}] ` : '') + (l.supplier||l.division||(l.outType==='susut'?'Penyusutan':'-'));
             let hs = l.type==='in' ? (l.price||0) : (l.qty>0 ? l.total/l.qty : 0);
             let editedBadge = l.edited ? ' <span style="color:#f59e0b;" title="Transaksi ini pernah diedit">✏️</span>' : '';
-            return `<tr class="${canEdit?'ihEditableRow':''}" data-logid="${l.id}" ${canEdit?'style="cursor:pointer;"':''} title="${canEdit?'Klik untuk buka & koreksi transaksi ini':''}"><td>${new Date(l.timestamp).toLocaleString('id')}</td><td>${jenis}</td><td>${l.qty.toLocaleString('id')} ${item.baseUnit}</td><td>Rp ${Math.round(hs).toLocaleString('id')}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${pihak}</td><td style="font-size:0.72rem;">${l.ref||''}${l.by?(' 👤'+l.by):''}${editedBadge}</td>${canEdit?`<td><button type="button" class="btn btn-sm btn-secondary ihEditBtn" data-logid="${l.id}">✏️ Koreksi</button></td>`:''}</tr>`;
+            // Rincian lapisan FIFO yang benar-benar dipakai transaksi keluar ini. Baris utamanya tetap
+            // satu total; lapisannya di baris tambahan yang tersembunyi supaya tabel tidak dua kali panjang.
+            let lay = (l.type==='out' && Array.isArray(l.costLayers)) ? l.costLayers : [];
+            return `<tr class="${canEdit?'ihEditableRow':''}" data-logid="${l.id}" ${canEdit?'style="cursor:pointer;"':''} title="${canEdit?'Klik untuk buka & koreksi transaksi ini':''}"><td>${new Date(l.timestamp).toLocaleString('id')}</td><td>${jenis}</td><td>${l.qty.toLocaleString('id')} ${item.baseUnit}</td><td>Rp ${Math.round(hs).toLocaleString('id')}${lay.length?` <button type="button" class="ihFifoBtn" data-logid="${l.id}" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:0.68rem;padding:0 2px;">FIFO ▾</button>`:''}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${pihak}</td><td style="font-size:0.72rem;">${l.ref||''}${l.by?(' 👤'+l.by):''}${editedBadge}</td>${canEdit?`<td><button type="button" class="btn btn-sm btn-secondary ihEditBtn" data-logid="${l.id}">✏️ Koreksi</button></td>`:''}</tr>${lay.length?`<tr class="ihFifoRow" data-logid="${l.id}" hidden><td colspan="${colCount}" style="background:var(--bg3); padding:8px 14px;"><div style="font-size:0.7rem; color:var(--text3); text-transform:uppercase; letter-spacing:.4px; margin-bottom:4px;">Lapisan FIFO yang dipakai</div><table style="width:100%; font-size:0.75rem;"><thead><tr><th style="text-align:left;">Qty</th><th style="text-align:right;">Harga</th><th style="text-align:right;">Nilai</th><th style="text-align:left; padding-left:14px;">Tgl Batch</th></tr></thead><tbody>${lay.map(L=>`<tr><td>${(Number(L.qtyTaken)||0).toLocaleString('id')} ${item.baseUnit}</td><td style="text-align:right; font-variant-numeric:tabular-nums;">Rp ${Math.round(L.price||0).toLocaleString('id')}</td><td style="text-align:right; font-variant-numeric:tabular-nums;">Rp ${Math.round((Number(L.qtyTaken)||0)*(L.price||0)).toLocaleString('id')}</td><td style="padding-left:14px;">${L.dateIn?new Date(L.dateIn).toLocaleDateString('id'):'-'}</td></tr>`).join('')}</tbody></table></td></tr>`:''}`;
         }).join('') + (logs.length>300?`<tr><td colspan="${colCount}" style="text-align:center; color:var(--text3);">Menampilkan 300 dari ${logs.length} transaksi</td></tr>`:'')
         : `<tr><td colspan="${colCount}" style="text-align:center; color:var(--text3);">Belum ada transaksi untuk barang ini di log aktif.</td></tr>`;
         document.getElementById('ihFootNote').innerHTML = 'Histori mencakup transaksi yang masih ada di log aktif. Transaksi periode yang sudah ditutup buku telah diarsipkan ke spreadsheet dan tidak tampil di sini.' + (canEdit?' Klik baris atau tombol ✏️ Koreksi untuk membuka transaksi aslinya kalau ada yang keliru input.':'');
         modal.style.display='flex';
+        document.querySelectorAll('#ihBody .ihFifoBtn').forEach(btn=>btn.addEventListener('click',(e)=>{
+            e.stopPropagation();
+            let row=document.querySelector(`#ihBody .ihFifoRow[data-logid="${btn.dataset.logid}"]`);
+            if(row){ row.hidden = !row.hidden; btn.innerHTML = row.hidden ? 'FIFO ▾' : 'FIFO ▴'; }
+        }));
         if(canEdit){
             let jumpToEdit=(id)=>{ modal.style.display='none'; openEditLog(id); };
             document.querySelectorAll('#ihBody .ihEditBtn').forEach(b=>b.addEventListener('click',(e)=>{ e.stopPropagation(); jumpToEdit(parseInt(b.dataset.logid)); }));
@@ -4282,6 +4378,70 @@
                               suspectTotal: suspectCost.reduce((s,x)=>s+x.selisih,0) };
         return invDiagLastResult;
     }
+    // ===== AUDIT LEDGER SATU BAHAN (READ-ONLY) =====
+    // Menjawab pertanyaan "kenapa stok tercatat X padahal masuk A dan keluar B" dengan menyusun
+    // ulang seluruh mutasi bahan tsb berurutan waktu, lalu membandingkan saldo hasil replay log
+    // dengan saldo batch yang sebenarnya. TIDAK mengubah data apa pun.
+    window.auditBahan = function(kunci, gudang){
+        let q = String(kunci||'').trim().toLowerCase();
+        let it = itemBySku(kunci) || masterSKU.find(i=>i.sku.toLowerCase()===q)
+              || masterSKU.find(i=>normItemName(i.name).includes(normItemName(q)));
+        if(!it){ notify('Tidak ditemukan','Bahan "'+kunci+'" tidak ada di Master Data.','error'); return null; }
+        let G = gudang || currentReportGudang || DEFAULT_GUDANG;
+        let logs = transactionLog
+            .filter(l=>l.sku===it.sku && (G==='all' || (l.gudang||DEFAULT_GUDANG)===G))
+            .slice().sort((a,b)=>(a.timestamp-b.timestamp)||((a.id||0)-(b.id||0)));
+
+        let masuk=0, keluar=0, abaikan=0, saldo=0, baris=[];
+        logs.forEach(l=>{
+            let lewati = !!(l.nonStockMovement || l.inventoryMovement===false);
+            if(l.type==='in'){ if(!lewati){ masuk+=l.qty; saldo+=l.qty; } else abaikan+=l.qty; }
+            else { if(!lewati){ keluar+=l.qty; saldo-=l.qty; } else abaikan+=l.qty; }
+            baris.push({ tgl:new Date(l.timestamp).toLocaleDateString('id'), id:l.id,
+                jenis:(l.type==='in'?'MASUK':'KELUAR')+(lewati?' (non-stok)':''),
+                sumber:l.source||l.outType||'', qty:l.qty, saldo:Math.round(saldo*1000)/1000,
+                ref:l.ref||'', gudang:gudangName(l.gudang||DEFAULT_GUDANG) });
+        });
+
+        let batchQty = getStock(it.sku, G).qty;
+        let minus = (stockBatches[it.sku]||[]).filter(b=>(G==='all'||(b.gudang||DEFAULT_GUDANG)===G) && b.qty<0);
+        let pendingKe = transfers.filter(t=>t.status==='pending' && t.sku===it.sku && t.toGudang===G);
+        let pendingDari = transfers.filter(t=>t.status==='pending' && t.sku===it.sku && t.fromGudang===G);
+        let selisih = Math.round((batchQty - saldo)*1000)/1000;
+
+        let sebab = [];
+        if(Math.abs(selisih)>0.001){
+            sebab.push('Saldo batch dan hasil replay log TIDAK sama. Selisih '+selisih.toLocaleString('id')+' '+(it.baseUnit||'')+'.');
+            if(abaikan>0) sebab.push('Ada '+abaikan.toLocaleString('id')+' '+(it.baseUnit||'')+' pada baris non-stok (sengaja tidak menggerakkan stok).');
+            if(minus.length) sebab.push(minus.length+' batch minus masih menggantung ('+minus.reduce((a,b)=>a+b.qty,0).toLocaleString('id')+').');
+            if(pendingKe.length) sebab.push(pendingKe.length+' kiriman MASUK belum dikonfirmasi ('+pendingKe.reduce((a,t)=>a+t.qty,0).toLocaleString('id')+') — belum jadi stok di sini.');
+            if(pendingDari.length) sebab.push(pendingDari.length+' kiriman KELUAR belum dikonfirmasi ('+pendingDari.reduce((a,t)=>a+t.qty,0).toLocaleString('id')+') — sudah dipotong dari sini.');
+            sebab.push('Sisa selisih yang tidak terjelaskan berarti batch pernah diubah di luar jalur transaksi (import, koreksi manual, atau data lama).');
+        } else sebab.push('Saldo batch COCOK dengan hasil replay log. Tidak ada mismatch qty.');
+
+        let hasil = { sku:it.sku, nama:it.name, satuan:it.baseUnit, gudang:gudangName(G),
+                      masuk, keluar, ekspektasi:Math.round(saldo*1000)/1000, batchQty, selisih, baris, sebab };
+        try{ console.table(baris); }catch(e){}
+
+        let tabel = baris.slice(-40).map(r=>`<tr><td>${r.tgl}</td><td>${r.jenis}</td><td style="text-align:right;font-variant-numeric:tabular-nums;">${r.qty.toLocaleString('id')}</td><td style="text-align:right;font-variant-numeric:tabular-nums;font-weight:700;">${r.saldo.toLocaleString('id')}</td><td style="font-size:.72rem;">${dvzEsc(r.ref)}</td></tr>`).join('');
+        if(typeof Swal!=='undefined' && Swal.fire){
+            Swal.fire({ title:'Audit '+dvzEsc(it.name), width:900, confirmButtonText:'Tutup', html:
+                `<div style="text-align:left;font-size:14px">
+                 <p style="margin:0 0 10px"><b>${dvzEsc(gudangName(G))}</b> — satuan ${dvzEsc(it.baseUnit||'')}</p>
+                 <table style="width:100%;margin-bottom:12px;font-variant-numeric:tabular-nums">
+                   <tr><td>Total masuk (log)</td><td style="text-align:right">${masuk.toLocaleString('id')}</td></tr>
+                   <tr><td>Total keluar (log)</td><td style="text-align:right">${keluar.toLocaleString('id')}</td></tr>
+                   <tr><td><b>Seharusnya sisa</b></td><td style="text-align:right"><b>${(Math.round(saldo*1000)/1000).toLocaleString('id')}</b></td></tr>
+                   <tr><td>Stok batch sekarang</td><td style="text-align:right">${batchQty.toLocaleString('id')}</td></tr>
+                   <tr><td style="color:#b3261e"><b>Selisih</b></td><td style="text-align:right;color:#b3261e"><b>${selisih.toLocaleString('id')}</b></td></tr>
+                 </table>
+                 <ul style="margin:0 0 12px;padding-left:18px">${sebab.map(x=>'<li>'+dvzEsc(x)+'</li>').join('')}</ul>
+                 <div style="font-size:.72rem;color:#666;margin-bottom:4px">40 mutasi terakhir (lengkapnya di Console)</div>
+                 <div style="max-height:260px;overflow:auto"><table style="width:100%;font-size:.78rem"><thead><tr><th style="text-align:left">Tgl</th><th style="text-align:left">Jenis</th><th style="text-align:right">Qty</th><th style="text-align:right">Saldo</th><th style="text-align:left">Ref</th></tr></thead><tbody>${tabel}</tbody></table></div>
+                 </div>` });
+        }
+        return hasil;
+    };
     function renderInvDiagResult(){
         let r = invDiagLastResult; if(!r) return;
         let sum = document.getElementById('invDiagSummary');
@@ -4293,13 +4453,16 @@
             <div class="kpi-card"><div class="kpi-label">🏷️ Batch Harga Tebakan</div><div class="kpi-value">${(r.suspectCost||[]).length}</div><div class="kpi-sub">Nilai stok kurang tercatat ± Rp ${Math.round(r.suspectTotal||0).toLocaleString('id')}</div></div>
         `;
         let mb = document.getElementById('invDiagMismatchBody');
-        if (mb) mb.innerHTML = r.mismatchQty.length ? r.mismatchQty.map(x=>`<tr><td class="mono">${x.sku}</td><td>${x.name}</td><td>${gudangName(x.gudang)}</td><td style="text-align:right;">${x.bQty.toLocaleString('id')}</td><td style="text-align:right;">${x.lQty.toLocaleString('id')}</td><td style="text-align:right; color:#f87171; font-weight:700;">${x.diff.toLocaleString('id')}</td></tr>`).join('') : `<tr><td colspan="6" style="text-align:center; color:var(--text3);">✅ Tidak ada selisih qty batch vs log.</td></tr>`;
+        if (mb) mb.innerHTML = r.mismatchQty.length ? r.mismatchQty.map(x=>`<tr class="invDiagAuditRow" data-sku="${x.sku}" data-gudang="${x.gudang}" style="cursor:pointer;" title="Klik untuk menelusuri mutasi bahan ini"><td class="mono">${x.sku}</td><td>${x.name}</td><td>${gudangName(x.gudang)}</td><td style="text-align:right;">${x.bQty.toLocaleString('id')}</td><td style="text-align:right;">${x.lQty.toLocaleString('id')}</td><td style="text-align:right; color:#f87171; font-weight:700;">${x.diff.toLocaleString('id')}</td></tr>`).join('') : `<tr><td colspan="6" style="text-align:center; color:var(--text3);">✅ Tidak ada selisih qty batch vs log.</td></tr>`;
         let nb = document.getElementById('invDiagNegBody');
         if (nb) nb.innerHTML = r.negBatches.length ? r.negBatches.map(x=>`<tr><td class="mono">${x.sku}</td><td>${x.name}</td><td>${gudangName(x.gudang)}</td><td style="text-align:right; color:#f87171; font-weight:700;">${x.qty.toLocaleString('id')}</td><td style="text-align:right;">Rp ${Math.round(x.price).toLocaleString('id')}</td><td style="text-align:right;">Rp ${Math.round(x.value).toLocaleString('id')}</td></tr>`).join('') : `<tr><td colspan="6" style="text-align:center; color:var(--text3);">✅ Tidak ada batch minus.</td></tr>`;
         let ob = document.getElementById('invDiagOrphanBody');
         if (ob) ob.innerHTML = r.orphans.length ? r.orphans.map(x=>`<tr><td>${x.jenis}</td><td class="mono">${x.ref}</td><td>${gudangName(x.gudang)}</td><td style="font-size:0.78rem;">${x.ket}</td></tr>`).join('') : `<tr><td colspan="4" style="text-align:center; color:var(--text3);">✅ Tidak ada orphan batch/transaksi.</td></tr>`;
         let tb = document.getElementById('invDiagTransferBody');
         if (tb) tb.innerHTML = r.pending.length ? r.pending.map(t=>{ let jam=Math.floor(t.waitMs/3600000); let lama = jam<24?`${jam} jam`:`${Math.floor(jam/24)} hari`; return `<tr><td>${lama}</td><td>${gudangName(t.fromGudang)}</td><td>${gudangName(t.toGudang)}</td><td>${t.itemName}</td><td style="text-align:right;">${t.qty.toLocaleString('id')}</td><td style="text-align:right;">Rp ${Math.round(t.qty*(t.price||0)).toLocaleString('id')}</td></tr>`; }).join('') : `<tr><td colspan="6" style="text-align:center; color:var(--text3);">Tidak ada transfer pending.</td></tr>`;
+        document.querySelectorAll('#invDiagMismatchBody .invDiagAuditRow').forEach(tr=>tr.addEventListener('click',()=>{
+            auditBahan(tr.dataset.sku, tr.dataset.gudang);
+        }));
         let vb = document.getElementById('invDiagValueBody');
         if (vb) vb.innerHTML = r.mismatchValue.length ? r.mismatchValue.slice().sort((a,b)=>Math.abs(b.diff)-Math.abs(a.diff)).map(x=>`<tr><td class="mono">${x.sku}</td><td>${x.name}</td><td>${gudangName(x.gudang)}</td><td style="text-align:right;">Rp ${Math.round(x.bVal).toLocaleString('id')}</td><td style="text-align:right;">Rp ${Math.round(x.lVal).toLocaleString('id')}</td><td style="text-align:right; color:#f87171; font-weight:700;">Rp ${Math.round(x.diff).toLocaleString('id')}</td></tr>`).join('') : `<tr><td colspan="6" style="text-align:center; color:var(--text3);">✅ Tidak ada selisih nilai batch vs log.</td></tr>`;
     }
