@@ -1524,6 +1524,7 @@
                 // bertambah dua kali padahal barangnya cuma satu kiriman.
                 if(lokal.confirmUid) buangLog.add(lokal.confirmUid);
                 if(lokal.cancelUid) buangLog.add(lokal.cancelUid);
+                if(lokal.lossUid) buangLog.add(lokal.lossUid); // susut selisihnya juga milik konfirmasi yang kalah
             }
         });
         mutasiLokal.forEach(m=>{
@@ -1543,6 +1544,10 @@
     // ULANG terhadap batch server terbaru, lalu deducted/costLayers/total/price ditulis ulang.
     // Kalau stoknya tidak cukup, log TIDAK disisipkan setengah jadi; dikembalikan sebagai konflik.
     function terapkanUlangEfekStok(l){
+        // Baris yang memang TIDAK menggerakkan stok (mis. pencatatan susut selisih transfer, yang
+        // stoknya sudah berkurang saat pengiriman) hanya perlu ikut tersimpan lognya. Kalau efeknya
+        // ikut diterapkan di sini, stok gudang asal berkurang untuk kedua kalinya.
+        if(l.nonStockMovement || l.inventoryMovement===false) return { ok:true };
         const g=l.gudang||DEFAULT_GUDANG;
         if(!stockBatches[l.sku]) stockBatches[l.sku]=[];
         const arr=stockBatches[l.sku];
@@ -1663,6 +1668,17 @@
         if(n) persistLocal();
         return n;
     }
+    // uid yang masih tertunda dan BELUM terlihat di data server. Kalau state server tidak bisa
+    // dibaca, seluruh uid dianggap belum tersimpan — lebih baik mengirim ulang daripada
+    // membersihkan outbox atas dasar tebakan.
+    function uidBelumTersimpan(serverState){
+        if(!serverState) return mutasiLokal.map(m=>m.uid);
+        const adaLog = new Set((serverState.transactionLog||[]).map(l=>l.uid).filter(Boolean));
+        const adaTr  = new Set((serverState.transfers||[]).map(t=>t.uid).filter(Boolean));
+        return mutasiLokal
+            .filter(m => m.jenis==='transfer' ? !adaTr.has(m.uid) : !adaLog.has(m.uid))
+            .map(m=>m.uid);
+    }
     async function pushToServer() {
         if (!SYNC_URL || pushing) return;
         pushing = true;
@@ -1702,8 +1718,20 @@
             var chk = await window.__jsonpGet(SYNC_URL);
             if (chk && chk.ok && chk.version > serverVersion) {
                 serverVersion = chk.version;
-                bersihkanOutbox(); // baru sekarang aman: versi server sudah naik
-                setBadge('🟢 Tersinkron','#10b981');
+                // Versi naik saja BUKAN bukti kiriman kita masuk — bisa saja yang naik adalah simpanan
+                // perangkat lain. Outbox hanya boleh dibersihkan kalau setiap uid yang tertunda benar
+                // benar sudah ada di data server. Kalau belum, pertahankan dan kirim ulang.
+                const belum = uidBelumTersimpan(chk.state);
+                if (belum.length === 0) {
+                    bersihkanOutbox();
+                    setBadge('🟢 Tersinkron','#10b981');
+                } else {
+                    mutasiLokal = mutasiLokal.filter(m=>belum.includes(m.uid));
+                    simpanOutbox();
+                    dirty = true;
+                    setBadge('🟡 '+belum.length+' transaksi belum terverifikasi — mengirim ulang','#f59e0b');
+                    schedulePush();
+                }
             } else {
                 throw new Error('data terkirim tapi belum terverifikasi');
             }
@@ -2355,15 +2383,17 @@
         // Yang diterima diambil dari lapisan TERTUA dulu, persis seperti barangnya dimuat.
         // Tanpa ini, penerimaan sebagian akan memakai satu harga rata-rata dan lapisan mana yang
         // benar-benar sampai jadi tidak bisa ditelusuri lagi.
-        let terimaLayers = null;
+        let terimaLayers = null, sisaLayers = [];
         if (Array.isArray(tr.costLayers) && tr.costLayers.length) {
-            let sisa = qty, out = [];
+            let sisa = qty, out = [], belum = [];
             for (const L of tr.costLayers.slice().sort((a,b)=>(a.dateIn-b.dateIn))) {
-                if (sisa <= 1e-9) break;
-                const ambil = Math.min(Number(L.qtyTaken)||0, sisa);
+                const punya = Number(L.qtyTaken)||0;
+                const ambil = Math.min(punya, Math.max(sisa,0));
                 if (ambil > 0) { out.push({ qtyTaken:ambil, price:Number(L.price)||0, dateIn:L.dateIn }); sisa -= ambil; }
+                // Sisa lapisan yang TIDAK jadi diterima — inilah yang benar-benar hilang di jalan.
+                if (punya - ambil > 1e-9) belum.push({ qtyTaken:punya-ambil, price:Number(L.price)||0, dateIn:L.dateIn });
             }
-            if (out.length && Math.abs(sisa) < 1e-6) terimaLayers = out;
+            if (out.length && Math.abs(sisa) < 1e-6) { terimaLayers = out; sisaLayers = belum; }
         }
         const inRes = await processTransaction(tr.sku, 'in', qty, price, null, null, tr.ref||`Transfer dari ${gudangName(tr.fromGudang)}`, false, { gudang: tr.toGudang, source:'transfer', by: confirmedBy||deviceOperator, costLayers: terimaLayers });
         if (!inRes.success) return inRes;
@@ -2377,8 +2407,17 @@
         let shortfall = tr.qty - qty;
         if (shortfall > 0) {
             const inLog = transactionLog[0];
+            // Nilai kerugian = lapisan yang TIDAK jadi diterima, bukan shortfall x harga rata-rata.
+            // Yang sampai lebih dulu adalah lapisan tertua (termurah), jadi yang hilang justru lapisan
+            // termahal — memakai harga rata-rata membuat kerugian tercatat terlalu kecil dan sisa
+            // nilainya menggantung tanpa penjelasan.
+            const lossLayers = (sisaLayers && sisaLayers.length &&
+                Math.abs(sisaLayers.reduce((a,L)=>a+L.qtyTaken,0) - shortfall) < 1e-6)
+                ? sisaLayers.map(L=>({ qtyTaken:L.qtyTaken, price:L.price, dateIn:L.dateIn }))
+                : [{ qtyTaken: shortfall, price: tr.price||0, dateIn: null }];
+            const lossTotal = Math.round(lossLayers.reduce((a,L)=>a+L.qtyTaken*L.price,0)*100)/100;
             const lossLog = { id: nextLogId++, uid: newUid(), timestamp: Date.now(), sku: tr.sku, type:'out', qty: shortfall,
-                price: tr.price||0, total: Math.round(shortfall*(tr.price||0)*100)/100, by: confirmedBy||deviceOperator,
+                price: shortfall>0 ? lossTotal/shortfall : 0, total: lossTotal, lossLayers, by: confirmedBy||deviceOperator,
                 outType:'susut', desc:`Selisih kurang transfer dari ${gudangName(tr.fromGudang)}: ${note||'tanpa keterangan'}`,
                 area:'', supplier:'', division:'', ref:`Selisih transfer #${tr.id}`, batchIds:[], deducted:[],
                 gudang: tr.fromGudang, transferLossOf: tr.id,
