@@ -1164,7 +1164,7 @@
     // Data transaksi TETAP disimpan dalam satuan dasar — yang berubah hanya cara menampilkannya.
     // ANGKA UTAMA = SATUAN DASAR dari Master Data. Selalu "8.250 Gr", tidak pernah "8250" telanjang.
     function qtyLbl(skuOrItem, baseQty){
-        let it = (typeof skuOrItem === 'string') ? masterSKU.find(x=>x.sku===skuOrItem) : skuOrItem;
+        let it = (typeof skuOrItem === 'string') ? itemBySku(skuOrItem) : skuOrItem;
         let q = Number(baseQty)||0;
         let n = (Math.round(q*1000)/1000).toLocaleString('id');
         if(!it || !it.baseUnit) return n;
@@ -1172,13 +1172,13 @@
     }
     // Satuan dasar saja (untuk kolom "Satuan" terpisah di Export Excel/CSV).
     function unitOf(skuOrItem){
-        let it = (typeof skuOrItem === 'string') ? masterSKU.find(x=>x.sku===skuOrItem) : skuOrItem;
+        let it = (typeof skuOrItem === 'string') ? itemBySku(skuOrItem) : skuOrItem;
         return (it && it.baseUnit) ? it.baseUnit : '';
     }
     // Pecahan kemasan sbg KETERANGAN SEKUNDER, mis. "1 Sak + 1 Kg + 250 Gr".
     // Hanya pelengkap; angka utama tetap satuan dasar. Konversi murni dari Master Data, tanpa asumsi.
     function qtyPack(skuOrItem, baseQty){
-        let it = (typeof skuOrItem === 'string') ? masterSKU.find(x=>x.sku===skuOrItem) : skuOrItem;
+        let it = (typeof skuOrItem === 'string') ? itemBySku(skuOrItem) : skuOrItem;
         let q = Number(baseQty)||0;
         if(!it || !(it.buyContent>1) || q<=0) return '';
         let s = dualQty(it, q);
@@ -1250,6 +1250,26 @@
     function dvzEsc(t){ return String(t==null?'':t).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
     let currentReportGudang = DEFAULT_GUDANG; // gudang yang sedang dilihat di Laporan > Stok
     let masterSKU = [], stockBatches = {}, transactionLog = [], suppliers = [], divisions = [];
+    // ===== INDEKS KODE BAHAN -> BARANG =====
+    // Master berisi 1.100+ bahan dan pencarian barang tersebar di ~90 tempat memakai masterSKU.find(),
+    // yaitu penelusuran satu per satu dari awal daftar. Diukur langsung: 20.000 pencarian butuh ~32 ms
+    // lewat .find() dan ~2 ms lewat indeks ini.
+    // Catatan jujur: layar Laporan Stok & Dashboard TIDAK terbukti ikut lebih cepat, karena biayanya
+    // ada di penyusunan HTML, bukan di pencarian. Manfaat indeks ini terasa pada layar yang mencari
+    // barang per baris memakai kode (mis. Riwayat/Log, laporan pembelian & pengeluaran), dan pada
+    // daftar yang tumbuh seiring bertambahnya transaksi.
+    // Dibangun ulang otomatis kalau daftar diganti (sinkronisasi) atau jumlahnya berubah, dan
+    // dibatalkan secara eksplisit tiap kali data disimpan.
+    let __skuIndex = null, __skuIndexSrc = null, __skuIndexLen = -1;
+    function invalidateSkuIndex(){ __skuIndex = null; }
+    function itemBySku(sku){
+        if(!__skuIndex || __skuIndexSrc !== masterSKU || __skuIndexLen !== masterSKU.length){
+            __skuIndex = new Map();
+            for(const it of masterSKU) __skuIndex.set(it.sku, it);
+            __skuIndexSrc = masterSKU; __skuIndexLen = masterSKU.length;
+        }
+        return __skuIndex.get(sku); // undefined kalau tidak ada — sama persis dengan perilaku .find()
+    }
     let nextLogId = 1, nextSupplierId = 1, nextDivisionId = 1, nextBatchId = 1;
     // Sesi opname hitung-buta-ganda. counts[sku] = { p1:{qty,d,notes,at}, p2:{...}, recount, final, note }
     // Sesi Stok Opname terpisah per gudang — supaya SO yang dimulai di SCM (admin) TIDAK ikut mengunci
@@ -1310,6 +1330,7 @@
     }
 
     function persistLocal() {
+        invalidateSkuIndex(); // master mungkin baru berubah -> indeks kode bahan harus dibangun ulang
         if (!storageOK) return; // data tetap tersimpan di memori selama halaman terbuka
         try {
             localStorage.setItem(STORAGE.SKU, JSON.stringify(masterSKU));
@@ -1337,7 +1358,10 @@
     // Alamat Web App Google Apps Script disimpan di browser (sekali isi lewat tombol ⚙️ Sync)
     const DEFAULT_SYNC_URL = "https://script.google.com/macros/s/AKfycbzhkSaDSyEorL0Yf9AqtR3FZEmguAZttT5yo_-SJqbjAC8ne50glVsLxmBLds1z9peu/exec";
     let SYNC_URL = DEFAULT_SYNC_URL;
-    try { SYNC_URL = localStorage.getItem("sync_url") || DEFAULT_SYNC_URL; } catch(e) {}
+    // Bedakan "belum pernah diisi" (null -> pakai bawaan) dari "sengaja dikosongkan" (""  -> mode lokal).
+    // Dengan `|| DEFAULT_SYNC_URL`, pilihan "kosongkan untuk mode lokal saja" tidak pernah bertahan:
+    // string kosong dianggap falsy sehingga sinkronisasi menyala lagi setiap halaman dimuat ulang.
+    try { let u = localStorage.getItem("sync_url"); SYNC_URL = (u===null) ? DEFAULT_SYNC_URL : u; } catch(e) {}
     let serverVersion = 0;      // versi data terakhir yang diketahui dari server
     let pushTimer = null;       // debounce
     let pushing = false;
@@ -1391,6 +1415,7 @@
         return merged;
     }
     function applyState(s) {
+        invalidateSkuIndex();
         masterSKU = s.masterSKU||[]; stockBatches = s.stockBatches||{}; transactionLog = s.transactionLog||[];
         suppliers = s.suppliers||[]; divisions = s.divisions||[];
         const ids = s.ids||{};
@@ -1668,7 +1693,7 @@
         masterSKU = JSON.parse(JSON.stringify(SEED_MASTER));
         stockBatches = {}; masterSKU.forEach(i=>{ stockBatches[i.sku]=[]; });
         custom.forEach(i=>{
-            if(!masterSKU.find(x=>x.sku===i.sku)){ masterSKU.push(i); stockBatches[i.sku]=customBatches[i.sku]; }
+            if(!itemBySku(i.sku)){ masterSKU.push(i); stockBatches[i.sku]=customBatches[i.sku]; }
         });
         transactionLog = transactionLog.filter(l=>!/^ITM\d+$/.test(l.sku)); // hanya transaksi dummy yang dibuang
         let seedSup = JSON.parse(JSON.stringify(SEED_SUPPLIERS));
@@ -1682,21 +1707,29 @@
     // transfer yang harga asalnya 0, koreksi stok, dan adjustment opname.
     // Sebelumnya tiap tempat menebak sendiri dengan fallback Rp1 atau Rp0,01 — itu yang membuat
     // nilai persediaan anjlok tanpa jejak. Urutannya dari yang paling bisa dipertanggungjawabkan.
-    function bestKnownUnitCost(skuOrItem, gudang) {
-        let item = (typeof skuOrItem === 'string') ? masterSKU.find(x=>x.sku===skuOrItem) : skuOrItem;
+    function bestKnownUnitCost(skuOrItem, gudang, opts) {
+        opts = opts || {};
+        let item = (typeof skuOrItem === 'string') ? itemBySku(skuOrItem) : skuOrItem;
         if (!item) return 0;
-        // 1) Rata-rata batch positif di gudang ini
-        let here = 0, hereQty = 0;
-        (stockBatches[item.sku]||[]).forEach(b=>{
-            if (b.qty<=0) return;
-            if (gudang && gudang!=='all' && (b.gudang||DEFAULT_GUDANG)!==gudang) return;
-            here += b.qty*b.price; hereQty += b.qty;
-        });
-        if (hereQty>0 && here/hereQty>0) return here/hereQty;
-        // 2) Rata-rata batch positif di seluruh gudang
-        let anyV = 0, anyQ = 0;
-        (stockBatches[item.sku]||[]).forEach(b=>{ if(b.qty>0){ anyV += b.qty*b.price; anyQ += b.qty; } });
-        if (anyQ>0 && anyV/anyQ>0) return anyV/anyQ;
+        // Batch yang harganya sendiri hasil tebakan tidak boleh dipakai jadi rujukan — kalau dipakai,
+        // tebakan buruk akan menular ke transaksi berikutnya. `abaikanBatch` dipakai oleh Diagnostic
+        // saat menghitung "harga seharusnya" untuk batch yang sedang dicurigai (kalau tidak, ia akan
+        // mengambil harga dari batch itu sendiri dan selalu menyimpulkan sudah benar).
+        let layak = b => b.qty>0 && b.price>0 && !b.costUnknown;
+        if (!opts.abaikanBatch) {
+            // 1) Rata-rata batch positif di gudang ini
+            let here = 0, hereQty = 0;
+            (stockBatches[item.sku]||[]).forEach(b=>{
+                if (!layak(b)) return;
+                if (gudang && gudang!=='all' && (b.gudang||DEFAULT_GUDANG)!==gudang) return;
+                here += b.qty*b.price; hereQty += b.qty;
+            });
+            if (hereQty>0 && here/hereQty>0) return here/hereQty;
+            // 2) Rata-rata batch positif di seluruh gudang
+            let anyV = 0, anyQ = 0;
+            (stockBatches[item.sku]||[]).forEach(b=>{ if(layak(b)){ anyV += b.qty*b.price; anyQ += b.qty; } });
+            if (anyQ>0 && anyV/anyQ>0) return anyV/anyQ;
+        }
         // 3) Harga pembelian terakhir yang benar-benar tercatat di log
         let last = null;
         transactionLog.forEach(l=>{
@@ -1897,7 +1930,7 @@
     }
     async function processTransaction(sku, type, qty, price, supplierId, divisionId, ref, isAdjustment, opts) {
         opts = opts || {};
-        const item = masterSKU.find(i=>i.sku===sku);
+        const item = itemBySku(sku);
         if (!item) return { success:false, msg:`SKU ${sku} tidak ditemukan` };
         const gudang = opts.gudang || DEFAULT_GUDANG;
         // Kunci SO per gudang: SO yang berjalan di gudang lain TIDAK memblokir transaksi gudang ini.
@@ -2001,7 +2034,7 @@
     async function createTransfer(sku, qty, fromGudang, toGudang, ref, opts) {
         opts = opts || {};
         if (fromGudang === toGudang) return { success:false, msg:"Gudang asal dan tujuan tidak boleh sama" };
-        const item = masterSKU.find(i=>i.sku===sku);
+        const item = itemBySku(sku);
         if (!item) return { success:false, msg:`SKU ${sku} tidak ditemukan` };
         const outRes = await processTransaction(sku, 'out', qty, 0, null, null, ref||`Transfer ke ${gudangName(toGudang)}`, false, { gudang: fromGudang, outType: opts.outType||'transfer', transferTo: toGudang, by: opts.by||deviceOperator, timestamp: opts.timestamp||undefined, batchId: opts.invoiceId||undefined });
         if (!outRes.success) return outRes;
@@ -2055,14 +2088,14 @@
                 // kerugian supaya muncul di Penyusutan — TIDAK boleh ikut replay stok (double count).
                 nonStockMovement: true,
                 beforeStock: getStock(tr.sku, tr.fromGudang).qty, afterStock: getStock(tr.sku, tr.fromGudang).qty,
-                canUndoUntil: 0, itemName: masterSKU.find(i=>i.sku===tr.sku)?.name||tr.sku };
+                canUndoUntil: 0, itemName: itemBySku(tr.sku)?.name||tr.sku };
             transactionLog.unshift(lossLog);
             tr.lossLogId = lossLog.id;
             tr.inLogId = inLog.id; // pastikan tetap menunjuk log penerimaan, bukan log susut
         }
         persist();
         let mismatchNote = (qty!==tr.qty) ? ` (dikirim ${tr.qty}, diterima ${qty} — ${note||'tanpa keterangan'})` : '';
-        return { success:true, msg:`✅ Diterima ${qty} ${masterSKU.find(i=>i.sku===tr.sku)?.baseUnit||''} di ${gudangName(tr.toGudang)}${mismatchNote}` };
+        return { success:true, msg:`✅ Diterima ${qty} ${itemBySku(tr.sku)?.baseUnit||''} di ${gudangName(tr.toGudang)}${mismatchNote}` };
     }
     // Batalkan transfer yang masih pending (mis. salah kirim): kembalikan stok ke gudang asal.
     async function cancelTransfer(transferId, reason) {
@@ -2156,7 +2189,7 @@
             let res=await createTransfer(r.sku, r.qty, divisiId, d.gudang,
                 'Retur divisi '+d.name+(alasan?' — '+alasan:''),
                 { by: opts.by||deviceOperator, outType:'retur', jenis:'retur_divisi', invoiceId: invoiceId, timestamp: opts.timestamp||undefined });
-            if(res.success) ok++; else gagal.push((masterSKU.find(function(i){return i.sku===r.sku;})||{}).name+': '+res.msg);
+            if(res.success) ok++; else gagal.push((itemBySku(r.sku)||{}).name+': '+res.msg);
         }
         persist();
         return { success: ok>0, ok:ok, gagal:gagal,
@@ -2260,7 +2293,7 @@
         if (editLocked) return { success:false, msg:"Fitur edit transaksi sedang DIKUNCI oleh Admin. Buka kuncinya dulu di Tutup Buku." };
         const tLinkE = transferLinkedTo(logId);
         if (tLinkE) return { success:false, msg: transferGuardMsg(tLinkE, logId) };
-        const item = masterSKU.find(i=>i.sku===log.sku);
+        const item = itemBySku(log.sku);
         if (!item) return { success:false, msg:"Master barang tidak ditemukan" };
         const before = { qty:log.qty, price:log.price, total:log.total, supplier:log.supplier, division:log.division, area:log.area, outType:log.outType, desc:log.desc, ref:log.ref };
 
@@ -2578,7 +2611,7 @@
             rows0.forEach(r=>{
                 let qty = (r.phys!==undefined && r.phys!==null) ? r.phys : r.sys;
                 if(!(qty>0)) return;
-                let it=masterSKU.find(x=>x.sku===r.sku)||{};
+                let it=itemBySku(r.sku)||{};
                 let st=getStock(r.sku,g);
                 let unit = st.qty>0 ? st.value/st.qty
                          : ((it.lastBuyPrice>0 && it.buyContent>0) ? it.lastBuyPrice/it.buyContent : 0);
@@ -2678,7 +2711,7 @@
     function stokAwalRows(ts){
         let snap=getInventorySnapshotAt(ts);
         return snap.rows.map(r=>{
-            let it=masterSKU.find(x=>x.sku===r.sku)||{};
+            let it=itemBySku(r.sku)||{};
             return { gudang:r.gudang, gudangNama:gudangName(r.gudang), sku:r.sku,
                      nama:it.name||r.sku, satuan:it.baseUnit||'', qty:r.qty,
                      cost: r.qty!==0 ? r.value/r.qty : 0, nilai:r.value };
@@ -2829,7 +2862,7 @@
         let rows = transactionLog.filter(l=>{
             if(l.type!=='out' || l.outType!=='pakai') return false;
             if(l.timestamp<start || l.timestamp>end) return false;
-            if(kat){ let it=masterSKU.find(i=>i.sku===l.sku); if(!it || it.category!==kat) return false; }
+            if(kat){ let it=itemBySku(l.sku); if(!it || it.category!==kat) return false; }
             return true;
         });
         return { rows, start, end, kat };
@@ -2949,7 +2982,7 @@
         box.style.display='block';
         box.querySelectorAll('.simpleSearchItem[data-sku]').forEach(el=>el.addEventListener('click',()=>{
             koreksiPickedSku=el.dataset.sku;
-            let it=masterSKU.find(i=>i.sku===koreksiPickedSku);
+            let it=itemBySku(koreksiPickedSku);
             let s=getStock(koreksiPickedSku,koreksiTargetGudang());
             document.getElementById('koreksiPickedName').innerText=it.name;
             document.getElementById('koreksiPickedQty').innerText=`${s.qty.toLocaleString('id')} ${it.baseUnit}`;
@@ -2967,7 +3000,7 @@
     document.getElementById('koreksiSaveBtn')?.addEventListener('click', async ()=>{
         if(!koreksiPickedSku){ notify('Error','Pilih barang dulu','error'); return; }
         let gudang=koreksiTargetGudang();
-        let it=masterSKU.find(i=>i.sku===koreksiPickedSku);
+        let it=itemBySku(koreksiPickedSku);
         let target=parseFloat(String(document.getElementById('koreksiQtyInput').value||'').replace(/\./g,'').replace(',','.'));
         if(isNaN(target)||target<0){ notify('Error','Jumlah tidak valid','error'); return; }
         let cur=getStock(koreksiPickedSku,gudang).qty;
@@ -3009,7 +3042,7 @@
         body.querySelectorAll('.gEditBtn').forEach(btn=>btn.addEventListener('click', ()=>{
             let id=parseInt(btn.dataset.id);
             let l=transactionLog.find(x=>x.id===id); if(!l) return;
-            let unit=masterSKU.find(i=>i.sku===l.sku)?.baseUnit||'';
+            let unit=itemBySku(l.sku)?.baseUnit||'';
             let q=prompt(`Perbaiki JUMLAH untuk ${l.itemName||l.sku} (${unit}).\nTercatat sekarang: ${l.qty.toLocaleString('id')}`, String(l.qty));
             if(q===null) return;
             let newQty=angkaID(q);
@@ -3107,7 +3140,7 @@
                         : ["Tanggal","Kode","Nama Barang","Jumlah","Satuan","Nominal (Rp)","Jenis","Divisi/Area","Keterangan"];
         let data=[[`Laporan ${isIn?'Barang Masuk':'Pengeluaran'} — ${gudangName(gudang)}`],[`Periode: ${dari||'-'} s/d ${sampai||'-'}`],[],head];
         rows.forEach(l=>{
-            let unit=masterSKU.find(i=>i.sku===l.sku)?.baseUnit||'';
+            let unit=itemBySku(l.sku)?.baseUnit||'';
             data.push(isIn
                 ? [skFmtDate(l.timestamp), l.sku, l.itemName||'', l.qty, unit, Math.round(l.total||0), smSourceLabel(l).replace(/^[^\w]+\s*/,''), l.ref||'']
                 : [skFmtDate(l.timestamp), l.sku, l.itemName||'', l.qty, unit, Math.round(l.total||0), keluarJenisLabel(l), l.division||l.area||'', l.desc||l.ref||'']);
@@ -3129,7 +3162,7 @@
         let head = isIn ? [["Tanggal","Kode","Nama Barang","Jumlah","Nominal","Asal"]]
                         : [["Tanggal","Kode","Nama Barang","Jumlah","Nominal","Jenis","Divisi/Area"]];
         let body = rows.map(l=>{
-            let unit=masterSKU.find(i=>i.sku===l.sku)?.baseUnit||'';
+            let unit=itemBySku(l.sku)?.baseUnit||'';
             return isIn
                 ? [skFmtDate(l.timestamp), l.sku, l.itemName||'', `${qtyLbl(l.sku, l.qty)}`, `Rp ${Math.round(l.total||0).toLocaleString('id')}`, smSourceLabel(l).replace(/^[^\w]+\s*/,'')]
                 : [skFmtDate(l.timestamp), l.sku, l.itemName||'', `${qtyLbl(l.sku, l.qty)}`, `Rp ${Math.round(l.total||0).toLocaleString('id')}`, keluarJenisLabel(l), l.division||l.area||'-'];
@@ -3487,7 +3520,7 @@
         }).join('') + (rows.length>300?`<tr><td colspan="10" style="text-align:center; color:var(--text3);">Menampilkan 300 dari ${rows.length} — persempit pencarian</td></tr>`:'');
         body.querySelectorAll('.editStock').forEach(function(btn){ btn.addEventListener('click',function(){ openEditItemModal(btn.dataset.sku); }); });
         body.querySelectorAll('.togStock').forEach(function(btn){ btn.addEventListener('click',function(){
-            let item=masterSKU.find(function(i){return i.sku===btn.dataset.sku;}); if(!item) return;
+            let item=itemBySku(btn.dataset.sku); if(!item) return;
             item.status = item.status==='Aktif' ? 'Tidak Aktif' : 'Aktif';
             persist(); renderStockTable();
         }); });
@@ -3495,7 +3528,7 @@
     }
     let editingItemSku=null;
     function openEditItemModal(sku){
-        let item=masterSKU.find(i=>i.sku===sku); if(!item) return;
+        let item=itemBySku(sku); if(!item) return;
         if(currentRole==='stok' && !isTransitItemAllowed(item, myGudang())){ notify('Ditolak','Barang ini bukan milik gudang Anda.','error'); return; }
         editingItemSku=sku;
         document.getElementById('editItemInfo').innerText = `Kode: ${item.sku}`;
@@ -3525,7 +3558,7 @@
     document.getElementById('editItemCancel')?.addEventListener('click', closeEditItemModal);
     document.getElementById('editItemModal')?.addEventListener('click',(e)=>{ if(e.target.id==='editItemModal') closeEditItemModal(); });
     document.getElementById('editItemSave')?.addEventListener('click', async ()=>{
-        let item=masterSKU.find(i=>i.sku===editingItemSku); if(!item) return;
+        let item=itemBySku(editingItemSku); if(!item) return;
         let name=document.getElementById('editItemName').value.trim();
         if(!name){ notify('Error','Nama barang tidak boleh kosong','error'); return; }
         let category=document.getElementById('editItemCategory').value.trim();
@@ -3547,9 +3580,9 @@
             let target=parseFloat(newStockStr);
             if(!isNaN(target) && target>=0 && target!==curStock){
                 let diff=target-curStock;
-                let basePrice=(item.lastBuyPrice||0)/(item.buyContent||1);
+                let basePrice=(item.lastBuyPrice||0)/(item.buyContent||1) || bestKnownUnitCost(item, editGudang);
                 let res = diff>0
-                    ? await processTransaction(item.sku,'in',diff,basePrice>0?basePrice:1,null,null,'Koreksi/Stok Awal (Edit)',true,{gudang:editGudang})
+                    ? await processTransaction(item.sku,'in',diff,basePrice>0?basePrice:0.01,null,null,'Koreksi/Stok Awal (Edit)',true,{gudang:editGudang, costUnknown:!(basePrice>0)})
                     : await processTransaction(item.sku,'out',Math.abs(diff),0,null,null,'Koreksi/Stok Awal (Edit)',true,{gudang:editGudang});
                 if(!res.success){ notify('Koreksi stok gagal',res.msg,'error'); return; }
             }
@@ -3560,7 +3593,7 @@
     });
     function deleteItemFlow(sku){
         if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin yang dapat menghapus barang.','error'); return; }
-        let item=masterSKU.find(i=>i.sku===sku); if(!item) return;
+        let item=itemBySku(sku); if(!item) return;
         let stockPerGudang = GUDANG_LIST.map(g=>({g, qty:getStock(sku,g.id).qty})).filter(x=>Math.abs(x.qty)>0.0001);
         if(stockPerGudang.length){
             let detail=stockPerGudang.map(x=>`${gudangName(x.g.id)}: ${qtyLbl(item, x.qty)}`).join(', ');
@@ -3745,7 +3778,7 @@
         return Object.values(g).sort((a,b)=>b.sentAt-a.sentAt);
     }
     function showTransferInvoiceDetail(group, backTitle, backGroups){
-        let unit=(sku)=>masterSKU.find(i=>i.sku===sku)?.baseUnit||'';
+        let unit=(sku)=>itemBySku(sku)?.baseUnit||'';
         let rows = group.items.map(t=>`<tr><td style="padding:4px 6px; border-bottom:1px solid #33415533;">${t.itemName}</td><td style="padding:4px 6px; border-bottom:1px solid #33415533; text-align:right; white-space:nowrap;">${qtyLbl(t.sku, t.qty)}</td></tr>`).join('');
         Swal.fire({
             title: group.ref ? `Surat Jalan ${group.ref}` : 'Rincian Pengiriman',
@@ -3828,7 +3861,7 @@
         pending.forEach(t=>{ let k=transferGroupKey(t); (groups[k]=groups[k]||[]).push(t); });
         area.innerHTML = Object.entries(groups).map(([invId, items])=>{
             let first = items[0];
-            let unit=(sku)=>masterSKU.find(i=>i.sku===sku)?.baseUnit||'';
+            let unit=(sku)=>itemBySku(sku)?.baseUnit||'';
             let itemsHtml = items.map(t=>{
                 let adj = transferAdjustments[t.id];
                 let qtyLabel = adj ? `Diterima <b>${qtyLbl(t.sku, adj.qty)}</b> <span style="color:var(--text3);">(dikirim ${t.qty.toLocaleString('id')})</span>${adj.note?` — ${adj.note}`:''}` : `${qtyLbl(t.sku, t.qty)}`;
@@ -3871,7 +3904,7 @@
         area.querySelectorAll('.adjustTransferItemBtn').forEach(btn=>btn.addEventListener('click', ()=>{
             let id=parseInt(btn.dataset.id);
             let t=transfers.find(x=>x.id===id); if(!t) return;
-            let unit=masterSKU.find(i=>i.sku===t.sku)?.baseUnit||'';
+            let unit=itemBySku(t.sku)?.baseUnit||'';
             let val=prompt(`Jumlah yang BENAR-BENAR diterima (${unit}) untuk ${t.itemName} — dikirim ${t.qty.toLocaleString('id')} ${unit}:`, String(transferAdjustments[id]?.qty ?? t.qty));
             if(val===null) return;
             let receivedQty = angkaID(val);
@@ -4033,7 +4066,7 @@
             inp.addEventListener('click', function(e){ e.stopPropagation(); });
             inp.addEventListener('change', function(e){
                 e.stopPropagation();
-                let item=masterSKU.find(m=>m.sku===inp.dataset.sku); if(!item) return;
+                let item=itemBySku(inp.dataset.sku); if(!item) return;
                 let v=parseFloat(inp.value);
                 item.minStock = (isFinite(v) && v>=0) ? v : 0;
                 persist();
@@ -4071,7 +4104,7 @@
         document.getElementById('srExpiring').innerText = getExpiring(30, currentReportGudang).length;
     }
     function openItemHistory(sku) {
-        let item=masterSKU.find(i=>i.sku===sku); if(!item) return;
+        let item=itemBySku(sku); if(!item) return;
         let modal=document.getElementById('itemHistoryModal'); if(!modal) return;
         let s=getStock(sku, currentReportGudang);
         document.getElementById('ihTitle').innerHTML=`📦 ${item.name} <span class="mono" style="font-size:0.75rem; color:var(--text3);">(${item.sku})</span> — ${gudangName(currentReportGudang)}`;
@@ -4175,7 +4208,7 @@
 
         allKeys.forEach(key=>{
             let [sku, gudang] = key.split('|');
-            let item = masterSKU.find(i=>i.sku===sku);
+            let item = itemBySku(sku);
             let name = item ? item.name : `(SKU dihapus: ${sku})`;
             let bQty = (batchMap[key]||{qty:0}).qty, lQty = (logMap[key]||{qty:0}).qty;
             let bVal = (batchMap[key]||{value:0}).value, lVal = (logMap[key]||{value:0}).value;
@@ -4205,6 +4238,37 @@
             });
         });
 
+        // ===== BATCH BERHARGA TEBAKAN (SISA KERUSAKAN LAMA) =====
+        // Versi lama menambal harga yang tidak diketahui dengan Rp1 (pengeluaran melebihi stok,
+        // koreksi stok, adjustment opname) atau Rp0,01 (transfer & retur berharga 0). Batch yang
+        // terlanjur terbentuk dengan harga itu MASIH ada di data dan terus menekan nilai persediaan
+        // ke bawah. Bagian ini menemukannya dan menghitung berapa seharusnya, supaya bisa dibetulkan
+        // lewat Laporan > Koreksi & Reset Stok tanpa menebak-nebak lagi.
+        let suspectCost = [];
+        masterSKU.forEach(i=>{
+            (stockBatches[i.sku]||[]).forEach(b=>{
+                if(b.qty===0) return;
+                let p = b.price||0;
+                let mencurigakan = (p===1 || p===0.01 || p===0 || b.costUnknown);
+                if(!mencurigakan) return;
+                let g = b.gudang||DEFAULT_GUDANG;
+                let seharusnya = bestKnownUnitCost(i, g, {abaikanBatch:true});
+                suspectCost.push({ sku:i.sku, name:i.name, gudang:g, qty:b.qty, price:p,
+                                   nilaiSekarang: b.qty*p,
+                                   saranHarga: seharusnya,
+                                   selisih: seharusnya>0 ? b.qty*(seharusnya-p) : 0 });
+            });
+        });
+        suspectCost.sort((a,b)=>Math.abs(b.selisih)-Math.abs(a.selisih));
+        // Ditampilkan lewat tabel Orphan yang sudah ada supaya langsung terlihat & ikut ter-export CSV.
+        suspectCost.forEach(x=>{
+            orphans.push({ jenis:'Harga Tebakan', ref:`${x.sku} @ Rp${x.price}`, gudang:x.gudang,
+                ket:`${x.name} — ${x.qty.toLocaleString('id')} satuan tercatat Rp${x.price}/satuan. `
+                   + (x.saranHarga>0
+                       ? `Harga wajar berdasarkan data yang ada: Rp${Math.round(x.saranHarga).toLocaleString('id')}/satuan. Nilai stok kurang tercatat sekitar Rp${Math.round(x.selisih).toLocaleString('id')}.`
+                       : `Belum ada rujukan harga sama sekali — isi Harga Beli Terakhir di Master Data dulu.`) });
+        });
+
         // Pending transfer (in-transit)
         let pending = transfers.filter(t=>t.status==='pending').map(t=>({
             ...t, waitMs: Date.now()-t.sentAt
@@ -4214,7 +4278,8 @@
         let totalLogVal = Object.values(logMap).reduce((s,v)=>s+v.value,0);
         let transit = getInTransit();
 
-        invDiagLastResult = { mismatchQty, mismatchValue, negBatches, orphans, pending, totalBatchVal, totalLogVal, transit };
+        invDiagLastResult = { mismatchQty, mismatchValue, negBatches, orphans, pending, totalBatchVal, totalLogVal, transit, suspectCost,
+                              suspectTotal: suspectCost.reduce((s,x)=>s+x.selisih,0) };
         return invDiagLastResult;
     }
     function renderInvDiagResult(){
@@ -4225,6 +4290,7 @@
             <div class="kpi-card"><div class="kpi-label">💰 Selisih Nilai (SKU×Gudang)</div><div class="kpi-value">${r.mismatchValue.length}</div><div class="kpi-sub">Rp ${Math.round(r.totalBatchVal-r.totalLogVal).toLocaleString('id')} total</div></div>
             <div class="kpi-card"><div class="kpi-label">🔻 Batch Minus</div><div class="kpi-value">${r.negBatches.length}</div><div class="kpi-sub">Rp ${Math.round(r.negBatches.reduce((s,x)=>s+x.value,0)).toLocaleString('id')}</div></div>
             <div class="kpi-card"><div class="kpi-label">🚚 Pending Transfer</div><div class="kpi-value">${r.pending.length}</div><div class="kpi-sub">Rp ${Math.round(r.transit.value).toLocaleString('id')} in-transit</div></div>
+            <div class="kpi-card"><div class="kpi-label">🏷️ Batch Harga Tebakan</div><div class="kpi-value">${(r.suspectCost||[]).length}</div><div class="kpi-sub">Nilai stok kurang tercatat ± Rp ${Math.round(r.suspectTotal||0).toLocaleString('id')}</div></div>
         `;
         let mb = document.getElementById('invDiagMismatchBody');
         if (mb) mb.innerHTML = r.mismatchQty.length ? r.mismatchQty.map(x=>`<tr><td class="mono">${x.sku}</td><td>${x.name}</td><td>${gudangName(x.gudang)}</td><td style="text-align:right;">${x.bQty.toLocaleString('id')}</td><td style="text-align:right;">${x.lQty.toLocaleString('id')}</td><td style="text-align:right; color:#f87171; font-weight:700;">${x.diff.toLocaleString('id')}</td></tr>`).join('') : `<tr><td colspan="6" style="text-align:center; color:var(--text3);">✅ Tidak ada selisih qty batch vs log.</td></tr>`;
@@ -4380,7 +4446,7 @@
         let rows=[];
         for(let sku in soSession.counts){
             let c=soSession.counts[sku][soRole]; if(!c) continue;
-            let it=masterSKU.find(i=>i.sku===sku);
+            let it=itemBySku(sku);
             if(q && !((it?it.name:sku).toLowerCase().includes(q) || sku.toLowerCase().includes(q))) continue;
             let edited=c.history&&c.history.length;
             let canEdit = !soSession.counts[sku].final; // final terkunci total, hanya Admin yang bisa buka lagi
@@ -4396,7 +4462,7 @@
         }));
     }
     window.soOpenCount=function(sku, forceEdit){
-        let it=masterSKU.find(i=>i.sku===sku); if(!it) return;
+        let it=itemBySku(sku); if(!it) return;
         let area=document.getElementById('soCountArea');
         let c=soSession.counts[sku];
         let isRecount=c&&c.recount;
@@ -4437,7 +4503,7 @@
         upd();
     };
     window.soSaveCount=function(sku, isEdit){
-        let it=masterSKU.find(i=>i.sku===sku); if(!it) return;
+        let it=itemBySku(sku); if(!it) return;
         let mtb=midToBase(it), bc=it.buyContent||1;
         let v1=parseFloat(document.getElementById('soIn1').value)||0;
         let v2=parseFloat(document.getElementById('soIn2').value)||0;
@@ -4562,7 +4628,7 @@
         persist(); renderSOAdmin();
     };
     window.soSetFinal=function(sku){
-        let it=masterSKU.find(i=>i.sku===sku);
+        let it=itemBySku(sku);
         let v=prompt(`Angka FINAL hasil pengecekan fisik bersama untuk ${it.name} (dalam ${it.baseUnit}):`);
         if(v===null) return;
         let n=angkaID(v);
@@ -4723,7 +4789,7 @@
             let batchLogIds = transactionLog.filter(x=>x.batchId===l.batchId && x.type==='out').map(x=>x.id);
             if(batchLogIds.length>1){ printOutSlipBatch(batchLogIds); return; }
         }
-        let item=masterSKU.find(i=>i.sku===l.sku);
+        let item=itemBySku(l.sku);
         let bc=item?(item.buyContent||1):1;
         let kemasanQty = (item && bc>1) ? (l.qty/bc) : null;
         let kemasanUom = item ? item.buyUnit : '';
@@ -4841,7 +4907,7 @@
         let fmt=(n)=> n.toLocaleString('id', { minimumFractionDigits:1, maximumFractionDigits:2 });
         let grandTotal = 0;
         let rowsHtml = logs.map(l=>{
-            let item=masterSKU.find(i=>i.sku===l.sku);
+            let item=itemBySku(l.sku);
             let bc=item?(item.buyContent||1):1;
             let kemasanQty = (item && bc>1) ? (l.qty/bc) : null;
             let hargaSatuan = l.sellPrice!==undefined ? l.sellPrice : (l.price||0);
@@ -5002,7 +5068,7 @@
         let baseRows=h.allCounts&&h.allCounts.length?h.allCounts:(h.differences||[]);
         let isToday = endTs >= Date.now();
         let rows=baseRows.map(r=>{
-            let it=masterSKU.find(i=>i.sku===r.sku);
+            let it=itemBySku(r.sku);
             let counted = (r.phys!==null && r.phys!==undefined);
             let base = counted ? r.phys : (r.sys||0);
             let m=mut[r.sku]||{in:0,out:0,n:0};
@@ -5020,7 +5086,7 @@
         let luar=[];
         Object.keys(mut).forEach(sku=>{
             if(inSesi.has(sku)) return;
-            let it=masterSKU.find(i=>i.sku===sku); if(!it) return;
+            let it=itemBySku(sku); if(!it) return;
             let m=mut[sku];
             let st=getStock(sku,gudang);
             let unitCost = st.qty>0 ? st.value/st.qty : ((it.lastBuyPrice||0)/(it.buyContent||1));
@@ -5356,7 +5422,7 @@
         if(search) rows = rows.filter(l=> l.sku.toLowerCase().includes(search) || (l.itemName||'').toLowerCase().includes(search));
         let outdated = [];
         rows.forEach(l=>{
-            let item=masterSKU.find(i=>i.sku===l.sku);
+            let item=itemBySku(l.sku);
             if(!item) return; // barang sudah dihapus dari master, tidak bisa dibandingkan lagi
             let costPerUnit = l.qty>0 ? l.total/l.qty : 0;
             let currentSellPerUnit = Math.round(computeSellPrice(item, costPerUnit)*100)/100;
@@ -5387,7 +5453,7 @@
         body.querySelectorAll('.hjUpdateMarginBtn').forEach(btn=>btn.addEventListener('click', ()=>{
             let id=parseInt(btn.dataset.id);
             let l=transactionLog.find(x=>x.id===id); if(!l) return;
-            let item=masterSKU.find(i=>i.sku===l.sku); if(!item) return;
+            let item=itemBySku(l.sku); if(!item) return;
             let costPerUnit = l.qty>0 ? l.total/l.qty : 0;
             let newSellPerUnit = computeSellPrice(item, costPerUnit);
             if(!confirm(`Update Harga Jual di DO ini dari Rp ${Math.round(l.sellPrice).toLocaleString('id')} menjadi Rp ${Math.round(newSellPerUnit).toLocaleString('id')} per ${item.baseUnit}?\n\nHPP/nilai stok TIDAK berubah — hanya info margin/Harga Jual di DO yang diperbarui.`)) return;
@@ -5402,7 +5468,7 @@
         if(!log) return { success:false, msg:"Transaksi tidak ditemukan" };
         if(log.timestamp < lockBefore) return { success:false, msg:"Transaksi berada di periode yang sudah TUTUP BUKU dan terkunci permanen." };
         if(editLocked) return { success:false, msg:"Mode Koreksi Data sedang terkunci. Buka dulu di menu Tutup Buku." };
-        const item = masterSKU.find(i=>i.sku===log.sku);
+        const item = itemBySku(log.sku);
         if(!item) return { success:false, msg:"Master barang tidak ditemukan" };
         const costPerUnit = log.qty>0 ? log.total/log.qty : 0;
         const newSellPerUnit = computeSellPrice(item, costPerUnit);
@@ -5466,7 +5532,7 @@
         body.innerHTML = items.map(i=>`<tr><td><input type="checkbox" class="hjChk" data-sku="${i.sku}"></td><td class="mono">${i.sku}</td><td>${i.name}</td><td>${i.category}</td><td style="font-size:0.78rem;">${sellRuleLabel(i)}</td><td><button class="btn btn-sm btn-secondary hjItemEdit" data-sku="${i.sku}">✏️ Atur</button></td></tr>`).join('')
             || `<tr><td colspan="6" style="text-align:center; color:var(--text3);">Tidak ada barang cocok.</td></tr>`;
         body.querySelectorAll('.hjItemEdit').forEach(btn=>btn.addEventListener('click',()=>{
-            let item=masterSKU.find(i=>i.sku===btn.dataset.sku); if(!item) return;
+            let item=itemBySku(btn.dataset.sku); if(!item) return;
             let curCode = item.sellRuleType==='markup'?'1':(item.sellRuleType==='markup_nominal'?'2':(item.sellRuleType==='fixed'?'3':'0'));
             let type=prompt(`Aturan untuk ${item.name}:\n1 = Markup PERSEN (%) dari HPP\n2 = Markup NOMINAL (Rp) ditambahkan ke HPP\n3 = Harga Tetap (Rp)\n0 = Hapus aturan (ikut kategori)`, curCode);
             if(type===null) return;
@@ -5514,7 +5580,7 @@
             : `harga tetap Rp${val.toLocaleString('id')}`));
         if(!confirm(`Terapkan ${bulkDesc} ke ${selected.length} barang terpilih?`)) return;
         selected.forEach(sku=>{
-            let item=masterSKU.find(i=>i.sku===sku); if(!item) return;
+            let item=itemBySku(sku); if(!item) return;
             if(type==='none'){ item.sellRuleType='none'; item.sellRuleValue=0; }
             else { item.sellRuleType=type; item.sellRuleValue=val; }
         });
@@ -5544,7 +5610,7 @@
     function renderBomRows(){
         let area=document.getElementById('bomRowsArea'); if(!area) return;
         area.innerHTML = bomRows.map(r=>{
-            let item = masterSKU.find(i=>i.sku===r.sku);
+            let item = itemBySku(r.sku);
             let mtb = item ? midToBase(item) : 0, bc = item ? (item.buyContent||1) : 1;
             let cost = item ? (r.qtyBuy*bc + r.qtyMid*mtb + (angkaID(r.qtyBase))) * estimateItemCost(item) : 0;
             return `<div class="card" style="margin-bottom:10px; padding:14px;">
@@ -5579,7 +5645,7 @@
             else if(inp.classList.contains('bomQtyMid')) row.qtyMid=parseFloat(inp.value)||0;
             else row.qtyBase=parseFloat(inp.value)||0;
             updateBomTotals(); // hanya perbarui angka, tidak perlu re-render seluruh baris (jaga fokus input)
-            let item=masterSKU.find(i=>i.sku===row.sku);
+            let item=itemBySku(row.sku);
             if(item){
                 let mtb=midToBase(item), bc=item.buyContent||1;
                 let cost=(row.qtyBuy*bc+row.qtyMid*mtb+row.qtyBase)*estimateItemCost(item);
@@ -5592,7 +5658,7 @@
     function bomRowCostBase(row,item){ let mtb=midToBase(item), bc=item.buyContent||1; return (parseFloat(row.qtyBuy)||0)*bc + (parseFloat(row.qtyMid)||0)*mtb + (parseFloat(row.qtyBase)||0); }
     function bomTotalCostEstimate(){
         let total=0;
-        bomRows.forEach(r=>{ let item=masterSKU.find(i=>i.sku===r.sku); if(!item) return; total += bomRowCostBase(r,item) * estimateItemCost(item); });
+        bomRows.forEach(r=>{ let item=itemBySku(r.sku); if(!item) return; total += bomRowCostBase(r,item) * estimateItemCost(item); });
         return total;
     }
     function updateBomTotals(){
@@ -5614,7 +5680,7 @@
     function renderBomOutRows(){
         let area=document.getElementById('bomOutRowsArea'); if(!area) return;
         area.innerHTML = bomOutRows.map(r=>{
-            let item = masterSKU.find(i=>i.sku===r.sku);
+            let item = itemBySku(r.sku);
             let mtb = item ? midToBase(item) : 0, bc = item ? (item.buyContent||1) : 1;
             let qty = bomOutRowQtyBase(r,item);
             return `<div class="card" style="margin-bottom:10px; padding:14px;">
@@ -5650,7 +5716,7 @@
             else if(inp.classList.contains('bomOutQtyMid')) row.qtyMid=parseFloat(inp.value)||0;
             else row.qtyBase=parseFloat(inp.value)||0;
             updateBomOutputCalc();
-            let item=masterSKU.find(i=>i.sku===row.sku);
+            let item=itemBySku(row.sku);
             let span=inp.closest('.card')?.querySelector('span');
             if(span && item){ let qty=bomOutRowQtyBase(row,item); span.innerHTML = `Stok saat ini (${gudangName(curBomGudang())}): ${getStock(item.sku,curBomGudang()).qty.toLocaleString('id')} ${item.baseUnit}${qty>0?` | Hasil: ${qty.toLocaleString('id')} ${item.baseUnit}`:''}`; }
         }));
@@ -5663,10 +5729,10 @@
     document.getElementById('bomOutAddRow')?.addEventListener('click', bomOutAddRowFn);
     function updateBomOutputCalc(){
         let calc=document.getElementById('bomOutCalc'); if(!calc) return;
-        let validOut = bomOutRows.filter(r=>r.sku && masterSKU.find(i=>i.sku===r.sku) && bomOutRowQtyBase(r,masterSKU.find(i=>i.sku===r.sku))>0);
+        let validOut = bomOutRows.filter(r=>r.sku && itemBySku(r.sku) && bomOutRowQtyBase(r,itemBySku(r.sku))>0);
         if(!validOut.length){ calc.innerHTML = `Tambahkan barang hasil produksi & isi jumlahnya untuk melihat estimasi HPP`; return; }
         let total=bomTotalCostEstimate();
-        let weights = validOut.map(r=>{ let item=masterSKU.find(i=>i.sku===r.sku); let qty=bomOutRowQtyBase(r,item); let w=qty*((item.lastBuyPrice||0)>0?item.lastBuyPrice:1); return {r,item,qty,w}; });
+        let weights = validOut.map(r=>{ let item=itemBySku(r.sku); let qty=bomOutRowQtyBase(r,item); let w=qty*((item.lastBuyPrice||0)>0?item.lastBuyPrice:1); return {r,item,qty,w}; });
         let totalW = weights.reduce((s,x)=>s+x.w,0) || 1;
         calc.innerHTML = weights.map(x=>{
             let cost = total*(x.w/totalW);
@@ -5677,32 +5743,32 @@
     document.getElementById('bomGudangSel')?.addEventListener('change', ()=>{ renderBomRows(); renderBomOutRows(); updateBomOutputCalc(); });
 
     document.getElementById('bomProcessBtn')?.addEventListener('click', async ()=>{
-        let validRows = bomRows.filter(r=>r.sku && masterSKU.find(i=>i.sku===r.sku));
+        let validRows = bomRows.filter(r=>r.sku && itemBySku(r.sku));
         if(!validRows.length){ notify('Error','Tambahkan minimal 1 bahan baku','error'); return; }
-        let validOut = bomOutRows.filter(r=>r.sku && masterSKU.find(i=>i.sku===r.sku));
+        let validOut = bomOutRows.filter(r=>r.sku && itemBySku(r.sku));
         if(!validOut.length){ notify('Error','Tambahkan minimal 1 barang hasil produksi','error'); return; }
         for(let r of validOut){
-            let item=masterSKU.find(i=>i.sku===r.sku);
+            let item=itemBySku(r.sku);
             if(!(bomOutRowQtyBase(r,item)>0)){ notify('Error',`Isi jumlah hasil produksi untuk ${item.name}`,'error'); return; }
         }
         let gudang = document.getElementById('bomGudangSel').value || DEFAULT_GUDANG;
         // Kecukupan stok TIDAK lagi jadi syarat — produksi tetap boleh jalan walau bahan bakunya
         // 0/kurang di sistem. Cukup pastikan jumlah pemakaiannya sudah diisi.
         for(let r of validRows){
-            let item=masterSKU.find(i=>i.sku===r.sku);
+            let item=itemBySku(r.sku);
             let needBase = bomRowCostBase(r,item);
             if(!(needBase>0)){ notify('Error',`Isi jumlah pemakaian untuk ${item.name}`,'error'); return; }
         }
         let divisiId = document.getElementById('bomDivisiSel').value;
         let divisiName = divisions.find(d=>d.id==divisiId)?.name || 'Racik';
-        let outNames = validOut.map(r=>masterSKU.find(i=>i.sku===r.sku).name).join(', ');
+        let outNames = validOut.map(r=>itemBySku(r.sku).name).join(', ');
         let refText = document.getElementById('bomOutRef').value.trim() || `Racik ${outNames}`;
         if(!confirm(`Proses produksi ${validOut.length} jenis hasil (${outNames}) dari ${validRows.length} bahan baku di ${gudangName(gudang)}?`)) return;
 
         let processed=[]; // log id yang berhasil, untuk rollback jika ada kegagalan
         let totalCost=0;
         for(let r of validRows){
-            let item=masterSKU.find(i=>i.sku===r.sku);
+            let item=itemBySku(r.sku);
             let needBase = bomRowCostBase(r,item);
             let res = await processTransaction(item.sku,'out',needBase,0,null,divisiId||null, `Racik: ${outNames} (${refText})`, false, { outType:'produksi', by:deviceOperator, gudang });
             if(!res.success){
@@ -5716,7 +5782,7 @@
             totalCost += transactionLog[0].total;
         }
         // Bagi total biaya bahan baku secara proporsional ke tiap hasil produksi (berdasarkan nilai x jumlah)
-        let weights = validOut.map(r=>{ let item=masterSKU.find(i=>i.sku===r.sku); let qty=bomOutRowQtyBase(r,item); let w=qty*((item.lastBuyPrice||0)>0?item.lastBuyPrice:1); return {r,item,qty,w}; });
+        let weights = validOut.map(r=>{ let item=itemBySku(r.sku); let qty=bomOutRowQtyBase(r,item); let w=qty*((item.lastBuyPrice||0)>0?item.lastBuyPrice:1); return {r,item,qty,w}; });
         let totalW = weights.reduce((s,x)=>s+x.w,0) || 1;
         let outSummaries=[];
         for(let x of weights){
@@ -5829,7 +5895,7 @@
         document.getElementById('multiColPrice').innerHTML=isIn?'Harga':(isPenjualanSelected?'Harga Jual (margin)':'Est. HPP');
         document.getElementById('multiInvoiceTotalGroup').style.display=isIn?'grid':'none';
         area.innerHTML = multiRows.map(r=>{
-            let item=masterSKU.find(i=>i.sku===r.sku);
+            let item=itemBySku(r.sku);
             let mtb=item?midToBase(item):0, bc=item?(item.buyContent||1):1;
             let qtyBase = item ? (angkaID(r.qtyBuy))*bc + (angkaID(r.qtyMid))*mtb + (angkaID(r.qtyBase)) : 0;
             let priceInput=angkaID(r.price);
@@ -5881,7 +5947,7 @@
             }).join('');
             listEl.querySelectorAll('.multiPick').forEach(b=>b.addEventListener('click',()=>{
                 row.sku=b.dataset.sku; row.qtyBuy=''; row.qtyMid=''; row.qtyBase='';
-                let it=masterSKU.find(i=>i.sku===row.sku);
+                let it=itemBySku(row.sku);
                 if(it && document.getElementById('multiType').value==='in' && it.lastBuyPrice>0) row.price = it.lastBuyPrice;
                 renderMultiRows(); updateMultiTotals();
             }));
@@ -5904,7 +5970,7 @@
     // Perbarui subtotal SATU baris saja (tanpa render ulang seluruh tabel), supaya fokus/kursor input tidak hilang saat mengetik
     function renderMultiRowSubtotal(rid){
         let row=multiRows.find(r=>r.id===rid); if(!row) return;
-        let item=masterSKU.find(i=>i.sku===row.sku); if(!item) return;
+        let item=itemBySku(row.sku); if(!item) return;
         let typeVal=document.getElementById('multiType').value;
         let isIn=typeVal==='in';
         let qtyBase=multiRowQtyBase(row,item);
@@ -5934,7 +6000,7 @@
         let isPenjualanSelected = typeVal==='out' && divObj && isPenjualanDivisi(divObj.name);
         let n=0, subtotal=0;
         multiRows.forEach(r=>{
-            let item=masterSKU.find(i=>i.sku===r.sku); if(!item) return;
+            let item=itemBySku(r.sku); if(!item) return;
             let qty=multiRowQtyBase(r,item); if(!(qty>0)) return;
             n++;
             if(isIn){
@@ -6010,7 +6076,7 @@
     document.getElementById('multiProcessBtn')?.addEventListener('click', async ()=>{
         let typeVal=document.getElementById('multiType').value;
         if(typeVal==='transfer'){
-            let validRows = multiRows.filter(r=>r.sku && masterSKU.find(i=>i.sku===r.sku));
+            let validRows = multiRows.filter(r=>r.sku && itemBySku(r.sku));
             if(!validRows.length){ notify('Error','Tambahkan minimal 1 barang dengan jumlah terisi','error'); return; }
             let fromGudang = document.getElementById('multiGudangAsal').value || DEFAULT_GUDANG;
             let toGudang = document.getElementById('multiGudangTujuan').value || DEFAULT_GUDANG;
@@ -6018,7 +6084,7 @@
             if(fromGudang===toGudang){ notify('Error','Gudang asal dan tujuan tidak boleh sama','error'); return; }
             let rowsToProcess=[];
             for(let r of validRows){
-                let item=masterSKU.find(i=>i.sku===r.sku);
+                let item=itemBySku(r.sku);
                 let qty=multiRowQtyBase(r,item);
                 if(qty>0) rowsToProcess.push({item,qty});
             }
@@ -6037,13 +6103,13 @@
             resultArea.innerHTML=html;
             notify(failures.length?'Sebagian Terkirim':'Semua Terkirim', `${successes.length} baris menunggu konfirmasi ${gudangName(toGudang)}${failures.length?`, ${failures.length} gagal`:''}.`, failures.length?'warning':'success');
             let failedSkus=new Set(failures.map(f=>f.item.sku));
-            multiRows = multiRows.filter(r=>{ let it=masterSKU.find(i=>i.sku===r.sku); return it && failedSkus.has(it.sku); });
+            multiRows = multiRows.filter(r=>{ let it=itemBySku(r.sku); return it && failedSkus.has(it.sku); });
             if(!multiRows.length) multiAddRowFn(); else renderMultiRows();
             refreshUI();
             return;
         }
         let isIn=typeVal==='in';
-        let validRows = multiRows.filter(r=>r.sku && masterSKU.find(i=>i.sku===r.sku));
+        let validRows = multiRows.filter(r=>r.sku && itemBySku(r.sku));
         if(!validRows.length){ notify('Error','Tambahkan minimal 1 barang dengan jumlah terisi','error'); return; }
         let supplierId = document.getElementById('multiSupplier').value;
         let gudang = document.getElementById('multiGudang').value || DEFAULT_GUDANG;
@@ -6057,7 +6123,7 @@
         if(!isIn && outType==='pakai' && areaGroupVisible && !areaBakery){ notify('Area Bakery Wajib','Isi Area Bakery Tujuan sebelum memproses transaksi keluar ini.','warning'); return; }
         let rowsToProcess=[];
         for(let r of validRows){
-            let item=masterSKU.find(i=>i.sku===r.sku);
+            let item=itemBySku(r.sku);
             let qty=multiRowQtyBase(r,item);
             if(!(qty>0)) continue;
             if(isIn && !(parseFloat(r.price)>0)){ notify('Error',`Isi harga untuk ${item.name}`,'error'); return; }
@@ -6118,7 +6184,7 @@
         notify(failures.length?'Sebagian Berhasil':'Semua Berhasil', `${successes.length} baris terproses${failures.length?`, ${failures.length} gagal — lihat rincian di bawah tombol Proses`:''}.`, failures.length?'warning':'success');
         // reset baris yang berhasil saja; baris gagal (jika ada) dibiarkan agar mudah diperbaiki
         let failedSkus=new Set(failures.map(f=>f.item.sku));
-        multiRows = multiRows.filter(r=>{ let it=masterSKU.find(i=>i.sku===r.sku); return it && failedSkus.has(it.sku); });
+        multiRows = multiRows.filter(r=>{ let it=itemBySku(r.sku); return it && failedSkus.has(it.sku); });
         if(!failedSkus.size){ document.getElementById('multiInvoiceTotal').value=''; document.getElementById('multiInvoiceCheck').style.display='none'; document.getElementById('multiDiskonPct').value=''; document.getElementById('multiPpnPct').value=''; document.getElementById('multiOngkir').value=''; let tglInvoiceElR=document.getElementById('multiTglInvoice'); if(tglInvoiceElR) tglInvoiceElR.value=new Date().toISOString().slice(0,10); }
         if(!multiRows.length) multiAddRowFn(); else renderMultiRows();
         refreshUI();
@@ -6219,7 +6285,7 @@
         });
     }
     function simpleSelectItem(sku){
-        let item=masterSKU.find(i=>i.sku===sku); if(!item) return;
+        let item=itemBySku(sku); if(!item) return;
         simpleSelectedSku=sku;
         document.getElementById('simpleSearchInput').value='';
         document.getElementById('simpleSearchResults').style.display='none';
@@ -6253,7 +6319,7 @@
         label.style.display = simpleRows.length ? 'block' : 'none';
         document.getElementById('simpleRowsCount').innerText = simpleRows.length;
         list.innerHTML = simpleRows.map(r=>{
-            let item=masterSKU.find(i=>i.sku===r.sku);
+            let item=itemBySku(r.sku);
             let hargaTxt = simpleMode==='in' ? ` · @Rp${Math.round(r.harga).toLocaleString('id')} = Rp${Math.round(r.qty*r.harga).toLocaleString('id')}` : '';
             return `<div class="simpleRowItem"><div><div class="sriName">${item?item.name:r.sku}</div><div class="sriMeta">${r.qty.toLocaleString('id')} ${item?item.baseUnit:''}${hargaTxt}</div></div><button type="button" class="simpleRowRemove" data-id="${r.id}" title="Hapus dari daftar">✖</button></div>`;
         }).join('');
@@ -6266,7 +6332,7 @@
     }
     function simpleAddCurrentToRows(){
         if(!simpleSelectedSku){ notify('Error','Pilih barang terlebih dahulu','error'); return; }
-        let item=masterSKU.find(i=>i.sku===simpleSelectedSku); if(!item) return;
+        let item=itemBySku(simpleSelectedSku); if(!item) return;
         let qty=angkaID(document.getElementById('simpleJumlah').value);
         if(!(qty>0)){ notify('Error','Jumlah harus lebih dari 0','error'); return; }
         let harga=0;
@@ -6387,7 +6453,7 @@
         let gudang=myGudang();
         let simpleTs=simpleGetCustomTimestamp();
         let batchId = 'SG'+Date.now()+Math.random().toString(36).slice(2,6);
-        let rowsSnapshot = simpleRows.map(r=>({...r, item:masterSKU.find(i=>i.sku===r.sku)}));
+        let rowsSnapshot = simpleRows.map(r=>({...r, item:itemBySku(r.sku)}));
         let namesTxt = rowsSnapshot.map(r=>r.item?r.item.name:r.sku).join(', ');
         if(simpleMode==='in'){
             if(!confirm(`Catat stok masuk ${rowsSnapshot.length} barang (${namesTxt}) ke ${gudangName(gudang)}?`)) return;
@@ -6466,7 +6532,7 @@
 
     document.getElementById('addItemBtn')?.addEventListener('click',async()=>{
         let sku=prompt('Kode bahan (mis. RM-XX-26-001):'); if(!sku) return; sku=sku.trim();
-        if(masterSKU.find(i=>i.sku===sku)){ notify('Error','Kode sudah ada','error'); return; }
+        if(itemBySku(sku)){ notify('Error','Kode sudah ada','error'); return; }
         let name=prompt('Nama bahan:'); if(!name) return;
         let category=prompt('Kategori:','Umum')||'Umum';
         let baseUnit=prompt('Satuan dasar HPP (Gr/Pcs/Ml):','Pcs')||'Pcs';
@@ -6533,7 +6599,7 @@
                         lastBuyPrice:iHrg>-1?numId(p[iHrg]):0,
                         status:iSts>-1?(String(p[iSts]).toLowerCase()==='aktif'?'Aktif':'Tidak Aktif'):'Aktif',
                         note:iKet>-1?p[iKet]:'' };
-                    let ex=masterSKU.find(i=>i.sku===kode);
+                    let ex=itemBySku(kode);
                     if(ex){ Object.assign(ex, data); updated++; }
                     else { masterSKU.push(Object.assign({sku:kode, minStock:0}, data)); stockBatches[kode]=[]; added++; }
                     if(data.distributor && !suppliers.find(s=>s.name===data.distributor)) suppliers.push({id:nextSupplierId++, name:data.distributor});
@@ -6550,7 +6616,7 @@
                         let sBuy = iSAK>-1 ? numId(p[iSAK]) : 0;
                         let hasVal = (iSA>-1 && String(p[iSA]||'').trim()!=='') || (iSAK>-1 && String(p[iSAK]||'').trim()!=='');
                         if(hasVal){
-                            let it=masterSKU.find(i=>i.sku===kode);
+                            let it=itemBySku(kode);
                             // Format sederhana: kolom SATUAN STOK AWAL menentukan satuan dari angka STOK AWAL.
                             // Jika satuannya sama dengan KEMASAN BELI, angka dianggap jumlah kemasan; selain itu (kosong/satuan dasar) dianggap satuan dasar.
                             if(iSAU>-1 && iSA>-1){
@@ -6758,7 +6824,7 @@
         body.innerHTML=scanRows.map((r,i)=>{
             let opts=r.candidates.map(c=>`<option value="${c.sku}" ${r.sku===c.sku?'selected':''}>${c.sku} — ${c.name}</option>`).join('')
                 + `<option value="__manual__">🔍 Cari manual...</option><option value="__new__">➕ Buat barang baru dari baris ini</option><option value="" ${!r.sku?'selected':''}>— tidak diproses —</option>`;
-            let it=masterSKU.find(x=>x.sku===r.sku);
+            let it=itemBySku(r.sku);
             let unitOpts='';
             if(it){
                 let mtb=midToBase(it);
@@ -6785,7 +6851,7 @@
                 let n=1; while(masterSKU.find(x=>x.sku==='RM-NEW-26-'+String(n).padStart(3,'0'))) n++;
                 let sku=prompt('Kode bahan baru:','RM-NEW-26-'+String(n).padStart(3,'0')); if(!sku){ renderScanTable(); return; }
                 sku=sku.trim();
-                if(masterSKU.find(x=>x.sku===sku)){ notify('Error','Kode sudah ada','error'); renderScanTable(); return; }
+                if(itemBySku(sku)){ notify('Error','Kode sudah ada','error'); renderScanTable(); return; }
                 let name=prompt('Nama bahan:', r.name.replace(/\b\w/g,c=>c.toUpperCase())); if(!name){ renderScanTable(); return; }
                 let category=prompt('Kategori:','Umum')||'Umum';
                 // tebak satuan dari kata di invoice: "kg" -> dasar Gr per Kg, dst.
@@ -6803,7 +6869,7 @@
                 stockBatches[sku]=[];
                 Object.values(soSessions).forEach(ss=>{ if(ss.active) ss.snapshot[sku]=0; }); // hapus barang dari SEMUA sesi SO yang sedang aktif, bukan cuma yang sedang dilihat
                 persist();
-                let it=masterSKU.find(x=>x.sku===sku);
+                let it=itemBySku(sku);
                 r.candidates.unshift(it);
                 r.sku=sku; r.score=1; r.source='baru';
                 r.unit=guessUnit(it, r.unitWord);
@@ -6948,7 +7014,7 @@
             let r=scanRows[idx];
             let chk=document.querySelector(`.scanChk[data-i="${idx}"]`);
             if(!chk||!chk.checked||!r.sku) continue;
-            let it=masterSKU.find(x=>x.sku===r.sku); if(!it) continue;
+            let it=itemBySku(r.sku); if(!it) continue;
             let mtb=midToBase(it);
             let factor = r.unit==='buy' ? (it.buyContent||1) : (r.unit==='mid'&&mtb>0 ? mtb : 1);
             let qtyBase = r.qty*factor;
@@ -7267,7 +7333,7 @@
         });
         let total=rows.reduce((s,l)=>s+(l.total||0),0);
         let list=rows.map(l=>{
-            let it=masterSKU.find(x=>x.sku===l.sku);
+            let it=itemBySku(l.sku);
             let wajar = (it && it.lastBuyPrice>0 && it.buyContent>0) ? it.lastBuyPrice/it.buyContent : null;
             let ratio = (wajar && l.price>0) ? l.price/wajar : null;
             let kem = it ? cekKemasan(it) : null;
@@ -7372,7 +7438,7 @@
         if (log.timestamp < lockBefore) { notify('Terkunci','Transaksi berada di periode yang sudah tutup buku, tidak bisa diedit.','warning'); return; }
         if (editLocked) { notify('Mode Koreksi Terkunci','Buka dulu Mode Koreksi Data (tombol 🔓/🔒 di tab Transaksi) sebelum mengedit.','warning'); return; }
         editingLogId=id;
-        const item=masterSKU.find(i=>i.sku===log.sku);
+        const item=itemBySku(log.sku);
         document.getElementById('editLogInfo').innerHTML = `${log.type==='in'?'📥 Barang Masuk':'📤 Barang Keluar'} — <span class="mono">${log.sku}</span> ${item?item.name:''}<br>${new Date(log.timestamp).toLocaleString('id')}`;
         document.getElementById('editLogQty').value = log.qty;
         document.getElementById('editLogRef').value = log.ref||'';
@@ -7410,7 +7476,7 @@
         if (!reasonVal) { notify('Alasan Wajib','Tulis alasan perubahan sebelum menyimpan','warning'); return; }
         const newData = { qty: document.getElementById('editLogQty').value, ref: document.getElementById('editLogRef').value, reason: reasonVal };
         if (log.type==='in') {
-            let item=masterSKU.find(i=>i.sku===log.sku);
+            let item=itemBySku(log.sku);
             let bc=item?(item.buyContent||1):1;
             let priceInput=parseFloat(document.getElementById('editLogPrice').value)||0;
             newData.price = bc>1 ? priceInput/bc : priceInput;
@@ -7437,7 +7503,7 @@
         if (currentRole!=='admin') return;
         if (log.timestamp < lockBefore) { notify('Terkunci','Transaksi berada di periode yang sudah tutup buku, tidak bisa dihapus.','warning'); return; }
         if (editLocked) { notify('Mode Koreksi Terkunci','Buka dulu Mode Koreksi Data (tombol 🔓/🔒 di tab Transaksi) sebelum menghapus.','warning'); return; }
-        let item=masterSKU.find(i=>i.sku===log.sku);
+        let item=itemBySku(log.sku);
         let reason=prompt(`Alasan menghapus transaksi ini (WAJIB, tercatat di Riwayat Edit & Hapus):\n${log.type==='in'?'📥 Masuk':'📤 Keluar'} ${log.sku} ${log.itemName||''} — ${log.qty.toLocaleString('id')} ${item?item.baseUnit:''}`);
         if(reason===null) return;
         if(!reason.trim()){ notify('Alasan Wajib','Tulis alasan penghapusan transaksi ini','warning'); return; }
@@ -7531,7 +7597,7 @@
             for(let raw of dataRows){
                 let p=raw.map(s=>String(s??'').trim());
                 let kode=p[iKode]; if(!kode) continue;
-                let item=masterSKU.find(i=>i.sku===kode);
+                let item=itemBySku(kode);
                 if(!item){ fails.push(`${kode}: SKU tidak ditemukan di master barang`); continue; }
                 if(!isTransitItemAllowed(item, gudang)){ fails.push(`${kode} - ${item.name}: bukan barang area ${gudangName(gudang)}`); continue; }
                 let qty=numId(p[iJumlah]);
@@ -7807,7 +7873,7 @@
         let mKeys=Object.keys(mAgg);
         document.getElementById('dvzTerima').innerHTML = mKeys.length
             ? mKeys.map(function(sku){
-                let it=masterSKU.find(function(i){ return i.sku===sku; });
+                let it=itemBySku(sku);
                 return '<div class="dvz-row"><span class="n">'+dvzEsc(it?it.name:sku)+'</span><span class="q">'+dvzQty(it,mAgg[sku])+'</span></div>';
               }).join('')
             : '<div class="dvz-empty">Belum ada bahan diterima hari ini.</div>';
@@ -7847,7 +7913,7 @@
         let riw=transactionLog.filter(function(l){ return l.gudang===id && new Date(l.timestamp).getTime()>=batas; }).slice(0,80);
         document.getElementById('dvzRiwayat').innerHTML = riw.length
             ? riw.map(function(l){
-                let it=masterSKU.find(function(i){ return i.sku===l.sku; });
+                let it=itemBySku(l.sku);
                 let jenis = l.type==='in' ? '<span style="color:#34d399;">Terima</span>'
                           : (l.outType==='retur' ? '<span style="color:#fbbf24;">Retur</span>' : '<span style="color:#f87171;">Pemakaian</span>');
                 return '<tr><td style="white-space:nowrap;">'+new Date(l.timestamp).toLocaleString('id',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})+'</td>'
@@ -7874,7 +7940,7 @@
         if(!pend.length){ card.style.display='none'; list.innerHTML=''; return; }
         card.style.display='block';
         list.innerHTML=pend.map(function(t){
-            let it=masterSKU.find(function(i){ return i.sku===t.sku; });
+            let it=itemBySku(t.sku);
             return '<div class="dvz-terima" data-tid="'+t.id+'">'
                 +'<div class="tn">'+dvzEsc(t.itemName)+'</div>'
                 +'<div class="tm">Dikirim '+dvzQty(it,t.qty)+' dari '+dvzEsc(gudangName(t.fromGudang))+' — '+new Date(t.sentAt).toLocaleString('id',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})+(t.ref?' — '+dvzEsc(t.ref):'')+'</div>'
@@ -8086,7 +8152,7 @@
         if(!keys.length){ body.innerHTML='<tr><td colspan="6" style="text-align:center; color:var(--text3);">Tidak ada pergerakan bahan pada periode ini.</td></tr>'; return; }
         keys.sort(function(a,b){ return h.perBahan[b].nilai-h.perBahan[a].nilai; });
         body.innerHTML=keys.map(function(sku){
-            let it=masterSKU.find(function(i){ return i.sku===sku; });
+            let it=itemBySku(sku);
             let x=h.perBahan[sku];
             let saldo=getStock(sku,id).qty;
             return '<tr><td>'+dvzEsc(it?it.name:sku)+'</td>'
@@ -8108,7 +8174,7 @@
         list.forEach(function(d){
             let h=ldHitung(d.id, per);
             Object.keys(h.perBahan).forEach(function(sku){
-                let it=masterSKU.find(function(i){ return i.sku===sku; }), x=h.perBahan[sku];
+                let it=itemBySku(sku), x=h.perBahan[sku];
                 rows.push([d.name, gudangName(d.gudang), it?it.name:sku, x.masuk, x.pakai, x.retur, getStock(sku,d.id).qty, Math.round(x.nilai)]);
             });
         });
@@ -8330,7 +8396,20 @@
         }
         else setBadge('📴 Lokal saja — klik ⚙️ Sync untuk hubungkan Google Sheets','#f59e0b');
     })();
-    setInterval(()=>{ try{ renderDashboard(); renderLog(); }catch(e){} }, 10000);
+    // Penyegaran berkala Dashboard & Log. Dulu berjalan tanpa syarat tiap 10 detik — termasuk saat
+    // aplikasi ada di latar belakang, saat pengguna sedang berada di tab lain, dan saat sedang
+    // mengetik di sebuah form. Padahal keduanya menelusuri seluruh transactionLog dan 1.100+ bahan.
+    // Sekarang hanya dijalankan kalau hasilnya memang sedang dilihat orang.
+    setInterval(()=>{
+        try{
+            if(document.hidden) return;                    // aplikasi di latar belakang
+            let f=document.activeElement;
+            if(f && /^(INPUT|TEXTAREA|SELECT)$/.test(f.tagName)) return; // pengguna sedang mengisi form
+            let aktif=document.querySelector('.tab-btn.active')?.dataset.tab;
+            if(aktif==='dashboard') renderDashboard();
+            else if(aktif==='report') renderLog();
+        }catch(e){}
+    }, 10000);
 </script>
 </body>
 </html>
