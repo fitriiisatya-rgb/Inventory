@@ -1333,6 +1333,7 @@
     function persistLocal() {
         invalidateSkuIndex(); // master mungkin baru berubah -> indeks kode bahan harus dibangun ulang
         dataVersi++;
+        try{ simpanOutbox(); }catch(e){}
         if (!storageOK) return; // data tetap tersimpan di memori selama halaman terbuka
         try {
             localStorage.setItem(STORAGE.SKU, JSON.stringify(masterSKU));
@@ -1377,8 +1378,25 @@
     let uidSeq = 0;
     function newUid(){ return deviceId + '.' + Date.now().toString(36) + '.' + (uidSeq++).toString(36); }
     // Mutasi yang dibuat di perangkat ini dan belum dipastikan tersimpan di server.
+    // Outbox ini WAJIB bertahan melewati reload. Kalau hanya ada di memori, aplikasi yang ditutup
+    // saat offline akan lupa bahwa masih ada transaksi yang belum terkirim, lalu menarik data server
+    // dan menimpanya — input hari itu hilang tanpa jejak.
+    const OUTBOX_KEY='sync_outbox';
     let mutasiLokal = [];   // [{jenis:'log'|'transfer', uid}]
-    function catatMutasiLokal(jenis, uid){ if(uid) mutasiLokal.push({jenis, uid}); }
+    function simpanOutbox(){
+        try{ localStorage.setItem(OUTBOX_KEY, JSON.stringify({ mutasiLokal, dirty })); }catch(e){}
+    }
+    function muatOutbox(){
+        try{
+            const o=JSON.parse(localStorage.getItem(OUTBOX_KEY)||'null');
+            // Outbox berisi = ada kerja yang belum terkirim, apa pun nilai flag dirty yang tersimpan.
+            // Menyandarkan diri pada flag itu saja rapuh: kalau ia sempat ter-reset, penarikan data
+            // server berikutnya akan menimpa transaksi yang belum sempat naik.
+            if(o && Array.isArray(o.mutasiLokal)){ mutasiLokal=o.mutasiLokal; if(o.dirty || mutasiLokal.length) dirty=true; }
+        }catch(e){}
+    }
+    function bersihkanOutbox(){ mutasiLokal=[]; try{ localStorage.removeItem(OUTBOX_KEY); }catch(e){} }
+    function catatMutasiLokal(jenis, uid){ if(uid){ mutasiLokal.push({jenis, uid}); simpanOutbox(); } }
     // Selama sebuah transaksi sedang diproses, data dari server TIDAK boleh menimpa state —
     // kalau menimpa, batch hasil mutasi hilang sementara lognya terlanjur tercatat.
     let sedangTransaksi = 0;
@@ -1616,17 +1634,27 @@
             if(!srv || srv.status!=='pending') return; // status server menang kalau sudah tidak pending
             srv.status=t.status; srv.confirmedAt=t.confirmedAt; srv.confirmedBy=t.confirmedBy;
             srv.confirmedQty=t.confirmedQty; srv.note=t.note; srv.confirmUid=t.confirmUid; srv.cancelUid=t.cancelUid;
+            srv.lossUid=t.lossUid; srv.lossLogId=t.lossLogId;
             n++;
         });
-        // Log OUT milik transfer yang tadi di-FIFO ulang: tautkan kembali ke transfernya, dan bawa
-        // lapisan biaya baru supaya gudang tujuan menerima harga yang benar-benar dipotong.
-        transactionLog.forEach(l=>{
-            if(!l.uid || !l.rehitungKonflik || l.type!=='out') return;
-            const tr = transfers.find(x=>x.outUid===l.uid);
-            if(!tr) return;
-            tr.outLogId = l.id;
-            tr.costLayers = (l.costLayers||[]).map(L=>({ batchId:L.batchId, qtyTaken:L.qtyTaken, price:L.price, dateIn:L.dateIn }));
-            tr.price = l.price;
+        // Seluruh id log yang ditunjuk transfer WAJIB ditautkan ulang lewat uid: id numerik berubah
+        // saat penggabungan (dinomori ulang atau datang dari perangkat lain), sedangkan uid tidak.
+        // Tanpa ini, outLogId/inLogId/lossLogId bisa menunjuk transaksi milik orang lain.
+        const perUid = new Map(transactionLog.filter(l=>l.uid).map(l=>[l.uid,l]));
+        transfers.forEach(tr=>{
+            if(tr.outUid){
+                const ol=perUid.get(tr.outUid);
+                if(ol){
+                    tr.outLogId = ol.id;
+                    if(ol.rehitungKonflik){
+                        // FIFO log OUT dihitung ulang -> lapisan biaya yang dibawa kiriman ikut berubah
+                        tr.costLayers = (ol.costLayers||[]).map(L=>({ batchId:L.batchId, qtyTaken:L.qtyTaken, price:L.price, dateIn:L.dateIn }));
+                        tr.price = ol.price;
+                    }
+                }
+            }
+            if(tr.confirmUid){ const il=perUid.get(tr.confirmUid); if(il) tr.inLogId = il.id; }
+            if(tr.lossUid){ const ll=perUid.get(tr.lossUid); if(ll) tr.lossLogId = ll.id; }
         });
         // Pencacah id harus di atas seluruh id yang kini ada, termasuk milik perangkat lain.
         nextLogId = Math.max(nextLogId, ...transactionLog.map(l=>(l.id||0)+1), 1);
@@ -1674,7 +1702,7 @@
             var chk = await window.__jsonpGet(SYNC_URL);
             if (chk && chk.ok && chk.version > serverVersion) {
                 serverVersion = chk.version;
-                mutasiLokal = []; // sudah pasti tersimpan di server
+                bersihkanOutbox(); // baru sekarang aman: versi server sudah naik
                 setBadge('🟢 Tersinkron','#10b981');
             } else {
                 throw new Error('data terkirim tapi belum terverifikasi');
@@ -1776,6 +1804,10 @@
     }
 
     function load() {
+        // WAJIB paling awal: load() memanggil persistLocal() di tengah jalan, dan persistLocal()
+        // menulis ulang outbox dari memori. Kalau outbox belum dibaca saat itu, isinya tertimpa
+        // kosong dan transaksi yang belum terkirim hilang tanpa jejak.
+        muatOutbox();
         let savedSku = null;
         if (storageOK) { try { savedSku = localStorage.getItem(STORAGE.SKU); } catch (e) {} }
         if (savedSku && JSON.parse(savedSku).length) {
@@ -2282,7 +2314,7 @@
         if (fromGudang === toGudang) return { success:false, msg:"Gudang asal dan tujuan tidak boleh sama" };
         const item = itemBySku(sku);
         if (!item) return { success:false, msg:`SKU ${sku} tidak ditemukan` };
-        const outRes = await processTransaction(sku, 'out', qty, 0, null, null, ref||`Transfer ke ${gudangName(toGudang)}`, false, { gudang: fromGudang, outType: opts.outType||'transfer', transferTo: toGudang, by: opts.by||deviceOperator, timestamp: opts.timestamp||undefined, batchId: opts.invoiceId||undefined });
+        const outRes = await processTransaction(sku, 'out', qty, 0, null, null, ref||`Transfer ke ${gudangName(toGudang)}`, false, { gudang: fromGudang, outType: opts.outType||'transfer', transferTo: toGudang, by: opts.by||deviceOperator, timestamp: opts.timestamp||undefined, effectiveTimestamp: opts.effectiveTimestamp||undefined, batchId: opts.invoiceId||undefined });
         if (!outRes.success) return outRes;
         const outLog = transactionLog[0];
         // Transfer WAJIB membawa lapisan biaya FIFO dari gudang asal. `price` di bawah hanya angka
@@ -2345,7 +2377,7 @@
         let shortfall = tr.qty - qty;
         if (shortfall > 0) {
             const inLog = transactionLog[0];
-            const lossLog = { id: nextLogId++, timestamp: Date.now(), sku: tr.sku, type:'out', qty: shortfall,
+            const lossLog = { id: nextLogId++, uid: newUid(), timestamp: Date.now(), sku: tr.sku, type:'out', qty: shortfall,
                 price: tr.price||0, total: Math.round(shortfall*(tr.price||0)*100)/100, by: confirmedBy||deviceOperator,
                 outType:'susut', desc:`Selisih kurang transfer dari ${gudangName(tr.fromGudang)}: ${note||'tanpa keterangan'}`,
                 area:'', supplier:'', division:'', ref:`Selisih transfer #${tr.id}`, batchIds:[], deducted:[],
@@ -2356,7 +2388,9 @@
                 beforeStock: getStock(tr.sku, tr.fromGudang).qty, afterStock: getStock(tr.sku, tr.fromGudang).qty,
                 canUndoUntil: 0, itemName: itemBySku(tr.sku)?.name||tr.sku };
             transactionLog.unshift(lossLog);
+            catatMutasiLokal('log', lossLog.uid);
             tr.lossLogId = lossLog.id;
+            tr.lossUid = lossLog.uid;
             tr.inLogId = inLog.id; // pastikan tetap menunjuk log penerimaan, bukan log susut
         }
         persist();
@@ -5654,7 +5688,16 @@
         // Kiriman yang belum dikonfirmasi = barang sudah keluar gudang asal tapi belum masuk gudang tujuan.
         // Kalau periode ditutup selagi masih menggantung, keluarnya terkunci di periode lama sementara
         // masuknya tercatat di periode baru — nilai kedua periode tidak akan pernah cocok.
-        let pendingTf = (typeof transfers!=='undefined') ? transfers.filter(t=>t.status==='pending' && t.sentAt < cutoff) : [];
+        // Kiriman yang MASIH pending harus memblokir tutup buku kalau BARANGNYA sudah keluar di
+        // periode itu — patokannya tanggal berlaku log OUT-nya, bukan sentAt (waktu tombol ditekan).
+        // Kiriman yang di-backdate ke Agustus tapi diinput September tetap terhitung milik Agustus.
+        let pendingTf = (typeof transfers!=='undefined') ? transfers.filter(t=>{
+            if(t.status!=='pending') return false;
+            const ol = t.outUid ? transactionLog.find(l=>l.uid===t.outUid)
+                                : transactionLog.find(l=>l.id===t.outLogId);
+            const ts = ol ? effTs(ol) : (t.sentAt||0);
+            return ts < cutoff;
+        }) : [];
         if(pendingTf.length){
             notify('Belum Bisa Tutup Buku',
                 `Masih ada ${pendingTf.length} kiriman antar gudang yang belum dikonfirmasi diterima (${[...new Set(pendingTf.map(t=>gudangName(t.toGudang)))].join(', ')}). Minta gudang tujuan mengonfirmasi dulu, atau batalkan kirimannya.`,'warning');
@@ -8821,8 +8864,18 @@
         // Tampilkan dulu dari data lokal agar aplikasi langsung bisa dipakai
         try { refreshUI(); } catch(e) { console.error("Render awal gagal:", e); }
         if (SYNC_URL) {
-            const got = await pullFromServer(true); // sinkron di latar belakang
-            if (got) { try { refreshUI(); } catch(e) {} }
+            if (mutasiLokal.length) {
+                // Masih ada transaksi yang belum terkirim dari sesi sebelumnya (mis. ditutup saat
+                // offline). JANGAN menarik data server dulu — itu akan menimpanya. Kirim/gabungkan
+                // dulu; pushToServer sendiri yang menangani kalau server ternyata lebih baru.
+                setBadge('🟡 Mengirim '+mutasiLokal.length+' transaksi tertunda...','#f59e0b');
+                dirty = true;
+                await pushToServer();
+                try { refreshUI(); } catch(e) {}
+            } else {
+                const got = await pullFromServer(true); // sinkron di latar belakang
+                if (got) { try { refreshUI(); } catch(e) {} }
+            }
         }
         else setBadge('📴 Lokal saja — klik ⚙️ Sync untuk hubungkan Google Sheets','#f59e0b');
     })();
