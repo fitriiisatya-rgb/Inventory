@@ -217,7 +217,9 @@
         <div style="font-size:0.72rem; color:var(--text3); margin-top:6px;">Seluruh angka bulanan di bawah (Stok Awal, Pembelian, Barang Keluar, Penyusutan, Produksi, Area Bakery) mengikuti periode ini. Nilai Stok Saat Ini dan Stok Menipis selalu menampilkan kondisi terkini, bukan per periode.</div>
     </div>
     <div class="grid-4">
-        <div class="kpi-card" id="stokAwalCard"><div class="kpi-label">📆 Stok Awal Periode</div><div class="kpi-value" id="stokAwalValue">Rp0</div><div class="kpi-sub" id="stokAwalSub">Perkiraan</div><!-- Rincian Stok Awal dinonaktifkan sementara: sumbernya belum sama dengan KPI. Akan dikerjakan terpisah. --></div>
+        <div class="kpi-card" id="stokAwalCard"><div class="kpi-label">📆 Stok Awal Periode</div><div class="kpi-value" id="stokAwalValue">Rp0</div><div class="kpi-sub" id="stokAwalSub">Perkiraan</div>
+            <div id="stokAwalPerArea" style="margin-top:8px; font-size:0.76rem;"></div>
+            <div id="stokAwalPeringatan" style="margin-top:6px; font-size:0.72rem;"></div></div>
         <div class="kpi-card"><div class="kpi-label">🛒 Pembelian (Masuk)</div>
             <div style="display:flex; align-items:baseline; gap:18px; flex-wrap:wrap;">
                 <div class="kpi-value" id="pembelianValue">Rp0</div>
@@ -962,6 +964,8 @@
             <div class="kpi-card" style="padding:12px;"><div class="kpi-label">Total Tampil (setelah filter)</div><div class="kpi-value" id="saShown" style="font-size:1rem;">Rp0</div></div>
             <div class="kpi-card" style="padding:12px;"><div class="kpi-label">Baris</div><div class="kpi-value" id="saCount" style="font-size:1.1rem;">0</div></div>
         </div>
+        <div id="saLegacy"></div>
+        <div id="saTop20" style="margin-bottom:12px;"></div>
         <div class="table-wrapper" style="max-height:50vh; overflow-y:auto;"><table><thead><tr><th>Area/Gudang</th><th>SKU</th><th>Nama Barang</th><th>Qty Stok Awal</th><th>Satuan</th><th>Harga/Cost</th><th>Nilai Stok Awal</th></tr></thead><tbody id="saBody"></tbody></table></div>
     </div>
 </div>
@@ -2991,6 +2995,23 @@
     // Tanggal yang menentukan sebuah mutasi masuk periode mana adalah tanggal BERLAKUNYA, bukan
     // tanggal ia diketik. Adjustment Agustus yang baru diposting 2 September tetap milik Agustus.
     function effTs(l){ return (l && (l.effectiveTimestamp || l.timestamp)) || 0; }
+    // Harga pokok per satuan PADA SUATU TITIK WAKTU. Berbeda dari bestKnownUnitCost() yang boleh
+    // melihat batch & harga hari ini: untuk valuasi historis, memakai data masa depan berarti
+    // menilai stok Agustus dengan harga September. Itu penyebab opening bisa melenceng jauh.
+    // Sengaja TIDAK memakai item.lastBuyPrice — kolom itu selalu berisi harga terakhir hari ini.
+    function bestKnownUnitCostAt(sku, gudang, ts){
+        let diGudang=null, dimanaSaja=null;
+        transactionLog.forEach(l=>{
+            if(l.sku!==sku || l.type!=='in' || !(l.price>0)) return;
+            if(l.nonStockMovement || l.inventoryMovement===false) return;
+            const t=effTs(l); if(!(t<=ts)) return;
+            if(!dimanaSaja || t>effTs(dimanaSaja)) dimanaSaja=l;
+            if((l.gudang||DEFAULT_GUDANG)===gudang && (!diGudang || t>effTs(diGudang))) diGudang=l;
+        });
+        const pilih = diGudang || dimanaSaja;
+        if(pilih) return { price: pilih.price, source: (pilih===diGudang?'Masuk '+gudangName(gudang):'Masuk '+gudangName(pilih.gudang||DEFAULT_GUDANG))+' · '+(pilih.ref||'-'), at: effTs(pilih) };
+        return { price: 0, source: 'Tidak ada rujukan harga s/d tanggal ini', at: null, costUnknown: true };
+    }
     function akhirHari(ts){ let d=new Date(ts); d.setHours(23,59,59,999); return d.getTime(); }
 
     // Hanya baris yang benar-benar menggerakkan stok yang boleh direplay.
@@ -3025,7 +3046,8 @@
                     const amb=Math.min(-neg.qty, sisa); neg.qty+=amb; sisa-=amb;
                     if(Math.abs(neg.qty)<1e-9) arr.splice(arr.indexOf(neg),1);
                 }
-                if(sisa>1e-9) arr.push({ qty:sisa, price:L.price, dateIn: pakaiT ? t : L.dateIn });
+                if(sisa>1e-9) arr.push({ qty:sisa, price:L.price, dateIn: pakaiT ? t : L.dateIn,
+                                        costSource:(l.source==='transfer'?'Transfer masuk':'Masuk')+' · '+(l.ref||'-'), costAt:t });
             }
         } else {
             let sisa=l.qty;
@@ -3062,11 +3084,21 @@
                 for(const b of arr){ if(sisa<=1e-9) break; if(b.qty<=0) continue;
                     const amb=Math.min(b.qty,sisa); b.qty-=amb; sisa-=amb; }
                 for(let i=arr.length-1;i>=0;i--) if(Math.abs(arr[i].qty)<1e-9) arr.splice(i,1);
-                if(sisa>1e-9) arr.push({ qty:-sisa, price:bestKnownUnitCost(r.sku,g), dateIn:anchor.ts });
+                if(sisa>1e-9){
+                    const c=bestKnownUnitCostAt(r.sku,g,anchor.ts);
+                    arr.push({ qty:-sisa, price:c.price, dateIn:anchor.ts, costSource:c.source, costAt:c.at, costUnknown:!!c.costUnknown });
+                }
             } else {
+                // Kelebihan fisik dinilai memakai lapisan yang MEMANG sudah ada s/d tanggal hitung.
+                // Kalau belum ada rujukan apa pun, ditandai costUnknown — bukan diam-diam memakai
+                // harga hari ini, karena itu menilai stok lama dengan harga masa depan.
                 const nilai=arr.reduce((s,b)=>s+b.qty*(b.price||0),0);
-                const harga = kini>0 ? nilai/kini : bestKnownUnitCost(r.sku,g);
-                arr.push({ qty:selisih, price:harga>0?harga:0, dateIn:anchor.ts });
+                if(kini>0 && nilai>0){
+                    arr.push({ qty:selisih, price:nilai/kini, dateIn:anchor.ts, costSource:'Rata-rata lapisan s/d '+new Date(anchor.ts).toLocaleDateString('id'), costAt:anchor.ts });
+                } else {
+                    const c=bestKnownUnitCostAt(r.sku,g,anchor.ts);
+                    arr.push({ qty:selisih, price:c.price, dateIn:anchor.ts, costSource:c.source, costAt:c.at, costUnknown:!!c.costUnknown });
+                }
             }
         });
     }
@@ -3075,12 +3107,71 @@
         else { for(const k in peta) delete peta[k]; }
         (anchor.rows||[]).forEach(r=>{
             const g=r.gudang||DEFAULT_GUDANG, k=r.sku+'|'+g;
-            peta[k]={ sku:r.sku, gudang:g, layers:(r.batches||[]).map(b=>({ qty:b.qty, price:b.price||0, dateIn:b.dateIn||anchor.ts })) };
+            peta[k]={ sku:r.sku, gudang:g, layers:(r.batches||[]).map(b=>({ qty:b.qty, price:b.price||0, dateIn:b.dateIn||anchor.ts,
+                        costSource:b.costSource||anchor.label, costAt:(b.costAt!=null?b.costAt:anchor.ts) })) };
         });
     }
     // Titik jangkar saldo terverifikasi, urut waktu. Stok Opname dijangkarkan pada TANGGAL HITUNG
     // FISIK — bukan awal bulan berikutnya. Itu yang membuat mutasi 30-31 Agustus setelah SO 29
     // Agustus tetap ikut terhitung ke Opening September.
+    const SNAP_ENGINE='fifo-asof-v1';
+    function closingPerluValidasi(){
+        return (closings||[]).filter(c=>c && c.snapshotRows && c.snapshotEngineVersion!==SNAP_ENGINE);
+    }
+    // Membandingkan snapshot Tutup Buku yang TERSIMPAN dengan hasil hitung ulang memakai mesin
+    // sekarang (SO + mutasi setelahnya). Read-only: tidak menyentuh data.
+    function bandingkanClosing(cl){
+        const lama={}; let lamaTotal=0;
+        (cl.snapshotRows||[]).forEach(r=>{
+            const g=r.gudang||DEFAULT_GUDANG, k=r.sku+'|'+g;
+            const v=(r.batches||[]).reduce((a,b)=>a+b.qty*(b.price||0),0);
+            const q=(r.batches||[]).reduce((a,b)=>a+b.qty,0);
+            lama[k]={sku:r.sku, gudang:g, qty:q, value:v}; lamaTotal+=v;
+        });
+        const baru=getInventorySnapshotAt(cl.cutoff);
+        const petaBaru={}; (baru.rows||[]).forEach(r=>{ petaBaru[r.sku+'|'+r.gudang]=r; });
+        const kunci=new Set([...Object.keys(lama), ...Object.keys(petaBaru)]);
+        const perGudang={}, perSku=[];
+        kunci.forEach(k=>{
+            const a=lama[k]||{value:0,qty:0}, b=petaBaru[k]||{value:0,qty:0};
+            const [sku,g]=k.split('|');
+            const d=b.value-a.value;
+            if(!perGudang[g]) perGudang[g]={gudang:g, lama:0, baru:0};
+            perGudang[g].lama+=a.value; perGudang[g].baru+=b.value;
+            if(Math.abs(d)>0.5) perSku.push({ sku, gudang:g, nama:(itemBySku(sku)||{}).name||sku,
+                                              qtyLama:a.qty, qtyBaru:b.qty, nilaiLama:a.value, nilaiBaru:b.value, selisih:d });
+        });
+        perSku.sort((x,y)=>Math.abs(y.selisih)-Math.abs(x.selisih));
+        return { ok:baru.ok, period:cl.period, cutoff:cl.cutoff, lamaTotal,
+                 baruTotal: baru.totalValue, selisih: baru.totalValue-lamaTotal,
+                 perGudang: Object.values(perGudang).map(x=>({...x, selisih:x.baru-x.lama})),
+                 perSku, dasar: baru.dasar, warning: baru.warning };
+    }
+    // Hanya dijalankan lewat tombol Admin dengan konfirmasi. Snapshot lama disimpan di
+    // legacySnapshot supaya bisa ditelusuri/dikembalikan, tidak dihapus.
+    window.rebuildClosingSnapshot = function(period){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        const cl=(closings||[]).find(c=>c.period===period);
+        if(!cl){ notify('Tidak ditemukan','Tutup buku '+period+' tidak ada.','error'); return; }
+        const cmp=bandingkanClosing(cl);
+        if(!cmp.ok){ notify('Tidak bisa dihitung ulang', cmp.warning, 'warning'); return; }
+        if(!confirm('Bangun ulang snapshot Tutup Buku '+period+'?\n\n'
+            + 'Tersimpan sekarang : Rp '+Math.round(cmp.lamaTotal).toLocaleString('id')+'\n'
+            + 'Hasil hitung ulang : Rp '+Math.round(cmp.baruTotal).toLocaleString('id')+'\n'
+            + 'Selisih            : Rp '+Math.round(cmp.selisih).toLocaleString('id')+'\n\n'
+            + 'Snapshot lama tetap disimpan sebagai legacySnapshot. Transaksi tidak diubah.')) return;
+        const baru=getInventorySnapshotAt(cl.cutoff);
+        if(!cl.legacySnapshot) cl.legacySnapshot={ snapshotRows:cl.snapshotRows, valueAtCutoff:cl.valueAtCutoff, disimpanPada:Date.now() };
+        cl.snapshotRows=baru.rows; cl.valueAtCutoff=baru.totalValue; cl.snapshotEngineVersion=SNAP_ENGINE;
+        cl.rebuiltAt=Date.now(); cl.rebuiltBy=currentUsername||deviceOperator||'';
+        if(typeof auditLog!=='undefined') auditLog.unshift({ id:nextAuditId++, action:'edit', at:Date.now(),
+            by:currentUsername||deviceOperator||'', reason:'Rebuild snapshot Tutup Buku '+period,
+            sku:'-', itemName:'Snapshot Tutup Buku '+period, type:'closing',
+            before:{ valueAtCutoff:cl.legacySnapshot.valueAtCutoff }, after:{ valueAtCutoff:cl.valueAtCutoff } });
+        persist(); refreshUI();
+        notify('Snapshot Dibangun Ulang', period+': Rp '+Math.round(cl.valueAtCutoff).toLocaleString('id')
+            + '. Stok Awal bulan berikutnya kini sama dengan angka ini.', 'success');
+    };
     function daftarAnchor(){
         let out=[];
         (inventoryBaselines||[]).forEach(s=>{
@@ -3088,7 +3179,12 @@
             out.push({ ts:s.timestamp, jenis:'baseline', gudang:s.gudang||null, rows:s.rows,
                        label:'Baseline '+new Date(s.timestamp).toLocaleDateString('id') });
         });
-        (closings||[]).forEach(c=>{ if(c && c.snapshotRows)
+        // Snapshot Tutup Buku LAMA (tanpa snapshotEngineVersion) dibuat oleh mesin yang menyalin
+        // kondisi batch saat tombol ditekan lalu memberinya tanggal historis. Kalau dipakai sebagai
+        // jangkar, ia menimpa hasil Stok Opname yang justru benar. Jadi hanya snapshot bermesin
+        // 'fifo-asof-v1' yang dipercaya; yang lama tetap DISIMPAN apa adanya dan dilaporkan untuk
+        // divalidasi admin, tidak diubah diam-diam.
+        (closings||[]).forEach(c=>{ if(c && c.snapshotRows && c.snapshotEngineVersion===SNAP_ENGINE)
             out.push({ ts:c.cutoff, jenis:'tutupbuku', gudang:null, rows:c.snapshotRows,
                        label:'Snapshot Tutup Buku '+(c.period||new Date(c.cutoff).toLocaleDateString('id')) }); });
         (soHistory||[]).forEach(h=>{
@@ -3135,7 +3231,7 @@
             const value=r.layers.reduce((s,b)=>s+b.qty*(b.price||0),0);
             if(Math.abs(qty)<1e-9 && Math.abs(value)<1e-9) return;
             rows.push({ sku:r.sku, gudang:r.gudang, qty, value,
-                        batches:r.layers.map(b=>({ qty:b.qty, price:b.price||0, dateIn:b.dateIn })) });
+                        batches:r.layers.map(b=>({ qty:b.qty, price:b.price||0, dateIn:b.dateIn, costSource:b.costSource||'', costAt:(b.costAt!=null?b.costAt:null), costUnknown:!!b.costUnknown })) });
         });
         rows.sort((a,b)=> a.gudang.localeCompare(b.gudang) || a.sku.localeCompare(b.sku));
         return { ok:true, rows, totalValue: rows.reduce((s,r)=>s+r.value,0), dasar:base.label, warning:'' };
@@ -3144,9 +3240,17 @@
         const snap=getInventorySnapshotAt(ts);
         return snap.rows.map(r=>{
             const it=itemBySku(r.sku)||{};
+            // Sumber harga yang PALING BARU di antara lapisannya — dipakai untuk menandai kalau
+            // sebuah nilai opening ternyata bersandar pada harga bertanggal setelah tanggal opening.
+            let cAt=null, cSrc='', unknown=false;
+            (r.batches||[]).forEach(b=>{
+                if(b.costUnknown) unknown=true;
+                if(b.costAt!=null && (cAt===null || b.costAt>cAt)){ cAt=b.costAt; cSrc=b.costSource||''; }
+            });
             return { gudang:r.gudang, gudangNama:gudangName(r.gudang), sku:r.sku,
                      nama:it.name||r.sku, satuan:it.baseUnit||'', qty:r.qty,
-                     cost: r.qty!==0 ? r.value/r.qty : 0, nilai:r.value };
+                     cost: r.qty!==0 ? r.value/r.qty : 0, nilai:r.value,
+                     costSource:cSrc, costAt:cAt, costUnknown:unknown };
         }).sort((a,b)=> a.gudangNama.localeCompare(b.gudangNama) || b.nilai-a.nilai);
     }
     // Nilai persediaan pada suatu titik waktu — alias tipis dari sumber tunggal di atas.
@@ -3780,6 +3884,28 @@
         // Subtext periode utk KPI yang mengikuti dashPeriode (bukan realtime)
         let _pl = getMonthStart().toLocaleDateString('id',{month:'long', year:'numeric'});
         let _sa=document.getElementById('stokAwalSub'); if(_sa) _sa.innerHTML=`Periode: <strong>${_pl}</strong>`;
+        // Subtotal per lokasi langsung di kartu — dari snapshot opening yang sama dengan KPI,
+        // BUKAN dari stok berjalan. Jumlah seluruh baris di bawah wajib sama dengan angka KPI.
+        let _ar=document.getElementById('stokAwalPerArea');
+        if(_ar){
+            const brs=stokAwalRows(getMonthStart().getTime());
+            const per={}; brs.forEach(r=>{ per[r.gudang]=(per[r.gudang]||0)+r.nilai; });
+            const urut=Object.keys(per).sort((a,b)=>per[b]-per[a]);
+            const tot=urut.reduce((a,g)=>a+per[g],0);
+            _ar.innerHTML = urut.length
+                ? urut.map(g=>`<div style="display:flex; justify-content:space-between; gap:10px; padding:1px 0;"><span style="color:var(--text3);">${dvzEsc(gudangName(g))}</span><span class="mono" style="font-variant-numeric:tabular-nums;">Rp ${Math.round(per[g]).toLocaleString('id')}</span></div>`).join('')
+                  + `<div style="display:flex; justify-content:space-between; gap:10px; padding:3px 0 0; margin-top:3px; border-top:1px solid var(--border); font-weight:700;"><span>TOTAL</span><span class="mono" style="font-variant-numeric:tabular-nums;">Rp ${Math.round(tot).toLocaleString('id')}</span></div>`
+                : `<div style="color:var(--text3);">Belum ada saldo awal untuk periode ini.</div>`;
+        }
+        // Peringatan snapshot Tutup Buku lama yang belum divalidasi — angkanya tidak dipakai
+        // sebagai jangkar, dan selisihnya bisa diperiksa di modal rincian.
+        let _pk=document.getElementById('stokAwalPeringatan');
+        if(_pk){
+            const legacy=closingPerluValidasi();
+            _pk.innerHTML = legacy.length
+                ? `<span style="color:#f59e0b;">⚠️ ${legacy.length} snapshot Tutup Buku lama belum divalidasi — klik kartu ini untuk membandingkan.</span>`
+                : '';
+        }
         let _pr=document.getElementById('racikSub'); if(_pr) _pr.innerHTML=`Periode: <strong>${_pl}</strong>`;
         let _ps=document.getElementById('pembelianSub'); if(_ps) _ps.innerHTML=`Periode: <strong>${_pl}</strong>`;
         document.getElementById('pembelianValue').innerHTML = `Rp ${getPembelian().toLocaleString()}`;
@@ -5766,7 +5892,7 @@
         }
         transactionLog=transactionLog.filter(l=>effTs(l)>=cutoff);
         lockBefore=Math.max(lockBefore, cutoff);
-        closings.push({ snapshotRows: snapCutoff.rows, period, closedAt:Date.now(), cutoff, txCount:toArchive.length, inTotal, hppTotal, susutTotal, valueAtCutoff, by:deviceOperator||'' });
+        closings.push({ snapshotRows: snapCutoff.rows, snapshotEngineVersion: SNAP_ENGINE, period, closedAt:Date.now(), cutoff, txCount:toArchive.length, inTotal, hppTotal, susutTotal, valueAtCutoff, by:deviceOperator||'' });
         persist(); refreshUI();
         notify('Tutup Buku Selesai',`${period}: ${toArchive.length} transaksi diarsip & terkunci. Stok awal resmi bulan berikutnya: Rp ${Math.round(valueAtCutoff).toLocaleString('id')}.`,'success');
     });
@@ -7777,6 +7903,8 @@
         });
     }
     function renderStokAwalDetail(){
+        renderSaTop20();
+        renderSaLegacy();
         let rows=saFiltered();
         let grand=saRowsCache.reduce((s,r)=>s+r.nilai,0);
         let shown=rows.reduce((s,r)=>s+r.nilai,0);
@@ -7796,6 +7924,61 @@
         });
         html += `<tr style="background:rgba(16,185,129,0.15); font-weight:800;"><td colspan="6">GRAND TOTAL TAMPIL</td><td>Rp ${Math.round(shown).toLocaleString('id')}</td></tr>`;
         document.getElementById('saBody').innerHTML = rows.length ? html : '<tr><td colspan="7" style="text-align:center; color:var(--text3);">Tidak ada stok pada awal periode ini.</td></tr>';
+    }
+    // Top 20 penyumbang nilai opening + pemeriksaan sumber harganya.
+    function renderSaTop20(){
+        const el=document.getElementById('saTop20'); if(!el) return;
+        const ts=saTsCache||getMonthStart().getTime();
+        const top=(saRowsCache||[]).slice().sort((a,b)=>Math.abs(b.nilai)-Math.abs(a.nilai)).slice(0,20);
+        if(!top.length){ el.innerHTML=''; return; }
+        const baris=top.map(r=>{
+            const masaDepan = r.costAt!=null && r.costAt>ts;
+            const abnormal = r.costUnknown || !(r.cost>0) || r.cost>1e8;
+            const merah = masaDepan || abnormal;
+            const ket = r.costUnknown ? 'Harga tidak diketahui'
+                      : (masaDepan ? 'Harga bertanggal SETELAH tanggal opening' : (abnormal ? 'Harga tidak wajar' : ''));
+            return `<tr${merah?' style="background:rgba(179,38,30,0.12);"':''}>
+                <td class="mono">${dvzEsc(r.sku)}</td><td>${dvzEsc(r.gudangNama)}</td>
+                <td style="text-align:right; font-variant-numeric:tabular-nums;">${(Math.round(r.qty*1000)/1000).toLocaleString('id')} ${dvzEsc(r.satuan)}</td>
+                <td style="text-align:right; font-variant-numeric:tabular-nums;">Rp ${r.cost.toLocaleString('id',{maximumFractionDigits:2})}</td>
+                <td style="text-align:right; font-variant-numeric:tabular-nums;">Rp ${Math.round(r.nilai).toLocaleString('id')}</td>
+                <td style="font-size:0.72rem;">${merah?'🔴 ':''}${dvzEsc(r.costSource||'-')}${ket?' — '+dvzEsc(ket):''}</td>
+                <td style="font-size:0.72rem;">${r.costAt!=null?new Date(r.costAt).toLocaleDateString('id'):'-'}</td></tr>`;
+        }).join('');
+        const jmlMerah=top.filter(r=>(r.costAt!=null&&r.costAt>ts)||r.costUnknown||!(r.cost>0)).length;
+        el.innerHTML=`<div class="card-title" style="font-size:0.85rem; margin-bottom:6px;">🔎 Top 20 Nilai Opening`
+            + (jmlMerah?` <span style="color:#f59e0b; font-weight:600;">· ${jmlMerah} baris perlu diperiksa</span>`:``)
+            + `</div><div class="table-wrapper" style="max-height:34vh; overflow:auto;"><table style="font-size:0.78rem;"><thead><tr>`
+            + `<th>SKU</th><th>Area</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Cost</th><th style="text-align:right;">Nilai</th><th>Cost Source</th><th>Cost Date</th>`
+            + `</tr></thead><tbody>${baris}</tbody></table></div>`;
+    }
+    // Snapshot Tutup Buku lama vs hasil hitung ulang — ditampilkan, tidak pernah dipakai diam-diam.
+    function renderSaLegacy(){
+        const el=document.getElementById('saLegacy'); if(!el) return;
+        const legacy=closingPerluValidasi();
+        if(!legacy.length){ el.innerHTML=''; return; }
+        el.innerHTML=legacy.map(cl=>{
+            const c=bandingkanClosing(cl);
+            if(!c.ok) return `<div class="alert alert-warning" style="margin:0 0 10px;">Snapshot Tutup Buku ${dvzEsc(cl.period||'')} belum bisa dibandingkan: ${dvzEsc(c.warning||'')}</div>`;
+            const g=c.perGudang.filter(x=>Math.abs(x.selisih)>0.5)
+                .map(x=>`<tr><td>${dvzEsc(gudangName(x.gudang))}</td><td style="text-align:right;">Rp ${Math.round(x.lama).toLocaleString('id')}</td><td style="text-align:right;">Rp ${Math.round(x.baru).toLocaleString('id')}</td><td style="text-align:right; color:#b3261e;">Rp ${Math.round(x.selisih).toLocaleString('id')}</td></tr>`).join('');
+            const sk=c.perSku.slice(0,10)
+                .map(x=>`<tr><td class="mono">${dvzEsc(x.sku)}</td><td>${dvzEsc(x.nama)}</td><td>${dvzEsc(gudangName(x.gudang))}</td><td style="text-align:right;">${(Math.round(x.qtyLama*100)/100).toLocaleString('id')} → ${(Math.round(x.qtyBaru*100)/100).toLocaleString('id')}</td><td style="text-align:right; color:#b3261e;">Rp ${Math.round(x.selisih).toLocaleString('id')}</td></tr>`).join('');
+            return `<div class="alert alert-warning" style="margin:0 0 12px; text-align:left;">
+                <div style="font-weight:700; margin-bottom:6px;">⚠️ Snapshot Tutup Buku ${dvzEsc(cl.period||'')} dibuat mesin lama — belum divalidasi</div>
+                <div style="font-size:0.78rem; margin-bottom:8px;">Angkanya TIDAK dipakai sebagai dasar Stok Awal. Dasar yang dipakai sekarang: <strong>${dvzEsc(c.dasar||'-')}</strong>.</div>
+                <table style="width:100%; font-size:0.78rem; margin-bottom:8px;"><tbody>
+                  <tr><td>Tersimpan di snapshot lama</td><td style="text-align:right; font-weight:700;">Rp ${Math.round(c.lamaTotal).toLocaleString('id')}</td></tr>
+                  <tr><td>Hasil hitung ulang (SO + mutasi)</td><td style="text-align:right; font-weight:700;">Rp ${Math.round(c.baruTotal).toLocaleString('id')}</td></tr>
+                  <tr><td style="color:#b3261e;">Selisih</td><td style="text-align:right; font-weight:700; color:#b3261e;">Rp ${Math.round(c.selisih).toLocaleString('id')}</td></tr>
+                </tbody></table>
+                ${g?`<div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:.4px; color:var(--text3); margin-bottom:3px;">Per Area</div><table style="width:100%; font-size:0.76rem; margin-bottom:8px;"><thead><tr><th style="text-align:left;">Area</th><th style="text-align:right;">Lama</th><th style="text-align:right;">Hitung Ulang</th><th style="text-align:right;">Selisih</th></tr></thead><tbody>${g}</tbody></table>`:''}
+                ${sk?`<div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:.4px; color:var(--text3); margin-bottom:3px;">Top 10 Penyumbang Selisih</div><table style="width:100%; font-size:0.76rem; margin-bottom:8px;"><thead><tr><th style="text-align:left;">SKU</th><th style="text-align:left;">Nama</th><th style="text-align:left;">Area</th><th style="text-align:right;">Qty lama → baru</th><th style="text-align:right;">Selisih</th></tr></thead><tbody>${sk}</tbody></table>`:''}
+                <button class="btn btn-sm btn-warning saRebuildBtn" data-period="${dvzEsc(cl.period||'')}">🔧 Bangun Ulang Snapshot Closing ${dvzEsc(cl.period||'')}</button>
+                <div style="font-size:0.7rem; color:var(--text3); margin-top:5px;">Snapshot lama tetap disimpan. Transaksi tidak diubah.</div>
+            </div>`;
+        }).join('');
+        el.querySelectorAll('.saRebuildBtn').forEach(b=>b.addEventListener('click',()=>rebuildClosingSnapshot(b.dataset.period)));
     }
     document.getElementById('stokAwalCard')?.addEventListener('click', openStokAwalDetail);
     document.getElementById('stokAwalDetailBtn')?.addEventListener('click', e=>{ e.stopPropagation(); openStokAwalDetail(); });
