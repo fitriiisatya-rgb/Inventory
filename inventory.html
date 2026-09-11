@@ -220,12 +220,12 @@
         <div class="kpi-card" id="stokAwalCard"><div class="kpi-label">📆 Stok Awal Periode</div><div class="kpi-value" id="stokAwalValue">Rp0</div><div class="kpi-sub" id="stokAwalSub">Perkiraan</div>
             <div id="stokAwalPerArea" style="margin-top:8px; font-size:0.76rem;"></div>
             <div id="stokAwalPeringatan" style="margin-top:6px; font-size:0.72rem;"></div></div>
-        <div class="kpi-card"><div class="kpi-label">🛒 Pembelian (Masuk)</div>
+        <div class="kpi-card"><div class="kpi-label">🛒 Pembelian (Masuk) — sebelum PPN</div>
             <div style="display:flex; align-items:baseline; gap:18px; flex-wrap:wrap;">
                 <div class="kpi-value" id="pembelianValue">Rp0</div>
                 <div style="font-size:0.78rem; color:var(--text2); line-height:1.5;">
                     <div>PPN: <strong id="pembelianPpnValue" style="color:var(--text);">Rp0</strong></div>
-                    <div>Grand Total: <strong id="pembelianGrandValue" style="color:var(--green);">Rp0</strong></div>
+                    <div>Grand Total (incl. PPN): <strong id="pembelianGrandValue" style="color:var(--green);">Rp0</strong></div>
                 </div>
             </div>
             <div class="kpi-sub" id="pembelianSub">Periode terpilih</div>
@@ -399,10 +399,10 @@
             <div style="margin:14px 0; padding:14px 16px; background:var(--bg2); border-radius:var(--radius); font-size:0.85rem;">
                 <div style="display:flex; justify-content:space-between; margin-bottom:4px;"><span id="multiRowCount">0 baris siap diproses</span><span id="multiSubtotal">Rp 0</span></div>
                 <div id="multiDiskonRow" style="display:none; justify-content:space-between; margin-bottom:4px; color:#ef4444;"><span id="multiDiskonLabel">Diskon</span><span id="multiDiskonAmt">- Rp 0</span></div>
-                <div id="multiPpnRow" style="display:none; justify-content:space-between; margin-bottom:4px; color:#3b82f6;"><span id="multiPpnLabel">PPN (kredit pajak, terpisah dari HPP)</span><span id="multiPpnAmt">+ Rp 0</span></div>
+                <div id="multiPpnRow" style="display:none; justify-content:space-between; margin-bottom:4px; color:#3b82f6;"><span id="multiPpnLabel">PPN (sudah termasuk harga pokok)</span><span id="multiPpnAmt">+ Rp 0</span></div>
                 <div id="multiOngkirRow" style="display:none; justify-content:space-between; margin-bottom:4px; color:#f59e0b;"><span>Ongkir / Biaya Kirim</span><span id="multiOngkirAmt">+ Rp 0</span></div>
                 <div style="display:flex; justify-content:space-between; padding-top:8px; margin-top:6px; border-top:1px solid var(--border);"><strong>TOTAL PEMBELIAN</strong><strong id="multiTotalEst" style="font-size:1.15rem;">Rp 0</strong></div>
-                <div id="multiPpnNote" style="display:none; font-size:0.72rem; color:var(--text3); margin-top:4px;">ℹ️ PPN dihitung hanya dari harga barang (setelah diskon) dan dicatat terpisah sebagai kredit pajak — TIDAK menambah nilai stok/HPP, dan TIDAK termasuk Ongkir. Diskon tetap mengurangi HPP.</div>
+                <div id="multiPpnNote" style="display:none; font-size:0.72rem; color:var(--text3); margin-top:4px;">ℹ️ PPN dihitung dari harga barang (setelah diskon) dan MASUK ke harga pokok/nilai stok sesuai kebijakan inventory. Nilainya tetap dicatat terpisah di kolom PPN untuk audit, tapi tidak ditambahkan lagi ke HPP. Ongkir TIDAK termasuk. Diskon tetap mengurangi HPP.</div>
             </div>
             <div id="multiInvoiceCheck" style="display:none; margin-bottom:12px;"></div>
             <button id="multiProcessBtn" class="btn btn-success">✅ Proses Semua Baris</button>
@@ -1034,6 +1034,7 @@
         </div>
         <button id="invDiagRunBtn" class="btn btn-primary btn-sm">🔄 Jalankan Diagnostic</button>
         <button id="invDiagExportBtn" class="btn btn-secondary btn-sm">📊 Export CSV</button>
+        <button id="invDiagPpnBtn" class="btn btn-warning btn-sm">🧾 Rebuild Historical Cost incl PPN</button>
     </div>
 </div>
 
@@ -1085,7 +1086,7 @@
             <div class="form-group"><label id="editItemMidContentLabel">Isi Satuan Tengah</label><input type="number" id="editItemMidContent" min="0" step="any"></div>
         </div>
         <div class="grid-2">
-            <div class="form-group"><label>Harga Beli Terakhir (per kemasan)</label><input type="number" id="editItemPrice" min="0" step="any"></div>
+            <div class="form-group"><label>Harga Beli Terakhir (incl. PPN, per kemasan)</label><input type="number" id="editItemPrice" min="0" step="any"></div>
             <div class="form-group"><label>Stok Minimum (satuan dasar)</label><input type="number" id="editItemMinStock" min="0" step="any"></div>
         </div>
         <div class="form-group"><label>Barcode</label><input type="text" id="editItemBarcode"></div>
@@ -2273,7 +2274,7 @@
             // Seluruh stok masuk habis menutup batch minus -> tidak ada batch baru, tapi transaksinya
             // tetap dicatat apa adanya supaya histori & rekonsiliasi tidak kehilangan jejak.
             sortBatches(sku);
-            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price:hargaRata, total:totalIn, by:opts.by||deviceOperator, exp:opts.exp||null, source:opts.source||'beli', uploadId:opts.uploadId||null, ppn:Math.round((opts.ppn||0)*100)/100, supplier:supName, division:opts.divisionLabel||"", ref, uid:newUid(), effectiveTimestamp:opts.effectiveTimestamp||null, batchIds:dibuat.map(b=>b.id), createdBatches:dibuat.map(b=>({ id:b.id, qty:b.qty })), negSettlements, costLayers:layersAsli, gudang, batchId:opts.batchId||null, deficitVariance, costUnknown:!!opts.costUnknown, beforeStock:getStock(sku,gudang).qty-qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
+            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price:hargaRata, total:totalIn, by:opts.by||deviceOperator, exp:opts.exp||null, source:opts.source||'beli', uploadId:opts.uploadId||null, ppn:Math.round((opts.ppn||0)*100)/100, supplier:supName, division:opts.divisionLabel||"", ref, uid:newUid(), effectiveTimestamp:opts.effectiveTimestamp||null, costInclPpn:true, batchIds:dibuat.map(b=>b.id), createdBatches:dibuat.map(b=>({ id:b.id, qty:b.qty })), negSettlements, costLayers:layersAsli, gudang, batchId:opts.batchId||null, deficitVariance, costUnknown:!!opts.costUnknown, beforeStock:getStock(sku,gudang).qty-qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
             transactionLog.unshift(log);
             catatMutasiLokal('log', log.uid);
             persist();
@@ -2393,7 +2394,7 @@
             for (const L of tr.costLayers.slice().sort((a,b)=>(a.dateIn-b.dateIn))) {
                 const punya = Number(L.qtyTaken)||0;
                 const ambil = Math.min(punya, Math.max(sisa,0));
-                if (ambil > 0) { out.push({ qtyTaken:ambil, price:Number(L.price)||0, dateIn:L.dateIn }); sisa -= ambil; }
+                if (ambil > 0) { out.push({ batchId:L.batchId!=null?L.batchId:null, qtyTaken:ambil, price:Number(L.price)||0, dateIn:L.dateIn }); sisa -= ambil; }
                 // Sisa lapisan yang TIDAK jadi diterima — inilah yang benar-benar hilang di jalan.
                 if (punya - ambil > 1e-9) belum.push({ qtyTaken:punya-ambil, price:Number(L.price)||0, dateIn:L.dateIn });
             }
@@ -2803,6 +2804,9 @@
     function getMonthStart() { let d=dashRefDate(); d.setDate(1); d.setHours(0,0,0,0); return d; }
     function getMonthEnd() { let d=dashRefDate(); d.setMonth(d.getMonth()+1); d.setDate(0); d.setHours(23,59,59,999); return d; }
     function getPembelian() { let start=getMonthStart(), end=getMonthEnd(); let total=0; transactionLog.forEach(l=>{ if(l.type==='in' && (l.source||'beli')==='beli'){ let t=new Date(effTs(l)); if(t>=start && t<=end) total+=l.total; } }); return total; }
+    // log.total SUDAH include PPN. Jadi "pembelian sebelum PPN" = total - ppn, dan Grand Total
+    // adalah total itu sendiri. Menjumlah getPembelian()+getPembelianPPN() akan menghitung PPN dua kali.
+    function getPembelianNet() { let start=getMonthStart(), end=getMonthEnd(); let total=0; transactionLog.forEach(l=>{ if(l.type==='in' && (l.source||'beli')==='beli'){ let t=new Date(effTs(l)); if(t>=start && t<=end) total+=(l.total||0)-(l.ppn||0); } }); return total; }
     function getPembelianPPN() { let start=getMonthStart(), end=getMonthEnd(); let total=0; transactionLog.forEach(l=>{ if(l.type==='in' && (l.source||'beli')==='beli'){ let t=new Date(effTs(l)); if(t>=start && t<=end) total+=(l.ppn||0); } }); return total; }
     function getPembelianByVendor(){
         let start=getMonthStart(), end=getMonthEnd();
@@ -3908,13 +3912,14 @@
         }
         let _pr=document.getElementById('racikSub'); if(_pr) _pr.innerHTML=`Periode: <strong>${_pl}</strong>`;
         let _ps=document.getElementById('pembelianSub'); if(_ps) _ps.innerHTML=`Periode: <strong>${_pl}</strong>`;
-        document.getElementById('pembelianValue').innerHTML = `Rp ${getPembelian().toLocaleString()}`;
+        document.getElementById('pembelianValue').innerHTML = `Rp ${Math.round(getPembelianNet()).toLocaleString('id')}`;
         // Kartu "Kiriman Menunggu Konfirmasi": supaya tidak ada surat jalan yang kelupaan/nyangkut
         // tanpa disadari — inilah yang bikin muncul kebingungan "kok kirimannya nggak ada".
         renderPendingTransferKpi();
         initDashPeriode();
         document.getElementById('pembelianPpnValue').innerHTML = `Rp ${getPembelianPPN().toLocaleString()}`;
-        document.getElementById('pembelianGrandValue').innerHTML = `Rp ${(getPembelian()+getPembelianPPN()).toLocaleString()}`;
+        // Grand Total = SUM(log.total) apa adanya; PPN sudah ada di dalamnya.
+        document.getElementById('pembelianGrandValue').innerHTML = `Rp ${Math.round(getPembelian()).toLocaleString('id')}`;
         renderKpiBreakdown('pembelianBreakdown', getPembelianByVendor(), '(Tanpa Supplier)');
         let selDiv = document.getElementById('hppDivisiSelect').value;
         let hpp = getHpp(selDiv==='all'?null:parseInt(selDiv));
@@ -4943,6 +4948,119 @@
     });
     document.getElementById('invDiagClose')?.addEventListener('click', ()=>{ document.getElementById('invDiagModal').style.display='none'; });
     document.getElementById('invDiagRunBtn')?.addEventListener('click', ()=>{ runInventoryDiagnostics(); renderInvDiagResult(); notify('Diagnostic selesai', 'Hasil audit sudah diperbarui.', 'success'); });
+    // ===== KEBIJAKAN: HARGA POKOK INCLUDE PPN =====
+    // Pembelian lama dicatat dengan harga TANPA PPN (log.ppn terpisah). Fungsi di bawah menghitung
+    // versi incl PPN-nya pada SALINAN data — tidak menyentuh data hidup — supaya bisa ditinjau dulu.
+    // Yang diubah hanya HARGA; kuantitas dan urutan FIFO tidak disentuh sama sekali.
+    function logPembelianTanpaPpn(){
+        return transactionLog.filter(l=> l.type==='in' && (l.ppn>0) && !l.costInclPpn && l.total>0);
+    }
+    function hitungRebuildPpn(){
+        const L=JSON.parse(JSON.stringify(transactionLog));
+        const B=JSON.parse(JSON.stringify(stockBatches));
+        const T=JSON.parse(JSON.stringify(transfers));
+        const hargaBaru={}, rincian=[];
+        L.forEach(l=>{
+            if(!(l.type==='in' && (l.ppn>0) && !l.costInclPpn && l.total>0)) return;
+            const f=(l.total+l.ppn)/l.total;
+            const unitLama = l.qty>0 ? l.total/l.qty : 0;
+            rincian.push({ sku:l.sku, nama:l.itemName||l.sku, ts:effTs(l), qty:l.qty,
+                           netCost:l.total, ppn:l.ppn, costIncl:Math.round((l.total+l.ppn)*100)/100,
+                           selisih:l.ppn, unitLama, unitBaru:unitLama*f });
+            (l.costLayers||[]).forEach(x=>{ x.price=(x.price||0)*f; });
+            l.price=(l.price||0)*f;
+            l.total=Math.round((l.total+l.ppn)*100)/100;
+            l.costInclPpn=true;
+            const ids=(l.createdBatches&&l.createdBatches.length)?l.createdBatches.map(c=>c.id):(l.batchIds||[]);
+            ids.forEach((id,i)=>{ if(id==null) return;
+                const lay=(l.costLayers||[])[i];
+                hargaBaru[id]= lay ? lay.price : (l.qty>0 ? l.total/l.qty : 0);
+            });
+        });
+        // Perubahan harga merambat: batch -> pengeluaran yang memakainya -> kiriman -> batch di gudang
+        // tujuan -> pengeluaran di sana. Diulang sampai tidak ada lagi yang berubah.
+        for(let putaran=0; putaran<12; putaran++){
+            let berubah=false;
+            Object.keys(B).forEach(sku=>(B[sku]||[]).forEach(b=>{
+                if(b.id!=null && hargaBaru[b.id]!=null && Math.abs((b.price||0)-hargaBaru[b.id])>1e-9){ b.price=hargaBaru[b.id]; berubah=true; }
+            }));
+            L.forEach(l=>{
+                if(l.type!=='out' || !Array.isArray(l.deducted) || !l.deducted.length) return;
+                let ubah=false;
+                l.deducted.forEach(d=>{ if(d.batchId!=null && hargaBaru[d.batchId]!=null && Math.abs((d.price||0)-hargaBaru[d.batchId])>1e-9){ d.price=hargaBaru[d.batchId]; ubah=true; } });
+                if(!ubah) return;
+                berubah=true;
+                l.total=Math.round(l.deducted.reduce((a,d)=>a+d.qtyTaken*d.price,0)*100)/100;
+                l.price=l.qty>0 ? l.total/l.qty : 0;
+                l.costLayers=l.deducted.map(d=>({ batchId:d.batchId, qtyTaken:d.qtyTaken, price:d.price, dateIn:d.dateIn }));
+            });
+            T.forEach(t=>{
+                if(!Array.isArray(t.costLayers)) return;
+                let ubah=false;
+                t.costLayers.forEach(x=>{ if(x.batchId!=null && hargaBaru[x.batchId]!=null && Math.abs((x.price||0)-hargaBaru[x.batchId])>1e-9){ x.price=hargaBaru[x.batchId]; ubah=true; } });
+                if(!ubah) return;
+                berubah=true;
+                const q=t.costLayers.reduce((a,x)=>a+x.qtyTaken,0);
+                if(q>0) t.price=t.costLayers.reduce((a,x)=>a+x.qtyTaken*x.price,0)/q;
+            });
+            L.forEach(l=>{
+                if(l.type!=='in' || l.source!=='transfer' || !Array.isArray(l.costLayers)) return;
+                let ubah=false;
+                l.costLayers.forEach(x=>{ if(x.batchId!=null && hargaBaru[x.batchId]!=null && Math.abs((x.price||0)-hargaBaru[x.batchId])>1e-9){ x.price=hargaBaru[x.batchId]; ubah=true; } });
+                if(!ubah) return;
+                berubah=true;
+                l.total=Math.round(l.costLayers.reduce((a,x)=>a+x.qtyTaken*x.price,0)*100)/100;
+                l.price=l.qty>0 ? l.total/l.qty : 0;
+                const ids=(l.createdBatches&&l.createdBatches.length)?l.createdBatches.map(c=>c.id):(l.batchIds||[]);
+                ids.forEach((id,i)=>{ if(id!=null && l.costLayers[i]) hargaBaru[id]=l.costLayers[i].price; });
+            });
+            if(!berubah) break;
+        }
+        const nilaiSekarang=Object.values(stockBatches||{}).flat().reduce((a,b)=>a+b.qty*(b.price||0),0);
+        const nilaiSesudah=Object.values(B||{}).flat().reduce((a,b)=>a+b.qty*(b.price||0),0);
+        rincian.sort((a,b)=>b.selisih-a.selisih);
+        return { L, B, T, rincian, nilaiSekarang, nilaiSesudah };
+    }
+    window.rebuildHistoricalCostInclPPN = function(){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        const legacy=logPembelianTanpaPpn();
+        if(!legacy.length){ notify('Tidak ada yang perlu diubah','Semua pembelian yang punya PPN sudah memakai harga pokok incl PPN.','success'); return; }
+        const h=hitungRebuildPpn();
+        const rows=h.rincian.slice(0,25).map(r=>`<tr><td class="mono">${dvzEsc(r.sku)}</td><td>${dvzEsc(String(r.nama).slice(0,28))}</td>`
+            + `<td>${new Date(r.ts).toLocaleDateString('id')}</td>`
+            + `<td style="text-align:right;">${(Math.round(r.qty*100)/100).toLocaleString('id')}</td>`
+            + `<td style="text-align:right;">Rp ${Math.round(r.netCost).toLocaleString('id')}</td>`
+            + `<td style="text-align:right;">Rp ${Math.round(r.ppn).toLocaleString('id')}</td>`
+            + `<td style="text-align:right;">Rp ${Math.round(r.costIncl).toLocaleString('id')}</td>`
+            + `<td style="text-align:right; color:#b3261e;">Rp ${Math.round(r.selisih).toLocaleString('id')}</td></tr>`).join('');
+        Swal.fire({ title:'Rebuild Historical Cost incl PPN', width:1000, showCancelButton:true,
+            confirmButtonText:'Ya, bangun ulang', cancelButtonText:'Batal',
+            html:`<div style="text-align:left;font-size:14px">
+                <p style="margin:0 0 10px">${legacy.length} transaksi pembelian masih memakai harga pokok TANPA PPN.</p>
+                <table style="width:100%;margin-bottom:12px;font-variant-numeric:tabular-nums">
+                  <tr><td>Nilai persediaan sekarang</td><td style="text-align:right"><b>Rp ${Math.round(h.nilaiSekarang).toLocaleString('id')}</b></td></tr>
+                  <tr><td>Setelah rebuild (incl PPN)</td><td style="text-align:right"><b>Rp ${Math.round(h.nilaiSesudah).toLocaleString('id')}</b></td></tr>
+                  <tr><td style="color:#b3261e">Selisih</td><td style="text-align:right;color:#b3261e"><b>Rp ${Math.round(h.nilaiSesudah-h.nilaiSekarang).toLocaleString('id')}</b></td></tr>
+                </table>
+                <div style="font-size:.72rem;color:#666;margin-bottom:4px">${h.rincian.length} baris terdampak · 25 teratas</div>
+                <div style="max-height:280px;overflow:auto"><table style="width:100%;font-size:.76rem"><thead><tr>
+                  <th style="text-align:left">SKU</th><th style="text-align:left">Nama</th><th style="text-align:left">Tanggal</th>
+                  <th style="text-align:right">Qty</th><th style="text-align:right">Net Cost</th><th style="text-align:right">PPN</th>
+                  <th style="text-align:right">Cost incl PPN</th><th style="text-align:right">Selisih</th></tr></thead><tbody>${rows}</tbody></table></div>
+                <p style="margin:12px 0 0;font-size:.78rem">Hanya HARGA yang diubah. Kuantitas dan urutan FIFO tetap. Nilai lama dibackup dan perubahan dicatat di riwayat audit.</p>
+            </div>` }).then(res=>{
+            if(!res.isConfirmed) return;
+            try{ localStorage.setItem('backup_pre_ppn_'+Date.now(), JSON.stringify({ transactionLog, stockBatches, transfers })); }catch(e){}
+            transactionLog=h.L; stockBatches=h.B; transfers=h.T;
+            if(typeof auditLog!=='undefined') auditLog.unshift({ id:nextAuditId++, action:'edit', at:Date.now(),
+                by:currentUsername||deviceOperator||'', reason:'Rebuild historical cost incl PPN ('+h.rincian.length+' transaksi)',
+                sku:'-', itemName:'Harga pokok incl PPN', type:'policy',
+                before:{ nilaiPersediaan:Math.round(h.nilaiSekarang) }, after:{ nilaiPersediaan:Math.round(h.nilaiSesudah) } });
+            persist(); refreshUI(); runInventoryDiagnostics(); renderInvDiagResult();
+            notify('Selesai', h.rincian.length+' transaksi dibangun ulang. Nilai persediaan kini Rp '+Math.round(h.nilaiSesudah).toLocaleString('id')+'.', 'success');
+        });
+    };
+    document.getElementById('invDiagPpnBtn')?.addEventListener('click', ()=>rebuildHistoricalCostInclPPN());
     document.getElementById('invDiagExportBtn')?.addEventListener('click', ()=>{
         if(!invDiagLastResult) runInventoryDiagnostics();
         let r=invDiagLastResult;
@@ -6669,7 +6787,7 @@
         } else diskonRow.style.display='none';
         if(t.isIn && t.ppnPct>0){
             ppnRow.style.display='flex';
-            document.getElementById('multiPpnLabel').innerHTML=`PPN (${t.ppnPct}%, kredit pajak, terpisah dari HPP)`;
+            document.getElementById('multiPpnLabel').innerHTML=`PPN (${t.ppnPct}%, SUDAH termasuk harga pokok)`;
             document.getElementById('multiPpnAmt').innerHTML=`+ Rp ${Math.round(t.ppnAmt).toLocaleString('id')}`;
             document.getElementById('multiPpnNote').style.display='block';
         } else { ppnRow.style.display='none'; document.getElementById('multiPpnNote').style.display='none'; }
@@ -6768,14 +6886,14 @@
         }
         if(!rowsToProcess.length){ notify('Error','Tidak ada baris dengan jumlah valid','error'); return; }
         // Diskon diterapkan proporsional ke HPP (mengurangi biaya barang sesungguhnya).
-        // PPN TIDAK masuk HPP — itu kredit pajak (PPN Masukan), dicatat terpisah per baris untuk balancing, bukan nilai stok.
+        // PPN MASUK HPP sesuai kebijakan inventory; nilainya tetap dicatat per baris di log.ppn untuk audit.
         let totals = multiComputeTotals();
         let diskonFactor = (isIn && totals.subtotal>0) ? (totals.subtotal-totals.diskonAmt)/totals.subtotal : 1;
         let itemDiscCount = rowsToProcess.filter(rp=>rp.discPct>0).length;
         let confirmMsg = `Proses ${rowsToProcess.length} baris ${isIn?'barang masuk':'barang keluar'} di ${gudangName(gudang)}?`;
         if(isIn && itemDiscCount>0) confirmMsg += ` ${itemDiscCount} baris memakai diskon per barang.`;
         if(isIn && totals.diskonAmt>0) confirmMsg += ` Diskon invoice tambahan akan diterapkan proporsional ke HPP tiap barang.`;
-        if(isIn && totals.ppnAmt>0) confirmMsg += ` PPN Rp ${Math.round(totals.ppnAmt).toLocaleString('id')} dicatat terpisah sebagai kredit pajak (tidak menambah nilai stok).`;
+        if(isIn && totals.ppnAmt>0) confirmMsg += ` PPN Rp ${Math.round(totals.ppnAmt).toLocaleString('id')} SUDAH termasuk dalam harga pokok barang.`;
         if(!confirm(confirmMsg)) return;
         let batchId = 'B'+Date.now()+Math.random().toString(36).slice(2,6);
         // Tanggal transaksi/invoice custom (admin & akun stok) — jika diisi, dipakai sebagai tanggal transaksi
@@ -6783,16 +6901,27 @@
         let customTxTs = multiGetCustomTimestamp();
         let successes=[], failures=[];
         for(let rp of rowsToProcess){
-            let adjustedPriceBase = isIn ? rp.priceBase*diskonFactor : rp.priceBase;
-            // Bagi PPN proporsional ke tiap baris berdasarkan porsi subtotal-nya, murni utk pencatatan/balancing
+            // ===== HARGA POKOK BARANG WAJIB INCLUDE PPN =====
+            // netUnitCost = harga setelah diskon barang + porsi diskon invoice.
+            // ppnPerUnit  = PPN baris ini dibagi qty-nya.
+            // Keduanya dijumlah SEBELUM masuk processTransaction, sehingga batch.price, log.price,
+            // log.total, HPP FIFO berikutnya, dan cost yang dibawa transfer semuanya sudah incl PPN.
+            // log.ppn tetap disimpan untuk audit — JANGAN ditambahkan lagi ke HPP, sudah di dalam total.
             let rowSubtotal = rp.priceBase*rp.qty;
             let rowPpn = (isIn && totals.subtotal>0) ? totals.ppnAmt*(rowSubtotal/totals.subtotal) : 0;
+            let netUnitCost = isIn ? rp.priceBase*diskonFactor : rp.priceBase;
+            let ppnPerUnit = (isIn && rp.qty>0) ? rowPpn/rp.qty : 0;
+            let unitCostInclPPN = netUnitCost + ppnPerUnit;
+            let adjustedPriceBase = isIn ? unitCostInclPPN : rp.priceBase;
             let opts = isIn
                 ? { exp: rp.exp?new Date(rp.exp+'T23:59:59').getTime():null, by:deviceOperator, ppn:rowPpn, batchId, gudang, timestamp: customTxTs||undefined }
                 : { outType, desc: outType==='susut'?desc:'', area: outType==='pakai'?areaBakery:'', by:deviceOperator, batchId, gudang, timestamp: customTxTs||undefined };
             let res = await processTransaction(rp.item.sku, isIn?'in':'out', rp.qty, isIn?adjustedPriceBase:0, isIn?(supplierId||null):null, (!isIn&&outType==='pakai')?(divisionId||null):null, ref, false, opts);
             if(res.success){
-                if(isIn && rp.priceInput>0) rp.item.lastBuyPrice = rp.priceInput; // simpan harga mentah (per kemasan, SEBELUM diskon) utk autofill berikutnya
+                // Master menyimpan harga beli terakhir INCLUDE PPN per satuan pembelian, setelah
+                // diskon barang + diskon invoice + PPN. Autofill berikutnya jadi konsisten dan
+                // PPN tidak pernah dihitung dua kali saat input baru.
+                if(isIn && unitCostInclPPN>0) rp.item.lastBuyPrice = unitCostInclPPN * (rp.item.buyContent||1);
                 let newLog=transactionLog[0];
                 newLog.batchId = batchId;
                 if(!isIn && isPenjualanDivisi(newLog.division)){
