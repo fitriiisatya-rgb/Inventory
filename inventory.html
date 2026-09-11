@@ -808,7 +808,7 @@
 <!-- MASTER DATA (Barang, Supplier, Divisi) -->
 <div id="tab-master" class="tab-content">
     <div style="display:flex; gap:8px; margin-bottom:16px;"><button class="masterSub active" data-sub="barang">📦 Barang</button><button class="masterSub stok-hide" data-sub="supplier">🏢 Supplier</button><button class="masterSub stok-hide" data-sub="division">🏛️ Divisi</button><button class="masterSub admin-only stok-hide" data-sub="prodivisi">🏭 Divisi Produksi</button><button class="masterSub stok-hide" data-sub="hargajual">🏷️ Harga Jual</button><button class="masterSub admin-only stok-hide" data-sub="backup">💾 Backup</button></div>
-    <div id="sub-barang" class="masterContent"><div class="card"><div class="card-title"><div class="card-title-icon">📦</div> Master Barang + Konversi Satuan</div><div style="display:flex; gap:8px; margin-bottom:12px;"><input type="text" id="stockSearch" placeholder="Cari Kode/Nama/Barcode/Merk" style="flex:1"><select id="statusFilter" style="width:auto;"><option value="Aktif">Hanya Aktif</option><option value="all">Semua Status</option></select><button id="resetStock" class="btn btn-secondary btn-sm">Reset</button><button id="addItemBtn" class="btn btn-primary btn-sm admin-only">+ Barang Baru</button><label for="importStock" class="btn btn-secondary btn-sm admin-only stok-hide" style="cursor:pointer;">📂 Import CSV/Excel</label><input type="file" id="importStock" accept=".csv,.xlsx" style="display:none;"><button id="resetMasterBtn" class="btn btn-warning btn-sm admin-only stok-hide" title="Hapus SEMUA master barang">🗑️ Reset Master</button></div><div class="table-wrapper"><table id="stockTable"><thead><tr><th>Kode</th><th>Nama</th><th>Kategori</th><th>Merk</th><th>Kemasan</th><th>Harga Satuan (Rp)</th><th>Stok (Satuan Dasar)</th><th>Nilai (Rp)</th><th>Status</th><th>Aksi</th></tr></thead><tbody id="stockBody"></tbody></table></div></div></div>
+    <div id="sub-barang" class="masterContent"><div class="card"><div class="card-title"><div class="card-title-icon">📦</div> Master Barang + Konversi Satuan</div><div style="display:flex; gap:8px; margin-bottom:12px;"><input type="text" id="stockSearch" placeholder="Cari Kode/Nama/Barcode/Merk" style="flex:1"><select id="statusFilter" style="width:auto;"><option value="Aktif">Hanya Aktif</option><option value="all">Semua Status</option></select><button id="resetStock" class="btn btn-secondary btn-sm">Reset</button><button id="addItemBtn" class="btn btn-primary btn-sm admin-only">+ Barang Baru</button><label for="importStock" class="btn btn-secondary btn-sm admin-only stok-hide" style="cursor:pointer;">📂 Import CSV/Excel</label><input type="file" id="importStock" accept=".csv,.xlsx" style="display:none;"><button id="fixPpnMasterBtn" class="btn btn-warning btn-sm admin-only stok-hide" title="Perbaiki Harga Beli Terakhir agar include PPN">🧾 Perbaiki Harga incl PPN</button><button id="resetMasterBtn" class="btn btn-warning btn-sm admin-only stok-hide" title="Hapus SEMUA master barang">🗑️ Reset Master</button></div><div id="masterPpnBanner"></div><div class="table-wrapper"><table id="stockTable"><thead><tr><th>Kode</th><th>Nama</th><th>Kategori</th><th>Merk</th><th>Kemasan</th><th>Harga Beli Terakhir (incl. PPN)</th><th>Stok (Satuan Dasar)</th><th>Nilai (Rp)</th><th>Status</th><th>Aksi</th></tr></thead><tbody id="stockBody"></tbody></table></div></div></div>
     <div id="sub-supplier" class="masterContent" style="display:none;"><div class="card"><div class="card-title"><div class="card-title-icon">🏢</div> Supplier</div><div style="display:flex; gap:8px; margin-bottom:12px;" class="admin-only"><input type="text" id="newSupplier" placeholder="Nama supplier"><button id="addSupplier" class="btn btn-primary">Tambah</button></div><div class="table-wrapper"><table id="supplierTable"><thead><tr><th>ID</th><th>Nama</th><th>Aksi</th></tr></thead><tbody id="supplierBody"></tbody></table></div></div></div>
     <div id="sub-division" class="masterContent" style="display:none;"><div class="card"><div class="card-title"><div class="card-title-icon">🏛️</div> Divisi</div><div style="display:flex; gap:8px; margin-bottom:12px;" class="admin-only"><input type="text" id="newDivision" placeholder="Nama divisi"><button id="addDivision" class="btn btn-primary">Tambah</button></div><div class="table-wrapper"><table id="divisionTable"><thead><tr><th>ID</th><th>Nama</th><th>Aksi</th></tr></thead><tbody id="divisionBody"></tbody></table></div></div></div>
     <div id="sub-backup" class="masterContent admin-only" style="display:none;">
@@ -4103,12 +4103,25 @@
             if(!q) return true;
             return i.sku.toLowerCase().includes(q)||i.name.toLowerCase().includes(q)||(i.barcode||'').toLowerCase().includes(q)||(i.merk||'').toLowerCase().includes(q);
         });
+        // SKU yang harga belinya belum bisa dipastikan include PPN — ditandai di barisnya sendiri,
+        // supaya tidak ada angka yang tampil seolah sudah sesuai kebijakan padahal belum.
+        syncMasterLastBuyPriceFromPurchaseLogs();
+        const raguSet=new Set((window.__masterPpnRagu||[]).map(x=>x.sku));
+        let ban=document.getElementById('masterPpnBanner');
+        if(ban){
+            const n=raguSet.size;
+            ban.innerHTML = n ? `<div class="alert alert-warning" style="margin:0 0 12px; text-align:left;">
+                ⚠️ <strong>${n} barang</strong> harga belinya belum bisa dipastikan include PPN — pembelian terakhirnya diinput tanpa mengisi kolom PPN,
+                jadi sistem sengaja TIDAK menimpanya (menimpa akan menurunkan harga dari incl PPN ke harga bersih).
+                Klik <strong>🧾 Perbaiki Harga incl PPN</strong> di atas untuk membereskannya.</div>` : '';
+        }
         let shown=rows.slice(0,300);
         body.innerHTML=shown.map(function(i){
             let s=getStock(i.sku);
             let mtb=midToBase(i);
+            let ragu=raguSet.has(i.sku);
             let kemasan=(i.buyContent&&i.buyContent>1)?`${i.buyUnit}${mtb>0?` = ${i.midContent.toLocaleString('id')} ${i.midUnit}`:''} = ${i.buyContent.toLocaleString('id')} ${i.baseUnit}`:(i.baseUnit||'-');
-            return `<tr><td class="mono">${i.sku}</td><td>${i.name}</td><td>${i.category}</td><td>${i.merk||'-'}</td><td>${kemasan}</td><td style="white-space:nowrap;">Rp ${Math.round((i.lastBuyPrice||0)/(i.buyContent||1)).toLocaleString('id')}/${i.baseUnit}${(i.buyContent&&i.buyContent>1)?`<div style="font-size:0.68rem; color:var(--text3);">Rp ${Math.round(i.lastBuyPrice||0).toLocaleString('id')}/${i.buyUnit}</div>`:''}</td><td>${qtyLbl(i, s.qty)}</td><td>Rp ${Math.round(s.value).toLocaleString('id')}</td><td>${i.status==='Aktif'?'🟢':'⚪'} ${i.status}</td><td style="white-space:nowrap;"><button class="btn btn-sm btn-secondary editStock" data-sku="${i.sku}">✏️</button> <button class="btn btn-sm btn-secondary togStock" data-sku="${i.sku}">${i.status==='Aktif'?'Nonaktifkan':'Aktifkan'}</button> <button class="btn btn-sm btn-warning delStock admin-only stok-hide" data-sku="${i.sku}" title="Hapus barang">🗑️</button></td></tr>`;
+            return `<tr><td class="mono">${i.sku}</td><td>${i.name}</td><td>${i.category}</td><td>${i.merk||'-'}</td><td>${kemasan}</td><td style="white-space:nowrap;">Rp ${Math.round((i.lastBuyPrice||0)/(i.buyContent||1)).toLocaleString('id')}/${i.baseUnit}${(i.buyContent&&i.buyContent>1)?`<div style="font-size:0.68rem; color:var(--text3);">Rp ${Math.round(i.lastBuyPrice||0).toLocaleString('id')}/${i.buyUnit}</div>`:''}${ragu?` <span title="Pembelian terakhir diinput tanpa PPN — angka ini belum tentu include PPN" style="color:#f59e0b; font-size:0.7rem; white-space:nowrap;">⚠ blm incl PPN</span>`:''}</td><td>${qtyLbl(i, s.qty)}</td><td>Rp ${Math.round(s.value).toLocaleString('id')}</td><td>${i.status==='Aktif'?'🟢':'⚪'} ${i.status}</td><td style="white-space:nowrap;"><button class="btn btn-sm btn-secondary editStock" data-sku="${i.sku}">✏️</button> <button class="btn btn-sm btn-secondary togStock" data-sku="${i.sku}">${i.status==='Aktif'?'Nonaktifkan':'Aktifkan'}</button> <button class="btn btn-sm btn-warning delStock admin-only stok-hide" data-sku="${i.sku}" title="Hapus barang">🗑️</button></td></tr>`;
         }).join('') + (rows.length>300?`<tr><td colspan="10" style="text-align:center; color:var(--text3);">Menampilkan 300 dari ${rows.length} — persempit pencarian</td></tr>`:'');
         body.querySelectorAll('.editStock').forEach(function(btn){ btn.addEventListener('click',function(){ openEditItemModal(btn.dataset.sku); }); });
         body.querySelectorAll('.togStock').forEach(function(btn){ btn.addEventListener('click',function(){
@@ -5141,7 +5154,13 @@
                     sku:'-', itemName:'PPN pembelian lama', type:'policy',
                     before:{ ppnTercatat:0 }, after:{ ppnTercatat:Math.round(totPpn) } });
                 persist(); refreshUI();
-                notify('PPN Tercatat', kandidat.length+' transaksi diberi PPN '+pct+'%, '+n+' harga Master ikut disegarkan. Lanjutkan ke langkah ② untuk memasukkannya ke harga pokok.', 'success');
+                // Langsung tawarkan langkah 2 supaya tidak perlu mencari tombolnya lagi — tetap
+                // dengan preview & konfirmasi sendiri, jadi tidak ada yang berubah tanpa ditinjau.
+                Swal.fire({ title:'PPN tercatat', icon:'success', width:620,
+                    html:`<div style="text-align:left;font-size:14px">${kandidat.length} transaksi diberi PPN ${pct}% dan ${n} harga Master disegarkan.<br><br>`
+                        +`Harga pokok/batch <b>belum</b> berubah. Lanjutkan ke langkah ② sekarang?</div>`,
+                    showCancelButton:true, confirmButtonText:'Lanjut ke ② Rebuild Harga Pokok', cancelButtonText:'Nanti saja'
+                }).then(r3=>{ if(r3.isConfirmed) rebuildHistoricalCostInclPPN(); });
             });
         });
     };
@@ -5187,6 +5206,7 @@
         });
     };
     document.getElementById('invDiagPpnTandaiBtn')?.addEventListener('click', ()=>catatPpnPembelianLama());
+    document.getElementById('fixPpnMasterBtn')?.addEventListener('click', ()=>catatPpnPembelianLama());
     document.getElementById('invDiagPpnBtn')?.addEventListener('click', ()=>rebuildHistoricalCostInclPPN());
     document.getElementById('invDiagExportBtn')?.addEventListener('click', ()=>{
         if(!invDiagLastResult) runInventoryDiagnostics();
