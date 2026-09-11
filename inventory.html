@@ -1035,7 +1035,8 @@
         </div>
         <button id="invDiagRunBtn" class="btn btn-primary btn-sm">🔄 Jalankan Diagnostic</button>
         <button id="invDiagExportBtn" class="btn btn-secondary btn-sm">📊 Export CSV</button>
-        <button id="invDiagPpnBtn" class="btn btn-warning btn-sm">🧾 Rebuild Historical Cost incl PPN</button>
+        <button id="invDiagPpnTandaiBtn" class="btn btn-warning btn-sm">① Catat PPN pada Pembelian Lama</button>
+        <button id="invDiagPpnBtn" class="btn btn-warning btn-sm">② Rebuild Historical Cost incl PPN</button>
     </div>
 </div>
 
@@ -3031,17 +3032,26 @@
             const k=l.sku, a=terbaru[k];
             if(!a || effTs(l)>effTs(a) || (effTs(l)===effTs(a) && (l.timestamp||0)>(a.timestamp||0))) terbaru[k]=l;
         });
-        let diubah=0;
+        let diubah=0, ragu=[];
         Object.keys(terbaru).forEach(sku=>{
             const it=itemBySku(sku); if(!it) return;
             const l=terbaru[sku];
-            // Log baru sudah include PPN di dalam total; log lama belum, jadi PPN-nya ditambahkan.
+            // Hanya menulis master kalau benar-benar bisa menghasilkan angka INCLUDE PPN:
+            //  - log baru (costInclPpn) -> total sudah gross;
+            //  - log lama yang PPN-nya tercatat -> gross = total + ppn.
+            // Log lama yang PPN-nya TIDAK tercatat tidak bisa dipastikan net atau gross. Menulisnya
+            // akan MENURUNKAN master dari nilai incl PPN ke nilai net tanpa ada yang sadar, jadi
+            // master dibiarkan apa adanya dan SKU-nya dilaporkan untuk diperiksa.
+            const bisa = (l.costInclPpn===true) || ((l.ppn||0) > 0);
+            if(!bisa){ ragu.push({ sku, nama:it.name, masterSekarang:it.lastBuyPrice||0,
+                                   netPerKemasan:(l.total/l.qty)*(it.buyContent||1), ts:effTs(l), ref:l.ref||'' }); return; }
             const grossTotal = (l.costInclPpn===true) ? l.total : (l.total + (l.ppn||0));
             const baru = (grossTotal / l.qty) * (it.buyContent||1);
             if(!(baru>0)) return;
             if(Math.abs((it.lastBuyPrice||0)-baru)>0.005){ it.lastBuyPrice=baru; diubah++; }
         });
         // SKU tanpa log pembelian sengaja TIDAK disentuh — nilai master lama dipertahankan, tidak ditebak.
+        window.__masterPpnRagu = ragu;
         return diubah;
     }
     function akhirHari(ts){ let d=new Date(ts); d.setHours(23,59,59,999); return d.getTime(); }
@@ -4878,6 +4888,17 @@
                    + `TIDAK diperbaiki otomatis — merekonstruksi lapisannya berarti menebak dan memalsukan riwayat.` });
         }
 
+        // Pembelian lama yang PPN-nya tidak tercatat: Master tidak bisa dipastikan incl PPN.
+        try{
+            const tanpaPpn = transactionLog.filter(l=> l.type==='in' && (l.source||'beli')==='beli'
+                && l.costInclPpn!==true && !((l.ppn||0)>0) && l.qty>0 && l.total>0);
+            if(tanpaPpn.length){
+                orphans.push({ jenis:'PPN Tidak Tercatat', ref:tanpaPpn.length+' pembelian lama', gudang:DEFAULT_GUDANG,
+                    ket:'Harga pokoknya tidak bisa dipastikan sudah include PPN atau belum, jadi Harga Beli Terakhir di Master sengaja TIDAK ditimpa. '
+                       +'Pakai tombol ① Catat PPN pada Pembelian Lama, lalu ② Rebuild Historical Cost incl PPN.' });
+            }
+        }catch(e){}
+
         // Pending transfer (in-transit)
         let pending = transfers.filter(t=>t.status==='pending').map(t=>({
             ...t, waitMs: Date.now()-t.sentAt
@@ -5058,6 +5079,72 @@
         rincian.sort((a,b)=>b.selisih-a.selisih);
         return { L, B, T, rincian, nilaiSekarang, nilaiSesudah };
     }
+    // ===== LANGKAH 1: CATAT PPN PADA PEMBELIAN LAMA =====
+    // Banyak pembelian lama diinput hanya dengan harga bersih; kolom PPN dibiarkan kosong sehingga
+    // log.ppn = 0. Dari data itu sistem TIDAK bisa tahu apakah harganya sudah gross atau belum,
+    // jadi ia tidak boleh menebak. Di sini admin menyatakan sendiri tarif PPN yang berlaku, melihat
+    // dampaknya dulu, baru dikonfirmasi. Yang ditulis HANYA kolom ppn; harga pokoknya dibereskan
+    // pada langkah 2 supaya tiap perubahan tetap bisa ditinjau terpisah.
+    function pembelianTanpaPpnTercatat(){
+        return transactionLog.filter(l=> l.type==='in' && (l.source||'beli')==='beli'
+            && l.costInclPpn!==true && !((l.ppn||0)>0) && l.qty>0 && l.total>0);
+    }
+    window.catatPpnPembelianLama = function(){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        const kandidat=pembelianTanpaPpnTercatat();
+        if(!kandidat.length){ notify('Tidak ada','Semua pembelian sudah punya PPN tercatat atau sudah incl PPN.','success'); return; }
+        Swal.fire({ title:'Catat PPN pada Pembelian Lama', input:'number',
+            inputLabel:'Tarif PPN yang berlaku untuk '+kandidat.length+' transaksi ini (%)',
+            inputValue:'', inputPlaceholder:'mis. 11',
+            html:'<div style="text-align:left;font-size:13px">Sistem tidak menebak tarifnya. Isi sesuai faktur Anda. '
+                +'Yang ditulis hanya kolom PPN — harga pokok dibereskan di langkah ②.</div>',
+            showCancelButton:true, confirmButtonText:'Lihat dampaknya', cancelButtonText:'Batal'
+        }).then(r1=>{
+            const pct=parseFloat(r1.value);
+            if(!r1.isConfirmed || !(pct>0)) return;
+            const baris=kandidat.map(l=>{
+                const it=itemBySku(l.sku)||{};
+                const ppn=l.total*pct/100;
+                const grossPerKemasan=((l.total+ppn)/l.qty)*(it.buyContent||1);
+                return { sku:l.sku, nama:it.name||l.sku, ts:effTs(l), ref:l.ref||'',
+                         net:l.total, ppn, masterSekarang:it.lastBuyPrice||0, masterBaru:grossPerKemasan };
+            }).sort((a,b)=>b.ppn-a.ppn);
+            const totNet=baris.reduce((a,x)=>a+x.net,0), totPpn=baris.reduce((a,x)=>a+x.ppn,0);
+            const rows=baris.slice(0,25).map(x=>`<tr><td class="mono">${dvzEsc(x.sku)}</td><td>${dvzEsc(String(x.nama).slice(0,26))}</td>`
+                +`<td>${new Date(x.ts).toLocaleDateString('id')}</td>`
+                +`<td style="text-align:right;">Rp ${Math.round(x.net).toLocaleString('id')}</td>`
+                +`<td style="text-align:right;">Rp ${Math.round(x.ppn).toLocaleString('id')}</td>`
+                +`<td style="text-align:right;">Rp ${Math.round(x.masterSekarang).toLocaleString('id')}</td>`
+                +`<td style="text-align:right; color:var(--green);">Rp ${Math.round(x.masterBaru).toLocaleString('id')}</td></tr>`).join('');
+            Swal.fire({ title:'Dampak PPN '+pct+'%', width:1000, showCancelButton:true,
+                confirmButtonText:'Ya, catat PPN-nya', cancelButtonText:'Batal',
+                html:`<div style="text-align:left;font-size:14px">
+                  <table style="width:100%;margin-bottom:12px;font-variant-numeric:tabular-nums">
+                    <tr><td>${kandidat.length} transaksi · total net</td><td style="text-align:right"><b>Rp ${Math.round(totNet).toLocaleString('id')}</b></td></tr>
+                    <tr><td>PPN yang akan dicatat</td><td style="text-align:right"><b>Rp ${Math.round(totPpn).toLocaleString('id')}</b></td></tr>
+                  </table>
+                  <div style="font-size:.72rem;color:#666;margin-bottom:4px">Dampak ke Master (25 teratas)</div>
+                  <div style="max-height:280px;overflow:auto"><table style="width:100%;font-size:.76rem"><thead><tr>
+                    <th style="text-align:left">SKU</th><th style="text-align:left">Nama</th><th style="text-align:left">Tanggal</th>
+                    <th style="text-align:right">Net</th><th style="text-align:right">PPN</th>
+                    <th style="text-align:right">Master kini</th><th style="text-align:right">Master jadi</th></tr></thead><tbody>${rows}</tbody></table></div>
+                  <p style="margin:12px 0 0;font-size:.78rem">Hanya kolom PPN yang ditulis. Harga pokok/batch belum berubah — jalankan langkah ② setelah ini.</p>
+                </div>` }).then(r2=>{
+                if(!r2.isConfirmed) return;
+                try{ localStorage.setItem('backup_ppn_tandai_'+Date.now(), JSON.stringify({
+                    logs:kandidat.map(l=>({uid:l.uid, id:l.id, ppn:l.ppn||0})),
+                    master:masterSKU.map(i=>({sku:i.sku, lastBuyPrice:i.lastBuyPrice})) })); }catch(e){}
+                kandidat.forEach(l=>{ l.ppn=Math.round(l.total*pct/100*100)/100; l.ppnDitandaiManual=pct; });
+                const n=syncMasterLastBuyPriceFromPurchaseLogs();
+                if(typeof auditLog!=='undefined') auditLog.unshift({ id:nextAuditId++, action:'edit', at:Date.now(),
+                    by:currentUsername||deviceOperator||'', reason:'Catat PPN '+pct+'% pada '+kandidat.length+' pembelian lama',
+                    sku:'-', itemName:'PPN pembelian lama', type:'policy',
+                    before:{ ppnTercatat:0 }, after:{ ppnTercatat:Math.round(totPpn) } });
+                persist(); refreshUI();
+                notify('PPN Tercatat', kandidat.length+' transaksi diberi PPN '+pct+'%, '+n+' harga Master ikut disegarkan. Lanjutkan ke langkah ② untuk memasukkannya ke harga pokok.', 'success');
+            });
+        });
+    };
     window.rebuildHistoricalCostInclPPN = function(){
         if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
         const legacy=logPembelianTanpaPpn();
@@ -5099,6 +5186,7 @@
             notify('Selesai', h.rincian.length+' transaksi dibangun ulang, '+nMaster+' harga Master disinkronkan. Nilai persediaan kini Rp '+Math.round(h.nilaiSesudah).toLocaleString('id')+'.', 'success');
         });
     };
+    document.getElementById('invDiagPpnTandaiBtn')?.addEventListener('click', ()=>catatPpnPembelianLama());
     document.getElementById('invDiagPpnBtn')?.addEventListener('click', ()=>rebuildHistoricalCostInclPPN());
     document.getElementById('invDiagExportBtn')?.addEventListener('click', ()=>{
         if(!invDiagLastResult) runInventoryDiagnostics();
