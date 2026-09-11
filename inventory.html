@@ -218,7 +218,7 @@
     </div>
     <div class="grid-4">
         <div class="kpi-card" id="stokAwalCard"><div class="kpi-label">📆 Stok Awal Periode</div><div class="kpi-value" id="stokAwalValue">Rp0</div><div class="kpi-sub" id="stokAwalSub">Perkiraan</div>
-            <div id="stokAwalPerArea" style="margin-top:8px; font-size:0.76rem;"></div>
+            <div style="margin-top:6px; font-size:0.72rem; color:var(--accent);">Klik untuk rincian</div>
             <div id="stokAwalPeringatan" style="margin-top:6px; font-size:0.72rem;"></div></div>
         <div class="kpi-card"><div class="kpi-label">🛒 Pembelian (Masuk) — sebelum PPN</div>
             <div style="display:flex; align-items:baseline; gap:18px; flex-wrap:wrap;">
@@ -964,6 +964,7 @@
             <div class="kpi-card" style="padding:12px;"><div class="kpi-label">Total Tampil (setelah filter)</div><div class="kpi-value" id="saShown" style="font-size:1rem;">Rp0</div></div>
             <div class="kpi-card" style="padding:12px;"><div class="kpi-label">Baris</div><div class="kpi-value" id="saCount" style="font-size:1.1rem;">0</div></div>
         </div>
+        <div id="saKartuGudang" class="grid-3" style="margin-bottom:12px;"></div>
         <div id="saLegacy"></div>
         <div id="saTop20" style="margin-bottom:12px;"></div>
         <div class="table-wrapper" style="max-height:50vh; overflow-y:auto;"><table><thead><tr><th>Area/Gudang</th><th>SKU</th><th>Nama Barang</th><th>Qty Stok Awal</th><th>Satuan</th><th>Harga/Cost</th><th>Nilai Stok Awal</th></tr></thead><tbody id="saBody"></tbody></table></div>
@@ -1865,7 +1866,9 @@
             try{ produksiDivisi = JSON.parse(localStorage.getItem('produksi_divisi')||'[]'); }catch(e){}
             let cl = JSON.parse(localStorage.getItem("closings") || "{}");
             closings = cl.closings || []; lockBefore = cl.lockBefore || 0; editLocked = cl.editLocked || false; categoryMarkup = cl.categoryMarkup || {}; auditLog = cl.auditLog || []; nextAuditId = cl.nextAuditId || 1;
-            migrateDummyMaster(); normalizeItems(); persistLocal();
+            migrateDummyMaster(); normalizeItems();
+        try{ syncMasterLastBuyPriceFromPurchaseLogs(); }catch(e){}  // master selalu turunan log pembelian
+        persistLocal();
         } else {
             // DATA AWAL: master bahan baku standar perusahaan (dari CSV)
             masterSKU = JSON.parse(JSON.stringify(SEED_MASTER));
@@ -2274,7 +2277,7 @@
             // Seluruh stok masuk habis menutup batch minus -> tidak ada batch baru, tapi transaksinya
             // tetap dicatat apa adanya supaya histori & rekonsiliasi tidak kehilangan jejak.
             sortBatches(sku);
-            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price:hargaRata, total:totalIn, by:opts.by||deviceOperator, exp:opts.exp||null, source:opts.source||'beli', uploadId:opts.uploadId||null, ppn:Math.round((opts.ppn||0)*100)/100, supplier:supName, division:opts.divisionLabel||"", ref, uid:newUid(), effectiveTimestamp:opts.effectiveTimestamp||null, costInclPpn:true, batchIds:dibuat.map(b=>b.id), createdBatches:dibuat.map(b=>({ id:b.id, qty:b.qty })), negSettlements, costLayers:layersAsli, gudang, batchId:opts.batchId||null, deficitVariance, costUnknown:!!opts.costUnknown, beforeStock:getStock(sku,gudang).qty-qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
+            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price:hargaRata, total:totalIn, by:opts.by||deviceOperator, exp:opts.exp||null, source:opts.source||'beli', uploadId:opts.uploadId||null, ppn:Math.round((opts.ppn||0)*100)/100, supplier:supName, division:opts.divisionLabel||"", ref, uid:newUid(), effectiveTimestamp:opts.effectiveTimestamp||null, soAdjustOf:opts.soAdjustOf||null, costInclPpn:true, batchIds:dibuat.map(b=>b.id), createdBatches:dibuat.map(b=>({ id:b.id, qty:b.qty })), negSettlements, costLayers:layersAsli, gudang, batchId:opts.batchId||null, deficitVariance, costUnknown:!!opts.costUnknown, beforeStock:getStock(sku,gudang).qty-qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
             transactionLog.unshift(log);
             catatMutasiLokal('log', log.uid);
             persist();
@@ -2331,7 +2334,7 @@
             // menerima harga asli tiap lapisan, bukan satu harga rata-rata yang menghapus jejak FIFO.
             const costLayers = deducted.map(d=>({ batchId:d.batchId, qtyTaken:d.qtyTaken, price:d.price, dateIn:d.dateIn }));
             const divName = divisions.find(d=>d.id==divisionId)?.name||"";
-            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price:avgPrice, total:totalCost, by:opts.by||deviceOperator, outType:opts.outType||'pakai', desc:opts.desc||'', area:opts.area||'', supplier:"", division:divName, uid:newUid(), effectiveTimestamp:opts.effectiveTimestamp||null, ref, batchIds:deducted.map(d=>d.batchId), deducted, costLayers, gudang, transferTo:opts.transferTo||null, resetAdjustment:!!opts.resetAdjustment, batchId:opts.batchId||null, beforeStock:getStock(sku,gudang).qty+qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
+            const log = { id:nextLogId++, timestamp:txTs, sku, type, qty, price:avgPrice, total:totalCost, by:opts.by||deviceOperator, outType:opts.outType||'pakai', desc:opts.desc||'', area:opts.area||'', supplier:"", division:divName, uid:newUid(), effectiveTimestamp:opts.effectiveTimestamp||null, soAdjustOf:opts.soAdjustOf||null, ref, batchIds:deducted.map(d=>d.batchId), deducted, costLayers, gudang, transferTo:opts.transferTo||null, resetAdjustment:!!opts.resetAdjustment, batchId:opts.batchId||null, beforeStock:getStock(sku,gudang).qty+qty, afterStock:getStock(sku,gudang).qty, canUndoUntil:Date.now()+15*60*1000, itemName:item.name };
             transactionLog.unshift(log);
             catatMutasiLokal('log', log.uid);
             persist();
@@ -3016,6 +3019,31 @@
         if(pilih) return { price: pilih.price, source: (pilih===diGudang?'Masuk '+gudangName(gudang):'Masuk '+gudangName(pilih.gudang||DEFAULT_GUDANG))+' · '+(pilih.ref||'-'), at: effTs(pilih) };
         return { price: 0, source: 'Tidak ada rujukan harga s/d tanggal ini', at: null, costUnknown: true };
     }
+    // ===== MASTER HARGA BELI TERAKHIR = PEMBELIAN SUPPLIER TERAKHIR, INCLUDE PPN =====
+    // Master tidak boleh ditulis dari nilai lepas: ia harus selalu turunan dari log pembelian.
+    // Hanya pembelian supplier yang dipakai — transfer, stok awal, opname, dan hasil produksi bukan
+    // harga beli. PPN tidak pernah diasumsikan 11%: dipakai log.ppn yang benar-benar tercatat.
+    function syncMasterLastBuyPriceFromPurchaseLogs(){
+        const terbaru={};
+        transactionLog.forEach(l=>{
+            if(l.type!=='in' || (l.source||'beli')!=='beli') return;
+            if(!(l.qty>0) || !(l.total>0)) return;
+            const k=l.sku, a=terbaru[k];
+            if(!a || effTs(l)>effTs(a) || (effTs(l)===effTs(a) && (l.timestamp||0)>(a.timestamp||0))) terbaru[k]=l;
+        });
+        let diubah=0;
+        Object.keys(terbaru).forEach(sku=>{
+            const it=itemBySku(sku); if(!it) return;
+            const l=terbaru[sku];
+            // Log baru sudah include PPN di dalam total; log lama belum, jadi PPN-nya ditambahkan.
+            const grossTotal = (l.costInclPpn===true) ? l.total : (l.total + (l.ppn||0));
+            const baru = (grossTotal / l.qty) * (it.buyContent||1);
+            if(!(baru>0)) return;
+            if(Math.abs((it.lastBuyPrice||0)-baru)>0.005){ it.lastBuyPrice=baru; diubah++; }
+        });
+        // SKU tanpa log pembelian sengaja TIDAK disentuh — nilai master lama dipertahankan, tidak ditebak.
+        return diubah;
+    }
     function akhirHari(ts){ let d=new Date(ts); d.setHours(23,59,59,999); return d.getTime(); }
 
     // Hanya baris yang benar-benar menggerakkan stok yang boleh direplay.
@@ -3118,7 +3146,10 @@
     // Titik jangkar saldo terverifikasi, urut waktu. Stok Opname dijangkarkan pada TANGGAL HITUNG
     // FISIK — bukan awal bulan berikutnya. Itu yang membuat mutasi 30-31 Agustus setelah SO 29
     // Agustus tetap ikut terhitung ke Opening September.
-    const SNAP_ENGINE='fifo-asof-v1';
+    // Dinaikkan karena mesin saldo berubah: harga historis as-of, adjustment SO tidak direplay
+    // dua kali, dan harga pokok include PPN. Snapshot v1 otomatis jadi legacy dan tidak dipakai
+    // sebagai jangkar — datanya tetap disimpan untuk dibandingkan.
+    const SNAP_ENGINE='fifo-asof-v2-so-clean-ppn';
     function closingPerluValidasi(){
         return (closings||[]).filter(c=>c && c.snapshotRows && c.snapshotEngineVersion!==SNAP_ENGINE);
     }
@@ -3193,10 +3224,25 @@
                        label:'Snapshot Tutup Buku '+(c.period||new Date(c.cutoff).toLocaleDateString('id')) }); });
         (soHistory||[]).forEach(h=>{
             const cd=h.countDate||h.date; if(!cd || !(h.allCounts&&h.allCounts.length)) return;
-            out.push({ ts:akhirHari(cd), jenis:'so', gudang:h.gudang||DEFAULT_GUDANG, counts:h.allCounts,
+            out.push({ ts:akhirHari(cd), jenis:'so', gudang:h.gudang||DEFAULT_GUDANG, counts:h.allCounts, countDate:cd,
                        label:'Hasil Stok Opname '+gudangName(h.gudang||DEFAULT_GUDANG)+' '+new Date(cd).toLocaleDateString('id') });
         });
         return out.sort((a,b)=> (a.ts-b.ts) || ((a.jenis==='so'?1:0)-(b.jenis==='so'?1:0)));
+    }
+    // Adjustment yang DIBUAT OLEH sesi SO itu sendiri. Hitungan fisik SO sudah menjadi kebenaran
+    // kuantitas, jadi kalau adjustment-nya ikut direplay sebelum saldo diset, selisihnya terhitung
+    // dua kali. Lognya TETAP ada di database — hanya dilewati saat menyusun ulang saldo historis.
+    // Adjustment admin biasa (30/31 Agustus) tidak kena aturan ini.
+    function adalahAdjustmentSO(l, anchor){
+        if(!anchor || anchor.jenis!=='so') return false;
+        if((l.gudang||DEFAULT_GUDANG)!==anchor.gudang) return false;
+        if(l.soAdjustOf!=null) return l.soAdjustOf===anchor.countDate;
+        // Data lama tanpa penanda: dikenali dari sumber/ref bawaan soFinish, dan harus jatuh pada
+        // hari hitung fisik yang sama.
+        const bawaanSO = (l.source==='opname') || String(l.ref||'').indexOf('Adjustment SO')===0;
+        if(!bawaanSO) return false;
+        const t=effTs(l);
+        return t>anchor.ts-86400000 && t<=anchor.ts;
     }
     let __anchorCache=null, __anchorVer=-1;
     function bangunAnchor(){
@@ -3205,7 +3251,11 @@
         const logs=mutasiStok().slice().sort((a,b)=> (effTs(a)-effTs(b)) || ((a.id||0)-(b.id||0)));
         let peta={}, li=0, hasil=[];
         for(const a of anchors){
-            while(li<logs.length && effTs(logs[li])<=a.ts){ terapkanLogKeLapisan(peta, logs[li]); li++; }
+            while(li<logs.length && effTs(logs[li])<=a.ts){
+                const l=logs[li];
+                if(!adalahAdjustmentSO(l, a)) terapkanLogKeLapisan(peta, l);
+                li++;
+            }
             if(a.jenis==='so') setSaldoDariSO(peta, a); else gantiDariRows(peta, a);
             hasil.push({ ts:a.ts, jenis:a.jenis, label:a.label, state:salinPeta(peta) });
         }
@@ -3888,19 +3938,6 @@
         // Subtext periode utk KPI yang mengikuti dashPeriode (bukan realtime)
         let _pl = getMonthStart().toLocaleDateString('id',{month:'long', year:'numeric'});
         let _sa=document.getElementById('stokAwalSub'); if(_sa) _sa.innerHTML=`Periode: <strong>${_pl}</strong>`;
-        // Subtotal per lokasi langsung di kartu — dari snapshot opening yang sama dengan KPI,
-        // BUKAN dari stok berjalan. Jumlah seluruh baris di bawah wajib sama dengan angka KPI.
-        let _ar=document.getElementById('stokAwalPerArea');
-        if(_ar){
-            const brs=stokAwalRows(getMonthStart().getTime());
-            const per={}; brs.forEach(r=>{ per[r.gudang]=(per[r.gudang]||0)+r.nilai; });
-            const urut=Object.keys(per).sort((a,b)=>per[b]-per[a]);
-            const tot=urut.reduce((a,g)=>a+per[g],0);
-            _ar.innerHTML = urut.length
-                ? urut.map(g=>`<div style="display:flex; justify-content:space-between; gap:10px; padding:1px 0;"><span style="color:var(--text3);">${dvzEsc(gudangName(g))}</span><span class="mono" style="font-variant-numeric:tabular-nums;">Rp ${Math.round(per[g]).toLocaleString('id')}</span></div>`).join('')
-                  + `<div style="display:flex; justify-content:space-between; gap:10px; padding:3px 0 0; margin-top:3px; border-top:1px solid var(--border); font-weight:700;"><span>TOTAL</span><span class="mono" style="font-variant-numeric:tabular-nums;">Rp ${Math.round(tot).toLocaleString('id')}</span></div>`
-                : `<div style="color:var(--text3);">Belum ada saldo awal untuk periode ini.</div>`;
-        }
         // Peringatan snapshot Tutup Buku lama yang belum divalidasi — angkanya tidak dipakai
         // sebagai jangkar, dan selisihnya bisa diperiksa di modal rincian.
         let _pk=document.getElementById('stokAwalPeringatan');
@@ -5052,12 +5089,14 @@
             if(!res.isConfirmed) return;
             try{ localStorage.setItem('backup_pre_ppn_'+Date.now(), JSON.stringify({ transactionLog, stockBatches, transfers })); }catch(e){}
             transactionLog=h.L; stockBatches=h.B; transfers=h.T;
+            try{ localStorage.setItem('backup_master_price_'+Date.now(), JSON.stringify(masterSKU.map(i=>({sku:i.sku, lastBuyPrice:i.lastBuyPrice})))); }catch(e){}
+            const nMaster = syncMasterLastBuyPriceFromPurchaseLogs();
             if(typeof auditLog!=='undefined') auditLog.unshift({ id:nextAuditId++, action:'edit', at:Date.now(),
                 by:currentUsername||deviceOperator||'', reason:'Rebuild historical cost incl PPN ('+h.rincian.length+' transaksi)',
                 sku:'-', itemName:'Harga pokok incl PPN', type:'policy',
                 before:{ nilaiPersediaan:Math.round(h.nilaiSekarang) }, after:{ nilaiPersediaan:Math.round(h.nilaiSesudah) } });
             persist(); refreshUI(); runInventoryDiagnostics(); renderInvDiagResult();
-            notify('Selesai', h.rincian.length+' transaksi dibangun ulang. Nilai persediaan kini Rp '+Math.round(h.nilaiSesudah).toLocaleString('id')+'.', 'success');
+            notify('Selesai', h.rincian.length+' transaksi dibangun ulang, '+nMaster+' harga Master disinkronkan. Nilai persediaan kini Rp '+Math.round(h.nilaiSesudah).toLocaleString('id')+'.', 'success');
         });
     };
     document.getElementById('invDiagPpnBtn')?.addEventListener('click', ()=>rebuildHistoricalCostInclPPN());
@@ -5440,16 +5479,18 @@
             let row={sku:i.sku,name:i.name,sys,phys:fq,diff:fq-sys,p1:c.p1?c.p1.qty:null,p2:c.p2?c.p2.qty:null,note:c.note||''};
             allCounts.push(row);
             if(fq!==sys){
-                let st=getStock(i.sku,gudang); let avgPrice=st.qty>0?st.value/st.qty:bestKnownUnitCost(i,gudang);
+                // Harga adjustment SO WAJIB harga yang berlaku pada tanggal hitung fisik — bukan
+                // harga hari ini, supaya SO 29 Agustus tidak dinilai dengan harga September.
+                let avgPrice=bestKnownUnitCostAt(i.sku,gudang,countDate).price;
                 let reason=(c.note||'(tanpa keterangan)')+' [SO '+new Date().toLocaleDateString('id')+']';
                 let res = row.diff>0
                     // Kelebihan fisik: masuk sebagai penyesuaian, ditandai sumber 'opname' supaya TIDAK
                     // ikut terhitung sebagai Pembelian di dashboard/laporan (bukan barang dibeli, temuan opname).
-                    ? await processTransaction(i.sku,'in',row.diff,avgPrice>0?avgPrice:0.01,null,null,'Adjustment SO: '+reason,true,{gudang, source:'opname', effectiveTimestamp:countDate, costUnknown:!(avgPrice>0)})
+                    ? await processTransaction(i.sku,'in',row.diff,avgPrice>0?avgPrice:0.01,null,null,'Adjustment SO: '+reason,true,{gudang, source:'opname', effectiveTimestamp:countDate, soAdjustOf:countDate, costUnknown:!(avgPrice>0)})
                     // Kekurangan fisik: dicatat sebagai KELUAR jenis Pemakaian (bukan Susut) — supaya
                     // masuk ke angka pemakaian/HPP yang jadi tanggung jawab gudang tsb, bukan langsung
                     // dihapuskan sebagai kerugian. Sebabnya tetap tercatat di keterangan untuk penelusuran.
-                    : await processTransaction(i.sku,'out',Math.abs(row.diff),0,null,null,'Adjustment SO: '+reason,true,{gudang, outType:'pakai', desc:'Selisih opname: '+reason, effectiveTimestamp:countDate});
+                    : await processTransaction(i.sku,'out',Math.abs(row.diff),0,null,null,'Adjustment SO: '+reason,true,{gudang, outType:'pakai', desc:'Selisih opname: '+reason, effectiveTimestamp:countDate, soAdjustOf:countDate});
                 if(res.success){ totalDiff+=row.diff*avgPrice; diffs.push(row); }
             }
         }
@@ -6918,10 +6959,8 @@
                 : { outType, desc: outType==='susut'?desc:'', area: outType==='pakai'?areaBakery:'', by:deviceOperator, batchId, gudang, timestamp: customTxTs||undefined };
             let res = await processTransaction(rp.item.sku, isIn?'in':'out', rp.qty, isIn?adjustedPriceBase:0, isIn?(supplierId||null):null, (!isIn&&outType==='pakai')?(divisionId||null):null, ref, false, opts);
             if(res.success){
-                // Master menyimpan harga beli terakhir INCLUDE PPN per satuan pembelian, setelah
-                // diskon barang + diskon invoice + PPN. Autofill berikutnya jadi konsisten dan
-                // PPN tidak pernah dihitung dua kali saat input baru.
-                if(isIn && unitCostInclPPN>0) rp.item.lastBuyPrice = unitCostInclPPN * (rp.item.buyContent||1);
+                // Master tidak ditulis langsung di sini; disinkronkan dari log pembelian setelah
+                // seluruh baris diproses, supaya satu-satunya sumbernya tetap log.
                 let newLog=transactionLog[0];
                 newLog.batchId = batchId;
                 if(!isIn && isPenjualanDivisi(newLog.division)){
@@ -6935,6 +6974,8 @@
             } else failures.push({item:rp.item, msg:res.msg});
         }
         if(successes.length) persist();
+        // Master harga beli terakhir disinkronkan dari log pembelian setelah semua baris diproses.
+        if(isIn){ try{ syncMasterLastBuyPriceFromPurchaseLogs(); persist(); }catch(e){} }
         let resultArea=document.getElementById('multiResultArea');
         let html=`<div class="alert ${failures.length?'alert-warning':'alert-success'}">${successes.length} baris berhasil${failures.length?`, ${failures.length} gagal`:''}.</div>`;
         if(failures.length) html+=`<div style="font-size:0.8rem; color:#ef4444; margin-top:6px;">${failures.map(f=>`❌ ${f.item.name}: ${f.msg}`).join('<br>')}</div>`;
@@ -8031,7 +8072,26 @@
             return true;
         });
     }
+    // Empat kartu di paling atas modal: SCM, Cibadak, Karang Tengah, lalu Grand Total.
+    // Satu sumber dengan KPI dan tabel di bawahnya: stokAwalRows(getMonthStart()).
+    // Lokasi di luar ketiga gudang itu (mis. saldo divisi) tetap ditampilkan sebagai "Lokasi Lain"
+    // supaya nilainya tidak hilang dari penjumlahan.
+    function renderSaKartuGudang(){
+        const el=document.getElementById('saKartuGudang'); if(!el) return;
+        const per={}; (saRowsCache||[]).forEach(r=>{ per[r.gudang]=(per[r.gudang]||0)+r.nilai; });
+        const utama=['scm','cibadak','karangtengah'];
+        const lain=Object.keys(per).filter(g=>!utama.includes(g));
+        const nilaiLain=lain.reduce((a,g)=>a+per[g],0);
+        const grand=Object.values(per).reduce((a,v)=>a+v,0);
+        const kartu=(label,nilai,hijau)=>`<div class="kpi-card" style="padding:12px;">
+            <div class="kpi-label">${dvzEsc(label)}</div>
+            <div class="kpi-value" style="font-size:1rem;${hijau?' color:var(--green);':''}">Rp ${Math.round(nilai).toLocaleString('id')}</div></div>`;
+        el.innerHTML = utama.map(g=>kartu(gudangName(g), per[g]||0)).join('')
+            + (lain.length ? kartu('Lokasi Lain ('+lain.length+')', nilaiLain) : '')
+            + kartu('GRAND TOTAL', grand, true);
+    }
     function renderStokAwalDetail(){
+        renderSaKartuGudang();
         renderSaTop20();
         renderSaLegacy();
         let rows=saFiltered();
