@@ -1052,6 +1052,7 @@
         </div>
         <button id="invDiagRunBtn" class="btn btn-primary btn-sm">🔄 Jalankan Diagnostic</button>
         <button id="invDiagExportBtn" class="btn btn-secondary btn-sm">📊 Export CSV</button>
+        <button id="invDiagAngkaRusakBtn" class="btn btn-warning btn-sm">🔢 Perbaiki Angka Kehilangan Koma</button>
         <button id="invDiagPpnTandaiBtn" class="btn btn-warning btn-sm">① Catat PPN pada Pembelian Lama</button>
         <button id="invDiagPpnBtn" class="btn btn-warning btn-sm">② Rebuild Historical Cost incl PPN</button>
     </div>
@@ -5402,6 +5403,216 @@
         return transactionLog.filter(l=> l.type==='in' && (l.source||'beli')==='beli'
             && l.costInclPpn!==true && !((l.ppn||0)>0) && l.qty>0 && l.total>0);
     }
+    // ===================== ANGKA RUSAK: PEMISAH DESIMAL HILANG =====================
+    // Gejala: sebuah angka tersimpan sebagai kelipatan 10^n dari nilai sebenarnya, karena koma
+    // desimalnya hilang di file yang diimpor ("6,566666666666666" -> 6566666666666666).
+    // Akibatnya satu baris Stok Awal bisa menggelembungkan nilai persediaan jadi kuintiliun.
+    //
+    // Yang dilakukan di sini HANYA memperbaiki angka pada BARIS LOG-nya. Tidak menghapus baris,
+    // tidak menyentuh batch, tidak menulis ulang transaksi hilir. Dua alasan:
+    //   - menghapus sebelah saja berbahaya: baris masuk yang rusak sering sudah punya pasangan
+    //     koreksi keluar yang sama rusaknya, dan membuang salah satunya bikin stok minus raksasa;
+    //   - membagi keduanya dengan faktor yang sama membuat pasangan itu tetap seimbang.
+    const RUSAK_AMBANG = 1e7;   // di atas ini, sebuah qty/harga satuan tidak wajar untuk bahan bakery
+    function bahanPembandingRusak(){
+        const q={}, p={};
+        (transactionLog||[]).forEach(l=>{
+            if(!l || l.nonStockMovement || l.inventoryMovement===false) return;
+            const qty=Math.abs(l.qty||0), hrg=Math.abs(l.price||0);
+            if(qty>RUSAK_AMBANG || hrg>RUSAK_AMBANG) return;      // yang rusak tidak boleh jadi pembanding
+            if(qty>0){ const k=l.sku+'|'+(l.gudang||DEFAULT_GUDANG); (q[k]=q[k]||[]).push(qty); }
+            if(hrg>0 && l.type==='in'){ (p[l.sku]=p[l.sku]||[]).push(hrg); }
+        });
+        return {q,p};
+    }
+    function nilaiTengah(a){ if(!a||!a.length) return 0; const s=a.slice().sort((x,y)=>x-y); const m=s.length>>1;
+        return s.length%2 ? s[m] : (s[m-1]+s[m])/2; }
+    // Usul koreksi untuk SATU log. Hanya diusulkan kalau perbandingannya benar-benar pangkat 10
+    // dan hasil bagi-nya mendarat di kisaran wajar — kalau tidak, dibiarkan untuk diperiksa manusia.
+    function usulKoreksiRusak(l, ref){
+        const out=[];
+        [['qty', Math.abs(l.qty||0)], ['price', Math.abs(l.price||0)]].forEach(([kolom, nilai])=>{
+            if(!(nilai>RUSAK_AMBANG)) return;
+            let dasar, sumber;
+            if(kolom==='qty'){
+                dasar=nilaiTengah(ref.q[l.sku+'|'+(l.gudang||DEFAULT_GUDANG)]||[]);
+                sumber='jumlah wajar SKU ini di gudang yang sama';
+            } else {
+                dasar=nilaiTengah(ref.p[l.sku]||[]); sumber='harga masuk wajar SKU ini';
+                if(!(dasar>0)){ const it=itemBySku(l.sku)||{};
+                    dasar=(it.lastBuyPrice>0 && it.buyContent>0) ? it.lastBuyPrice/it.buyContent : 0;
+                    sumber='harga Master per satuan dasar'; }
+            }
+            if(!(dasar>0)){ out.push({kolom, sebelum:nilai, faktor:null, sesudah:null, sumber:'tidak ada pembanding'}); return; }
+            const e=Math.round(Math.log10(nilai/dasar));
+            if(!(e>=2)){ out.push({kolom, sebelum:nilai, faktor:null, sesudah:null, sumber:'selisihnya bukan pangkat 10'}); return; }
+            const faktor=Math.pow(10,e), baru=nilai/faktor;
+            if(!(baru>=dasar*0.2 && baru<=dasar*5)){ out.push({kolom, sebelum:nilai, faktor, sesudah:null, sumber:'hasil bagi masih tidak wajar'}); return; }
+            out.push({kolom, sebelum:nilai, faktor, sesudah:baru, sumber});
+        });
+        return out;
+    }
+    function deteksiAngkaRusak(){
+        const ref=bahanPembandingRusak(), hasil=[];
+        (transactionLog||[]).forEach(l=>{
+            if(!l) return;
+            if(!(Math.abs(l.qty||0)>RUSAK_AMBANG || Math.abs(l.price||0)>RUSAK_AMBANG)) return;
+            const k=usulKoreksiRusak(l, ref);
+            hasil.push({ log:l, koreksi:k, bisa:k.length>0 && k.every(x=>x.sesudah!=null) });
+        });
+        hasil.sort((a,b)=>Math.abs(b.log.total||0)-Math.abs(a.log.total||0));
+        return hasil;
+    }
+    // Menghitung dampak koreksi TANPA menyimpan apa pun: angka diubah sementara, diukur, lalu
+    // dikembalikan persis seperti semula.
+    function dampakPerbaikanRusak(daftar){
+        const bulan=(typeof saPeriodeStr==='function') ? saPeriodeStr() : null;
+        const ts=getMonthStart().getTime();
+        const nilaiAwal=getInventorySnapshotAt(ts);
+        const simpan=daftar.map(d=>({ l:d.log, qty:d.log.qty, price:d.log.price, total:d.log.total,
+            costLayers:d.log.costLayers?JSON.parse(JSON.stringify(d.log.costLayers)):null,
+            deducted:d.log.deducted?JSON.parse(JSON.stringify(d.log.deducted)):null,
+            lossLayers:d.log.lossLayers?JSON.parse(JSON.stringify(d.log.lossLayers)):null,
+            createdBatches:d.log.createdBatches?JSON.parse(JSON.stringify(d.log.createdBatches)):null }));
+        daftar.forEach(d=>{ if(d.bisa) terapkanSatuKoreksi(d); });
+        dataVersi++;
+        const nilaiAkhir=getInventorySnapshotAt(ts);
+        const per=s=>{ const o={}; (s.rows||[]).forEach(r=>{ o[r.gudang]=(o[r.gudang]||0)+r.value; }); return o; };
+        const hasil={ sebelum:nilaiAwal.totalValue, sesudah:nilaiAkhir.totalValue,
+                      perSebelum:per(nilaiAwal), perSesudah:per(nilaiAkhir), periode:bulan };
+        // Pemulihan harus LENGKAP. Kalau satu field saja tertinggal, "pratinjau" diam-diam
+        // meninggalkan perubahan pada data — persis hal yang alat ini janjikan tidak terjadi.
+        simpan.forEach(s=>{ s.l.qty=s.qty; s.l.price=s.price; s.l.total=s.total;
+            if(s.costLayers) s.l.costLayers=s.costLayers;
+            if(s.deducted) s.l.deducted=s.deducted;
+            if(s.lossLayers) s.l.lossLayers=s.lossLayers;
+            if(s.createdBatches) s.l.createdBatches=s.createdBatches;
+            delete s.l.angkaDiperbaiki; });
+        dataVersi++;
+        return hasil;
+    }
+    // Membagi angka pada satu log dengan faktornya. Lapisan biaya & rincian batch ikut dibagi
+    // supaya jumlahnya tetap cocok dengan qty/total barisnya.
+    function terapkanSatuKoreksi(d){
+        const l=d.log;
+        if(l.angkaDiperbaiki) return false;   // sudah dibagi sekali; membagi lagi merusak lebih parah
+        const fq=(d.koreksi.find(x=>x.kolom==='qty')||{}).faktor || 1;
+        const fp=(d.koreksi.find(x=>x.kolom==='price')||{}).faktor || 1;
+        if(fq===1 && fp===1) return false;
+        if(fq!==1) l.qty=l.qty/fq;
+        if(fp!==1) l.price=l.price/fp;
+        l.total=Math.round((l.qty*l.price)*100)/100;
+        ['costLayers','deducted','lossLayers'].forEach(nama=>{
+            if(!Array.isArray(l[nama])) return;
+            l[nama].forEach(L=>{ if(L.qtyTaken!=null && fq!==1) L.qtyTaken=L.qtyTaken/fq;
+                                 if(L.qty!=null && fq!==1) L.qty=L.qty/fq;
+                                 if(L.price!=null && fp!==1) L.price=L.price/fp; });
+        });
+        if(Array.isArray(l.createdBatches) && fq!==1) l.createdBatches.forEach(c=>{ if(c.qty!=null) c.qty=c.qty/fq; });
+        l.angkaDiperbaiki={ pada:Date.now(), faktorQty:fq, faktorHarga:fp };
+        return true;
+    }
+    // Alat Admin: tampilkan dulu seluruh dampaknya, baru minta persetujuan.
+    window.perbaikiAngkaRusak = function(){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        const daftar=deteksiAngkaRusak();
+        if(!daftar.length){ notify('Bersih','Tidak ada angka yang tampak kehilangan pemisah desimal.','success'); return; }
+        const bisa=daftar.filter(d=>d.bisa), ragu=daftar.filter(d=>!d.bisa);
+        const rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+        const dmp=dampakPerbaikanRusak(daftar);
+        const gud=[...new Set([...Object.keys(dmp.perSebelum), ...Object.keys(dmp.perSesudah)])];
+        const barisGudang=gud.map(g=>`<tr><td>${dvzEsc(gudangName(g))}</td>
+            <td style="text-align:right">${rp(dmp.perSebelum[g]||0)}</td>
+            <td style="text-align:right;color:#1a7f37">${rp(dmp.perSesudah[g]||0)}</td></tr>`).join('');
+        const baris=bisa.slice(0,30).map(d=>{
+            const l=d.log, it=itemBySku(l.sku)||{};
+            const k=d.koreksi.map(x=>`${x.kolom==='qty'?'jumlah':'harga'}: ${Number(x.sebelum).toLocaleString('id',{maximumFractionDigits:2})}`
+                +` → <b style="color:#1a7f37">${Number(x.sesudah).toLocaleString('id',{maximumFractionDigits:2})}</b>`
+                +` <span style="color:#888">(÷${Number(x.faktor).toLocaleString('id')})</span>`).join('<br>');
+            return `<tr><td>${new Date(effTs(l)).toLocaleDateString('id')}</td><td class="mono">${dvzEsc(l.sku)}</td>
+                <td>${dvzEsc(String(it.name||l.itemName||'').slice(0,24))}</td><td>${dvzEsc(gudangName(l.gudang||DEFAULT_GUDANG))}</td>
+                <td style="font-size:.74rem">${k}</td>
+                <td style="text-align:right">${rp(l.total||0)}</td></tr>`;
+        }).join('');
+        Swal.fire({ title:'Perbaiki Angka yang Kehilangan Koma Desimal', width:1040,
+            showCancelButton:true, confirmButtonText:'Ya, perbaiki '+bisa.length+' baris', cancelButtonText:'Batal',
+            html:`<div style="text-align:left;font-size:14px">
+              <p style="margin:0 0 10px">Ditemukan <b>${daftar.length}</b> baris dengan angka yang tampak kehilangan pemisah desimal
+              (nilainya pas kelipatan 10, 100, 1.000… dari angka wajarnya).
+              <b>${bisa.length}</b> bisa dipastikan koreksinya, <b>${ragu.length}</b> tidak.</p>
+              <div style="font-size:.72rem;color:#666;margin-bottom:3px">DAMPAK KE STOK AWAL ${dvzEsc(dmp.periode||'')}</div>
+              <table style="width:100%;margin-bottom:12px;font-variant-numeric:tabular-nums;font-size:.82rem">
+                <thead><tr><th style="text-align:left">Area</th><th style="text-align:right">SEBELUM</th><th style="text-align:right">SESUDAH</th></tr></thead>
+                <tbody>${barisGudang}
+                  <tr style="font-weight:800;border-top:2px solid #ccc"><td>TOTAL</td>
+                    <td style="text-align:right">${rp(dmp.sebelum)}</td>
+                    <td style="text-align:right;color:#1a7f37">${rp(dmp.sesudah)}</td></tr>
+                </tbody></table>
+              <div style="font-size:.72rem;color:#666;margin-bottom:3px">RINCIAN (${Math.min(30,bisa.length)} dari ${bisa.length})</div>
+              <div style="max-height:260px;overflow:auto"><table style="width:100%;font-size:.76rem"><thead><tr>
+                <th style="text-align:left">Tanggal</th><th style="text-align:left">SKU</th><th style="text-align:left">Nama</th>
+                <th style="text-align:left">Gudang</th><th style="text-align:left">Koreksi</th><th style="text-align:right">Nilai lama</th>
+              </tr></thead><tbody>${baris}</tbody></table></div>
+              ${ragu.length?`<p style="margin:10px 0 0;font-size:.78rem;color:#b3261e"><b>${ragu.length} baris TIDAK diperbaiki</b> karena koreksinya tidak bisa dipastikan: ${dvzEsc([...new Set(ragu.map(r=>(r.koreksi[0]||{}).sumber||'-'))].join('; '))}. Periksa manual.</p>`:''}
+              <p style="margin:10px 0 0;font-size:.78rem">Yang diubah hanya <b>angka pada baris log</b>. Baris tidak dihapus, batch & stok realtime tidak disentuh.
+              Baris masuk dan pasangan koreksi keluarnya dibagi dengan faktor yang sama, jadi tetap seimbang. Bisa dibatalkan lewat tombol Urungkan.</p>
+            </div>` }).then(r=>{
+            if(!r.isConfirmed) return;
+            const pin=prompt('PIN Admin untuk menerapkan perbaikan:');
+            if(pin===null) return;
+            if(pin!==soPins.admin){ notify('PIN Salah','','error'); return; }
+            const cadangan=bisa.map(d=>({ uid:d.log.uid, id:d.log.id, qty:d.log.qty, price:d.log.price, total:d.log.total,
+                costLayers:d.log.costLayers?JSON.parse(JSON.stringify(d.log.costLayers)):null,
+                deducted:d.log.deducted?JSON.parse(JSON.stringify(d.log.deducted)):null,
+                createdBatches:d.log.createdBatches?JSON.parse(JSON.stringify(d.log.createdBatches)):null }));
+            const kunci='backup_angka_rusak_'+Date.now();
+            try{ localStorage.setItem(kunci, JSON.stringify(cadangan)); }catch(e){}
+            let n=0; bisa.forEach(d=>{ if(terapkanSatuKoreksi(d)) n++; });
+            dataVersi++;
+            window.__cadanganAngkaRusak=cadangan;
+            if(typeof auditLog!=='undefined') auditLog.unshift({ id:nextAuditId++, action:'edit', at:Date.now(),
+                by:currentUsername||deviceOperator||'', reason:`Perbaiki pemisah desimal pada ${n} baris log. Stok Awal ${rp(dmp.sebelum)} -> ${rp(dmp.sesudah)}. Cadangan: ${kunci}`,
+                sku:'-', itemName:'Koreksi angka rusak', type:'policy',
+                before:{ stokAwal:Math.round(dmp.sebelum), baris:n }, after:{ stokAwal:Math.round(dmp.sesudah) },
+                snapshot:{ cadanganKey:kunci, cadangan } });
+            persist(); refreshUI();
+            Swal.fire({ title:'Selesai', icon:'success', width:640,
+                html:`<div style="text-align:left;font-size:14px">${n} baris diperbaiki.<br><br>
+                  Stok Awal ${dvzEsc(dmp.periode||'')}: <b>${rp(dmp.sebelum)}</b> → <b style="color:#1a7f37">${rp(dmp.sesudah)}</b><br><br>
+                  Cadangan nilai lama tersimpan (<span class="mono" style="font-size:.75rem">${dvzEsc(kunci)}</span>) dan tercatat di Riwayat Edit.
+                  Untuk mengembalikan, jalankan <span class="mono">urungkanPerbaikanAngka()</span> di Console.</div>` });
+        });
+    };
+    // Pengembalian: memakai cadangan di memori, atau cadangan terakhir di penyimpanan browser.
+    window.urungkanPerbaikanAngka = function(kunci){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        let cad=window.__cadanganAngkaRusak;
+        if(!cad){
+            try{
+                const semua=Object.keys(localStorage).filter(k=>k.startsWith('backup_angka_rusak_')).sort();
+                if(kunci) cad=JSON.parse(localStorage.getItem(kunci)||'null');
+                else if(semua.length) cad=JSON.parse(localStorage.getItem(semua[semua.length-1])||'null');
+            }catch(e){}
+        }
+        if(!cad || !cad.length){ notify('Tidak ada cadangan','Tidak ditemukan cadangan perbaikan angka.','warning'); return; }
+        if(!confirm('Kembalikan '+cad.length+' baris ke nilai SEBELUM diperbaiki?')) return;
+        let n=0;
+        cad.forEach(c=>{
+            // Data lama tidak punya uid (bernilai null). Mencari dengan uid null akan cocok ke log
+            // pertama mana pun yang uid-nya kosong — salah baris. Jadi uid hanya dipakai kalau ada.
+            const l = (c.uid ? transactionLog.find(x=>x.uid && x.uid===c.uid) : null)
+                   || (c.id!=null ? transactionLog.find(x=>x.id===c.id) : null);
+            if(!l) return;
+            l.qty=c.qty; l.price=c.price; l.total=c.total;
+            if(c.costLayers) l.costLayers=c.costLayers;
+            if(c.deducted) l.deducted=c.deducted;
+            if(c.createdBatches) l.createdBatches=c.createdBatches;
+            delete l.angkaDiperbaiki; n++;
+        });
+        dataVersi++; persist(); refreshUI();
+        notify('Dikembalikan', n+' baris kembali ke nilai semula.', 'success');
+    };
+
     window.catatPpnPembelianLama = function(){
         if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
         const kandidat=pembelianTanpaPpnTercatat();
@@ -5505,6 +5716,7 @@
             notify('Selesai', h.rincian.length+' transaksi dibangun ulang, '+nMaster+' harga Master disinkronkan. Nilai persediaan kini Rp '+Math.round(h.nilaiSesudah).toLocaleString('id')+'.', 'success');
         });
     };
+    document.getElementById('invDiagAngkaRusakBtn')?.addEventListener('click', ()=>perbaikiAngkaRusak());
     document.getElementById('invDiagPpnTandaiBtn')?.addEventListener('click', ()=>catatPpnPembelianLama());
     document.getElementById('fixPpnMasterBtn')?.addEventListener('click', ()=>catatPpnPembelianLama());
     document.getElementById('invDiagPpnBtn')?.addEventListener('click', ()=>rebuildHistoricalCostInclPPN());
@@ -9162,6 +9374,16 @@
                 if(!isTransitItemAllowed(item, gudang)){ fails.push(`${kode} - ${item.name}: bukan barang area ${gudangName(gudang)}`); continue; }
                 let qty=numId(p[iJumlah]);
                 if(!(qty>0)){ skipped++; continue; }
+                // PENJAGA JUMLAH. Penjaga harga di bawah tidak pernah menangkap kasus ini: barisnya
+                // berharga wajar, yang gila justru jumlahnya. Penyebabnya file sumber yang kehilangan
+                // pemisah desimal — "6,566666666666666" masuk sebagai 6.566.666.666.666.666 — dan satu
+                // baris seperti itu cukup untuk meledakkan nilai persediaan jadi kuintiliun.
+                if(qty > 1e7){
+                    fails.push(`${kode}: jumlah ${qty.toLocaleString('id')} ${item.baseUnit} tidak masuk akal. `
+                        + `Kemungkinan besar pemisah desimal hilang saat file dibuat (mis. "6,57" terbaca 657000000000000). `
+                        + `Periksa kolom Jumlah di file Anda, simpan ulang sebagai CSV/XLSX dengan angka yang benar.`);
+                    continue;
+                }
                 let price = iHarga>-1 ? numId(p[iHarga]) : 0;
                 if(!(price>0)) price = (item.lastBuyPrice>0 ? item.lastBuyPrice/(item.buyContent||1) : 1);
                 // Kolom Harga harus per SATUAN DASAR. Kesalahan paling sering: mengisi harga per kemasan
