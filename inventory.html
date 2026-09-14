@@ -1041,7 +1041,12 @@
             <div class="table-wrapper" style="max-height:220px; overflow-y:auto;"><table><thead><tr><th>Lama Menunggu</th><th>Dari</th><th>Ke</th><th>Barang</th><th>Qty</th><th style="text-align:right;">Nilai</th></tr></thead><tbody id="invDiagTransferBody"></tbody></table></div>
         </div>
         <div style="margin-bottom:14px;">
-            <div style="font-weight:700; margin-bottom:4px;">5️⃣ Selisih Nilai per SKU × Gudang</div>
+            <div style="font-weight:700; margin-bottom:4px;">5️⃣ Audit Transfer (OUT gudang asal vs IN gudang tujuan)</div>
+            <div style="font-size:0.75rem; color:var(--text3); margin-bottom:6px;">Satu kiriman wajib punya tanggal transaksi dan nilai yang sama di kedua sisi. Tanggal konfirmasi boleh berbeda — itu hanya jejak audit, bukan tanggal transaksi.</div>
+            <div class="table-wrapper" style="max-height:280px; overflow-y:auto;"><table><thead><tr><th>Ref</th><th>SKU</th><th>Qty OUT</th><th>Qty IN</th><th>Tgl OUT</th><th>Tgl IN</th><th>Tgl Konfirmasi</th><th style="text-align:right;">Nilai OUT</th><th style="text-align:right;">Nilai IN</th><th style="text-align:right;">Selisih</th><th>Catatan</th></tr></thead><tbody id="invDiagXferAuditBody"></tbody></table></div>
+        </div>
+        <div style="margin-bottom:14px;">
+            <div style="font-weight:700; margin-bottom:4px;">6️⃣ Selisih Nilai per SKU × Gudang</div>
             <div style="font-size:0.75rem; color:var(--text3); margin-bottom:6px;">Nilai stok sistem (batch aktif × harga) dibandingkan hasil replay nilai dari transactionLog (Σ nilai masuk − Σ nilai keluar). Dipakai untuk melacak SKU mana yang menyumbang selisih Dashboard vs Laporan Stok.</div>
             <div class="table-wrapper" style="max-height:260px; overflow-y:auto;"><table><thead><tr><th>SKU</th><th>Nama</th><th>Gudang</th><th style="text-align:right;">Nilai Batch</th><th style="text-align:right;">Nilai dari Log</th><th style="text-align:right;">Selisih</th></tr></thead><tbody id="invDiagValueBody"></tbody></table></div>
         </div>
@@ -1667,6 +1672,11 @@
             srv.status=t.status; srv.confirmedAt=t.confirmedAt; srv.confirmedBy=t.confirmedBy;
             srv.confirmedQty=t.confirmedQty; srv.note=t.note; srv.confirmUid=t.confirmUid; srv.cancelUid=t.cancelUid;
             srv.lossUid=t.lossUid; srv.lossLogId=t.lossLogId;
+            if(t.effectiveTimestamp) srv.effectiveTimestamp=t.effectiveTimestamp;
+            if(t.outTotal!=null) srv.outTotal=t.outTotal;
+            if(t.costLayers) srv.costLayers=t.costLayers;
+            if(t.price!=null) srv.price=t.price;
+            if(t.costIncomplete){ srv.costIncomplete=true; srv.costIncompleteReason=t.costIncompleteReason||''; }
             n++;
         });
         // Seluruh id log yang ditunjuk transfer WAJIB ditautkan ulang lewat uid: id numerik berubah
@@ -2364,6 +2374,51 @@
     }
 
     // ========================= TRANSFER ANTAR GUDANG =========================
+    // ===== SATU KIRIMAN = SATU TANGGAL, SATU HARGA =====
+    // Dua cacat yang diperbaiki di blok ini:
+    //   (a) TANGGAL. Dulu log IN gudang tujuan dibuat tanpa effectiveTimestamp, jadi tanggal
+    //       transaksinya = waktu tombol "Terima" ditekan. Kiriman 27 Agustus yang baru
+    //       dikonfirmasi 30 Agustus tercatat keluar di Agustus dan masuk di... 30 Agustus.
+    //       Kedua sisi jadi beda periode dan nilai persediaan antar gudang tidak pernah cocok.
+    //   (b) HARGA. Dulu harga penerimaan boleh jatuh ke bestKnownUnitCost() kalau tr.price kosong —
+    //       itu harga TEBAKAN dari gudang lain/master, bukan harga barang yang benar-benar dikirim.
+    //       Barang yang sama bisa keluar Rp10.000 dan masuk Rp12.000; selisihnya muncul entah di mana.
+    // Aturan sekarang: tanggal efektif & harga penerimaan SELALU diturunkan dari log OUT gudang asal.
+    function cariOutLogTransfer(tr){
+        if(!tr) return null;
+        if(tr.outUid){ const l=transactionLog.find(x=>x.uid===tr.outUid); if(l) return l; }
+        if(tr.outLogId!=null){ const l=transactionLog.find(x=>x.id===tr.outLogId); if(l) return l; }
+        return null;
+    }
+    // Tanggal transaksi kiriman. Dibaca, tidak pernah ditulis balik ke data lama secara otomatis.
+    function transferEffTs(tr, outLog){
+        if(!tr) return 0;
+        if(tr.effectiveTimestamp) return tr.effectiveTimestamp;
+        const ol = (outLog!==undefined) ? outLog : cariOutLogTransfer(tr);
+        if(ol) return effTs(ol);
+        return tr.sentAt||0;
+    }
+    function jumlahLayer(arr){ return (arr||[]).reduce((a,L)=>a+(Number(L.qtyTaken!=null?L.qtyTaken:L.qty)||0),0); }
+    function salinLayer(arr){ return (arr||[]).map(L=>({ batchId:(L.batchId!=null?L.batchId:null), qtyTaken:Number(L.qtyTaken!=null?L.qtyTaken:L.qty)||0, price:Number(L.price)||0, dateIn:L.dateIn!=null?L.dateIn:null })); }
+    // Lapisan biaya yang SAH untuk sebuah kiriman, menurut urutan wewenang:
+    //   1. costLayers pada log OUT gudang asal          <- sumber kebenaran
+    //   2. deducted pada log OUT (transfer lama)        <- isinya sama, beda nama field
+    //   3. costLayers yang tersimpan di transfer        <- hanya kalau log OUT sudah diarsip/hilang
+    //   4. tidak ada                                    -> TRANSFER COST INCOMPLETE, bukan tebakan
+    function layerSumberTransfer(tr, outLog){
+        const cocok = arr => arr && arr.length && Math.abs(jumlahLayer(arr) - tr.qty) < 1e-6;
+        if(outLog){
+            if(cocok(outLog.costLayers)) return { layers:salinLayer(outLog.costLayers), sumber:'outLog.costLayers', total:outLog.total };
+            if(cocok(outLog.deducted))   return { layers:salinLayer(outLog.deducted),   sumber:'outLog.deducted',   total:outLog.total };
+        }
+        if(cocok(tr.costLayers)){
+            const lay=salinLayer(tr.costLayers);
+            return { layers:lay, sumber: outLog?'transfer.costLayers (log OUT tidak punya lapisan)':'transfer.costLayers (log OUT tidak ditemukan)',
+                     total: Math.round(lay.reduce((a,L)=>a+L.qtyTaken*L.price,0)*100)/100, sumberHilang:!outLog };
+        }
+        return { layers:null, sumber:'', total:null, sumberHilang:!outLog };
+    }
+
     // Admin kirim barang dari satu gudang ke gudang lain: stok gudang ASAL berkurang seketika (barang sudah berangkat),
     // tapi stok gudang TUJUAN baru bertambah setelah dikonfirmasi diterima oleh gudang tujuan (atau admin).
     async function createTransfer(sku, qty, fromGudang, toGudang, ref, opts) {
@@ -2374,13 +2429,25 @@
         const outRes = await processTransaction(sku, 'out', qty, 0, null, null, ref||`Transfer ke ${gudangName(toGudang)}`, false, { gudang: fromGudang, outType: opts.outType||'transfer', transferTo: toGudang, by: opts.by||deviceOperator, timestamp: opts.timestamp||undefined, effectiveTimestamp: opts.effectiveTimestamp||undefined, batchId: opts.invoiceId||undefined });
         if (!outRes.success) return outRes;
         const outLog = transactionLog[0];
+        // Tanggal transaksi kiriman DIKUNCI di sini, ke tanggal berlakunya log OUT. `sentAt` tetap
+        // Date.now() sebagai jejak audit "kapan tombol kirim ditekan" — dua hal berbeda yang dulu
+        // tercampur. Gudang tujuan nanti WAJIB memakai tanggal ini, bukan tanggal konfirmasinya.
+        const transferEffectiveTs = effTs(outLog);
         // Transfer WAJIB membawa lapisan biaya FIFO dari gudang asal. `price` di bawah hanya angka
         // ringkas untuk tampilan kartu kiriman; yang menentukan harga di gudang tujuan adalah costLayers.
-        const tr = { id: nextTransferId++, uid: newUid(), sku, itemName: item.name, qty, price: outLog.price, fromGudang, toGudang, ref: ref||'',
-            costLayers: (outLog.costLayers||[]).map(L=>({ batchId:L.batchId, qtyTaken:L.qtyTaken, price:L.price, dateIn:L.dateIn })),
+        const outLayers = (outLog.costLayers||[]).map(L=>({ batchId:L.batchId, qtyTaken:L.qtyTaken, price:L.price, dateIn:L.dateIn }));
+        const tr = { id: nextTransferId++, uid: newUid(), sku, itemName: item.name, qty,
+            price: outLog.qty>0 ? outLog.total/outLog.qty : 0,
+            outTotal: outLog.total,               // nilai resmi kiriman — penerimaan harus sama persis
+            fromGudang, toGudang, ref: ref||'',
+            costLayers: outLayers,
+            effectiveTimestamp: transferEffectiveTs,
             outUid: outLog.uid,   // tautan tahan-gabung: id numerik bisa dinomori ulang, uid tidak
             status:'pending', sentAt: Date.now(), sentBy: opts.by||deviceOperator, outLogId: outLog.id,
             confirmedAt:null, confirmedBy:null, confirmedQty:null, inLogId:null, note:'' };
+        // Kiriman baru WAJIB punya lapisan biaya lengkap. Kalau tidak, ditandai sekarang juga —
+        // jangan menunggu sampai gudang tujuan menerima lalu harga muncul entah dari mana.
+        if(Math.abs(jumlahLayer(outLayers) - qty) > 1e-6) tr.costIncomplete = true;
         // Hanya diisi kalau pengirim benar-benar mengelompokkan (satu proses kirim = satu invoiceId).
         // Kalau dikosongkan, pengelompokan jatuh ke transferGroupKey (nomor surat jalan + gudang + tanggal),
         // supaya satu surat jalan tidak pecah jadi banyak baris di notifikasi penerima.
@@ -2403,30 +2470,64 @@
         if (qty > tr.qty + 1e-9) {
             return { success:false, msg:`Jumlah diterima (${qty.toLocaleString('id')}) lebih besar dari yang dikirim (${tr.qty.toLocaleString('id')}). Periksa kembali hitungan fisiknya. Kalau memang gudang asal salah catat jumlah kirim, batalkan pengiriman ini lalu kirim ulang dengan jumlah yang benar.` };
         }
-        // Harga 0 tidak boleh ditambal jadi Rp0,01 — itu membuat barang masuk ke gudang tujuan nyaris
-        // tanpa nilai dan langsung merusak total nilai persediaan. Pakai harga pokok terbaik yang ada.
-        let price = tr.price>0 ? tr.price : bestKnownUnitCost(tr.sku, tr.fromGudang);
+        // ===== TANGGAL: dari gudang asal, bukan dari kapan tombol Terima ditekan =====
+        const outLog = cariOutLogTransfer(tr);
+        const transferTs = transferEffTs(tr, outLog);
+        if (lockBefore && transferTs && transferTs < lockBefore) {
+            return { success:false, msg:`Kiriman ini bertanggal ${new Date(transferTs).toLocaleDateString('id')}, yang sudah masuk periode TUTUP BUKU. Penerimaan harus dicatat pada tanggal kiriman, dan periode itu sudah terkunci. Batalkan kiriman ini lalu kirim ulang dengan tanggal periode berjalan.` };
+        }
+        // ===== HARGA: HANYA dari log OUT gudang asal =====
+        // Tidak boleh dari bestKnownUnitCost(), tidak boleh dari harga Master, tidak boleh dari
+        // harga pasar hari ini. Kalau sumbernya benar-benar tidak ada, itu ditandai — bukan ditebak.
+        const sumber = layerSumberTransfer(tr, outLog);
+        let costIncomplete = false, alasanCost = '';
+        let sourceLayers = sumber.layers;
+        let outTotal = (sumber.total!=null) ? sumber.total : (tr.outTotal!=null ? tr.outTotal : null);
+        if (!sourceLayers) {
+            costIncomplete = true;
+            alasanCost = outLog
+                ? 'Log keluar gudang asal ditemukan tapi tidak punya lapisan biaya yang cocok dengan jumlah kiriman.'
+                : 'Log keluar gudang asal tidak ditemukan (mungkin sudah diarsip Tutup Buku), dan kiriman ini tidak menyimpan lapisan biaya.';
+            if (outTotal==null && tr.price>0) outTotal = tr.price*tr.qty;
+        }
+        // Nilai resmi kiriman & harga satuannya — inilah yang wajib dicocokkan oleh penerimaan.
+        if (outTotal!=null) { tr.outTotal = outTotal; tr.price = tr.qty>0 ? outTotal/tr.qty : 0; }
+        if (sourceLayers) tr.costLayers = salinLayer(sourceLayers);
+        let price = tr.price>0 ? tr.price : 0;
         const costUnknown = !(price>0);
-        if (costUnknown) price = 0.01; // benar-benar tidak ada rujukan harga; ditandai supaya kelihatan di Diagnostic
+        if (costUnknown) { price = 0.01; costIncomplete = true; if(!alasanCost) alasanCost='Nilai kiriman di gudang asal nol/tidak diketahui.'; }
         // ===== ALOKASI FIFO UNTUK PENERIMAAN SEBAGIAN =====
         // Yang diterima diambil dari lapisan TERTUA dulu, persis seperti barangnya dimuat.
         // Tanpa ini, penerimaan sebagian akan memakai satu harga rata-rata dan lapisan mana yang
         // benar-benar sampai jadi tidak bisa ditelusuri lagi.
         let terimaLayers = null, sisaLayers = [];
-        if (Array.isArray(tr.costLayers) && tr.costLayers.length) {
-            let sisa = qty, out = [], belum = [];
-            for (const L of tr.costLayers.slice().sort((a,b)=>(a.dateIn-b.dateIn))) {
-                const punya = Number(L.qtyTaken)||0;
-                const ambil = Math.min(punya, Math.max(sisa,0));
-                if (ambil > 0) { out.push({ batchId:L.batchId!=null?L.batchId:null, qtyTaken:ambil, price:Number(L.price)||0, dateIn:L.dateIn }); sisa -= ambil; }
-                // Sisa lapisan yang TIDAK jadi diterima — inilah yang benar-benar hilang di jalan.
-                if (punya - ambil > 1e-9) belum.push({ qtyTaken:punya-ambil, price:Number(L.price)||0, dateIn:L.dateIn });
+        if (sourceLayers && sourceLayers.length) {
+            if (Math.abs(qty - tr.qty) < 1e-9) {
+                // Terima penuh: lapisannya PERSIS lapisan gudang asal, tanpa dihitung ulang.
+                terimaLayers = salinLayer(sourceLayers); sisaLayers = [];
+            } else {
+                let sisa = qty, out = [], belum = [];
+                for (const L of sourceLayers.slice().sort((a,b)=>((a.dateIn||0)-(b.dateIn||0)))) {
+                    const punya = Number(L.qtyTaken)||0;
+                    const ambil = Math.min(punya, Math.max(sisa,0));
+                    if (ambil > 0) { out.push({ batchId:L.batchId!=null?L.batchId:null, qtyTaken:ambil, price:Number(L.price)||0, dateIn:L.dateIn }); sisa -= ambil; }
+                    // Sisa lapisan yang TIDAK jadi diterima — inilah yang benar-benar hilang di jalan.
+                    if (punya - ambil > 1e-9) belum.push({ qtyTaken:punya-ambil, price:Number(L.price)||0, dateIn:L.dateIn });
+                }
+                if (out.length && Math.abs(sisa) < 1e-6) { terimaLayers = out; sisaLayers = belum; }
             }
-            if (out.length && Math.abs(sisa) < 1e-6) { terimaLayers = out; sisaLayers = belum; }
         }
-        const inRes = await processTransaction(tr.sku, 'in', qty, price, null, null, tr.ref||`Transfer dari ${gudangName(tr.fromGudang)}`, false, { gudang: tr.toGudang, source:'transfer', by: confirmedBy||deviceOperator, costLayers: terimaLayers });
+        const inRes = await processTransaction(tr.sku, 'in', qty, price, null, null, tr.ref||`Transfer dari ${gudangName(tr.fromGudang)}`, false,
+            { gudang: tr.toGudang, source:'transfer', by: confirmedBy||deviceOperator, costLayers: terimaLayers,
+              // Tanggal transaksi = tanggal kiriman. `timestamp` sengaja tetap waktu konfirmasi:
+              // itulah receivedAt yang dipakai FIFO internal gudang tujuan (barang yang baru sampai
+              // tidak boleh menyalip stok yang sudah lebih dulu ada di sini).
+              effectiveTimestamp: transferTs,
+              costUnknown: costIncomplete });
         if (!inRes.success) return inRes;
         tr.status='confirmed'; tr.confirmedAt=Date.now(); tr.confirmedBy=confirmedBy||deviceOperator;
+        if (costIncomplete) { tr.costIncomplete = true; tr.costIncompleteReason = alasanCost; }
+        else { delete tr.costIncomplete; delete tr.costIncompleteReason; }
         tr.confirmedQty=qty; tr.note=note||''; tr.inLogId=transactionLog[0].id; tr.confirmUid=transactionLog[0].uid;
         catatMutasiLokal('transfer', tr.uid);
         if (costUnknown) tr.costUnknown = true;
@@ -2444,8 +2545,12 @@
                 Math.abs(sisaLayers.reduce((a,L)=>a+L.qtyTaken,0) - shortfall) < 1e-6)
                 ? sisaLayers.map(L=>({ qtyTaken:L.qtyTaken, price:L.price, dateIn:L.dateIn }))
                 : [{ qtyTaken: shortfall, price: tr.price||0, dateIn: null }];
-            const lossTotal = Math.round(lossLayers.reduce((a,L)=>a+L.qtyTaken*L.price,0)*100)/100;
-            const lossLog = { id: nextLogId++, uid: newUid(), timestamp: Date.now(), sku: tr.sku, type:'out', qty: shortfall,
+            // Identitas yang wajib berlaku: diterima + hilang = yang dikirim. Kalau lossTotal dihitung
+            // sendiri dari lapisannya, pembulatan dua angka di belakang koma bisa menyisakan selisih
+            // satu sen yang menggantung selamanya. Jadi sisanya diambil dari nilai kiriman resmi.
+            let lossTotal = Math.round(lossLayers.reduce((a,L)=>a+L.qtyTaken*L.price,0)*100)/100;
+            if (tr.outTotal!=null && inLog && inLog.total!=null) lossTotal = Math.round((tr.outTotal - inLog.total)*100)/100;
+            const lossLog = { id: nextLogId++, uid: newUid(), timestamp: Date.now(), effectiveTimestamp: transferTs, sku: tr.sku, type:'out', qty: shortfall,
                 price: shortfall>0 ? lossTotal/shortfall : 0, total: lossTotal, lossLayers, by: confirmedBy||deviceOperator,
                 outType:'susut', desc:`Selisih kurang transfer dari ${gudangName(tr.fromGudang)}: ${note||'tanpa keterangan'}`,
                 area:'', supplier:'', division:'', ref:`Selisih transfer #${tr.id}`, batchIds:[], deducted:[],
@@ -2479,9 +2584,18 @@
             // Pemulihan WAJIB memakai lapisan biaya kiriman itu sendiri. Kalau dikembalikan dengan
             // satu harga rata-rata, gudang asal menerima kembali barangnya tapi kehilangan komposisi
             // FIFO-nya — nilai persediaan bergeser walau qty-nya kembali utuh.
-            const backLayers = (Array.isArray(tr.costLayers) && tr.costLayers.length &&
-                Math.abs(tr.costLayers.reduce((a,L)=>a+(Number(L.qtyTaken)||0),0) - tr.qty) < 1e-6) ? tr.costLayers : null;
-            const backRes = await processTransaction(tr.sku, 'in', tr.qty, tr.price>0?tr.price:(bestKnownUnitCost(tr.sku, tr.fromGudang)||0.01), null, null, 'Batal transfer: '+(reason||''), false, { gudang: tr.fromGudang, source:'transfer', by: deviceOperator, costLayers: backLayers });
+            const outLogB = cariOutLogTransfer(tr);
+            const sumberB = layerSumberTransfer(tr, outLogB);
+            const backLayers = sumberB.layers;
+            // Pembatalan = kiriman itu dianggap tidak pernah terjadi, jadi pemulihannya jatuh pada
+            // TANGGAL KIRIM — bukan tanggal pembatalan. Kalau tidak, gudang asal terlihat kehilangan
+            // barang selama beberapa hari padahal barangnya tidak pernah ke mana-mana.
+            // Kecuali kalau tanggal itu sudah terkunci Tutup Buku: pemulihan lalu dicatat hari ini
+            // supaya tidak menembus periode yang sudah dikunci.
+            const tsBatal = transferEffTs(tr, outLogB);
+            const tsPakai = (tsBatal && (!lockBefore || tsBatal >= lockBefore)) ? tsBatal : undefined;
+            const hargaBack = (sumberB.total!=null && tr.qty>0) ? sumberB.total/tr.qty : (tr.price>0?tr.price:0.01);
+            const backRes = await processTransaction(tr.sku, 'in', tr.qty, hargaBack, null, null, 'Batal transfer: '+(reason||''), false, { gudang: tr.fromGudang, source:'transfer', by: deviceOperator, costLayers: backLayers, effectiveTimestamp: tsPakai });
             if (!backRes.success) return backRes;
         }
         tr.status='cancelled'; tr.note=reason||''; tr.confirmedAt=Date.now(); tr.confirmedBy=deviceOperator;
@@ -2916,12 +3030,12 @@
         let bahanBody=document.getElementById('scBahanBody');
         if(bahanBody){
             if(!bahanRows.length) bahanBody.innerHTML=`<tr><td colspan="6" style="text-align:center; color:var(--text3); padding:16px;">Tidak ada bahan baku keluar ke Scalling pada periode ini.</td></tr>`;
-            else bahanBody.innerHTML = bahanRows.map(l=>`<tr><td>${scFmtDate(l.timestamp)}</td><td>${l.sku}</td><td>${l.itemName||l.sku} <span style="color:var(--text3); font-size:0.7rem;">(${gudangName(l.gudang)})</span></td><td style="text-align:right; color:#f87171; font-weight:700;">-${qtyLbl(l.sku, l.qty)}</td><td style="text-align:right;">Rp ${Math.round(l.total||0).toLocaleString('id')}</td><td>${l.ref||''}</td></tr>`).join('');
+            else bahanBody.innerHTML = bahanRows.map(l=>`<tr><td>${scFmtDate(effTs(l))}</td><td>${l.sku}</td><td>${l.itemName||l.sku} <span style="color:var(--text3); font-size:0.7rem;">(${gudangName(l.gudang)})</span></td><td style="text-align:right; color:#f87171; font-weight:700;">-${qtyLbl(l.sku, l.qty)}</td><td style="text-align:right;">Rp ${Math.round(l.total||0).toLocaleString('id')}</td><td>${l.ref||''}</td></tr>`).join('');
         }
         let barangBody=document.getElementById('scBarangBody');
         if(barangBody){
             if(!barangRows.length) barangBody.innerHTML=`<tr><td colspan="6" style="text-align:center; color:var(--text3); padding:16px;">Tidak ada barang jadi dari Scalling pada periode ini.</td></tr>`;
-            else barangBody.innerHTML = barangRows.map(l=>`<tr><td>${scFmtDate(l.timestamp)}</td><td>${l.sku}</td><td>${l.itemName||l.sku} <span style="color:var(--text3); font-size:0.7rem;">(${gudangName(l.gudang)})</span></td><td style="text-align:right; color:var(--green); font-weight:700;">+${qtyLbl(l.sku, l.qty)}</td><td style="text-align:right;">Rp ${Math.round(l.total||0).toLocaleString('id')}</td><td>${l.ref||''}</td></tr>`).join('');
+            else barangBody.innerHTML = barangRows.map(l=>`<tr><td>${scFmtDate(effTs(l))}</td><td>${l.sku}</td><td>${l.itemName||l.sku} <span style="color:var(--text3); font-size:0.7rem;">(${gudangName(l.gudang)})</span></td><td style="text-align:right; color:var(--green); font-weight:700;">+${qtyLbl(l.sku, l.qty)}</td><td style="text-align:right;">Rp ${Math.round(l.total||0).toLocaleString('id')}</td><td>${l.ref||''}</td></tr>`).join('');
         }
     }
     document.getElementById('scDariTanggal')?.addEventListener('change', scComputeAndRender);
@@ -3533,7 +3647,7 @@
         body.innerHTML = rows.length ? rows.slice(0,500).map(l=>{
             let locked=isEditLocked(l);
             let editCell = locked ? `<span style="color:var(--text3); font-size:0.7rem;">🔒</span>` : `<button class="btn btn-sm btn-secondary editLogBtnPb" data-id="${l.id}">✏️ Edit</button> <button class="btn btn-sm btn-warning delLogBtnPb" data-id="${l.id}">🗑️</button>`;
-            return `<tr><td>${new Date(l.timestamp).toLocaleString('id')}</td><td>${gudangName(l.gudang||DEFAULT_GUDANG)}</td><td class="mono">${l.sku}</td><td>${l.itemName||''}</td><td>${qtyLbl(l.sku, l.qty)}</td><td>Rp ${Math.round(l.price||0).toLocaleString('id')}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${(isProduksi?l.division:l.supplier)||'-'}</td><td>${l.ref||''}</td><td>${editCell}</td></tr>`;
+            return `<tr><td>${new Date(effTs(l)).toLocaleString('id')}</td><td>${gudangName(l.gudang||DEFAULT_GUDANG)}</td><td class="mono">${l.sku}</td><td>${l.itemName||''}</td><td>${qtyLbl(l.sku, l.qty)}</td><td>Rp ${Math.round(l.price||0).toLocaleString('id')}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${(isProduksi?l.division:l.supplier)||'-'}</td><td>${l.ref||''}</td><td>${editCell}</td></tr>`;
         }).join('')
             : `<tr><td colspan="9" style="text-align:center; color:var(--text3);">Tidak ada transaksi pada periode ini.</td></tr>`;
         body.querySelectorAll('.editLogBtnPb').forEach(btn=>btn.addEventListener('click',()=>openEditLog(parseInt(btn.dataset.id))));
@@ -3642,7 +3756,7 @@
             let locked = effTs(l)<lockBefore;
             let act = locked ? '<span style="color:var(--text3); font-size:0.7rem;">🔒</span>'
                 : `<button class="btn btn-sm btn-secondary gEditBtn" data-id="${l.id}" title="Perbaiki jumlah kalau salah input">✏️</button> <button class="btn btn-sm btn-warning gDelBtn" data-id="${l.id}" title="Hapus transaksi (stok dikembalikan)">🗑️</button>`;
-            return `<tr><td>${skFmtDate(l.timestamp)}</td><td>${l.itemName||l.sku}</td><td style="text-align:right; color:#f87171; font-weight:700;">-${qtyLbl(l.sku, l.qty)}</td><td style="text-align:right;">Rp ${Math.round(l.total||0).toLocaleString('id')}</td><td style="text-align:right; white-space:nowrap;">${act}</td></tr>`;
+            return `<tr><td>${skFmtDate(effTs(l))}</td><td>${l.itemName||l.sku}</td><td style="text-align:right; color:#f87171; font-weight:700;">-${qtyLbl(l.sku, l.qty)}</td><td style="text-align:right;">Rp ${Math.round(l.total||0).toLocaleString('id')}</td><td style="text-align:right; white-space:nowrap;">${act}</td></tr>`;
         }).join('');
         bindGudangRowActions(body, skComputeAndRender);
         body.querySelectorAll('.skUndoBtn').forEach(btn=>{
@@ -3805,7 +3919,7 @@
             let locked = effTs(l)<lockBefore;
             let act = locked ? '<span style="color:var(--text3); font-size:0.7rem;">🔒</span>'
                 : `<button class="btn btn-sm btn-secondary gEditBtn" data-id="${l.id}" title="Perbaiki jumlah/harga kalau salah input">✏️</button> <button class="btn btn-sm btn-warning gDelBtn" data-id="${l.id}" title="Hapus transaksi">🗑️</button>`;
-            return `<tr><td>${skFmtDate(l.timestamp)}</td><td>${l.itemName||l.sku}</td><td style="text-align:right; color:#4ade80; font-weight:700;">+${qtyLbl(l.sku, l.qty)}</td><td style="text-align:right;">Rp ${Math.round(l.total||0).toLocaleString('id')}</td><td style="font-size:0.78rem;">${smSourceLabel(l)}</td><td style="text-align:right; white-space:nowrap;">${act}</td></tr>`;
+            return `<tr><td>${skFmtDate(effTs(l))}</td><td>${l.itemName||l.sku}</td><td style="text-align:right; color:#4ade80; font-weight:700;">+${qtyLbl(l.sku, l.qty)}</td><td style="text-align:right;">Rp ${Math.round(l.total||0).toLocaleString('id')}</td><td style="font-size:0.78rem;">${smSourceLabel(l)}</td><td style="text-align:right; white-space:nowrap;">${act}</td></tr>`;
         }).join('');
         bindGudangRowActions(body, smComputeAndRender);
     }
@@ -3843,8 +3957,8 @@
         rows.forEach(l=>{
             let unit=itemBySku(l.sku)?.baseUnit||'';
             data.push(isIn
-                ? [skFmtDate(l.timestamp), l.sku, l.itemName||'', l.qty, unit, Math.round(l.total||0), smSourceLabel(l).replace(/^[^\w]+\s*/,''), l.ref||'']
-                : [skFmtDate(l.timestamp), l.sku, l.itemName||'', l.qty, unit, Math.round(l.total||0), keluarJenisLabel(l), l.division||l.area||'', l.desc||l.ref||'']);
+                ? [skFmtDate(effTs(l)), l.sku, l.itemName||'', l.qty, unit, Math.round(l.total||0), smSourceLabel(l).replace(/^[^\w]+\s*/,''), l.ref||'']
+                : [skFmtDate(effTs(l)), l.sku, l.itemName||'', l.qty, unit, Math.round(l.total||0), keluarJenisLabel(l), l.division||l.area||'', l.desc||l.ref||'']);
         });
         data.push([]);
         data.push(['TOTAL', '', '', rows.reduce((s,l)=>s+l.qty,0), '', Math.round(rows.reduce((s,l)=>s+(l.total||0),0))]);
@@ -3865,8 +3979,8 @@
         let body = rows.map(l=>{
             let unit=itemBySku(l.sku)?.baseUnit||'';
             return isIn
-                ? [skFmtDate(l.timestamp), l.sku, l.itemName||'', `${qtyLbl(l.sku, l.qty)}`, `Rp ${Math.round(l.total||0).toLocaleString('id')}`, smSourceLabel(l).replace(/^[^\w]+\s*/,'')]
-                : [skFmtDate(l.timestamp), l.sku, l.itemName||'', `${qtyLbl(l.sku, l.qty)}`, `Rp ${Math.round(l.total||0).toLocaleString('id')}`, keluarJenisLabel(l), l.division||l.area||'-'];
+                ? [skFmtDate(effTs(l)), l.sku, l.itemName||'', `${qtyLbl(l.sku, l.qty)}`, `Rp ${Math.round(l.total||0).toLocaleString('id')}`, smSourceLabel(l).replace(/^[^\w]+\s*/,'')]
+                : [skFmtDate(effTs(l)), l.sku, l.itemName||'', `${qtyLbl(l.sku, l.qty)}`, `Rp ${Math.round(l.total||0).toLocaleString('id')}`, keluarJenisLabel(l), l.division||l.area||'-'];
         });
         doc.autoTable({startY:23, head, body, styles:{fontSize:8}});
         doc.save(`laporan_${isIn?'masuk':'pengeluaran'}_${gudang}_${dari||''}.pdf`);
@@ -3945,7 +4059,7 @@
         body.innerHTML = rows.length ? rows.slice(0,500).map(l=>{
             let locked=isEditLocked(l);
             let editCell = locked ? `<span style="color:var(--text3); font-size:0.7rem;">🔒</span>` : `<button class="btn btn-sm btn-secondary editLogBtnPg" data-id="${l.id}">✏️ Edit</button> <button class="btn btn-sm btn-warning delLogBtnPg" data-id="${l.id}">🗑️</button>`;
-            return `<tr><td>${new Date(l.timestamp).toLocaleString('id')}</td><td>${l.outType==='susut'?'🗑️ Susut':(l.outType==='produksi'?'🧪 Racik':(l.outType==='transfer'?`🚚 Transfer → ${gudangName(l.transferTo||'')}`:'📤 Keluar'))}</td><td>${gudangName(l.gudang||DEFAULT_GUDANG)}</td><td class="mono">${l.sku}</td><td>${l.itemName||''}</td><td>${qtyLbl(l.sku, l.qty)}</td><td>Rp ${Math.round(l.price||0).toLocaleString('id')}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${l.division||(l.outType==='susut'?'Penyusutan':'-')}</td><td>${l.area||'-'}</td><td>${l.ref||''}</td><td style="white-space:nowrap;"><button class="btn btn-sm btn-secondary printSlipReport" data-id="${l.id}">🖨️</button> ${editCell}</td></tr>`;
+            return `<tr><td>${new Date(effTs(l)).toLocaleString('id')}</td><td>${l.outType==='susut'?'🗑️ Susut':(l.outType==='produksi'?'🧪 Racik':(l.outType==='transfer'?`🚚 Transfer → ${gudangName(l.transferTo||'')}`:'📤 Keluar'))}</td><td>${gudangName(l.gudang||DEFAULT_GUDANG)}</td><td class="mono">${l.sku}</td><td>${l.itemName||''}</td><td>${qtyLbl(l.sku, l.qty)}</td><td>Rp ${Math.round(l.price||0).toLocaleString('id')}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${l.division||(l.outType==='susut'?'Penyusutan':'-')}</td><td>${l.area||'-'}</td><td>${l.ref||''}</td><td style="white-space:nowrap;"><button class="btn btn-sm btn-secondary printSlipReport" data-id="${l.id}">🖨️</button> ${editCell}</td></tr>`;
         }).join('')
             : `<tr><td colspan="11" style="text-align:center; color:var(--text3);">Tidak ada transaksi pada periode ini.</td></tr>`;
         body.querySelectorAll('.printSlipReport').forEach(btn=>btn.addEventListener('click',()=>printOutSlip(parseInt(btn.dataset.id))));
@@ -4005,14 +4119,14 @@
         if(typeof XLSX==="undefined"){ notify('Offline','Library Excel belum termuat. Perlu koneksi internet.','warning'); return; }
         let rows=window.__pbRows||[];
         let data=[["Tanggal","Sumber","Kode","Nama Barang","Jumlah","Satuan","Harga Satuan","Total","Vendor/Divisi","Ref"]];
-        rows.forEach(l=>data.push([new Date(l.timestamp).toLocaleString(), (l.source||'beli')==='beli'?'Pembelian':'Produksi Internal', l.sku, l.itemName||'', l.qty, unitOf(l.sku), l.price||0, l.total, l.supplier||l.division||'', l.ref||'']));
+        rows.forEach(l=>data.push([new Date(effTs(l)).toLocaleString(), (l.source||'beli')==='beli'?'Pembelian':'Produksi Internal', l.sku, l.itemName||'', l.qty, unitOf(l.sku), l.price||0, l.total, l.supplier||l.division||'', l.ref||'']));
         let ws=XLSX.utils.aoa_to_sheet(data); let wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Pembelian"); XLSX.writeFile(wb,"laporan_pembelian.xlsx");
     });
     document.getElementById('pgExportExcel')?.addEventListener('click', ()=>{
         if(typeof XLSX==="undefined"){ notify('Offline','Library Excel belum termuat. Perlu koneksi internet.','warning'); return; }
         let rows=window.__pgRows||[];
         let data=[["Tanggal","Jenis","Kode","Nama Barang","Jumlah","Satuan","HPP Satuan","Total","Divisi","Area Bakery Tujuan","Ref","Deskripsi","Petugas"]];
-        rows.forEach(l=>data.push([new Date(l.timestamp).toLocaleString(), l.outType==='susut'?'Susut':'Keluar', l.sku, l.itemName||'', l.qty, unitOf(l.sku), l.price||0, l.total, l.division||'', l.area||'', l.ref||'', l.desc||'', l.by||'']));
+        rows.forEach(l=>data.push([new Date(effTs(l)).toLocaleString(), l.outType==='susut'?'Susut':'Keluar', l.sku, l.itemName||'', l.qty, unitOf(l.sku), l.price||0, l.total, l.division||'', l.area||'', l.ref||'', l.desc||'', l.by||'']));
         let ws=XLSX.utils.aoa_to_sheet(data); let wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Pengeluaran"); XLSX.writeFile(wb,"laporan_pengeluaran.xlsx");
     });
 
@@ -4400,7 +4514,7 @@
             return `<div style="border-bottom:1px solid var(--border);">
                 <div class="logBatchHead" data-k="${g.key}" style="padding:8px 6px; display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; cursor:pointer;">
                     <span><strong>${judul}</strong> · ${items.length} barang · total ${totalQty.toLocaleString('id')}<br>
-                        <span style="font-size:0.78rem; color:var(--text3);">${new Date(f.timestamp).toLocaleString()} | ${ket} | <span style="color:var(--accent);">${gudangName(f.gudang||DEFAULT_GUDANG)}</span></span></span>
+                        <span style="font-size:0.78rem; color:var(--text3);">${new Date(effTs(f)).toLocaleString()} | ${ket} | <span style="color:var(--accent);">${gudangName(f.gudang||DEFAULT_GUDANG)}</span></span></span>
                     <span style="display:flex; gap:6px; align-items:center;">
                         ${f.type==='out'?`<button class="btn btn-sm btn-secondary printSlipBtn" data-id="${f.id}" title="Cetak seluruh barang dalam batch ini">🖨️</button>`:''}
                         <span class="logBatchChev" data-k="${g.key}" style="font-size:0.75rem; color:var(--accent); white-space:nowrap;">Lihat rincian ▾</span>
@@ -4431,7 +4545,7 @@
             let areaBadge = (l.type==='out' && l.area) ? ` | <span style="color:#f59e0b;">🏪 ${l.area}</span>` : '';
             let jenisIcon = l.type==='in' ? '📥' : (l.outType==='susut'?'🗑️':(l.outType==='produksi'?'🧪':(l.outType==='transfer'?'🚚':'📤')));
             let pihakTxt = l.outType==='transfer' ? `Transfer → ${gudangName(l.transferTo||'')}` : (l.supplier||l.division||'-');
-            return `<div style="padding:6px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;"><span>${new Date(l.timestamp).toLocaleString()} | ${jenisIcon} ${l.sku} ${qtyLbl(l.sku, l.qty)} | ${pihakTxt} | <span style="color:var(--accent);">${gudangName(l.gudang||DEFAULT_GUDANG)}</span>${areaBadge}${orphanBadge}${l.edited?' <span style="color:#f59e0b; font-size:0.7rem;">✏️diedit</span>':''}</span><span style="display:flex; gap:6px;">${canUndo?`<button class="btn btn-sm btn-warning undoBtn" data-id="${l.id}">↩️ Undo</button>`:''}${printBtn}${editBtn}</span></div>`;
+            return `<div style="padding:6px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;"><span>${new Date(effTs(l)).toLocaleString()} | ${jenisIcon} ${l.sku} ${qtyLbl(l.sku, l.qty)} | ${pihakTxt} | <span style="color:var(--accent);">${gudangName(l.gudang||DEFAULT_GUDANG)}</span>${areaBadge}${orphanBadge}${l.edited?' <span style="color:#f59e0b; font-size:0.7rem;">✏️diedit</span>':''}</span><span style="display:flex; gap:6px;">${canUndo?`<button class="btn btn-sm btn-warning undoBtn" data-id="${l.id}">↩️ Undo</button>`:''}${printBtn}${editBtn}</span></div>`;
         }
         cont.querySelectorAll('.editLogBtn2').forEach(btn=>btn.addEventListener('click',()=>openEditLog(parseInt(btn.dataset.id))));
         cont.querySelectorAll('.delLogBtn2').forEach(btn=>btn.addEventListener('click',()=>deleteLogEntry(parseInt(btn.dataset.id))));
@@ -4474,7 +4588,7 @@
             let actionCell = currentRole==='stok'
                 ? '<span style="color:var(--text3); font-size:0.7rem;">lihat saja</span>'
                 : (locked?'<span style="color:var(--text3); font-size:0.72rem;">🔒 terkunci</span>':`<button class="btn btn-sm btn-secondary editLogBtn" data-id="${l.id}">✏️ Edit</button> <button class="btn btn-sm btn-warning delLogBtn" data-id="${l.id}">🗑️</button>`);
-            return `<tr><td>${new Date(l.timestamp).toLocaleString('id')}</td><td>${jenis}</td><td>${gudangName(l.gudang||DEFAULT_GUDANG)}</td><td class="mono">${l.sku}</td><td>${l.itemName||''}</td><td>${qtyLbl(l.sku, l.qty)}</td><td>Rp ${Math.round(l.price||0).toLocaleString('id')}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${pihak}</td><td style="font-size:0.72rem;">${ket}</td><td>${actionCell}</td></tr>`;
+            return `<tr><td>${new Date(effTs(l)).toLocaleString('id')}</td><td>${jenis}</td><td>${gudangName(l.gudang||DEFAULT_GUDANG)}</td><td class="mono">${l.sku}</td><td>${l.itemName||''}</td><td>${qtyLbl(l.sku, l.qty)}</td><td>Rp ${Math.round(l.price||0).toLocaleString('id')}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${pihak}</td><td style="font-size:0.72rem;">${ket}</td><td>${actionCell}</td></tr>`;
         }).join('');
         body.querySelectorAll('.editLogBtn').forEach(btn=>btn.addEventListener('click',()=>openEditLog(parseInt(btn.dataset.id))));
         body.querySelectorAll('.delLogBtn').forEach(btn=>btn.addEventListener('click',()=>deleteLogEntry(parseInt(btn.dataset.id))));
@@ -4860,7 +4974,7 @@
             // Rincian lapisan FIFO yang benar-benar dipakai transaksi keluar ini. Baris utamanya tetap
             // satu total; lapisannya di baris tambahan yang tersembunyi supaya tabel tidak dua kali panjang.
             let lay = (l.type==='out' && Array.isArray(l.costLayers)) ? l.costLayers : [];
-            return `<tr class="${canEdit?'ihEditableRow':''}" data-logid="${l.id}" ${canEdit?'style="cursor:pointer;"':''} title="${canEdit?'Klik untuk buka & koreksi transaksi ini':''}"><td>${new Date(l.timestamp).toLocaleString('id')}</td><td>${jenis}</td><td>${l.qty.toLocaleString('id')} ${item.baseUnit}</td><td>Rp ${Math.round(hs).toLocaleString('id')}${lay.length?` <button type="button" class="ihFifoBtn" data-logid="${l.id}" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:0.68rem;padding:0 2px;">FIFO ▾</button>`:''}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${pihak}</td><td style="font-size:0.72rem;">${l.ref||''}${l.by?(' 👤'+l.by):''}${editedBadge}</td>${canEdit?`<td><button type="button" class="btn btn-sm btn-secondary ihEditBtn" data-logid="${l.id}">✏️ Koreksi</button></td>`:''}</tr>${lay.length?`<tr class="ihFifoRow" data-logid="${l.id}" hidden><td colspan="${colCount}" style="background:var(--bg3); padding:8px 14px;"><div style="font-size:0.7rem; color:var(--text3); text-transform:uppercase; letter-spacing:.4px; margin-bottom:4px;">Lapisan FIFO yang dipakai</div><table style="width:100%; font-size:0.75rem;"><thead><tr><th style="text-align:left;">Qty</th><th style="text-align:right;">Harga</th><th style="text-align:right;">Nilai</th><th style="text-align:left; padding-left:14px;">Tgl Batch</th></tr></thead><tbody>${lay.map(L=>`<tr><td>${(Number(L.qtyTaken)||0).toLocaleString('id')} ${item.baseUnit}</td><td style="text-align:right; font-variant-numeric:tabular-nums;">Rp ${Math.round(L.price||0).toLocaleString('id')}</td><td style="text-align:right; font-variant-numeric:tabular-nums;">Rp ${Math.round((Number(L.qtyTaken)||0)*(L.price||0)).toLocaleString('id')}</td><td style="padding-left:14px;">${L.dateIn?new Date(L.dateIn).toLocaleDateString('id'):'-'}</td></tr>`).join('')}</tbody></table></td></tr>`:''}`;
+            return `<tr class="${canEdit?'ihEditableRow':''}" data-logid="${l.id}" ${canEdit?'style="cursor:pointer;"':''} title="${canEdit?'Klik untuk buka & koreksi transaksi ini':''}"><td>${new Date(effTs(l)).toLocaleString('id')}</td><td>${jenis}</td><td>${l.qty.toLocaleString('id')} ${item.baseUnit}</td><td>Rp ${Math.round(hs).toLocaleString('id')}${lay.length?` <button type="button" class="ihFifoBtn" data-logid="${l.id}" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:0.68rem;padding:0 2px;">FIFO ▾</button>`:''}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${pihak}</td><td style="font-size:0.72rem;">${l.ref||''}${l.by?(' 👤'+l.by):''}${editedBadge}</td>${canEdit?`<td><button type="button" class="btn btn-sm btn-secondary ihEditBtn" data-logid="${l.id}">✏️ Koreksi</button></td>`:''}</tr>${lay.length?`<tr class="ihFifoRow" data-logid="${l.id}" hidden><td colspan="${colCount}" style="background:var(--bg3); padding:8px 14px;"><div style="font-size:0.7rem; color:var(--text3); text-transform:uppercase; letter-spacing:.4px; margin-bottom:4px;">Lapisan FIFO yang dipakai</div><table style="width:100%; font-size:0.75rem;"><thead><tr><th style="text-align:left;">Qty</th><th style="text-align:right;">Harga</th><th style="text-align:right;">Nilai</th><th style="text-align:left; padding-left:14px;">Tgl Batch</th></tr></thead><tbody>${lay.map(L=>`<tr><td>${(Number(L.qtyTaken)||0).toLocaleString('id')} ${item.baseUnit}</td><td style="text-align:right; font-variant-numeric:tabular-nums;">Rp ${Math.round(L.price||0).toLocaleString('id')}</td><td style="text-align:right; font-variant-numeric:tabular-nums;">Rp ${Math.round((Number(L.qtyTaken)||0)*(L.price||0)).toLocaleString('id')}</td><td style="padding-left:14px;">${L.dateIn?new Date(L.dateIn).toLocaleDateString('id'):'-'}</td></tr>`).join('')}</tbody></table></td></tr>`:''}`;
         }).join('') + (logs.length>300?`<tr><td colspan="${colCount}" style="text-align:center; color:var(--text3);">Menampilkan 300 dari ${logs.length} transaksi</td></tr>`:'')
         : `<tr><td colspan="${colCount}" style="text-align:center; color:var(--text3);">Belum ada transaksi untuk barang ini di log aktif.</td></tr>`;
         document.getElementById('ihFootNote').innerHTML = 'Histori mencakup transaksi yang masih ada di log aktif. Transaksi periode yang sudah ditutup buku telah diarsipkan ke spreadsheet dan tidak tampil di sini.' + (canEdit?' Klik baris atau tombol ✏️ Koreksi untuk membuka transaksi aslinya kalau ada yang keliru input.':'');
@@ -5046,11 +5160,49 @@
             ...t, waitMs: Date.now()-t.sentAt
         })).sort((a,b)=>b.waitMs-a.waitMs);
 
+        // ===== AUDIT TRANSFER: SATU KIRIMAN HARUS SAMA DI KEDUA SISI =====
+        // Membandingkan log KELUAR gudang asal dengan log MASUK gudang tujuan untuk tiap kiriman
+        // yang sudah dikonfirmasi. Read-only — tidak memperbaiki apa pun, hanya menunjukkan.
+        let auditTransfer = [];
+        (transfers||[]).filter(t=>t && t.status==='confirmed').forEach(t=>{
+            const ol = cariOutLogTransfer(t);
+            const il = t.confirmUid ? transactionLog.find(l=>l.uid===t.confirmUid)
+                                    : (t.inLogId!=null ? transactionLog.find(l=>l.id===t.inLogId) : null);
+            const ll = t.lossUid ? transactionLog.find(l=>l.uid===t.lossUid)
+                                 : (t.lossLogId!=null ? transactionLog.find(l=>l.id===t.lossLogId) : null);
+            const tsOut = ol ? effTs(ol) : transferEffTs(t, null);
+            const tsIn  = il ? effTs(il) : null;
+            const nilaiOut = ol ? (ol.total||0) : (t.outTotal!=null ? t.outTotal : null);
+            const nilaiIn  = il ? (il.total||0) : null;
+            const nilaiLoss= ll ? (ll.total||0) : 0;
+            const qtyIn = il ? il.qty : (t.confirmedQty!=null ? t.confirmedQty : null);
+            const penuh = qtyIn!=null && Math.abs(qtyIn - t.qty) < 1e-9;
+            const selisih = (nilaiOut!=null && nilaiIn!=null) ? Math.round((nilaiIn + nilaiLoss - nilaiOut)*100)/100 : null;
+            let flag = [];
+            if(!ol) flag.push('Log KELUAR gudang asal tidak ditemukan');
+            if(!il) flag.push('Log MASUK gudang tujuan tidak ditemukan');
+            if(tsIn!=null && tsOut && Math.abs(tsIn - tsOut) > 1000) flag.push('Tanggal efektif OUT dan IN berbeda');
+            if(penuh && selisih!=null && Math.abs(selisih) > 1) flag.push('Terima penuh tapi nilai OUT dan IN berbeda');
+            if(!penuh && selisih!=null && Math.abs(selisih) > 1) flag.push('Diterima + hilang tidak sama dengan yang dikirim');
+            if(penuh && ol && il && Array.isArray(ol.costLayers) && Array.isArray(il.costLayers)){
+                const cap = a => (a||[]).slice().sort((x,y)=>(x.dateIn||0)-(y.dateIn||0)||x.price-y.price)
+                    .map(L=>`${Math.round((Number(L.qtyTaken)||0)*1e6)/1e6}@${Math.round((Number(L.price)||0)*100)/100}`).join('|');
+                if(cap(ol.costLayers)!==cap(il.costLayers)) flag.push('Lapisan biaya OUT dan IN berbeda');
+            }
+            if(t.costIncomplete) flag.push('TRANSFER COST INCOMPLETE'+(t.costIncompleteReason?' — '+t.costIncompleteReason:''));
+            auditTransfer.push({ id:t.id, ref:t.ref||('#'+t.id), sku:t.sku, nama:t.itemName||t.sku,
+                dari:t.fromGudang, ke:t.toGudang, qtyOut:t.qty, qtyIn, tsOut, tsIn,
+                confirmedAt:t.confirmedAt||null, nilaiOut, nilaiIn, nilaiLoss, selisih, penuh, flag });
+        });
+        auditTransfer.sort((a,b)=> (b.flag.length-a.flag.length) || ((b.tsOut||0)-(a.tsOut||0)));
+        const transferBermasalah = auditTransfer.filter(x=>x.flag.length);
+
         let totalBatchVal = 0; masterSKU.forEach(i=>totalBatchVal+=getStock(i.sku).value);
         let totalLogVal = Object.values(logMap).reduce((s,v)=>s+v.value,0);
         let transit = getInTransit();
 
         invDiagLastResult = { mismatchQty, mismatchValue, negBatches, orphans, pending, totalBatchVal, totalLogVal, transit, suspectCost, tanpaLayer:tanpaLayer.length,
+                              auditTransfer, transferBermasalah,
                               suspectTotal: suspectCost.reduce((s,x)=>s+x.selisih,0) };
         return invDiagLastResult;
     }
@@ -5073,7 +5225,7 @@
             let lewati = !!(l.nonStockMovement || l.inventoryMovement===false);
             if(l.type==='in'){ if(!lewati){ masuk+=l.qty; saldo+=l.qty; } else abaikan+=l.qty; }
             else { if(!lewati){ keluar+=l.qty; saldo-=l.qty; } else abaikan+=l.qty; }
-            baris.push({ tgl:new Date(l.timestamp).toLocaleDateString('id'), id:l.id,
+            baris.push({ tgl:new Date(effTs(l)).toLocaleDateString('id'), id:l.id,
                 jenis:(l.type==='in'?'MASUK':'KELUAR')+(lewati?' (non-stok)':''),
                 sumber:l.source||l.outType||'', qty:l.qty, saldo:Math.round(saldo*1000)/1000,
                 ref:l.ref||'', gudang:gudangName(l.gudang||DEFAULT_GUDANG) });
@@ -5127,6 +5279,7 @@
             <div class="kpi-card"><div class="kpi-label">🔻 Batch Minus</div><div class="kpi-value">${r.negBatches.length}</div><div class="kpi-sub">Rp ${Math.round(r.negBatches.reduce((s,x)=>s+x.value,0)).toLocaleString('id')}</div></div>
             <div class="kpi-card"><div class="kpi-label">🚚 Pending Transfer</div><div class="kpi-value">${r.pending.length}</div><div class="kpi-sub">Rp ${Math.round(r.transit.value).toLocaleString('id')} in-transit</div></div>
             <div class="kpi-card"><div class="kpi-label">🏷️ Batch Harga Tebakan</div><div class="kpi-value">${(r.suspectCost||[]).length}</div><div class="kpi-sub">Nilai stok kurang tercatat ± Rp ${Math.round(r.suspectTotal||0).toLocaleString('id')}</div></div>
+            <div class="kpi-card"><div class="kpi-label">🔁 Transfer Tidak Cocok</div><div class="kpi-value"${(r.transferBermasalah||[]).length?' style="color:#f87171;"':''}>${(r.transferBermasalah||[]).length}</div><div class="kpi-sub">dari ${(r.auditTransfer||[]).length} kiriman dikonfirmasi</div></div>
         `;
         let mb = document.getElementById('invDiagMismatchBody');
         if (mb) mb.innerHTML = r.mismatchQty.length ? r.mismatchQty.map(x=>`<tr class="invDiagAuditRow" data-sku="${x.sku}" data-gudang="${x.gudang}" style="cursor:pointer;" title="Klik untuk menelusuri mutasi bahan ini"><td class="mono">${x.sku}</td><td>${x.name}</td><td>${gudangName(x.gudang)}</td><td style="text-align:right;">${x.bQty.toLocaleString('id')}</td><td style="text-align:right;">${x.lQty.toLocaleString('id')}</td><td style="text-align:right; color:#f87171; font-weight:700;">${x.diff.toLocaleString('id')}</td></tr>`).join('') : `<tr><td colspan="6" style="text-align:center; color:var(--text3);">✅ Tidak ada selisih qty batch vs log.</td></tr>`;
@@ -5139,6 +5292,24 @@
         document.querySelectorAll('#invDiagMismatchBody .invDiagAuditRow').forEach(tr=>tr.addEventListener('click',()=>{
             auditBahan(tr.dataset.sku, tr.dataset.gudang);
         }));
+        let xb = document.getElementById('invDiagXferAuditBody');
+        if (xb) {
+            const at = r.auditTransfer||[];
+            const tgl = v => v ? new Date(v).toLocaleDateString('id') : '-';
+            xb.innerHTML = at.length ? at.slice(0,200).map(x=>{
+                const bermasalah = x.flag.length>0;
+                return `<tr${bermasalah?' style="background:rgba(179,38,30,0.12);"':''}>
+                    <td style="font-size:0.74rem;">${dvzEsc(x.ref)}</td><td class="mono">${dvzEsc(x.sku)}</td>
+                    <td style="text-align:right;">${x.qtyOut.toLocaleString('id')}</td>
+                    <td style="text-align:right;">${x.qtyIn!=null?x.qtyIn.toLocaleString('id'):'-'}</td>
+                    <td>${tgl(x.tsOut)}</td><td>${tgl(x.tsIn)}</td>
+                    <td style="font-size:0.72rem; color:var(--text3);">${tgl(x.confirmedAt)}</td>
+                    <td style="text-align:right;">${x.nilaiOut!=null?'Rp '+Math.round(x.nilaiOut).toLocaleString('id'):'-'}</td>
+                    <td style="text-align:right;">${x.nilaiIn!=null?'Rp '+Math.round(x.nilaiIn).toLocaleString('id'):'-'}${x.nilaiLoss?` <span style="font-size:0.68rem; color:var(--text3);">+susut ${Math.round(x.nilaiLoss).toLocaleString('id')}</span>`:''}</td>
+                    <td style="text-align:right;${x.selisih&&Math.abs(x.selisih)>1?' color:#f87171; font-weight:700;':''}">${x.selisih!=null?'Rp '+Math.round(x.selisih).toLocaleString('id'):'-'}</td>
+                    <td style="font-size:0.72rem;">${bermasalah?'🔴 '+dvzEsc(x.flag.join('; ')):'✅'}</td></tr>`;
+            }).join('') : `<tr><td colspan="11" style="text-align:center; color:var(--text3);">Belum ada transfer yang dikonfirmasi.</td></tr>`;
+        }
         let vb = document.getElementById('invDiagValueBody');
         if (vb) vb.innerHTML = r.mismatchValue.length ? r.mismatchValue.slice().sort((a,b)=>Math.abs(b.diff)-Math.abs(a.diff)).map(x=>`<tr><td class="mono">${x.sku}</td><td>${x.name}</td><td>${gudangName(x.gudang)}</td><td style="text-align:right;">Rp ${Math.round(x.bVal).toLocaleString('id')}</td><td style="text-align:right;">Rp ${Math.round(x.lVal).toLocaleString('id')}</td><td style="text-align:right; color:#f87171; font-weight:700;">Rp ${Math.round(x.diff).toLocaleString('id')}</td></tr>`).join('') : `<tr><td colspan="6" style="text-align:center; color:var(--text3);">✅ Tidak ada selisih nilai batch vs log.</td></tr>`;
     }
@@ -5797,7 +5968,7 @@
         return l.division || '-';
     }
     function doNumberFor(l){
-        let d=new Date(l.timestamp);
+        let d=new Date(effTs(l));
         let divCode=(l.division||l.desc||'INT').toUpperCase().replace(/[^A-Z]/g,'').slice(0,4)||'INT';
         return `DO/${divCode}/${String(l.id).padStart(3,'0')}/${romanMonth(d.getMonth())}/${d.getFullYear()}`;
     }
@@ -5871,7 +6042,7 @@
                 <div class="info-right">
                     <table>
                         <tr><td class="lbl">DO No.</td><td>: ${doNumberFor(l)}</td></tr>
-                        <tr><td class="lbl">Tgl DO</td><td>: ${new Date(l.timestamp).toLocaleDateString('id',{day:'2-digit',month:'short',year:'numeric'})}</td></tr>
+                        <tr><td class="lbl">Tgl DO</td><td>: ${new Date(effTs(l)).toLocaleDateString('id',{day:'2-digit',month:'short',year:'numeric'})}</td></tr>
                         ${!isSusut&&l.division?`<tr><td class="lbl">Divisi</td><td>: ${l.division}</td></tr>`:''}
                         <tr><td class="lbl">Ref</td><td>: ${l.ref||'-'}</td></tr>
                         <tr><td class="lbl">Petugas</td><td>: ${l.by||'-'}</td></tr>
@@ -5990,7 +6161,7 @@
                 <div class="info-right">
                     <table>
                         <tr><td class="lbl">DO No.</td><td>: ${doNumberFor(first)}</td></tr>
-                        <tr><td class="lbl">Tgl DO</td><td>: ${new Date(first.timestamp).toLocaleDateString('id',{day:'2-digit',month:'short',year:'numeric'})}</td></tr>
+                        <tr><td class="lbl">Tgl DO</td><td>: ${new Date(effTs(first)).toLocaleDateString('id',{day:'2-digit',month:'short',year:'numeric'})}</td></tr>
                         ${!isSusut&&first.division?`<tr><td class="lbl">Divisi</td><td>: ${first.division}</td></tr>`:''}
                         <tr><td class="lbl">Ref</td><td>: ${first.ref||'-'}</td></tr>
                         <tr><td class="lbl">Petugas</td><td>: ${first.by||'-'}</td></tr>
@@ -6254,10 +6425,7 @@
         // Kiriman yang di-backdate ke Agustus tapi diinput September tetap terhitung milik Agustus.
         let pendingTf = (typeof transfers!=='undefined') ? transfers.filter(t=>{
             if(t.status!=='pending') return false;
-            const ol = t.outUid ? transactionLog.find(l=>l.uid===t.outUid)
-                                : transactionLog.find(l=>l.id===t.outLogId);
-            const ts = ol ? effTs(ol) : (t.sentAt||0);
-            return ts < cutoff;
+            return transferEffTs(t) < cutoff;
         }) : [];
         if(pendingTf.length){
             notify('Belum Bisa Tutup Buku',
@@ -6475,7 +6643,7 @@
                 let diffTotal = (currentSellPerUnit-storedSellPerUnit)*l.qty;
                 let locked = isEditLocked(l);
                 return `<tr>
-                    <td>${new Date(l.timestamp).toLocaleDateString('id')}</td>
+                    <td>${new Date(effTs(l)).toLocaleDateString('id')}</td>
                     <td class="mono">${l.sku}</td>
                     <td>${l.itemName||item.name}</td>
                     <td>${l.qty.toLocaleString('id')} ${item.baseUnit}</td>
@@ -8083,8 +8251,8 @@
         if(success){ document.getElementById('scanResultArea').style.display='none'; document.getElementById('invoiceText').value=''; refreshUI(); }
     });
     document.getElementById('clearTextBtn')?.addEventListener('click',()=>{ document.getElementById('invoiceText').value=''; document.getElementById('scanResultArea').style.display='none'; });
-    document.getElementById('exportExcel')?.addEventListener('click',()=>{ if(typeof XLSX==="undefined"){ notify('Offline','Library Excel belum termuat. Perlu koneksi internet.','warning'); return; } let data=[["Tanggal","Jenis","SKU","Nama","Jumlah","Harga Satuan","Total","Supplier/Divisi","Ref","Deskripsi","Petugas"]]; getFilteredLog().forEach(l=>{ data.push([new Date(l.timestamp).toLocaleString(), l.type==='out'&&l.outType==='susut'?'susut':l.type, l.sku, l.itemName||'', l.qty, l.type==='in'?l.price:(l.total/l.qty).toFixed(2), l.total, l.supplier||l.division||'', l.ref||'', l.desc||'', l.by||'']); }); let ws=XLSX.utils.aoa_to_sheet(data); let wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Laporan"); XLSX.writeFile(wb,"laporan.xlsx"); });
-    document.getElementById('exportPDF')?.addEventListener('click',()=>{ if(!window.jspdf){ notify('Offline','Library PDF belum termuat. Perlu koneksi internet.','warning'); return; } let {jsPDF}=window.jspdf; let doc=new jsPDF({orientation:'landscape'}); let body=getFilteredLog().map(l=>[new Date(l.timestamp).toLocaleString(), l.type, l.sku, l.itemName||'', l.qty, l.type==='in'?l.price:(l.total/l.qty).toFixed(2), l.total, l.supplier||l.division||'', l.ref||'']); doc.autoTable({head:[["Tgl","Jenis","SKU","Nama","Jml","Harga","Total","Supplier/Divisi","Ref"]],body:body,styles:{fontSize:7}}); doc.save("laporan.pdf"); });
+    document.getElementById('exportExcel')?.addEventListener('click',()=>{ if(typeof XLSX==="undefined"){ notify('Offline','Library Excel belum termuat. Perlu koneksi internet.','warning'); return; } let data=[["Tanggal","Jenis","SKU","Nama","Jumlah","Harga Satuan","Total","Supplier/Divisi","Ref","Deskripsi","Petugas"]]; getFilteredLog().forEach(l=>{ data.push([new Date(effTs(l)).toLocaleString(), l.type==='out'&&l.outType==='susut'?'susut':l.type, l.sku, l.itemName||'', l.qty, l.type==='in'?l.price:(l.total/l.qty).toFixed(2), l.total, l.supplier||l.division||'', l.ref||'', l.desc||'', l.by||'']); }); let ws=XLSX.utils.aoa_to_sheet(data); let wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Laporan"); XLSX.writeFile(wb,"laporan.xlsx"); });
+    document.getElementById('exportPDF')?.addEventListener('click',()=>{ if(!window.jspdf){ notify('Offline','Library PDF belum termuat. Perlu koneksi internet.','warning'); return; } let {jsPDF}=window.jspdf; let doc=new jsPDF({orientation:'landscape'}); let body=getFilteredLog().map(l=>[new Date(effTs(l)).toLocaleString(), l.type, l.sku, l.itemName||'', l.qty, l.type==='in'?l.price:(l.total/l.qty).toFixed(2), l.total, l.supplier||l.division||'', l.ref||'']); doc.autoTable({head:[["Tgl","Jenis","SKU","Nama","Jml","Harga","Total","Supplier/Divisi","Ref"]],body:body,styles:{fontSize:7}}); doc.save("laporan.pdf"); });
     document.getElementById('exportHistory')?.addEventListener('click',()=>{ let csv="Tanggal,TotalSKU,JumlahSelisih,NilaiSelisih\n"+soHistory.map(h=>`${new Date(h.date).toISOString()},${h.totalSku},${h.diffCount},${h.totalDiffValue}`).join("\n"); let a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"})); a.download="histori_opname.csv"; a.click(); });
     // Laporan Stok: filter & export
     document.getElementById('ihClose')?.addEventListener('click',()=>{ document.getElementById('itemHistoryModal').style.display='none'; });
@@ -8744,7 +8912,7 @@
             else if(x.flagged) cell=`<span style="color:#ef4444; font-weight:700;">🔴 ${x.ratio>=1?Math.round(x.ratio)+'x lebih mahal':'1/'+Math.round(1/x.ratio)+'x'}</span><br><span style="font-size:0.7rem; color:var(--text3);">referensi ±Rp${x.wajar.toLocaleString('id',{maximumFractionDigits:2})}/${x.it.baseUnit}</span>`;
             else cell='<span style="color:#10b981;">🟢 Wajar</span>';
             return `<tr${x.flagged?' style="background:rgba(239,68,68,0.08);"':''}>
-                <td>${new Date(x.l.timestamp).toLocaleDateString('id')}</td>
+                <td>${new Date(effTs(x.l)).toLocaleDateString('id')}</td>
                 <td class="mono">${x.l.sku}</td><td>${x.l.itemName||''}</td>
                 <td>${gudangName(x.l.gudang||DEFAULT_GUDANG)}</td>
                 <td>${qtyLbl(x.l.sku, x.l.qty)}</td>
@@ -8831,7 +8999,7 @@
         if (editLocked) { notify('Mode Koreksi Terkunci','Buka dulu Mode Koreksi Data (tombol 🔓/🔒 di tab Transaksi) sebelum mengedit.','warning'); return; }
         editingLogId=id;
         const item=itemBySku(log.sku);
-        document.getElementById('editLogInfo').innerHTML = `${log.type==='in'?'📥 Barang Masuk':'📤 Barang Keluar'} — <span class="mono">${log.sku}</span> ${item?item.name:''}<br>${new Date(log.timestamp).toLocaleString('id')}`;
+        document.getElementById('editLogInfo').innerHTML = `${log.type==='in'?'📥 Barang Masuk':'📤 Barang Keluar'} — <span class="mono">${log.sku}</span> ${item?item.name:''}<br>${new Date(effTs(log)).toLocaleString('id')}${log.effectiveTimestamp&&log.effectiveTimestamp!==log.timestamp?` <span style="font-size:0.72rem; color:var(--text3);">(diinput ${new Date(log.timestamp).toLocaleString('id')})</span>`:''}`;
         document.getElementById('editLogQty').value = log.qty;
         document.getElementById('editLogRef').value = log.ref||'';
         document.getElementById('editLogReason').value = '';
@@ -9308,7 +9476,7 @@
                 let it=itemBySku(l.sku);
                 let jenis = l.type==='in' ? '<span style="color:#34d399;">Terima</span>'
                           : (l.outType==='retur' ? '<span style="color:#fbbf24;">Retur</span>' : '<span style="color:#f87171;">Pemakaian</span>');
-                return '<tr><td style="white-space:nowrap;">'+new Date(l.timestamp).toLocaleString('id',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})+'</td>'
+                return '<tr><td style="white-space:nowrap;">'+new Date(effTs(l)).toLocaleString('id',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})+'</td>'
                     +'<td>'+jenis+'</td><td>'+dvzEsc(it?it.name:l.sku)+'</td>'
                     +'<td style="text-align:right;" class="mono">'+dvzQty(it,l.qty)+'</td></tr>';
               }).join('')
