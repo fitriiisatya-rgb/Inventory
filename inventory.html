@@ -1053,6 +1053,7 @@
         <button id="invDiagRunBtn" class="btn btn-primary btn-sm">🔄 Jalankan Diagnostic</button>
         <button id="invDiagExportBtn" class="btn btn-secondary btn-sm">📊 Export CSV</button>
         <button id="invDiagAngkaRusakBtn" class="btn btn-warning btn-sm">🔢 Perbaiki Angka Kehilangan Koma</button>
+        <button id="invDiagHargaSatuanBtn" class="btn btn-warning btn-sm">⚖️ Perbaiki Harga Salah Satuan</button>
         <button id="invDiagPpnTandaiBtn" class="btn btn-warning btn-sm">① Catat PPN pada Pembelian Lama</button>
         <button id="invDiagPpnBtn" class="btn btn-warning btn-sm">② Rebuild Historical Cost incl PPN</button>
     </div>
@@ -5613,6 +5614,148 @@
         notify('Dikembalikan', n+' baris kembali ke nilai semula.', 'success');
     };
 
+
+    // ============ HARGA MEMAKAI SATUAN MENENGAH, KUANTITAS MEMAKAI SATUAN DASAR ============
+    // Gejala kedua, berbeda dari pemisah desimal yang hilang. Untuk bahan ber-satuan dasar Gr/Ml,
+    // sebagian transaksi lama mencatat HARGA per Kg/Liter sementara KUANTITAS-nya sudah dalam Gr/Ml.
+    // Nilainya jadi 1.000x terlalu besar, dan harga itu menular lewat lapisan FIFO ke saldo hasil
+    // Stok Opname — di situlah Rp8 miliar untuk 325 Kg coklat pasta berasal.
+    //
+    // Yang diperbaiki HANYA harganya. Kuantitas TIDAK disentuh: menaikkan qty 1.000x sudah diuji
+    // pada data nyata dan menghasilkan stok minus ratusan juta satuan — mustahil secara fisik,
+    // jadi tafsir itu terbantah oleh datanya sendiri.
+    function satuanDasarPerMenengah(it){
+        const mc=Number(it && it.midContent)||0, bc=Number(it && it.buyContent)||0;
+        return (mc>0 && bc>0) ? bc/mc : 0;   // mis. 20.000 Gr per Ctn / 20 Kg per Ctn = 1.000 Gr per Kg
+    }
+    function deteksiHargaSatuanMid(){
+        const hasil=[];
+        (transactionLog||[]).forEach(l=>{
+            if(!l || !(l.price>0)) return;
+            if(l.angkaSatuanDiperbaiki) return;
+            const it=itemBySku(l.sku); if(!it) return;
+            if(!['Gr','Ml','G'].includes(it.baseUnit)) return;
+            if(!(it.lastBuyPrice>0) || !(it.buyContent>0)) return;
+            const faktor=satuanDasarPerMenengah(it);
+            if(!(faktor>=10)) return;
+            const wajar=it.lastBuyPrice/it.buyContent;
+            const rasio=l.price/wajar;
+            // harus benar-benar sekitar faktor satuan, bukan sekadar "mahal"
+            if(!(rasio>=0.3*faktor && rasio<=3*faktor)) return;
+            hasil.push({ log:l, faktor, wajar, rasio,
+                         sesudah:l.price/faktor, satuanMid:it.midUnit||'', satuanDasar:it.baseUnit });
+        });
+        hasil.sort((a,b)=>Math.abs(b.log.total||0)-Math.abs(a.log.total||0));
+        return hasil;
+    }
+    function terapkanSatuHargaMid(d){
+        const l=d.log;
+        if(l.angkaSatuanDiperbaiki) return false;
+        const f=d.faktor;
+        l.price=l.price/f;
+        l.total=Math.round((l.qty*l.price)*100)/100;
+        ['costLayers','deducted','lossLayers'].forEach(nama=>{
+            if(Array.isArray(l[nama])) l[nama].forEach(L=>{ if(L.price!=null) L.price=L.price/f; });
+        });
+        l.angkaSatuanDiperbaiki={ pada:Date.now(), faktor:f };
+        return true;
+    }
+    window.perbaikiHargaSatuanMid = function(){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        const daftar=deteksiHargaSatuanMid();
+        if(!daftar.length){ notify('Bersih','Tidak ada harga yang tampak memakai satuan Kg/Liter pada bahan ber-satuan Gr/Ml.','success'); return; }
+        const rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+        const ts=getMonthStart().getTime();
+        const sebelumSnap=getInventorySnapshotAt(ts);
+        const simpan=daftar.map(d=>({ l:d.log, price:d.log.price, total:d.log.total,
+            costLayers:d.log.costLayers?JSON.parse(JSON.stringify(d.log.costLayers)):null,
+            deducted:d.log.deducted?JSON.parse(JSON.stringify(d.log.deducted)):null,
+            lossLayers:d.log.lossLayers?JSON.parse(JSON.stringify(d.log.lossLayers)):null }));
+        daftar.forEach(d=>terapkanSatuHargaMid(d)); dataVersi++;
+        const sesudahSnap=getInventorySnapshotAt(ts);
+        const per=sn=>{ const o={}; (sn.rows||[]).forEach(r=>{ o[r.gudang]=(o[r.gudang]||0)+r.value; }); return o; };
+        const pA=per(sebelumSnap), pB=per(sesudahSnap);
+        simpan.forEach(x=>{ x.l.price=x.price; x.l.total=x.total;
+            if(x.costLayers) x.l.costLayers=x.costLayers;
+            if(x.deducted) x.l.deducted=x.deducted;
+            if(x.lossLayers) x.l.lossLayers=x.lossLayers;
+            delete x.l.angkaSatuanDiperbaiki; });
+        dataVersi++;
+        const perSku={};
+        daftar.forEach(d=>{ const k=d.log.sku; if(!perSku[k]) perSku[k]={n:0, nilai:0, faktor:d.faktor, d};
+            perSku[k].n++; perSku[k].nilai+=Math.abs(d.log.total||0); });
+        const barisSku=Object.keys(perSku).sort((a,b)=>perSku[b].nilai-perSku[a].nilai).map(k=>{
+            const x=perSku[k], it=itemBySku(k)||{};
+            return `<tr><td class="mono">${dvzEsc(k)}</td><td>${dvzEsc(String(it.name||'').slice(0,26))}</td>
+              <td>${dvzEsc(it.baseUnit||'')}</td><td style="text-align:right">${x.n}</td>
+              <td style="text-align:right">÷${Number(x.faktor).toLocaleString('id')}</td>
+              <td style="text-align:right">${rp(x.nilai)}</td></tr>`; }).join('');
+        const gud=[...new Set([...Object.keys(pA),...Object.keys(pB)])];
+        const barisGd=gud.map(g=>`<tr><td>${dvzEsc(gudangName(g))}</td><td style="text-align:right">${rp(pA[g]||0)}</td>
+            <td style="text-align:right;color:#1a7f37">${rp(pB[g]||0)}</td></tr>`).join('');
+        Swal.fire({ title:'Harga Memakai Satuan Kg/Liter pada Bahan Ber-satuan Gr/Ml', width:1000,
+            showCancelButton:true, confirmButtonText:'Ya, bagi harganya', cancelButtonText:'Batal',
+            html:`<div style="text-align:left;font-size:14px">
+              <p style="margin:0 0 10px"><b>${daftar.length}</b> transaksi pada <b>${Object.keys(perSku).length}</b> bahan mencatat harga
+              per Kg/Liter padahal kuantitasnya sudah dalam Gr/Ml. Harganya dibagi faktor satuan;
+              <b>kuantitas tidak diubah</b>.</p>
+              <table style="width:100%;margin-bottom:12px;font-variant-numeric:tabular-nums;font-size:.82rem">
+                <thead><tr><th style="text-align:left">Area</th><th style="text-align:right">SEBELUM</th><th style="text-align:right">SESUDAH</th></tr></thead>
+                <tbody>${barisGd}<tr style="font-weight:800;border-top:2px solid #ccc"><td>TOTAL</td>
+                  <td style="text-align:right">${rp(sebelumSnap.totalValue)}</td>
+                  <td style="text-align:right;color:#1a7f37">${rp(sesudahSnap.totalValue)}</td></tr></tbody></table>
+              <div style="max-height:240px;overflow:auto"><table style="width:100%;font-size:.78rem"><thead><tr>
+                <th style="text-align:left">SKU</th><th style="text-align:left">Nama</th><th style="text-align:left">Satuan</th>
+                <th style="text-align:right">Transaksi</th><th style="text-align:right">Dibagi</th><th style="text-align:right">Nilai lama</th>
+              </tr></thead><tbody>${barisSku}</tbody></table></div>
+              <p style="margin:10px 0 0;font-size:.78rem">Kuantitas sengaja tidak disentuh: menaikkannya 1.000x menghasilkan stok minus ratusan juta satuan, jadi tafsir itu terbantah datanya sendiri.</p>
+            </div>` }).then(r=>{
+            if(!r.isConfirmed) return;
+            const pin=prompt('PIN Admin untuk menerapkan perbaikan harga satuan:');
+            if(pin===null) return;
+            if(pin!==soPins.admin){ notify('PIN Salah','','error'); return; }
+            const cadangan=daftar.map(d=>({ uid:d.log.uid, id:d.log.id, price:d.log.price, total:d.log.total,
+                costLayers:d.log.costLayers?JSON.parse(JSON.stringify(d.log.costLayers)):null,
+                deducted:d.log.deducted?JSON.parse(JSON.stringify(d.log.deducted)):null,
+                lossLayers:d.log.lossLayers?JSON.parse(JSON.stringify(d.log.lossLayers)):null }));
+            const kunci='backup_harga_satuan_'+Date.now();
+            try{ localStorage.setItem(kunci, JSON.stringify(cadangan)); }catch(e){}
+            window.__cadanganHargaSatuan=cadangan;
+            let n=0; daftar.forEach(d=>{ if(terapkanSatuHargaMid(d)) n++; });
+            dataVersi++;
+            if(typeof auditLog!=='undefined') auditLog.unshift({ id:nextAuditId++, action:'edit', at:Date.now(),
+                by:currentUsername||deviceOperator||'', reason:`Bagi harga satuan Kg/Liter -> Gr/Ml pada ${n} transaksi. Stok Awal ${rp(sebelumSnap.totalValue)} -> ${rp(sesudahSnap.totalValue)}. Cadangan: ${kunci}`,
+                sku:'-', itemName:'Koreksi harga satuan', type:'policy',
+                before:{ stokAwal:Math.round(sebelumSnap.totalValue) }, after:{ stokAwal:Math.round(sesudahSnap.totalValue) },
+                snapshot:{ cadanganKey:kunci } });
+            persist(); refreshUI();
+            Swal.fire({ title:'Selesai', icon:'success', width:620,
+                html:`<div style="text-align:left;font-size:14px">${n} transaksi diperbaiki.<br><br>
+                  Stok Awal: <b>${rp(sebelumSnap.totalValue)}</b> → <b style="color:#1a7f37">${rp(sesudahSnap.totalValue)}</b><br><br>
+                  Untuk mengembalikan: <span class="mono">urungkanHargaSatuan()</span> di Console.</div>` });
+        });
+    };
+    window.urungkanHargaSatuan = function(kunci){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        let cad=window.__cadanganHargaSatuan;
+        if(!cad){ try{
+            const semua=Object.keys(localStorage).filter(k=>k.startsWith('backup_harga_satuan_')).sort();
+            cad=JSON.parse(localStorage.getItem(kunci||semua[semua.length-1])||'null'); }catch(e){} }
+        if(!cad || !cad.length){ notify('Tidak ada cadangan','','warning'); return; }
+        if(!confirm('Kembalikan '+cad.length+' transaksi ke harga sebelum diperbaiki?')) return;
+        let n=0;
+        cad.forEach(c=>{
+            const l=(c.uid?transactionLog.find(x=>x.uid&&x.uid===c.uid):null)||(c.id!=null?transactionLog.find(x=>x.id===c.id):null);
+            if(!l) return;
+            l.price=c.price; l.total=c.total;
+            if(c.costLayers) l.costLayers=c.costLayers;
+            if(c.deducted) l.deducted=c.deducted;
+            if(c.lossLayers) l.lossLayers=c.lossLayers;
+            delete l.angkaSatuanDiperbaiki; n++; });
+        dataVersi++; persist(); refreshUI();
+        notify('Dikembalikan', n+' transaksi kembali ke harga semula.', 'success');
+    };
+
     window.catatPpnPembelianLama = function(){
         if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
         const kandidat=pembelianTanpaPpnTercatat();
@@ -5717,6 +5860,7 @@
         });
     };
     document.getElementById('invDiagAngkaRusakBtn')?.addEventListener('click', ()=>perbaikiAngkaRusak());
+    document.getElementById('invDiagHargaSatuanBtn')?.addEventListener('click', ()=>perbaikiHargaSatuanMid());
     document.getElementById('invDiagPpnTandaiBtn')?.addEventListener('click', ()=>catatPpnPembelianLama());
     document.getElementById('fixPpnMasterBtn')?.addEventListener('click', ()=>catatPpnPembelianLama());
     document.getElementById('invDiagPpnBtn')?.addEventListener('click', ()=>rebuildHistoricalCostInclPPN());
