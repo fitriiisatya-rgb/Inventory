@@ -102,18 +102,26 @@
   say('Jumlah baris ber-FLAG di Top 50: ' + flagged.length);
 
   // cek khusus: apakah harga per kemasan dipakai sebagai harga per satuan dasar?
-  const dugaanKemasan = top50.filter(r=>{
-    if(!(r.masterPerKemasan>0) || !(r.isi>1) || !isFinite(r.cost)) return false;
-    const rasioKeKemasan = r.cost / r.masterPerKemasan;
-    return rasioKeKemasan > 0.8 && rasioKeKemasan < 1.25;     // cost/unit ~= harga SATU KEMASAN
-  });
+  const cekKemasan = r => {
+    const m = masterPerBase(r.sku);
+    if(!(m.perKemasan>0) || !(m.isi>1) || !isFinite(r.cost)) return null;
+    const rk = r.cost / m.perKemasan;
+    return (rk>0.8 && rk<1.25) ? {...r, masterPerKemasan:m.perKemasan, isi:m.isi} : null;
+  };
+  const dugaanKemasan = rows.map(cekKemasan).filter(Boolean)          // SELURUH baris, bukan Top 50
+                            .sort((a,b)=>Math.abs(b.nilai)-Math.abs(a.nilai));
+  const nilaiKemasan = dugaanKemasan.reduce((a,r)=>a+r.nilai,0);
   say('');
-  say('DUGAAN "harga per Ctn/Kg/Pack dipakai sebagai harga per satuan dasar": ' + dugaanKemasan.length + ' baris');
+  say('DUGAAN "harga per Ctn/Kg/Pack dipakai sebagai harga per satuan dasar": ' + dugaanKemasan.length
+      + ' baris dari ' + rows.length + '  ·  senilai ' + rp(nilaiKemasan));
   if(dugaanKemasan.length){
     say(pad('SKU',16)+pad('Gudang',14)+lpad('Cost/unit',16)+lpad('Harga/kemasan',16)+lpad('Isi',12)+lpad('Seharusnya',16)+lpad('Salah x',10));
     hr();
-    dugaanKemasan.forEach(r=>say(pad(r.sku,16)+pad(r.gudangNama,14)+lpad(rp2(r.cost),16)+lpad(rp2(r.masterPerKemasan),16)
+    dugaanKemasan.slice(0,40).forEach(r=>say(pad(r.sku,16)+pad(r.gudangNama,14)+lpad(rp2(r.cost),16)+lpad(rp2(r.masterPerKemasan),16)
       +lpad(num(r.isi),12)+lpad(rp2(r.masterPerKemasan/r.isi),16)+lpad(Math.round(r.isi)+'x',10)));
+    if(dugaanKemasan.length>40) say('... +'+(dugaanKemasan.length-40)+' baris lagi');
+    say('Kalau semua baris ini seharusnya dibagi isi kemasannya, nilai opening turun dari '
+        +rp(nilaiKemasan)+' menjadi '+rp(dugaanKemasan.reduce((a,r)=>a+r.nilai/r.isi,0))+'.');
   }
 
   // ------------------------------------------------------------- 3. TRACE LAYER
@@ -327,12 +335,46 @@
         +'  ('+(dashTotal?Math.round(meledak.reduce((a,r)=>a+r.nilai,0)/dashTotal*1000)/10:0)+'% dari Opening)');
   }
 
+  H('10. LOG PEMBELIAN YANG HARGANYA BERBAU "HARGA PER KEMASAN"');
+  say('toBasePrice() hanya membagi dengan isi kemasan KALAU satuan yang dipilih operator = kemasan beli.');
+  say('Kalau operator mengetik harga per Ctn/Zak/Pail tapi satuannya tertinggal di satuan dasar,');
+  say('harga itu tersimpan apa adanya sebagai harga per Gr/Ml/Pcs. Di sini dicari jejaknya.');
+  say('');
+  const salahInput=[];
+  (transactionLog||[]).forEach(l=>{
+    if(l.type!=='in' || !(l.qty>0) || !(l.total>0)) return;
+    if(l.nonStockMovement || l.inventoryMovement===false) return;
+    const it=itemBySku(l.sku); if(!it || !(it.lastBuyPrice>0) || !(it.buyContent>1)) return;
+    const unit=l.total/l.qty;
+    const rk=unit/it.lastBuyPrice;            // ~1 berarti harga SATU KEMASAN dipakai per satuan dasar
+    const rb=unit/(it.lastBuyPrice/it.buyContent);
+    if(rk>0.5 && rk<2 && rb>5){
+      salahInput.push({ ts:effTs(l), sku:l.sku, nama:l.itemName||l.sku, gudang:l.gudang||DEFAULT_GUDANG,
+        qty:l.qty, unit, total:l.total, ref:l.ref||'', supplier:l.supplier||'',
+        perKemasan:it.lastBuyPrice, isi:it.buyContent, seharusnya:it.lastBuyPrice/it.buyContent,
+        totalSeharusnya:l.total/it.buyContent, kelebihan:l.total-(l.total/it.buyContent) });
+    }
+  });
+  salahInput.sort((a,b)=>b.kelebihan-a.kelebihan);
+  if(!salahInput.length) say('Tidak ditemukan log pembelian dengan pola ini.');
+  else {
+    say('Ditemukan '+salahInput.length+' log pembelian. Total kelebihan nilai: '+rp(salahInput.reduce((a,x)=>a+x.kelebihan,0)));
+    say('');
+    say(pad('Tgl',12)+pad('SKU',16)+pad('Nama',30)+pad('Gudang',14)+lpad('Qty',12)+lpad('Harga/satuan',16)+lpad('Seharusnya',14)+lpad('Salah x',9)+lpad('Nilai dicatat',20)+lpad('Kelebihan',20)+'  Ref');
+    hr();
+    salahInput.slice(0,40).forEach(x=>say(pad(tgl(x.ts),12)+pad(x.sku,16)+pad(x.nama,30)+pad(gudangName(x.gudang),14)
+      +lpad(num(x.qty),12)+lpad(rp2(x.unit),16)+lpad(rp2(x.seharusnya),14)+lpad(Math.round(x.isi)+'x',9)
+      +lpad(rp(x.total),20)+lpad(rp(x.kelebihan),20)+'  '+x.ref+(x.supplier?' · '+x.supplier:'')));
+    if(salahInput.length>40) say('... +'+(salahInput.length-40)+' log lagi');
+  }
+
   H('RINGKASAN');
   say('Dashboard Opening September : '+rp(dashTotal)+(beku?'  (angka BEKU dari Opening Resmi)':'  (hasil hitung ulang)'));
   say('Snapshot Closing Agustus    : '+rp(clTotal));
   say('Expected SCM (SO+mutasi)    : '+rp(expectedSCM)+'   vs Dashboard SCM '+rp(dashSCM)+'   GAP '+(expectedSCM!=null?rp(dashSCM-expectedSCM):'-'));
   say('Baris ber-rasio >5x         : '+nMahal+' baris senilai '+rp(valMahal)+'  ('+(dashTotal?Math.round(valMahal/dashTotal*1000)/10:0)+'% dari total opening)');
-  say('Dugaan harga per kemasan    : '+dugaanKemasan.length+' baris di Top 50');
+  say('Dugaan harga per kemasan    : '+dugaanKemasan.length+' baris opening senilai '+rp(nilaiKemasan));
+  say('Log pembelian salah satuan  : '+salahInput.length+' log, kelebihan '+rp(salahInput.reduce((a,x)=>a+x.kelebihan,0)));
   say('Pola qty-nol-jadi-penyebut  : '+meledak.length+' baris senilai '+rp(meledak.reduce((a,r)=>a+r.nilai,0)));
   say('');
   say('Salin seluruh laporan ini dengan mengetik:   copy(__TRACE)');
