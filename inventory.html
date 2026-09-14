@@ -959,15 +959,27 @@
             <button id="saExcel" class="btn btn-sm btn-secondary">📊 Export Excel</button>
             <button id="saPdf" class="btn btn-sm btn-secondary">📑 Export PDF</button>
         </div>
-        <div class="grid-3" style="margin-bottom:10px;">
-            <div class="kpi-card" style="padding:12px;"><div class="kpi-label">Grand Total (sesuai KPI)</div><div class="kpi-value" id="saGrand" style="font-size:1rem;">Rp0</div></div>
-            <div class="kpi-card" style="padding:12px;"><div class="kpi-label">Total Tampil (setelah filter)</div><div class="kpi-value" id="saShown" style="font-size:1rem;">Rp0</div></div>
-            <div class="kpi-card" style="padding:12px;"><div class="kpi-label">Baris</div><div class="kpi-value" id="saCount" style="font-size:1.1rem;">0</div></div>
-        </div>
-        <div id="saKartuGudang" class="grid-3" style="margin-bottom:12px;"></div>
+        <div id="saKartuGudang" class="grid-4" style="margin-bottom:10px;"></div>
+        <div id="saInfoFilter" style="font-size:0.76rem; color:var(--text3); margin-bottom:12px;"></div>
         <div id="saLegacy"></div>
         <div id="saTop20" style="margin-bottom:12px;"></div>
         <div class="table-wrapper" style="max-height:50vh; overflow-y:auto;"><table><thead><tr><th>Area/Gudang</th><th>SKU</th><th>Nama Barang</th><th>Qty Stok Awal</th><th>Satuan</th><th>Harga/Cost</th><th>Nilai Stok Awal</th></tr></thead><tbody id="saBody"></tbody></table></div>
+    </div>
+</div>
+
+<!-- MODAL OPENING RESMI (STOK AWAL BEKU) -->
+<div id="openingResmiModal" class="modal">
+    <div class="modal-content" style="max-width:940px;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:6px;">
+            <div class="card-title">🔒 Opening Resmi — <span id="orPeriodeLbl"></span></div>
+            <button id="orClose" class="btn btn-sm btn-secondary">✕ Tutup</button>
+        </div>
+        <div style="font-size:0.78rem; color:var(--text3); margin-bottom:10px;">
+            Opening Resmi adalah nilai stok awal yang <strong>dibekukan</strong>. Sekali tersimpan, transaksi bulan berjalan
+            tidak bisa mengubahnya. Hanya Admin yang boleh membangunnya ulang, dan hanya setelah melihat perbandingan di bawah.
+        </div>
+        <input type="file" id="orFileArsip" accept=".csv,.xlsx,.xls" style="display:none;">
+        <div id="orIsi"></div>
     </div>
 </div>
 
@@ -1302,6 +1314,14 @@
     let inventoryBaselines = []; // snapshot terverifikasi utk rekonstruksi stok historis
     let closings = []; // tutup buku: {period, closedAt, cutoff, txCount, inTotal, hppTotal, susutTotal, valueAtCutoff}
     let lockBefore = 0; // transaksi sebelum ini terkunci permanen (praktik akuntansi)
+    // OPENING RESMI PER PERIODE — dibekukan, bukan dihitung ulang.
+    // Tutup Buku MENGHAPUS transaksi lama dari transactionLog (dipindah ke arsip Google Sheets).
+    // Kalau Stok Awal selalu dihitung ulang dari log, angkanya akan ambruk begitu log sumbernya
+    // hilang. Maka pada saat Tutup Buku, saldo pada cutoff dibekukan di sini SEBELUM log dihapus:
+    // Closing September = Opening Oktober, permanen, tidak tergantung log yang masih tersisa.
+    // Bentuk: officialOpenings["2026-10"] = {period, cutoff, rows, totalValue, createdAt, createdBy, source, engine}
+    // rows memakai bentuk yang sama dengan getInventorySnapshotAt().rows: {sku, gudang, qty, value, batches[]}
+    let officialOpenings = {};
     // Nama barang tambahan yang didaftarkan ke katalog gudang transit (di luar daftar bawaan).
     // Dipakai supaya barang bisa ditambahkan ke gudang tertentu TANPA mengeluarkannya dari gudang lain.
     let gudangExtraNames = { cibadak:[], karangtengah:[] };
@@ -1355,7 +1375,7 @@
             localStorage.setItem('gudang_extra_names', JSON.stringify(gudangExtraNames));
             localStorage.setItem('produksi_divisi', JSON.stringify(produksiDivisi));
             localStorage.setItem(STORAGE.TRANSFER, JSON.stringify(transfers));
-            localStorage.setItem("closings", JSON.stringify({closings, lockBefore, editLocked, categoryMarkup, auditLog, nextAuditId}));
+            localStorage.setItem("closings", JSON.stringify({closings, officialOpenings, lockBefore, editLocked, categoryMarkup, auditLog, nextAuditId}));
         } catch (e) {
             console.error("Gagal simpan:", e);
             notify("Peringatan", "Data gagal disimpan ke penyimpanan browser: " + e.message, "warning");
@@ -1437,7 +1457,7 @@
         return { masterSKU, stockBatches, transactionLog, suppliers, divisions, inventoryBaselines, gudangExtraNames, produksiDivisi,
             divisiAkun: (((typeof authConfig!=='undefined' && authConfig && authConfig.users)||[]).filter(function(u){ return u.role==='divisi'; })),
             ids: { nextLogId, nextSupplierId, nextDivisionId, nextBatchId, nextTransferId },
-            so: { soSessions, soPins }, soHistory, invoiceAliases, closings, lockBefore, editLocked, categoryMarkup, auditLog, nextAuditId, transfers };
+            so: { soSessions, soPins }, soHistory, invoiceAliases, closings, officialOpenings, lockBefore, editLocked, categoryMarkup, auditLog, nextAuditId, transfers };
     }
     function mergeSOSessionFor(gudang, serverSession){
         // Gabungkan hitungan SO lokal & server per (bahan, petugas) untuk SATU gudang — yang terbaru menang.
@@ -1495,7 +1515,7 @@
             try{ saveAuth(); renderLoginUserOptions(); }catch(e){}
         }
         inventoryBaselines = s.inventoryBaselines || [];
-        closings = s.closings||[]; lockBefore = s.lockBefore||0; editLocked = s.editLocked||false; categoryMarkup = s.categoryMarkup||{}; auditLog = s.auditLog||[]; nextAuditId = s.nextAuditId||1;
+        closings = s.closings||[]; officialOpenings = gabungOpeningResmi(officialOpenings, s.officialOpenings); lockBefore = s.lockBefore||0; editLocked = s.editLocked||false; categoryMarkup = s.categoryMarkup||{}; auditLog = s.auditLog||[]; nextAuditId = s.nextAuditId||1;
         if(migrateDummyMaster()) schedulePush(); // server masih pegang dummy -> kirim koreksi
         normalizeItems();
         persistLocal();
@@ -1866,7 +1886,7 @@
             try{ gudangExtraNames = JSON.parse(localStorage.getItem('gudang_extra_names')||'{"cibadak":[],"karangtengah":[]}'); }catch(e){}
             try{ produksiDivisi = JSON.parse(localStorage.getItem('produksi_divisi')||'[]'); }catch(e){}
             let cl = JSON.parse(localStorage.getItem("closings") || "{}");
-            closings = cl.closings || []; lockBefore = cl.lockBefore || 0; editLocked = cl.editLocked || false; categoryMarkup = cl.categoryMarkup || {}; auditLog = cl.auditLog || []; nextAuditId = cl.nextAuditId || 1;
+            closings = cl.closings || []; officialOpenings = cl.officialOpenings || {}; lockBefore = cl.lockBefore || 0; editLocked = cl.editLocked || false; categoryMarkup = cl.categoryMarkup || {}; auditLog = cl.auditLog || []; nextAuditId = cl.nextAuditId || 1;
             migrateDummyMaster(); normalizeItems();
         try{ syncMasterLastBuyPriceFromPurchaseLogs(); }catch(e){}  // master selalu turunan log pembelian
         persistLocal();
@@ -2915,7 +2935,10 @@
         // saat dikirim tapi baru masuk ke gudang tujuan setelah dikonfirmasi diterima, transfer yang
         // "menyeberang" awal bulan bikin angka KPI ini melenceng dari Laporan. getStockValueAt sudah
         // otomatis pakai angka RESMI tutup buku kalau cutoff-nya cocok.)
-        return getStockValueAt(getMonthStart().getTime());
+        // Sejak ada Opening Resmi: kalau periode ini sudah dibekukan saat Tutup Buku, angka beku
+        // itulah yang dipakai — supaya Stok Awal tidak ikut berubah ketika transaksi bulan lama
+        // sudah dipindah ke arsip dan tidak ada lagi di transactionLog.
+        return getOpeningSnapshot(saPeriodeStr()).totalValue;
     }
     function getLowStock(gudang, skipZero, scopeFn) { let low=[]; masterSKU.forEach(i=>{ if(!(i.minStock>0)) return; if(scopeFn && !scopeFn(i)) return; let s=getStock(i.sku,gudang).qty; if(skipZero && s<=0) return; if(s<=i.minStock) low.push(`${i.name} (${s.toLocaleString('id')}/${i.minStock})`); }); return { count:low.length, list:low.slice(0,5).join(', ') + (low.length>5?` +${low.length-5}`:'') }; }
     let trendChart, topChart, monthlyChart, pgAreaChart;
@@ -3300,9 +3323,9 @@
         rows.sort((a,b)=> a.gudang.localeCompare(b.gudang) || a.sku.localeCompare(b.sku));
         return { ok:true, rows, totalValue: rows.reduce((s,r)=>s+r.value,0), dasar:base.label, warning:'' };
     }
-    function stokAwalRows(ts){
-        const snap=getInventorySnapshotAt(ts);
-        return snap.rows.map(r=>{
+    // Baris siap-tampil dari sebuah snapshot (dipakai modal, Excel, dan PDF — satu sumber).
+    function barisDariSnapshot(snap){
+        return (snap.rows||[]).map(r=>{
             const it=itemBySku(r.sku)||{};
             // Sumber harga yang PALING BARU di antara lapisannya — dipakai untuk menandai kalau
             // sebuah nilai opening ternyata bersandar pada harga bertanggal setelah tanggal opening.
@@ -3317,8 +3340,104 @@
                      costSource:cSrc, costAt:cAt, costUnknown:unknown };
         }).sort((a,b)=> a.gudangNama.localeCompare(b.gudangNama) || b.nilai-a.nilai);
     }
+    function stokAwalRows(ts){ return barisDariSnapshot(snapshotAwalPeriode(ts)); }
+    // Kalau `ts` persis jatuh di awal sebuah periode yang Opening Resminya sudah dibekukan,
+    // yang dipakai adalah angka beku itu — bukan hasil hitung ulang dari log yang mungkin
+    // sudah tidak lengkap lagi setelah Tutup Buku.
+    function snapshotAwalPeriode(ts){
+        const per = periodeDari(ts);
+        if(periodeCutoff(per)===ts && officialOpenings[per]) return getOpeningSnapshot(per);
+        return getInventorySnapshotAt(ts);
+    }
     // Nilai persediaan pada suatu titik waktu — alias tipis dari sumber tunggal di atas.
-    function getStockValueAt(ts){ return getInventorySnapshotAt(ts).totalValue; }
+    function getStockValueAt(ts){ return snapshotAwalPeriode(ts).totalValue; }
+
+    // ===================== OPENING RESMI (STOK AWAL BEKU) =====================
+    // Masalah yang diperbaiki di sini: Tutup Buku memindahkan transaksi lama ke arsip Google Sheets
+    // lalu MENGHAPUSNYA dari transactionLog. Selama Stok Awal dihitung ulang dari log setiap kali
+    // dibuka, angkanya pasti berubah begitu log sumbernya hilang — itulah kenapa Stok Awal bisa
+    // "berubah sendiri" setelah tutup buku. Jawabannya bukan menghitung lebih pintar, tapi
+    // MEMBEKUKAN hasilnya saat datanya masih lengkap, lalu selamanya membaca angka beku itu.
+    function periodeCutoff(period){
+        const p=String(period||'').split('-'); const y=parseInt(p[0],10), m=parseInt(p[1],10);
+        if(!isFinite(y)||!isFinite(m)) return NaN;
+        return new Date(y, m-1, 1, 0,0,0,0).getTime();
+    }
+    function periodeDari(ts){ const d=new Date(ts); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+    function periodeSebelum(period){ const c=periodeCutoff(period); const d=new Date(c); d.setMonth(d.getMonth()-1); return periodeDari(d.getTime()); }
+    function labelPeriode(period){ const c=periodeCutoff(period); return isFinite(c) ? new Date(c).toLocaleDateString('id',{month:'long', year:'numeric'}) : String(period||'-'); }
+
+    // Penggabungan antar perangkat: opening resmi bersifat tetap, tapi Admin boleh membangun ulang.
+    // Yang menang adalah versi dengan createdAt paling baru — yaitu hasil tindakan Admin terakhir.
+    function gabungOpeningResmi(lokal, server){
+        const out = Object.assign({}, lokal||{});
+        Object.keys(server||{}).forEach(k=>{
+            const a=out[k], b=server[k];
+            if(!b || !Array.isArray(b.rows)) return;
+            if(!a || !Array.isArray(a.rows) || (b.createdAt||0) > (a.createdAt||0)) out[k]=b;
+        });
+        return out;
+    }
+
+    // Apakah saldo pada `cutoff` masih bisa disusun ulang dengan JUJUR dari data yang tersisa?
+    // Tidak cukup hanya "ada jangkar". Kalau jangkar terdekat bertanggal SEBELUM lockBefore,
+    // maka transaksi antara jangkar itu dan lockBefore sudah dihapus Tutup Buku — replay-nya bolong.
+    function openingDataLengkap(cutoff){
+        const { anchors } = bangunAnchor();
+        let base=null;
+        for(const a of anchors){ if(a.ts<=cutoff) base=a; else break; }
+        if(!base) return { ok:false, base:null, alasan:'Belum ada jangkar saldo terverifikasi (Stok Opname / Tutup Buku mesin baru / Baseline) sebelum '+new Date(cutoff).toLocaleDateString('id')+'.' };
+        const lb = lockBefore||0;
+        if(base.ts < lb) return { ok:false, base, alasan:'Transaksi sebelum '+new Date(lb).toLocaleDateString('id')+' sudah diarsip dan dihapus oleh Tutup Buku, sedangkan jangkar terdekat ("'+base.label+'") bertanggal lebih awal dari itu. Mutasi di antara keduanya tidak ada lagi di sistem, jadi saldo tidak bisa disusun ulang.' };
+        return { ok:true, base, alasan:'' };
+    }
+
+    // SATU-SATUNYA sumber Stok Awal sebuah periode. Dipakai KPI, modal rincian, Excel, dan PDF.
+    // Urutan wewenangnya tegas:
+    //   1. Ada Opening Resmi beku  -> SELALU itu yang dipakai, apa pun isi transactionLog sekarang.
+    //   2. Belum ada               -> disusun ulang dari jangkar + mutasi, hanya kalau datanya utuh.
+    //   3. Data tidak utuh         -> HISTORICAL DATA INCOMPLETE. Tidak ada taksiran, tidak ada
+    //                                 angka karangan, dan TIDAK PERNAH memakai stok hari ini.
+    function getOpeningSnapshot(period){
+        const cutoff = periodeCutoff(period);
+        if(!isFinite(cutoff)) return { ok:false, incomplete:true, beku:false, period, cutoff:NaN, rows:[], totalValue:0, dasar:'-', source:'', warning:'Periode tidak dikenali.' };
+        const off = officialOpenings[period];
+        if(off && Array.isArray(off.rows)){
+            const rows = off.rows.map(r=>({ sku:r.sku, gudang:r.gudang, qty:r.qty, value:r.value, batches:(r.batches||[]).map(b=>({...b})) }));
+            const total = (off.totalValue!=null) ? off.totalValue : rows.reduce((a,r)=>a+(r.value||0),0);
+            return { ok:true, incomplete:false, beku:true, period, cutoff:(off.cutoff||cutoff), rows, totalValue:total,
+                dasar:'Opening Resmi '+labelPeriode(period)+' — dibekukan '+new Date(off.createdAt||off.cutoff||cutoff).toLocaleString('id')+(off.source?' ('+off.source+')':''),
+                source:off.source||'', createdAt:off.createdAt||0, createdBy:off.createdBy||'', warning:'' };
+        }
+        const lengkap = openingDataLengkap(cutoff);
+        if(!lengkap.ok){
+            return { ok:false, incomplete:true, beku:false, period, cutoff, rows:[], totalValue:0, dasar:'-', source:'',
+                warning:'HISTORICAL DATA INCOMPLETE — '+lengkap.alasan };
+        }
+        const snap = getInventorySnapshotAt(cutoff);
+        if(!snap.ok) return { ok:false, incomplete:true, beku:false, period, cutoff, rows:[], totalValue:0, dasar:'-', source:'', warning:'HISTORICAL DATA INCOMPLETE — '+snap.warning };
+        return { ok:true, incomplete:false, beku:false, period, cutoff, rows:snap.rows, totalValue:snap.totalValue,
+                 dasar:snap.dasar, source:'hitung-ulang', warning:'' };
+    }
+    // Membekukan saldo pada cutoff sebuah periode menjadi Opening Resmi.
+    // Dipanggil Tutup Buku SEBELUM transaksi lama dihapus, dan oleh tombol bangun-ulang Admin.
+    function tulisOpeningResmi(period, snap, source, by){
+        const cutoff = periodeCutoff(period);
+        officialOpenings[period] = {
+            period, cutoff,
+            rows: JSON.parse(JSON.stringify(snap.rows||[])),
+            totalValue: snap.totalValue||0,
+            createdAt: Date.now(),
+            createdBy: by || currentUsername || deviceOperator || '',
+            source: source || '',
+            engine: SNAP_ENGINE
+        };
+        return officialOpenings[period];
+    }
+    function ringkasPerGudang(rows){
+        const per={}; (rows||[]).forEach(r=>{ const g=r.gudang||DEFAULT_GUDANG; per[g]=(per[g]||0)+(r.value!=null?r.value:(r.nilai||0)); });
+        return per;
+    }
 
     function rangeFromInputs(startId,endId){
         let sv=document.getElementById(startId).value, ev=document.getElementById(endId).value;
@@ -3943,8 +4062,16 @@
         // Bedakan "benar-benar nol" dari "belum bisa direkonstruksi". Kalau tidak dibedakan,
         // Rp0 terbaca seolah stok memang kosong padahal sebenarnya datanya belum punya snapshot.
         let _saEl = document.getElementById('stokAwalValue');
+        let _saSnap = getOpeningSnapshot(saPeriodeStr());
         _saEl.style.fontSize='';
-        _saEl.innerHTML = `Rp ${Math.round(getStokAwal()).toLocaleString('id')}`;
+        if(_saSnap.ok){
+            _saEl.innerHTML = `Rp ${Math.round(_saSnap.totalValue).toLocaleString('id')}`
+                + (_saSnap.beku?` <span title="Opening Resmi — dibekukan saat Tutup Buku, tidak berubah oleh transaksi bulan berjalan" style="font-size:0.7rem; color:var(--green);">🔒</span>`:'');
+        } else {
+            // Rp0 di sini akan terbaca "stok memang kosong". Yang benar: datanya tidak lengkap.
+            _saEl.style.fontSize='0.95rem';
+            _saEl.innerHTML = `<span style="color:#f59e0b;">DATA HISTORIS TIDAK LENGKAP</span>`;
+        }
         // Subtext periode utk KPI yang mengikuti dashPeriode (bukan realtime)
         let _pl = getMonthStart().toLocaleDateString('id',{month:'long', year:'numeric'});
         let _sa=document.getElementById('stokAwalSub'); if(_sa) _sa.innerHTML=`Periode: <strong>${_pl}</strong>`;
@@ -3953,9 +4080,11 @@
         let _pk=document.getElementById('stokAwalPeringatan');
         if(_pk){
             const legacy=closingPerluValidasi();
-            _pk.innerHTML = legacy.length
-                ? `<span style="color:#f59e0b;">⚠️ ${legacy.length} snapshot Tutup Buku lama belum divalidasi — klik kartu ini untuk membandingkan.</span>`
-                : '';
+            _pk.innerHTML = !_saSnap.ok
+                ? `<span style="color:#f59e0b;">⛔ Stok Awal periode ini belum bisa disusun — klik kartu ini untuk membangun Opening Resmi.</span>`
+                : (legacy.length
+                    ? `<span style="color:#f59e0b;">⚠️ ${legacy.length} snapshot Tutup Buku lama belum divalidasi — klik kartu ini untuk membandingkan.</span>`
+                    : '');
         }
         let _pr=document.getElementById('racikSub'); if(_pr) _pr.innerHTML=`Periode: <strong>${_pl}</strong>`;
         let _ps=document.getElementById('pembelianSub'); if(_ps) _ps.innerHTML=`Periode: <strong>${_pl}</strong>`;
@@ -6135,12 +6264,15 @@
                 `Masih ada ${pendingTf.length} kiriman antar gudang yang belum dikonfirmasi diterima (${[...new Set(pendingTf.map(t=>gudangName(t.toGudang)))].join(', ')}). Minta gudang tujuan mengonfirmasi dulu, atau batalkan kirimannya.`,'warning');
             return;
         }
-        if(!confirm(`Tutup buku ${period}?\n• ${toArchive.length} transaksi diarsip ke sheet "Arsip ${period}"\n• Periode terkunci PERMANEN (tanpa undo/edit)\n• Nilai stok akhir resmi: Rp ${Math.round(valueAtCutoff).toLocaleString('id')}`)) return;
+        if(!confirm(`Tutup buku ${period}?\n• ${toArchive.length} transaksi diarsip ke sheet "Arsip ${period}"\n• Periode terkunci PERMANEN (tanpa undo/edit)\n• Nilai stok akhir resmi: Rp ${Math.round(valueAtCutoff).toLocaleString('id')}\n• Nilai itu dibekukan jadi OPENING RESMI ${periodeDari(cutoff)} dan tidak akan berubah lagi`)) return;
         notify('Mengarsipkan...','Jangan tutup aplikasi sampai selesai','info');
         let id=String(Date.now())+Math.floor(Math.random()*1e6);
         // Dua kolom tanggal dipisah: yang menentukan periode (efektif) dan jejak kapan diketik (posting).
-        let header=['Tanggal Efektif','Tanggal Posting','Jenis','SKU','Nama','Jumlah','Harga Satuan','Total','Supplier','Divisi','Ref','Deskripsi','Petugas'];
-        let rows=toArchive.map(l=>[new Date(effTs(l)).toLocaleString('id'), new Date(l.timestamp).toLocaleString('id'), l.type==='in'?'MASUK':(l.outType==='susut'?'SUSUT':'KELUAR'), l.sku, l.itemName||'', l.qty, l.price||0, l.total, l.supplier||'', l.division||'', l.ref||'', l.desc||'', l.by||'']);
+        // Kolom Gudang WAJIB ada: tanpa itu arsip tidak bisa dipakai membangun ulang Opening Resmi
+        // per area kalau suatu saat snapshot bekunya hilang. Kolom kode dipisah dari nama supaya
+        // bisa dibaca mesin maupun manusia.
+        let header=['Tanggal Efektif','Tanggal Posting','Jenis','SKU','Nama','Kode Gudang','Gudang','Jumlah','Harga Satuan','Total','Supplier','Divisi','Ref','Deskripsi','Petugas'];
+        let rows=toArchive.map(l=>[new Date(effTs(l)).toLocaleString('id'), new Date(l.timestamp).toLocaleString('id'), l.type==='in'?'MASUK':(l.outType==='susut'?'SUSUT':'KELUAR'), l.sku, l.itemName||'', (l.gudang||DEFAULT_GUDANG), gudangName(l.gudang||DEFAULT_GUDANG), l.qty, l.price||0, l.total, l.supplier||'', l.division||'', l.ref||'', l.desc||'', l.by||'']);
         try{
             for(let i=0;i<rows.length;i+=400){
                 let chunkId=id+'_'+i;
@@ -6157,9 +6289,15 @@
             notify('Tutup Buku DIBATALKAN','Arsip gagal terkonfirmasi ('+e.message+'). Tidak ada data yang dihapus — coba lagi.','error');
             return;
         }
+        // URUTAN INI PENTING: bekukan dulu Opening Resmi bulan berikutnya, BARU hapus transaksinya.
+        // Closing September = Opening Oktober. Sesudah baris berikutnya, transaksi Agustus/September
+        // tidak ada lagi di transactionLog, jadi saldo ini tidak akan pernah bisa dihitung ulang.
+        const periodeBerikut = periodeDari(cutoff);
+        tulisOpeningResmi(periodeBerikut, snapCutoff, 'Tutup Buku '+period, deviceOperator||currentUsername||'');
         transactionLog=transactionLog.filter(l=>effTs(l)>=cutoff);
         lockBefore=Math.max(lockBefore, cutoff);
         closings.push({ snapshotRows: snapCutoff.rows, snapshotEngineVersion: SNAP_ENGINE, period, closedAt:Date.now(), cutoff, txCount:toArchive.length, inTotal, hppTotal, susutTotal, valueAtCutoff, by:deviceOperator||'' });
+        if(typeof auditLog!=='undefined') auditLog.unshift({ id:(typeof nextAuditId!=='undefined'?nextAuditId++:Date.now()), at:Date.now(), by:deviceOperator||currentUsername||'', action:'opening-resmi', reason:`Opening Resmi ${periodeBerikut} dibekukan dari Tutup Buku ${period}: Rp ${Math.round(valueAtCutoff).toLocaleString('id')} (${snapCutoff.rows.length} baris)` });
         persist(); refreshUI();
         notify('Tutup Buku Selesai',`${period}: ${toArchive.length} transaksi diarsip & terkunci. Stok awal resmi bulan berikutnya: Rp ${Math.round(valueAtCutoff).toLocaleString('id')}.`,'success');
     });
@@ -6223,7 +6361,7 @@
         divisions = [{id:1,name:"Gudang"},{id:2,name:"Produksi Karangtengah"},{id:3,name:"Penjualan"},{id:4,name:"Produksi Cibadak"}];
         nextLogId=1; nextBatchId=1; nextSupplierId=suppliers.length+1; nextDivisionId=5;
         resetAllSOSessions();
-        soHistory=[]; invoiceAliases={}; closings=[]; lockBefore=0;
+        soHistory=[]; invoiceAliases={}; closings=[]; officialOpenings={}; lockBefore=0;
         persistLocal();
         refreshUI();
         // tunggu pengiriman yang sedang berjalan selesai, lalu paksa kirim data bersih
@@ -8125,7 +8263,7 @@
         notify('Perbaikan Selesai', `${nBatch} batch & ${nLog} transaksi diperbaiki.`, 'success');
     });
     // ===== RINCIAN STOK AWAL =====
-    let saRowsCache=[], saTsCache=0;
+    let saRowsCache=[], saTsCache=0, saSnapCache=null;
     function saPeriodeStr(){ let d=getMonthStart(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; }
     function renderBaselineInfo(){
         let el=document.getElementById('baselineInfo'); if(!el) return;
@@ -8144,16 +8282,30 @@
     });
     function openStokAwalDetail(){
         let modal=document.getElementById('stokAwalModal'); if(!modal) return;
+        const periode=saPeriodeStr();
         saTsCache=getMonthStart().getTime();
-        let snapInfo=getInventorySnapshotAt(saTsCache);
-        saRowsCache=stokAwalRows(saTsCache);
+        // SEMUA yang tampil di modal ini — kartu, tabel, Excel, PDF — berasal dari satu objek ini.
+        let snapInfo=getOpeningSnapshot(periode);
+        saSnapCache=snapInfo;
+        saRowsCache=barisDariSnapshot(snapInfo);
         let wrn=document.getElementById('saWarning');
         if(wrn) wrn.innerHTML = snapInfo.ok
-            ? `<div style="font-size:0.72rem; color:var(--text3);">Dasar perhitungan: <strong>${snapInfo.dasar}</strong></div>`
-            : `<div class="alert alert-warning" style="margin:0 0 8px;">⚠️ ${snapInfo.warning}
-                 <div style="margin-top:8px;"><button id="saBuatBaseline" class="btn btn-sm btn-warning">📌 Jadikan Stok Saat Ini sebagai Baseline</button></div>
-                 <div style="font-size:0.72rem; margin-top:6px;">Baseline dipakai sebagai titik awal. Periode SETELAH baseline langsung akurat; periode sebelumnya tetap tidak bisa direkonstruksi karena datanya memang tidak lengkap.</div>
+            ? `<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+                 <span style="font-size:0.72rem; color:var(--text3);">Dasar perhitungan: <strong>${dvzEsc(snapInfo.dasar)}</strong></span>
+                 ${snapInfo.beku?`<span class="badge" style="background:rgba(16,185,129,0.18); color:var(--green); font-size:0.66rem; padding:2px 7px; border-radius:10px;">🔒 OPENING RESMI — tidak berubah oleh transaksi bulan berjalan</span>`:''}
+                 <button id="saKelolaOpening" class="btn btn-sm btn-secondary" style="margin-left:auto;">🛠️ Opening Resmi…</button>
+               </div>`
+            : `<div class="alert alert-warning" style="margin:0 0 8px; text-align:left;">
+                 <div style="font-weight:700; margin-bottom:4px;">⛔ HISTORICAL DATA INCOMPLETE — ${dvzEsc(labelPeriode(periode))}</div>
+                 <div style="font-size:0.78rem;">${dvzEsc(snapInfo.warning||'')}</div>
+                 <div style="font-size:0.75rem; margin-top:6px;">Stok Awal periode ini <strong>tidak ditampilkan sebagai angka</strong>. Sistem tidak membuat taksiran dan tidak memakai stok hari ini sebagai pengganti — angka karangan lebih berbahaya daripada angka kosong.</div>
+                 <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+                   <button id="saKelolaOpening" class="btn btn-sm btn-warning">🛠️ Bangun Opening Resmi ${dvzEsc(periode)}</button>
+                   <button id="saBuatBaseline" class="btn btn-sm btn-secondary">📌 Jadikan Stok Saat Ini sebagai Baseline</button>
+                 </div>
+                 <div style="font-size:0.72rem; margin-top:6px;">Baseline hanya menolong periode SETELAHNYA. Untuk memulihkan periode ini, pakai tombol Opening Resmi lalu impor arsip bulan sebelumnya.</div>
                </div>`;
+        document.getElementById('saKelolaOpening')?.addEventListener('click', ()=>bukaOpeningResmi(periode));
         document.getElementById('saBuatBaseline')?.addEventListener('click', ()=>{
             if(!confirm('Simpan kondisi stok saat ini sebagai Baseline?\n\nData transaksi tidak diubah. Ini hanya titik awal rekonstruksi stok historis.')) return;
             let snap=snapshotDariBatchSaatIni(Date.now());
@@ -8162,7 +8314,7 @@
             persist(); refreshUI(); openStokAwalDetail();
             notify('Baseline Tersimpan', `Rp ${Math.round(snap.totalValue).toLocaleString('id')} · ${snap.rows.length} baris`, 'success');
         });
-        document.getElementById('saPeriodeLbl').textContent=getMonthStart().toLocaleDateString('id',{month:'long', year:'numeric'});
+        document.getElementById('saPeriodeLbl').textContent=labelPeriode(periode);
         let sel=document.getElementById('saFilterGudang');
         let daftar=[...new Set(saRowsCache.map(r=>r.gudang))];
         let cur=sel.value;
@@ -8191,12 +8343,13 @@
         const lain=Object.keys(per).filter(g=>!utama.includes(g));
         const nilaiLain=lain.reduce((a,g)=>a+per[g],0);
         const grand=Object.values(per).reduce((a,v)=>a+v,0);
-        const kartu=(label,nilai,hijau)=>`<div class="kpi-card" style="padding:12px;">
+        const kartu=(label,nilai,hijau,ket)=>`<div class="kpi-card" style="padding:12px;">
             <div class="kpi-label">${dvzEsc(label)}</div>
-            <div class="kpi-value" style="font-size:1rem;${hijau?' color:var(--green);':''}">Rp ${Math.round(nilai).toLocaleString('id')}</div></div>`;
+            <div class="kpi-value" style="font-size:1rem;${hijau?' color:var(--green);':''}">Rp ${Math.round(nilai).toLocaleString('id')}</div>
+            ${ket?`<div style="font-size:0.68rem; color:var(--text3); margin-top:2px;">${dvzEsc(ket)}</div>`:''}</div>`;
         el.innerHTML = utama.map(g=>kartu(gudangName(g), per[g]||0)).join('')
-            + (lain.length ? kartu('Lokasi Lain ('+lain.length+')', nilaiLain) : '')
-            + kartu('GRAND TOTAL', grand, true);
+            + kartu('GRAND TOTAL', grand, true, saSnapCache && saSnapCache.beku ? 'Opening Resmi (beku)' : 'hasil hitung ulang')
+            + (lain.length ? kartu('Lokasi Lain ('+lain.length+')', nilaiLain, false, lain.map(g=>gudangName(g)).join(', ')) : '');
     }
     function renderStokAwalDetail(){
         renderSaKartuGudang();
@@ -8205,9 +8358,10 @@
         let rows=saFiltered();
         let grand=saRowsCache.reduce((s,r)=>s+r.nilai,0);
         let shown=rows.reduce((s,r)=>s+r.nilai,0);
-        document.getElementById('saGrand').textContent='Rp '+Math.round(grand).toLocaleString('id');
-        document.getElementById('saShown').textContent='Rp '+Math.round(shown).toLocaleString('id');
-        document.getElementById('saCount').textContent=rows.length.toLocaleString('id');
+        const inf=document.getElementById('saInfoFilter');
+        if(inf) inf.innerHTML = `Menampilkan <strong>${rows.length.toLocaleString('id')}</strong> dari ${saRowsCache.length.toLocaleString('id')} baris`
+            + ` · total tampil <strong>Rp ${Math.round(shown).toLocaleString('id')}</strong>`
+            + (Math.abs(shown-grand)>0.5 ? ` · grand total seluruh area Rp ${Math.round(grand).toLocaleString('id')}` : '');
         // dikelompokkan per area + subtotal
         let byG={}; rows.forEach(r=>{ (byG[r.gudang]=byG[r.gudang]||[]).push(r); });
         let html='';
@@ -8259,7 +8413,7 @@
             if(!c.ok) return `<div class="alert alert-warning" style="margin:0 0 10px;">Snapshot Tutup Buku ${dvzEsc(cl.period||'')} belum bisa dibandingkan: ${dvzEsc(c.warning||'')}</div>`;
             const g=c.perGudang.filter(x=>Math.abs(x.selisih)>0.5)
                 .map(x=>`<tr><td>${dvzEsc(gudangName(x.gudang))}</td><td style="text-align:right;">Rp ${Math.round(x.lama).toLocaleString('id')}</td><td style="text-align:right;">Rp ${Math.round(x.baru).toLocaleString('id')}</td><td style="text-align:right; color:#b3261e;">Rp ${Math.round(x.selisih).toLocaleString('id')}</td></tr>`).join('');
-            const sk=c.perSku.slice(0,10)
+            const sk=c.perSku.slice(0,20)
                 .map(x=>`<tr><td class="mono">${dvzEsc(x.sku)}</td><td>${dvzEsc(x.nama)}</td><td>${dvzEsc(gudangName(x.gudang))}</td><td style="text-align:right;">${(Math.round(x.qtyLama*100)/100).toLocaleString('id')} → ${(Math.round(x.qtyBaru*100)/100).toLocaleString('id')}</td><td style="text-align:right; color:#b3261e;">Rp ${Math.round(x.selisih).toLocaleString('id')}</td></tr>`).join('');
             return `<div class="alert alert-warning" style="margin:0 0 12px; text-align:left;">
                 <div style="font-weight:700; margin-bottom:6px;">⚠️ Snapshot Tutup Buku ${dvzEsc(cl.period||'')} dibuat mesin lama — belum divalidasi</div>
@@ -8270,13 +8424,255 @@
                   <tr><td style="color:#b3261e;">Selisih</td><td style="text-align:right; font-weight:700; color:#b3261e;">Rp ${Math.round(c.selisih).toLocaleString('id')}</td></tr>
                 </tbody></table>
                 ${g?`<div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:.4px; color:var(--text3); margin-bottom:3px;">Per Area</div><table style="width:100%; font-size:0.76rem; margin-bottom:8px;"><thead><tr><th style="text-align:left;">Area</th><th style="text-align:right;">Lama</th><th style="text-align:right;">Hitung Ulang</th><th style="text-align:right;">Selisih</th></tr></thead><tbody>${g}</tbody></table>`:''}
-                ${sk?`<div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:.4px; color:var(--text3); margin-bottom:3px;">Top 10 Penyumbang Selisih</div><table style="width:100%; font-size:0.76rem; margin-bottom:8px;"><thead><tr><th style="text-align:left;">SKU</th><th style="text-align:left;">Nama</th><th style="text-align:left;">Area</th><th style="text-align:right;">Qty lama → baru</th><th style="text-align:right;">Selisih</th></tr></thead><tbody>${sk}</tbody></table>`:''}
+                ${sk?`<div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:.4px; color:var(--text3); margin-bottom:3px;">Top 20 Penyumbang Selisih</div><table style="width:100%; font-size:0.76rem; margin-bottom:8px;"><thead><tr><th style="text-align:left;">SKU</th><th style="text-align:left;">Nama</th><th style="text-align:left;">Area</th><th style="text-align:right;">Qty lama → baru</th><th style="text-align:right;">Selisih</th></tr></thead><tbody>${sk}</tbody></table>`:''}
                 <button class="btn btn-sm btn-warning saRebuildBtn" data-period="${dvzEsc(cl.period||'')}">🔧 Bangun Ulang Snapshot Closing ${dvzEsc(cl.period||'')}</button>
                 <div style="font-size:0.7rem; color:var(--text3); margin-top:5px;">Snapshot lama tetap disimpan. Transaksi tidak diubah.</div>
             </div>`;
         }).join('');
         el.querySelectorAll('.saRebuildBtn').forEach(b=>b.addEventListener('click',()=>rebuildClosingSnapshot(b.dataset.period)));
     }
+    // ===================== ALAT ADMIN: BANGUN / PULIHKAN OPENING RESMI =====================
+    // Dipakai kalau Opening Resmi sebuah periode belum ada (mis. periode yang sudah terlanjur
+    // ditutup memakai versi lama yang belum membekukan apa pun), atau kalau Admin memang perlu
+    // memperbaikinya. Tiga hal yang dijaga:
+    //   1. Tidak ada yang tersimpan sebelum Admin melihat perbandingan SEBELUM vs SESUDAH.
+    //   2. Nilai lama selalu dicadangkan di dalam entri baru (field `sebelumnya`).
+    //   3. Data arsip yang diimpor HANYA dipakai untuk menghitung opening. Tidak pernah masuk
+    //      transactionLog, tidak pernah menyentuh stok realtime, tidak pernah mengubah batch.
+    let orPeriode='', orKandidat=null, orCatatan='';
+
+    function rowsDariPeta(peta){
+        let rows=[];
+        Object.values(peta).forEach(r=>{
+            const qty=r.layers.reduce((s,b)=>s+b.qty,0);
+            const value=r.layers.reduce((s,b)=>s+b.qty*(b.price||0),0);
+            if(Math.abs(qty)<1e-9 && Math.abs(value)<1e-9) return;
+            rows.push({ sku:r.sku, gudang:r.gudang, qty, value,
+                        batches:r.layers.map(b=>({ qty:b.qty, price:b.price||0, dateIn:b.dateIn, costSource:b.costSource||'', costAt:(b.costAt!=null?b.costAt:null), costUnknown:!!b.costUnknown })) });
+        });
+        rows.sort((a,b)=> a.gudang.localeCompare(b.gudang) || a.sku.localeCompare(b.sku));
+        return rows;
+    }
+
+    // Membangun saldo pada cutoff dari JANGKAR + mutasi arsip (hasil impor) + mutasi yang masih hidup.
+    // Aturan replay-nya sama persis dengan bangunAnchor supaya hasilnya tidak beda mesin.
+    function hitungOpeningDariArsip(period, arsipLogs){
+        const cutoff=periodeCutoff(period);
+        const arsip=(arsipLogs||[]).filter(l=>effTs(l)<cutoff);
+        const maxArsip=arsip.reduce((m,l)=>Math.max(m,effTs(l)), 0);
+        // Kalau arsip menutupi rentang yang transaksinya MASIH ada di sistem, arsip yang dipakai —
+        // arsip adalah catatan periode yang sudah ditutup. Jumlah yang dilewati dilaporkan apa adanya.
+        const hidupSemua=mutasiStok().filter(l=>effTs(l)<cutoff);
+        const dilewati=maxArsip ? hidupSemua.filter(l=>effTs(l)<=maxArsip).length : 0;
+        const hidup=maxArsip ? hidupSemua.filter(l=>effTs(l)>maxArsip) : hidupSemua;
+        const logs=arsip.concat(hidup).sort((a,b)=> (effTs(a)-effTs(b)) || ((a.id||0)-(b.id||0)));
+        const anchors=daftarAnchor().filter(a=>a.ts<=cutoff);
+        let peta={}, li=0;
+        for(const a of anchors){
+            while(li<logs.length && effTs(logs[li])<=a.ts){
+                const l=logs[li];
+                if(!adalahAdjustmentSO(l, a)) terapkanLogKeLapisan(peta, l);
+                li++;
+            }
+            if(a.jenis==='so') setSaldoDariSO(peta, a); else gantiDariRows(peta, a);
+        }
+        while(li<logs.length){ terapkanLogKeLapisan(peta, logs[li]); li++; }
+        const rows=rowsDariPeta(peta);
+        return { ok:true, rows, totalValue:rows.reduce((s,r)=>s+r.value,0),
+                 dasar:'Impor arsip ('+arsip.length+' baris)'+(anchors.length?' + '+anchors.length+' jangkar':'' ),
+                 jumlahArsip:arsip.length, dilewati };
+    }
+
+    // Membaca file arsip Tutup Buku (CSV/XLSX) menjadi mutasi semu. Tidak pernah disimpan.
+    function bacaArsipKeMutasi(rows){
+        rows=(rows||[]).filter(r=>r && r.some(c=>String(c||'').trim()!==''));
+        if(!rows.length) return { ok:false, pesan:'File kosong.' };
+        let hi=rows.findIndex(r=>r.some(c=>/tanggal efektif|tanggal/i.test(String(c||''))) && r.some(c=>/^sku$|kode bahan/i.test(String(c||'').trim())));
+        if(hi<0) hi=0;
+        const header=rows[hi].map(h=>String(h||'').trim().toUpperCase());
+        const col=(...n)=>{ for(const x of n){ const i=header.indexOf(x); if(i>-1) return i; } return -1; };
+        const iTgl=col('TANGGAL EFEKTIF','TANGGAL'), iJenis=col('JENIS'), iSku=col('SKU','KODE BAHAN'),
+              iQty=col('JUMLAH','QTY'), iHrg=col('HARGA SATUAN','HARGA'), iTot=col('TOTAL'),
+              iGud=col('KODE GUDANG','GUDANG');
+        const kurang=[];
+        if(iTgl<0) kurang.push('Tanggal Efektif'); if(iJenis<0) kurang.push('Jenis');
+        if(iSku<0) kurang.push('SKU'); if(iQty<0) kurang.push('Jumlah');
+        if(kurang.length) return { ok:false, pesan:'Kolom wajib tidak ditemukan: '+kurang.join(', ')+'.' };
+        if(iGud<0) return { ok:false, tanpaGudang:true,
+            pesan:'File arsip ini TIDAK punya kolom Gudang. Tanpa kolom itu, saldo per area (SCM / Cibadak / Karang Tengah) tidak bisa dibangun ulang, dan sistem tidak akan menebak-nebak pembagiannya. Arsip Tutup Buku yang dibuat versi ini sudah memuat kolom "Kode Gudang" — untuk arsip lama, tambahkan kolom itu dulu secara manual dari catatan asli.' };
+        const kodeGudang={}; (typeof GUDANG_LIST!=='undefined'?GUDANG_LIST:[]).forEach(g=>{ kodeGudang[String(gudangName(g.id||g)).toUpperCase()]=(g.id||g); });
+        function keGudang(v){
+            const t=String(v||'').trim(); if(!t) return DEFAULT_GUDANG;
+            if(kodeGudang[t.toUpperCase()]) return kodeGudang[t.toUpperCase()];
+            return t.toLowerCase().replace(/\s+/g,'');
+        }
+        function keTs(v){
+            const t=String(v||'').trim(); if(!t) return 0;
+            let m=t.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})(?:[ ,]+(\d{1,2})[:.](\d{2}))?/);
+            if(m) return new Date(+m[3], +m[2]-1, +m[1], m[4]?+m[4]:12, m[5]?+m[5]:0, 0, 0).getTime();
+            m=t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if(m) return new Date(+m[1], +m[2]-1, +m[3], 12,0,0,0).getTime();
+            const d=new Date(t); return isNaN(d.getTime())?0:d.getTime();
+        }
+        const out=[]; const gagal=[];
+        for(let i=hi+1;i<rows.length;i++){
+            const r=rows[i]; const sku=String(r[iSku]||'').trim(); if(!sku) continue;
+            const ts=keTs(r[iTgl]); if(!ts){ gagal.push('baris '+(i+1)+': tanggal tidak terbaca'); continue; }
+            const qty=angkaID(r[iQty]); if(!isFinite(qty)||qty===0){ gagal.push('baris '+(i+1)+': jumlah tidak terbaca'); continue; }
+            const jen=String(r[iJenis]||'').trim().toUpperCase();
+            const type = jen.startsWith('MASUK') ? 'in' : 'out';
+            const harga = iHrg>-1 ? angkaID(r[iHrg]) : 0;
+            const total = iTot>-1 ? angkaID(r[iTot]) : harga*Math.abs(qty);
+            out.push({ __arsip:true, id:0, sku, type, qty:Math.abs(qty), price:harga||0,
+                       total:isFinite(total)?total:0, gudang:keGudang(r[iGud]),
+                       outType: jen.startsWith('SUSUT')?'susut':'pakai',
+                       timestamp:ts, effectiveTimestamp:ts });
+        }
+        if(!out.length) return { ok:false, pesan:'Tidak ada baris mutasi yang bisa dibaca dari file ini.'+(gagal.length?' Contoh masalah: '+gagal.slice(0,3).join('; '):'') };
+        return { ok:true, logs:out, gagal };
+    }
+
+    function bukaOpeningResmi(period){
+        orPeriode=period; orKandidat=null; orCatatan='';
+        const m=document.getElementById('openingResmiModal'); if(!m) return;
+        document.getElementById('orPeriodeLbl').textContent=labelPeriode(period);
+        renderOpeningResmi();
+        m.style.display='flex';
+    }
+    function orTabelBanding(sebelum, sesudah){
+        const utama=['scm','cibadak','karangtengah'];
+        const pa=ringkasPerGudang(sebelum&&sebelum.rows), pb=ringkasPerGudang(sesudah&&sesudah.rows);
+        const semua=[...new Set(utama.concat(Object.keys(pa)).concat(Object.keys(pb)))];
+        const baris=semua.map(g=>{
+            const a=pa[g]||0, b=pb[g]||0, d=b-a;
+            return `<tr><td>${dvzEsc(gudangName(g))}</td>
+                <td style="text-align:right;">${sebelum?'Rp '+Math.round(a).toLocaleString('id'):'—'}</td>
+                <td style="text-align:right;">${sesudah?'Rp '+Math.round(b).toLocaleString('id'):'—'}</td>
+                <td style="text-align:right;${Math.abs(d)>0.5?' color:#b3261e; font-weight:700;':''}">${(sebelum&&sesudah)?'Rp '+Math.round(d).toLocaleString('id'):'—'}</td></tr>`;
+        }).join('');
+        const ta=sebelum?sebelum.totalValue:0, tb=sesudah?sesudah.totalValue:0;
+        return `<table style="width:100%; font-size:0.8rem; margin:6px 0 10px;">
+            <thead><tr><th style="text-align:left;">Area</th><th style="text-align:right;">SEBELUM (tersimpan)</th><th style="text-align:right;">SESUDAH (kandidat)</th><th style="text-align:right;">Selisih</th></tr></thead>
+            <tbody>${baris}
+            <tr style="background:rgba(16,185,129,0.15); font-weight:800;"><td>GRAND TOTAL</td>
+              <td style="text-align:right;">${sebelum?'Rp '+Math.round(ta).toLocaleString('id'):'—'}</td>
+              <td style="text-align:right;">${sesudah?'Rp '+Math.round(tb).toLocaleString('id'):'—'}</td>
+              <td style="text-align:right;${Math.abs(tb-ta)>0.5?' color:#b3261e;':''}">${(sebelum&&sesudah)?'Rp '+Math.round(tb-ta).toLocaleString('id'):'—'}</td></tr>
+            </tbody></table>`;
+    }
+    function renderOpeningResmi(){
+        const el=document.getElementById('orIsi'); if(!el) return;
+        const period=orPeriode, cutoff=periodeCutoff(period);
+        const off=officialOpenings[period]||null;
+        const sebelum = off ? { rows:off.rows, totalValue:off.totalValue } : null;
+        const lengkap = openingDataLengkap(cutoff);
+        const bisaHitungUlang = lengkap.ok;
+        let html='';
+
+        html += `<div class="alert ${off?'alert-info':'alert-warning'}" style="margin:0 0 10px; text-align:left;">
+            <div style="font-weight:700;">${off?'🔒 Opening Resmi SUDAH ADA':'⚠️ Opening Resmi BELUM ADA untuk periode ini'}</div>
+            ${off?`<div style="font-size:0.78rem; margin-top:4px;">Rp <strong>${Math.round(off.totalValue).toLocaleString('id')}</strong> · ${off.rows.length} baris ·
+                dibekukan ${new Date(off.createdAt||cutoff).toLocaleString('id')} oleh ${dvzEsc(off.createdBy||'-')} ·
+                sumber: ${dvzEsc(off.source||'-')}${off.sebelumnya?` · <em>ada ${off.sebelumnya.length} versi cadangan</em>`:''}</div>`
+              :`<div style="font-size:0.78rem; margin-top:4px;">Selama belum ada, Stok Awal periode ini dihitung ulang dari jangkar + mutasi. Itu aman SELAMA datanya masih lengkap — dan tidak aman lagi setelah Tutup Buku menghapus transaksi lamanya.</div>`}
+        </div>`;
+
+        html += `<div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:.4px; color:var(--text3); margin-bottom:4px;">Kondisi data historis</div>`;
+        html += lengkap.ok
+            ? `<div style="font-size:0.8rem; margin-bottom:10px;">✅ Lengkap — jangkar terdekat: <strong>${dvzEsc(lengkap.base.label)}</strong> (${new Date(lengkap.base.ts).toLocaleDateString('id')}), dan seluruh mutasi sesudahnya sampai ${new Date(cutoff).toLocaleDateString('id')} masih ada di sistem.</div>`
+            : `<div class="alert alert-warning" style="margin:0 0 10px; text-align:left; font-size:0.8rem;"><strong>⛔ HISTORICAL DATA INCOMPLETE</strong><br>${dvzEsc(lengkap.alasan)}<br><span style="font-size:0.75rem;">Hitung ulang dari data sistem tidak akan jujur. Pakai impor arsip di bawah.</span></div>`;
+
+        html += `<div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
+            <button id="orHitung" class="btn btn-sm btn-secondary"${bisaHitungUlang?'':' disabled'}>🔄 Hitung Ulang dari Data Sistem</button>
+            <button id="orImpor" class="btn btn-sm btn-warning">📥 Impor Arsip ${dvzEsc(periodeSebelum(period))} (CSV/XLSX)</button>
+        </div>
+        <div style="font-size:0.72rem; color:var(--text3); margin-bottom:12px;">Data arsip yang diimpor <strong>hanya dipakai untuk menghitung opening</strong>. Tidak masuk transactionLog, tidak mengubah stok realtime, tidak mengubah batch.</div>`;
+
+        if(orKandidat){
+            html += `<div style="font-weight:700; font-size:0.85rem; margin-bottom:4px;">Perbandingan SEBELUM → SESUDAH</div>`;
+            html += `<div style="font-size:0.75rem; color:var(--text3); margin-bottom:4px;">Sumber kandidat: ${dvzEsc(orKandidat.dasar||'-')}${orCatatan?' · '+dvzEsc(orCatatan):''}</div>`;
+            html += orTabelBanding(sebelum, orKandidat);
+            const top=(orKandidat.rows||[]).slice().sort((a,b)=>Math.abs(b.value)-Math.abs(a.value)).slice(0,20)
+                .map(r=>{ const it=itemBySku(r.sku)||{};
+                    return `<tr><td class="mono">${dvzEsc(r.sku)}</td><td>${dvzEsc(it.name||r.sku)}</td><td>${dvzEsc(gudangName(r.gudang))}</td>
+                        <td style="text-align:right;">${(Math.round(r.qty*1000)/1000).toLocaleString('id')}</td>
+                        <td style="text-align:right;">Rp ${Math.round(r.value).toLocaleString('id')}</td></tr>`; }).join('');
+            html += `<div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:.4px; color:var(--text3); margin-bottom:3px;">Top 20 nilai pada kandidat (${orKandidat.rows.length} baris)</div>
+                <div class="table-wrapper" style="max-height:30vh; overflow:auto; margin-bottom:12px;"><table style="font-size:0.78rem;">
+                <thead><tr><th>SKU</th><th>Nama</th><th>Area</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Nilai</th></tr></thead><tbody>${top}</tbody></table></div>`;
+            html += `<button id="orSimpan" class="btn btn-sm btn-primary">✅ Simpan sebagai Opening Resmi ${dvzEsc(period)}</button>
+                <span style="font-size:0.72rem; color:var(--text3); margin-left:8px;">Perlu PIN Admin. Versi lama dicadangkan, tidak dihapus.</span>`;
+        } else {
+            html += `<div style="font-size:0.8rem; color:var(--text3);">Belum ada kandidat. Pilih salah satu tombol di atas dulu — tidak ada yang tersimpan sebelum angkanya Anda lihat.</div>`;
+        }
+        el.innerHTML=html;
+
+        document.getElementById('orHitung')?.addEventListener('click', ()=>{
+            const snap=getInventorySnapshotAt(periodeCutoff(orPeriode));
+            if(!snap.ok){ notify('Tidak Bisa Dihitung', snap.warning, 'warning'); return; }
+            orKandidat=snap; orCatatan='dihitung ulang dari jangkar + mutasi yang masih ada';
+            renderOpeningResmi();
+        });
+        document.getElementById('orImpor')?.addEventListener('click', ()=>document.getElementById('orFileArsip').click());
+        document.getElementById('orSimpan')?.addEventListener('click', orSimpan);
+    }
+    document.getElementById('orFileArsip')?.addEventListener('change', function(e){
+        const file=e.target.files[0]; if(!file) return;
+        const selesai=(rows)=>{
+            const hasil=bacaArsipKeMutasi(rows);
+            if(!hasil.ok){ notify(hasil.tanpaGudang?'Kolom Gudang Tidak Ada':'Arsip Tidak Terbaca', hasil.pesan, 'warning'); return; }
+            const k=hitungOpeningDariArsip(orPeriode, hasil.logs);
+            orKandidat=k;
+            orCatatan=`${hasil.logs.length} baris arsip dibaca`
+                + (hasil.gagal&&hasil.gagal.length?`, ${hasil.gagal.length} baris dilewati (tidak terbaca)`:'')
+                + (k.dilewati?`, ${k.dilewati} transaksi sistem pada rentang yang sama diabaikan karena arsip lebih otoritatif`:'');
+            renderOpeningResmi();
+            notify('Arsip Dibaca', `${hasil.logs.length} baris. Angkanya baru KANDIDAT — belum tersimpan.`, 'info');
+        };
+        const reader=new FileReader();
+        if(/\.xlsx?$/i.test(file.name)){
+            if(typeof XLSX==='undefined'){ notify('Offline','Library Excel belum termuat. Gunakan file CSV.','warning'); e.target.value=''; return; }
+            reader.onload=()=>{ try{
+                const wb=XLSX.read(new Uint8Array(reader.result),{type:'array'});
+                const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,raw:false,defval:''}).map(r=>r.map(c=>String(c==null?'':c)));
+                selesai(rows);
+            }catch(err){ notify('Gagal','File Excel tidak bisa dibaca: '+err.message,'error'); } e.target.value=''; };
+            reader.readAsArrayBuffer(file);
+        } else {
+            reader.onload=()=>{ const lines=String(reader.result).split(/\r?\n/).filter(l=>l.trim());
+                selesai(lines.map(l=>{ let out=[],cur='',q=false; for(const ch of l){ if(ch==='"') q=!q; else if((ch===','||ch===';')&&!q){ out.push(cur); cur=''; } else cur+=ch; } out.push(cur); return out; }));
+                e.target.value=''; };
+            reader.readAsText(file);
+        }
+    });
+    function orSimpan(){
+        if(!orKandidat){ return; }
+        const period=orPeriode, off=officialOpenings[period];
+        const pin=prompt('PIN Admin untuk menyimpan Opening Resmi '+period+':');
+        if(pin===null) return;
+        if(pin!==soPins.admin){ notify('PIN Salah','','error'); return; }
+        const lama = off ? Math.round(off.totalValue) : null;
+        const baru = Math.round(orKandidat.totalValue);
+        if(!confirm(`Simpan Opening Resmi ${period}?\n\n`
+            + (lama!==null?`SEBELUM : Rp ${lama.toLocaleString('id')}\n`:'SEBELUM : belum ada\n')
+            + `SESUDAH : Rp ${baru.toLocaleString('id')} (${orKandidat.rows.length} baris)\n`
+            + (lama!==null?`SELISIH : Rp ${(baru-lama).toLocaleString('id')}\n`:'')
+            + `\nAngka ini akan dibekukan dan dipakai sebagai Stok Awal ${labelPeriode(period)}.`
+            + (off?'\nVersi lama TIDAK dihapus — disimpan sebagai cadangan di dalam entri baru.':'')
+            + '\nTransaksi, batch, dan stok realtime tidak diubah sama sekali.')) return;
+        const cadangan = off ? (off.sebelumnya||[]).concat([{ rows:off.rows, totalValue:off.totalValue, createdAt:off.createdAt, createdBy:off.createdBy, source:off.source, digantiPada:Date.now() }]) : [];
+        const entri = tulisOpeningResmi(period, orKandidat, orCatatan||'bangun ulang manual', currentUsername||deviceOperator||'');
+        entri.sebelumnya = cadangan;
+        if(typeof auditLog!=='undefined') auditLog.unshift({ id:(typeof nextAuditId!=='undefined'?nextAuditId++:Date.now()), at:Date.now(), by:currentUsername||deviceOperator, action:'opening-resmi', reason:`Opening Resmi ${period} dibangun ulang: ${lama!==null?'Rp '+lama.toLocaleString('id'):'(belum ada)'} -> Rp ${baru.toLocaleString('id')} · ${orCatatan||'manual'}` });
+        persist(); refreshUI();
+        document.getElementById('openingResmiModal').style.display='none';
+        notify('Opening Resmi Tersimpan', `${labelPeriode(period)} = Rp ${baru.toLocaleString('id')}. Angka ini tidak akan berubah lagi oleh transaksi bulan berjalan.`, 'success');
+        if(document.getElementById('stokAwalModal').style.display==='flex') openStokAwalDetail();
+    }
+    document.getElementById('orClose')?.addEventListener('click', ()=>{ document.getElementById('openingResmiModal').style.display='none'; });
+    document.getElementById('openingResmiModal')?.addEventListener('click', e=>{ if(e.target.id==='openingResmiModal') e.target.style.display='none'; });
+    window.bukaOpeningResmi = bukaOpeningResmi;
+
     document.getElementById('stokAwalCard')?.addEventListener('click', openStokAwalDetail);
     document.getElementById('stokAwalDetailBtn')?.addEventListener('click', e=>{ e.stopPropagation(); openStokAwalDetail(); });
     document.getElementById('saClose')?.addEventListener('click', ()=>{ document.getElementById('stokAwalModal').style.display='none'; });
@@ -8285,8 +8681,10 @@
     document.getElementById('saSearch')?.addEventListener('input', renderStokAwalDetail);
     document.getElementById('saExcel')?.addEventListener('click', ()=>{
         if(typeof XLSX==="undefined"){ notify('Offline','Library Excel belum termuat.','warning'); return; }
+        if(saSnapCache && !saSnapCache.ok){ notify('Tidak Bisa Diekspor','Stok Awal periode ini belum bisa disusun (HISTORICAL DATA INCOMPLETE). Bangun Opening Resmi dulu — file kosong atau berisi taksiran lebih berbahaya daripada tidak ada file.','warning'); return; }
         let rows=saFiltered(), per=saPeriodeStr();
-        let data=[[`Rincian Stok Awal Periode ${document.getElementById('saPeriodeLbl').textContent}`],[],
+        let data=[[`Rincian Stok Awal Periode ${document.getElementById('saPeriodeLbl').textContent}`],
+                  [`Sumber: ${saSnapCache ? saSnapCache.dasar : '-'}`],[],
                   ['Area/Gudang','SKU','Nama Barang','Qty Stok Awal','Satuan','Harga/Cost','Nilai Stok Awal']];
         let byG={}; rows.forEach(r=>{ (byG[r.gudang]=byG[r.gudang]||[]).push(r); });
         Object.keys(byG).forEach(g=>{
@@ -8303,13 +8701,15 @@
     });
     document.getElementById('saPdf')?.addEventListener('click', ()=>{
         if(!window.jspdf){ notify('Offline','Library PDF belum termuat.','warning'); return; }
+        if(saSnapCache && !saSnapCache.ok){ notify('Tidak Bisa Diekspor','Stok Awal periode ini belum bisa disusun (HISTORICAL DATA INCOMPLETE). Bangun Opening Resmi dulu.','warning'); return; }
         let rows=saFiltered(), per=saPeriodeStr();
         let {jsPDF}=window.jspdf; let doc=new jsPDF({orientation:'landscape'});
         doc.setFontSize(13); doc.text(`Rincian Stok Awal — ${document.getElementById('saPeriodeLbl').textContent}`, 14, 12);
         doc.setFontSize(9);
         doc.text(`${rows.length} baris · Total sesuai filter Rp ${Math.round(rows.reduce((s,r)=>s+r.nilai,0)).toLocaleString('id')}`
                + ` · Grand Total (KPI Stok Awal) Rp ${Math.round(saRowsCache.reduce((s,r)=>s+r.nilai,0)).toLocaleString('id')}`, 14, 18);
-        doc.autoTable({ startY:23,
+        doc.setFontSize(7.5); doc.text(`Sumber: ${saSnapCache ? saSnapCache.dasar : '-'}`, 14, 22); doc.setFontSize(9);
+        doc.autoTable({ startY:26,
             head:[['Area/Gudang','SKU','Nama Barang','Qty','Satuan','Harga/Cost','Nilai']],
             body: rows.map(r=>[r.gudangNama,r.sku,r.nama,(Math.round(r.qty*1000)/1000).toLocaleString('id'),r.satuan,
                                'Rp '+r.cost.toLocaleString('id',{maximumFractionDigits:2}),'Rp '+Math.round(r.nilai).toLocaleString('id')]),
