@@ -678,7 +678,7 @@
             <div id="koreksiPicked" style="display:none; margin-top:8px;">
                 <div style="font-size:0.85rem; margin-bottom:6px;">Dipilih: <strong id="koreksiPickedName"></strong> — stok sistem: <strong id="koreksiPickedQty"></strong></div>
                 <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
-                    <div class="form-group" style="flex:1; min-width:140px; margin-bottom:0;"><label>Stok Fisik Sebenarnya</label><input type="number" id="koreksiQtyInput" inputmode="decimal" placeholder="0"></div>
+                    <div class="form-group" style="flex:1; min-width:140px; margin-bottom:0;"><label>Stok Fisik Sebenarnya</label><input type="number" id="koreksiQtyInput" inputmode="decimal" step="any" min="0" placeholder="0"></div>
                     <button id="koreksiSaveBtn" class="btn btn-success">✅ Simpan Koreksi</button>
                     <button id="koreksiCancelBtn" class="btn btn-secondary">Batal</button>
                 </div>
@@ -900,7 +900,7 @@
             <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; padding:12px; background:var(--bg2); border-radius:var(--radius);">
                 <strong style="font-size:0.82rem;">Terapkan ke barang tercentang:</strong>
                 <select id="hjBulkType" style="width:auto;"><option value="markup">Markup %</option><option value="markup_nominal">Markup Nominal +Rp</option><option value="fixed">Harga Tetap Rp</option><option value="none">Hapus Aturan</option></select>
-                <input type="number" id="hjBulkValue" placeholder="Nilai" style="width:120px;">
+                <input type="number" id="hjBulkValue" inputmode="decimal" step="any" placeholder="Nilai" style="width:120px;">
                 <button id="hjBulkApply" class="btn btn-primary btn-sm">Terapkan</button>
                 <span id="hjSelectedCount" style="font-size:0.78rem; color:var(--text3);">0 barang dipilih</span>
             </div>
@@ -1477,6 +1477,31 @@
         rinci.sort((a,b)=>b.bytes-a.bytes);
         return { total, rinci, batas:5*1024*1024 };
     }
+
+    // ===== SEMUA KOLOM ANGKA MENERIMA PECAHAN =====
+    // Satuan dasar bahan bakery jarang bulat: 0,5 Kg tepung, 2,25 Liter minyak, 0,001 Kg pewarna.
+    // <input type="number"> tanpa atribut step bawaannya step=1, dan peramban MENOLAK angka pecahan
+    // di kolom seperti itu — diam-diam, tanpa pesan, sehingga terlihat seperti input yang tidak mau
+    // tersimpan. Kolom yang dibuat dinamis gampang lolos dari pemeriksaan manual, jadi dipasang
+    // jaring di sini: setiap kolom angka yang belum punya step diberi step="any".
+    function izinkanDesimalSemuaKolom(akar){
+        try{
+            (akar||document).querySelectorAll('input[type=number]:not([step])').forEach(el=>{
+                el.setAttribute('step','any');
+                if(!el.getAttribute('inputmode')) el.setAttribute('inputmode','decimal');
+            });
+        }catch(e){}
+    }
+    // Dijalankan sekali saat halaman siap, lalu diawasi terus supaya kolom yang baru dibuat
+    // (baris invoice, kartu konfirmasi kiriman, dsb) ikut terkena.
+    try{
+        izinkanDesimalSemuaKolom(document);
+        if(typeof MutationObserver!=='undefined'){
+            new MutationObserver(m=>{
+                for(const x of m){ if(x.addedNodes && x.addedNodes.length){ izinkanDesimalSemuaKolom(document); break; } }
+            }).observe(document.body, { childList:true, subtree:true });
+        }
+    }catch(e){}
 
     function persistLocal() {
         invalidateSkuIndex(); // master mungkin baru berubah -> indeks kode bahan harus dibangun ulang
