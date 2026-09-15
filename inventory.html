@@ -839,7 +839,7 @@
 <!-- MASTER DATA (Barang, Supplier, Divisi) -->
 <div id="tab-master" class="tab-content">
     <div style="display:flex; gap:8px; margin-bottom:16px;"><button class="masterSub active" data-sub="barang">📦 Barang</button><button class="masterSub stok-hide" data-sub="supplier">🏢 Supplier</button><button class="masterSub stok-hide" data-sub="division">🏛️ Divisi</button><button class="masterSub admin-only stok-hide" data-sub="prodivisi">🏭 Divisi Produksi</button><button class="masterSub stok-hide" data-sub="hargajual">🏷️ Harga Jual</button><button class="masterSub admin-only stok-hide" data-sub="backup">💾 Backup</button></div>
-    <div id="sub-barang" class="masterContent"><div class="card"><div class="card-title"><div class="card-title-icon">📦</div> Master Barang + Konversi Satuan</div><div style="display:flex; gap:8px; margin-bottom:12px;"><input type="text" id="stockSearch" placeholder="Cari Kode/Nama/Barcode/Merk" style="flex:1"><select id="statusFilter" style="width:auto;"><option value="Aktif">Hanya Aktif</option><option value="all">Semua Status</option></select><button id="resetStock" class="btn btn-secondary btn-sm">Reset</button><button id="addItemBtn" class="btn btn-primary btn-sm admin-only">+ Barang Baru</button><label for="importStock" class="btn btn-secondary btn-sm admin-only stok-hide" style="cursor:pointer;">📂 Import CSV/Excel</label><input type="file" id="importStock" accept=".csv,.xlsx" style="display:none;"><button id="fixPpnMasterBtn" class="btn btn-warning btn-sm admin-only stok-hide" title="Perbaiki Harga Beli Terakhir agar include PPN">🧾 Perbaiki Harga incl PPN</button><button id="resetMasterBtn" class="btn btn-warning btn-sm admin-only stok-hide" title="Hapus SEMUA master barang">🗑️ Reset Master</button><button id="bandingMasterBtn" class="btn btn-secondary btn-sm admin-only stok-hide" title="Bandingkan master di sistem dengan file master Anda">🔍 Bandingkan dgn File Master</button><input type="file" id="bandingMasterFile" accept=".csv,.xlsx,.xls" style="display:none;"></div><div id="bandingMasterHasil"></div><div id="masterPpnBanner"></div><div class="table-wrapper"><table id="stockTable"><thead><tr><th>Kode</th><th>Nama</th><th>Kategori</th><th>Merk</th><th>Kemasan</th><th>Harga Beli Terakhir (incl. PPN)</th><th>Stok (Satuan Dasar)</th><th>Nilai (Rp)</th><th>Status</th><th>Aksi</th></tr></thead><tbody id="stockBody"></tbody></table></div></div></div>
+    <div id="sub-barang" class="masterContent"><div class="card"><div class="card-title"><div class="card-title-icon">📦</div> Master Barang + Konversi Satuan</div><div style="display:flex; gap:8px; margin-bottom:12px;"><input type="text" id="stockSearch" placeholder="Cari Kode/Nama/Barcode/Merk" style="flex:1"><select id="statusFilter" style="width:auto;"><option value="Aktif">Hanya Aktif</option><option value="all">Semua Status</option></select><button id="resetStock" class="btn btn-secondary btn-sm">Reset</button><button id="addItemBtn" class="btn btn-primary btn-sm admin-only">+ Barang Baru</button><label for="importStock" class="btn btn-secondary btn-sm admin-only stok-hide" style="cursor:pointer;">📂 Import CSV/Excel</label><input type="file" id="importStock" accept=".csv,.xlsx" style="display:none;"><button id="fixPpnMasterBtn" class="btn btn-warning btn-sm admin-only stok-hide" title="Perbaiki Harga Beli Terakhir agar include PPN">🧾 Perbaiki Harga incl PPN</button><button id="resetMasterBtn" class="btn btn-warning btn-sm admin-only stok-hide" title="Hapus SEMUA master barang">🗑️ Reset Master</button><button id="bandingMasterBtn" class="btn btn-secondary btn-sm admin-only stok-hide" title="Bandingkan master di sistem dengan file master Anda">🔍 Bandingkan dgn File Master</button><button id="perbaikiKodeBtn" class="btn btn-warning btn-sm admin-only stok-hide" title="Perbaiki kode barang yang bentuknya kacau">🔧 Perbaiki Kode Barang</button><input type="file" id="bandingMasterFile" accept=".csv,.xlsx,.xls" style="display:none;"></div><div id="bandingMasterHasil"></div><div id="masterPpnBanner"></div><div class="table-wrapper"><table id="stockTable"><thead><tr><th>Kode</th><th>Nama</th><th>Kategori</th><th>Merk</th><th>Kemasan</th><th>Harga Beli Terakhir (incl. PPN)</th><th>Stok (Satuan Dasar)</th><th>Nilai (Rp)</th><th>Status</th><th>Aksi</th></tr></thead><tbody id="stockBody"></tbody></table></div></div></div>
     <div id="sub-supplier" class="masterContent" style="display:none;"><div class="card"><div class="card-title"><div class="card-title-icon">🏢</div> Supplier</div><div style="display:flex; gap:8px; margin-bottom:12px;" class="admin-only"><input type="text" id="newSupplier" placeholder="Nama supplier"><button id="addSupplier" class="btn btn-primary">Tambah</button></div><div class="table-wrapper"><table id="supplierTable"><thead><tr><th>ID</th><th>Nama</th><th>Aksi</th></tr></thead><tbody id="supplierBody"></tbody></table></div></div></div>
     <div id="sub-division" class="masterContent" style="display:none;"><div class="card"><div class="card-title"><div class="card-title-icon">🏛️</div> Divisi</div><div style="display:flex; gap:8px; margin-bottom:12px;" class="admin-only"><input type="text" id="newDivision" placeholder="Nama divisi"><button id="addDivision" class="btn btn-primary">Tambah</button></div><div class="table-wrapper"><table id="divisionTable"><thead><tr><th>ID</th><th>Nama</th><th>Aksi</th></tr></thead><tbody id="divisionBody"></tbody></table></div></div></div>
     <div id="sub-backup" class="masterContent admin-only" style="display:none;">
@@ -5952,6 +5952,7 @@
         });
         return hasil;
     }
+    document.getElementById('perbaikiKodeBtn')?.addEventListener('click', ()=>perbaikiKodeBarang());
     document.getElementById('bandingMasterBtn')?.addEventListener('click', ()=>{
         if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
         document.getElementById('bandingMasterFile').click();
@@ -6100,6 +6101,165 @@
         if(!wb.SheetNames.length){ notify('Kosong','Tidak ada perbedaan untuk diexport.','info'); return; }
         XLSX.writeFile(wb, 'perbandingan_master_'+new Date().toISOString().slice(0,10)+'.xlsx');
     }
+
+    // ===================== PERBAIKI KODE BARANG =====================
+    // Kode yang bentuknya kacau membuat barang tidak bisa dicari dan dikira hilang. Dua bentuk yang
+    // benar-benar ditemukan di data: kode berisi spasi ("RM- GC-26-047") dan kode yang isinya nama
+    // barang itu sendiri ("Creamfill Classic Banana", hasil import yang kolomnya bergeser).
+    //
+    // Mengganti kode barang BUKAN sekadar mengubah satu field: kode itu dipakai sebagai kunci di
+    // stockBatches dan disalin ke setiap transaksi, kiriman, hitungan opname, snapshot tutup buku,
+    // dan Opening Resmi. Kalau ada satu saja yang tertinggal, stoknya terbelah dua dan tidak akan
+    // pernah cocok lagi. Fungsi di bawah memperbarui SEMUANYA sekaligus, dan menghitung dulu berapa
+    // yang akan tersentuh supaya bisa ditampilkan sebelum disetujui.
+    function kbHitungJejak(sku){
+        const n={ log:0, batch:0, transfer:0, so:0, sesiSO:0, baseline:0, closing:0, opening:0, audit:0 };
+        (transactionLog||[]).forEach(l=>{ if(l.sku===sku) n.log++; });
+        n.batch=((stockBatches||{})[sku]||[]).length;
+        (transfers||[]).forEach(t=>{ if(t.sku===sku) n.transfer++; });
+        (soHistory||[]).forEach(h=>(h.allCounts||[]).forEach(c=>{ if(c.sku===sku) n.so++; }));
+        Object.keys(soSessions||{}).forEach(g=>{ const s=soSessions[g]||{};
+            if((s.snapshot||{})[sku]!==undefined) n.sesiSO++;
+            if((s.counts||{})[sku]!==undefined) n.sesiSO++; });
+        (inventoryBaselines||[]).forEach(b=>(b.rows||[]).forEach(r=>{ if(r.sku===sku) n.baseline++; }));
+        (closings||[]).forEach(c=>(c.snapshotRows||[]).forEach(r=>{ if(r.sku===sku) n.closing++; }));
+        Object.keys(officialOpenings||{}).forEach(p=>((officialOpenings[p]||{}).rows||[]).forEach(r=>{ if(r.sku===sku) n.opening++; }));
+        (typeof auditLog!=='undefined'?auditLog:[]).forEach(a=>{ if(a.sku===sku) n.audit++; });
+        n.total=Object.keys(n).filter(k=>k!=='total').reduce((a,k)=>a+n[k],0);
+        return n;
+    }
+    function kbGantiKode(lama, baru){
+        if(lama===baru) return 0;
+        // Pengaman di fungsi intinya, bukan cuma di layar: menggabungkan dua barang berbeda ke satu
+        // kode akan mencampur stok dan riwayat keduanya, dan itu tidak bisa dibatalkan.
+        if(!lama || !baru) return 0;
+        if((masterSKU||[]).some(i=>i.sku===baru)){
+            console.warn('kbGantiKode dibatalkan: kode tujuan "'+baru+'" sudah dipakai.');
+            return 0;
+        }
+        let n=0;
+        (masterSKU||[]).forEach(i=>{ if(i.sku===lama){ i.sku=baru; n++; } });
+        if(stockBatches && stockBatches[lama]!==undefined){
+            const isi=stockBatches[lama];
+            stockBatches[baru]=(stockBatches[baru]||[]).concat(isi);
+            delete stockBatches[lama]; n+=isi.length;
+        }
+        (transactionLog||[]).forEach(l=>{ if(l.sku===lama){ l.sku=baru; n++; } });
+        (transfers||[]).forEach(t=>{ if(t.sku===lama){ t.sku=baru; n++; } });
+        (soHistory||[]).forEach(h=>(h.allCounts||[]).forEach(c=>{ if(c.sku===lama){ c.sku=baru; n++; } }));
+        Object.keys(soSessions||{}).forEach(g=>{ const s=soSessions[g]||{};
+            ['snapshot','counts'].forEach(f=>{ if(s[f] && s[f][lama]!==undefined){
+                s[f][baru]=s[f][lama]; delete s[f][lama]; n++; } }); });
+        (inventoryBaselines||[]).forEach(b=>(b.rows||[]).forEach(r=>{ if(r.sku===lama){ r.sku=baru; n++; } }));
+        (closings||[]).forEach(c=>(c.snapshotRows||[]).forEach(r=>{ if(r.sku===lama){ r.sku=baru; n++; } }));
+        Object.keys(officialOpenings||{}).forEach(p=>((officialOpenings[p]||{}).rows||[]).forEach(r=>{ if(r.sku===lama){ r.sku=baru; n++; } }));
+        (typeof auditLog!=='undefined'?auditLog:[]).forEach(a=>{ if(a.sku===lama){ a.sku=baru; n++; } });
+        invalidateSkuIndex(); dataVersi++;
+        return n;
+    }
+    // Usul perbaikan untuk tiap kode bermasalah. Sistem hanya mengusulkan yang bisa dipastikan:
+    // kode dirapikan kalau hasil rapinya belum dipakai, dan duplikat dihapus hanya kalau benar-benar
+    // tidak punya jejak apa pun. Selain itu diserahkan ke manusia.
+    function kbDaftarMasalah(){
+        const out=[];
+        const adaKode={}; (masterSKU||[]).forEach(i=>adaKode[i.sku]=i);
+        (masterSKU||[]).forEach(i=>{
+            const k=String(i.sku||''); const alasan=[];
+            if(/\s/.test(k)) alasan.push('mengandung spasi');
+            if(!/^[A-Za-z0-9._-]+$/.test(k.replace(/\s/g,''))) alasan.push('ada karakter tidak lazim');
+            const kodeSamaNama = k.replace(/\s/g,'').toLowerCase()===String(i.name||'').replace(/\s/g,'').toLowerCase();
+            if(kodeSamaNama) alasan.push('kode sama dengan nama barang');
+            if(!alasan.length) return;
+            const jejak=kbHitungJejak(k);
+            const rapi=k.replace(/\s+/g,'');
+            // kembaran: SKU lain dengan nama sama tapi kodenya wajar
+            const kembar=(masterSKU||[]).find(x=>x.sku!==k &&
+                String(x.name||'').trim().toLowerCase()===String(i.name||'').trim().toLowerCase() &&
+                /^[A-Za-z0-9._-]+$/.test(String(x.sku||'')));
+            let aksi='manual', usul='', ket='';
+            if(kodeSamaNama && kembar && jejak.total===0){
+                aksi='hapus'; usul=kembar.sku;
+                ket=`Duplikat dari ${kembar.sku} dan tidak punya jejak apa pun — aman dihapus.`;
+            } else if(rapi!==k && !adaKode[rapi]){
+                aksi='ganti'; usul=rapi;
+                ket=`Kode dirapikan jadi ${rapi}. ${jejak.total} rujukan ikut diperbarui.`;
+            } else if(rapi!==k && adaKode[rapi]){
+                ket=`Kode rapinya (${rapi}) sudah dipakai "${adaKode[rapi].name}". Perlu diputuskan manual: digabung atau diberi kode lain.`;
+            } else if(kodeSamaNama){
+                ket=jejak.total ? `Punya ${jejak.total} rujukan dan tidak ada kembaran berkode wajar. Beri kode baru secara manual.`
+                                : `Tidak ada kembaran berkode wajar. Beri kode baru secara manual.`;
+            }
+            out.push({ sku:k, nama:i.name, status:i.status, alasan:alasan.join(', '), jejak, aksi, usul, ket });
+        });
+        return out;
+    }
+
+    window.perbaikiKodeBarang = function(){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        const d=kbDaftarMasalah();
+        if(!d.length){ notify('Bersih','Tidak ada kode barang yang bentuknya bermasalah.','success'); return; }
+        const bisa=d.filter(x=>x.aksi!=='manual'), manual=d.filter(x=>x.aksi==='manual');
+        const jj=j=>{ const p=[]; if(j.log)p.push(j.log+' transaksi'); if(j.batch)p.push(j.batch+' batch');
+            if(j.transfer)p.push(j.transfer+' kiriman'); if(j.so)p.push(j.so+' baris opname');
+            if(j.baseline)p.push(j.baseline+' baseline'); if(j.closing)p.push(j.closing+' snapshot closing');
+            if(j.opening)p.push(j.opening+' opening resmi'); if(j.audit)p.push(j.audit+' audit');
+            return p.length?p.join(', '):'tidak ada rujukan'; };
+        const baris=d.map(x=>`<tr${x.aksi==='manual'?' style="background:rgba(245,158,11,0.10);"':''}>
+            <td class="mono">${dvzEsc(x.sku)}</td><td>${dvzEsc(String(x.nama).slice(0,26))}</td>
+            <td style="font-size:0.74rem;">${dvzEsc(x.alasan)}</td>
+            <td style="font-size:0.74rem;">${dvzEsc(jj(x.jejak))}</td>
+            <td>${x.aksi==='ganti'?`<span style="color:var(--green);">→ <span class="mono">${dvzEsc(x.usul)}</span></span>`
+                 :x.aksi==='hapus'?`<span style="color:#b3261e;">hapus (duplikat ${dvzEsc(x.usul)})</span>`
+                 :'<span style="color:#f59e0b;">perlu keputusan manual</span>'}</td>
+            <td style="font-size:0.74rem;">${dvzEsc(x.ket)}</td></tr>`).join('');
+        Swal.fire({ title:'Perbaiki Kode Barang', width:1020, showCancelButton:true,
+            confirmButtonText: bisa.length?`Perbaiki ${bisa.length} kode`:'Tutup',
+            cancelButtonText:'Batal',
+            html:`<div style="text-align:left;font-size:14px">
+              <p style="margin:0 0 10px">Ditemukan <b>${d.length}</b> kode barang yang bentuknya bermasalah.
+              <b>${bisa.length}</b> bisa diperbaiki otomatis, <b>${manual.length}</b> perlu keputusan Anda.</p>
+              <div style="max-height:300px;overflow:auto"><table style="width:100%;font-size:.78rem"><thead><tr>
+                <th style="text-align:left">Kode</th><th style="text-align:left">Nama</th><th style="text-align:left">Masalah</th>
+                <th style="text-align:left">Yang menempel</th><th style="text-align:left">Tindakan</th><th style="text-align:left">Keterangan</th>
+              </tr></thead><tbody>${baris}</tbody></table></div>
+              <p style="margin:10px 0 0;font-size:.78rem">Mengganti kode memperbarui <b>semua</b> rujukannya sekaligus —
+              transaksi, batch, kiriman, hitungan opname, snapshot tutup buku, dan Opening Resmi — supaya stoknya tidak terbelah.
+              Penghapusan hanya dilakukan pada kode yang benar-benar tidak punya rujukan apa pun.</p>
+            </div>` }).then(r=>{
+            if(!r.isConfirmed || !bisa.length) return;
+            const pin=prompt('PIN Admin untuk memperbaiki kode barang:');
+            if(pin===null) return;
+            if(pin!==soPins.admin){ notify('PIN Salah','','error'); return; }
+            const kunci='backup_kode_barang_'+Date.now();
+            try{ localStorage.setItem(kunci, JSON.stringify(bisa.map(x=>({ sku:x.sku, nama:x.nama, aksi:x.aksi, usul:x.usul })))); }catch(e){}
+            let nGanti=0, nHapus=0, nRujukan=0, rincian=[];
+            bisa.forEach(x=>{
+                if(x.aksi==='ganti'){
+                    // jangan pernah menimpa kode yang sudah dipakai
+                    if(itemBySku(x.usul)){ rincian.push(`${x.sku}: dilewati, ${x.usul} sudah dipakai`); return; }
+                    nRujukan += kbGantiKode(x.sku, x.usul); nGanti++;
+                    rincian.push(`${x.sku} → ${x.usul}`);
+                } else if(x.aksi==='hapus'){
+                    const j=kbHitungJejak(x.sku);
+                    if(j.total>0){ rincian.push(`${x.sku}: dilewati, ternyata punya ${j.total} rujukan`); return; }
+                    const i=masterSKU.findIndex(m=>m.sku===x.sku);
+                    if(i>-1){ masterSKU.splice(i,1); delete stockBatches[x.sku]; nHapus++;
+                        rincian.push(`${x.sku} dihapus (duplikat ${x.usul})`); }
+                }
+            });
+            invalidateSkuIndex();
+            if(typeof auditLog!=='undefined') auditLog.unshift({ id:nextAuditId++, action:'edit', at:Date.now(),
+                by:currentUsername||deviceOperator||'', reason:`Perbaiki kode barang: ${nGanti} diganti (${nRujukan} rujukan ikut diperbarui), ${nHapus} duplikat dihapus. ${rincian.join('; ')}. Cadangan: ${kunci}`,
+                sku:'-', itemName:'Kode Barang', type:'policy',
+                before:{ kodeBermasalah:d.length }, after:{ diperbaiki:nGanti+nHapus } });
+            persist(); refreshUI();
+            Swal.fire({ title:'Selesai', icon:'success', width:640,
+                html:`<div style="text-align:left;font-size:14px">
+                  ${nGanti} kode diganti, ${nRujukan} rujukan ikut diperbarui, ${nHapus} duplikat dihapus.<br><br>
+                  <div style="font-size:.8rem">${rincian.map(dvzEsc).join('<br>')}</div>
+                  ${manual.length?`<br><b>${manual.length} kode masih perlu keputusan Anda</b> — jalankan lagi untuk melihatnya.`:''}</div>` });
+        });
+    };
 
     window.perbaikiAngkaRusak = function(){
         if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
