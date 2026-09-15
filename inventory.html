@@ -1085,6 +1085,8 @@
         <button id="invDiagExportBtn" class="btn btn-secondary btn-sm">📊 Export CSV</button>
         <button id="invDiagAngkaRusakBtn" class="btn btn-warning btn-sm">🔢 Perbaiki Angka Kehilangan Koma</button>
         <button id="invDiagHargaSatuanBtn" class="btn btn-warning btn-sm">⚖️ Perbaiki Harga Salah Satuan</button>
+        <button id="invDiagHargaEkstremBtn" class="btn btn-warning btn-sm">💥 Perbaiki Harga Menyimpang Ekstrem</button>
+        <button id="invDiagDuplikatBtn" class="btn btn-warning btn-sm">👯 Periksa Baris Kembar</button>
         <button id="invDiagPpnTandaiBtn" class="btn btn-warning btn-sm">① Catat PPN pada Pembelian Lama</button>
         <button id="invDiagPpnBtn" class="btn btn-warning btn-sm">② Rebuild Historical Cost incl PPN</button>
     </div>
@@ -6697,6 +6699,305 @@
     };
 
 
+    // ====================== HARGA MENYIMPANG EKSTREM DARI HARGA MASTER ======================
+    // Alat "Perbaiki Harga Salah Satuan" di atas hanya mencari satu pola: harga per Kg/Liter
+    // dipakai pada bahan ber-satuan Gr/Ml, dengan rasio yang mendekati faktor satuannya.
+    // Pola itu terlalu sempit. Pada data nyata ditemukan pembelian bertarif Rp3.298.446.667/Kg
+    // untuk bahan yang harga wajarnya Rp32.984/Kg — tepat 100.000x, pergeseran koma lima digit —
+    // dan alat lama melewatkannya seluruhnya karena rasionya tidak cocok dengan faktor kemasan.
+    //
+    // Alat ini menjaring rasio berapa pun terhadap harga Master, lalu MEMILAH:
+    //   - rasio pas di pangkat sepuluh / faktor kemasan  -> pembaginya pasti, boleh diperbaiki
+    //   - rasio lain                                     -> DILAPORKAN SAJA, tanpa angka usulan
+    // Tidak ada tebakan. Harga yang tidak bisa dipastikan tidak disentuh sama sekali.
+    const HE_AMBANG = 20;          // di bawah 20x dianggap wajar (harga memang bisa naik-turun)
+    const HE_TOLERANSI = 0.05;     // rasio harus pas 5% ke sebuah faktor untuk disebut pasti
+    function heHargaWajar(it){
+        return (it && it.lastBuyPrice>0 && it.buyContent>0) ? it.lastBuyPrice/it.buyContent : 0;
+    }
+    function heCariFaktor(rasio, it){
+        const kandidat=[];
+        [10,100,1000,10000,100000,1000000].forEach(p=>kandidat.push({f:p, sebab:'pemisah desimal bergeser '+Math.round(Math.log10(p))+' digit'}));
+        const bc=Number(it.buyContent)||0, mc=Number(it.midContent)||0;
+        if(bc>1) kandidat.push({f:bc, sebab:`harga per ${it.buyUnit||'kemasan'} (isi ${bc})`});
+        if(bc>0 && mc>0 && bc/mc>1) kandidat.push({f:bc/mc, sebab:`harga per ${it.midUnit||'satuan menengah'}`});
+        for(const k of kandidat){
+            if(Math.abs(rasio/k.f - 1) <= HE_TOLERANSI) return k;
+        }
+        return null;
+    }
+    function deteksiHargaMenyimpang(){
+        const pasti=[], ragu=[];
+        (transactionLog||[]).forEach(l=>{
+            if(!l || !(l.price>0)) return;
+            if(l.angkaSatuanDiperbaiki || l.hargaEkstremDiperbaiki || l.angkaDiperbaiki) return;
+            const it=itemBySku(l.sku); if(!it) return;
+            const wajar=heHargaWajar(it); if(!(wajar>0)) return;
+            const rasio=l.price/wajar;
+            if(rasio < HE_AMBANG && rasio > 1/HE_AMBANG) return;
+            const it2={...it};
+            const k = rasio>=HE_AMBANG ? heCariFaktor(rasio, it2) : null;
+            const baris={ log:l, wajar, rasio, sku:l.sku,
+                          nama:l.itemName||it.name||'', satuan:it.baseUnit||'' };
+            if(k){ baris.faktor=k.f; baris.sebab=k.sebab; baris.sesudah=l.price/k.f; pasti.push(baris); }
+            else { baris.sebab = rasio>=HE_AMBANG ? 'rasio tidak cocok dengan pangkat sepuluh maupun isi kemasan'
+                                                  : 'harga jauh DI BAWAH harga Master'; ragu.push(baris); }
+        });
+        const urut=(a,b)=>Math.abs(b.log.total||0)-Math.abs(a.log.total||0);
+        pasti.sort(urut); ragu.sort(urut);
+        return { pasti, ragu };
+    }
+    function terapkanSatuHargaEkstrem(d){
+        const l=d.log;
+        if(l.hargaEkstremDiperbaiki) return false;
+        const f=d.faktor; if(!(f>1)) return false;
+        l.price=l.price/f;
+        l.total=Math.round((l.qty*l.price)*100)/100;
+        ['costLayers','deducted','lossLayers'].forEach(nama=>{
+            if(Array.isArray(l[nama])) l[nama].forEach(L=>{ if(L.price!=null) L.price=L.price/f; });
+        });
+        l.hargaEkstremDiperbaiki={ pada:Date.now(), faktor:f };
+        return true;
+    }
+    window.perbaikiHargaEkstrem = function(){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        const { pasti, ragu } = deteksiHargaMenyimpang();
+        if(!pasti.length && !ragu.length){ notify('Bersih','Tidak ada harga yang menyimpang ekstrem dari harga Master.','success'); return; }
+        const rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+        const ts=getMonthStart().getTime();
+        const sebelumSnap=getInventorySnapshotAt(ts);
+        // Pratinjau: terapkan, ukur, LALU KEMBALIKAN PERSIS. Tidak boleh ada sisa perubahan.
+        const simpan=pasti.map(d=>({ l:d.log, price:d.log.price, total:d.log.total,
+            costLayers:d.log.costLayers?JSON.parse(JSON.stringify(d.log.costLayers)):null,
+            deducted:d.log.deducted?JSON.parse(JSON.stringify(d.log.deducted)):null,
+            lossLayers:d.log.lossLayers?JSON.parse(JSON.stringify(d.log.lossLayers)):null }));
+        pasti.forEach(d=>terapkanSatuHargaEkstrem(d)); dataVersi++;
+        const sesudahSnap=getInventorySnapshotAt(ts);
+        simpan.forEach(x=>{ x.l.price=x.price; x.l.total=x.total;
+            if(x.costLayers) x.l.costLayers=x.costLayers;
+            if(x.deducted) x.l.deducted=x.deducted;
+            if(x.lossLayers) x.l.lossLayers=x.lossLayers;
+            delete x.l.hargaEkstremDiperbaiki; });
+        dataVersi++;
+        const per=sn=>{ const o={}; (sn.rows||[]).forEach(r=>{ o[r.gudang]=(o[r.gudang]||0)+r.value; }); return o; };
+        const pA=per(sebelumSnap), pB=per(sesudahSnap);
+        const gud=[...new Set([...Object.keys(pA),...Object.keys(pB)])];
+        const barisGd=gud.map(g=>`<tr><td>${dvzEsc(gudangName(g))}</td><td style="text-align:right">${rp(pA[g]||0)}</td>
+            <td style="text-align:right;color:#1a7f37">${rp(pB[g]||0)}</td></tr>`).join('');
+        const barisTbl=arr=>arr.slice(0,200).map(d=>`<tr>
+            <td class="mono">${dvzEsc(d.sku)}</td><td>${dvzEsc(String(d.nama).slice(0,24))}</td>
+            <td>${new Date(effTs(d.log)).toLocaleDateString('id')}</td>
+            <td style="text-align:right">${rp(d.log.price)}</td>
+            <td style="text-align:right">${rp(d.wajar)}</td>
+            <td style="text-align:right">${Math.round(d.rasio).toLocaleString('id')}x</td>
+            <td style="text-align:right">${d.faktor?rp(d.sesudah):'<i>tidak diusulkan</i>'}</td>
+            <td style="font-size:.72rem">${dvzEsc(d.sebab)}</td></tr>`).join('');
+        const kepala=`<thead><tr><th style="text-align:left">SKU</th><th style="text-align:left">Nama</th><th style="text-align:left">Tanggal</th>
+            <th style="text-align:right">Harga tercatat</th><th style="text-align:right">Harga Master</th><th style="text-align:right">Rasio</th>
+            <th style="text-align:right">Usulan</th><th style="text-align:left">Dasar</th></tr></thead>`;
+        Swal.fire({ title:'Harga Menyimpang Ekstrem dari Harga Master', width:1100,
+            showCancelButton:true, confirmButtonText: pasti.length?`Ya, perbaiki ${pasti.length} baris yang pasti`:'Tutup',
+            cancelButtonText:'Batal',
+            html:`<div style="text-align:left;font-size:14px">
+              <p style="margin:0 0 10px"><b>${pasti.length}</b> transaksi punya pembagi yang pasti (rasionya tepat di pangkat sepuluh atau isi kemasan) dan bisa diperbaiki sekarang.
+              <b>${ragu.length}</b> transaksi menyimpang tapi <b>tidak diperbaiki</b> — pembaginya tidak bisa dipastikan, jadi angkanya tidak ditebak.</p>
+              ${pasti.length?`<table style="width:100%;margin-bottom:12px;font-variant-numeric:tabular-nums;font-size:.82rem">
+                <thead><tr><th style="text-align:left">Area</th><th style="text-align:right">SEBELUM</th><th style="text-align:right">SESUDAH</th></tr></thead>
+                <tbody>${barisGd}<tr style="font-weight:800;border-top:2px solid #ccc"><td>TOTAL Stok Awal</td>
+                  <td style="text-align:right">${rp(sebelumSnap.totalValue)}</td>
+                  <td style="text-align:right;color:#1a7f37">${rp(sesudahSnap.totalValue)}</td></tr></tbody></table>`:''}
+              ${pasti.length?`<div style="font-weight:700;margin:6px 0 4px">Bisa diperbaiki (${pasti.length})</div>
+              <div style="max-height:200px;overflow:auto"><table style="width:100%;font-size:.76rem">${kepala}<tbody>${barisTbl(pasti)}</tbody></table></div>`:''}
+              ${ragu.length?`<div style="font-weight:700;margin:12px 0 4px;color:#b45309">Perlu diperiksa manusia (${ragu.length}) — tidak ikut diperbaiki</div>
+              <div style="max-height:200px;overflow:auto"><table style="width:100%;font-size:.76rem">${kepala}<tbody>${barisTbl(ragu)}</tbody></table></div>`:''}
+              <p style="margin:10px 0 0;font-size:.78rem">Kuantitas tidak disentuh sama sekali — hanya harga dan lapisan biayanya. Sebagian harga di daftar kedua kemungkinan ikut membaik sendiri setelah daftar pertama diperbaiki, karena harganya diwarisi lewat lapisan FIFO dari pembelian yang rusak.</p>
+            </div>` }).then(r=>{
+            if(!r.isConfirmed || !pasti.length) return;
+            const pin=prompt('PIN Admin untuk menerapkan perbaikan harga ekstrem:');
+            if(pin===null) return;
+            if(pin!==soPins.admin){ notify('PIN Salah','','error'); return; }
+            const cadangan=pasti.map(d=>({ uid:d.log.uid, id:d.log.id, price:d.log.price, total:d.log.total,
+                costLayers:d.log.costLayers?JSON.parse(JSON.stringify(d.log.costLayers)):null,
+                deducted:d.log.deducted?JSON.parse(JSON.stringify(d.log.deducted)):null,
+                lossLayers:d.log.lossLayers?JSON.parse(JSON.stringify(d.log.lossLayers)):null }));
+            const kunci='backup_harga_ekstrem_'+Date.now();
+            try{ localStorage.setItem(kunci, JSON.stringify(cadangan)); }catch(e){}
+            window.__cadanganHargaEkstrem=cadangan;
+            let n=0; pasti.forEach(d=>{ if(terapkanSatuHargaEkstrem(d)) n++; });
+            dataVersi++;
+            if(typeof auditLog!=='undefined') auditLog.unshift({ id:nextAuditId++, action:'edit', at:Date.now(),
+                by:currentUsername||deviceOperator||'', reason:`Perbaiki harga menyimpang ekstrem pada ${n} transaksi. Stok Awal ${rp(sebelumSnap.totalValue)} -> ${rp(sesudahSnap.totalValue)}. ${ragu.length} baris dibiarkan karena pembaginya tidak pasti. Cadangan: ${kunci}`,
+                sku:'-', itemName:'Koreksi harga ekstrem', type:'policy',
+                before:{ stokAwal:Math.round(sebelumSnap.totalValue) }, after:{ stokAwal:Math.round(sesudahSnap.totalValue) },
+                snapshot:{ cadanganKey:kunci } });
+            persist(); refreshUI();
+            Swal.fire({ title:'Selesai', icon:'success', width:640,
+                html:`<div style="text-align:left;font-size:14px">${n} transaksi diperbaiki, ${ragu.length} dibiarkan untuk diperiksa manual.<br><br>
+                  Stok Awal: <b>${rp(sebelumSnap.totalValue)}</b> → <b style="color:#1a7f37">${rp(sesudahSnap.totalValue)}</b><br><br>
+                  Untuk mengembalikan: <span class="mono">urungkanHargaEkstrem()</span> di Console.</div>` });
+        });
+    };
+    window.urungkanHargaEkstrem = function(kunci){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        let cad=window.__cadanganHargaEkstrem;
+        if(!cad){ try{
+            const semua=Object.keys(localStorage).filter(k=>k.startsWith('backup_harga_ekstrem_')).sort();
+            cad=JSON.parse(localStorage.getItem(kunci||semua[semua.length-1])||'null'); }catch(e){} }
+        if(!cad || !cad.length){ notify('Tidak ada cadangan','','warning'); return; }
+        if(!confirm('Kembalikan '+cad.length+' transaksi ke harga sebelum diperbaiki?')) return;
+        let n=0;
+        cad.forEach(c=>{
+            const l=(c.uid?transactionLog.find(x=>x.uid&&x.uid===c.uid):null)||(c.id!=null?transactionLog.find(x=>x.id===c.id):null);
+            if(!l) return;
+            l.price=c.price; l.total=c.total;
+            if(c.costLayers) l.costLayers=c.costLayers;
+            if(c.deducted) l.deducted=c.deducted;
+            if(c.lossLayers) l.lossLayers=c.lossLayers;
+            delete l.hargaEkstremDiperbaiki; n++; });
+        dataVersi++; persist(); refreshUI();
+        notify('Dikembalikan', n+' transaksi kembali ke harga semula.', 'success');
+    };
+
+    // ====================== BARIS TRANSAKSI KEMBAR PERSIS ======================
+    // Pola ketiga yang lolos dari kedua alat di atas: harganya benar, kuantitasnya benar,
+    // tapi barisnya diposting berkali-kali. Pada data nyata ditemukan satu pembelian
+    // 1.005 Kg yang tercatat sembilan kali dalam satu jam — stok dan nilainya berlipat sembilan.
+    //
+    // PENTING: baris kembar TIDAK otomatis berarti salah. Sembilan pengiriman 1.005 Kg dalam
+    // satu hari itu mungkin saja nyata. Karena itu alat ini TIDAK PERNAH menghapus sendiri —
+    // semua kotak centang dimulai dalam keadaan KOSONG dan manusia yang memilih.
+    function dupKunci(l){
+        const q=Math.round((Number(l.qty)||0)*1000)/1000;
+        const h=Math.round((Number(l.price)||0)*100)/100;
+        const t=new Date(effTs(l)); const tgl=t.getFullYear()+'-'+(t.getMonth()+1)+'-'+t.getDate();
+        return [l.sku, l.type, l.outType||'', l.gudang||DEFAULT_GUDANG, q, h, tgl].join('|');
+    }
+    // Uji-coba kering pembalikan stok: meniru syarat tarikKembaliBatchMasuk & reverseLogStockEffect
+    // TANPA mengubah apa pun. Kalau ini mengembalikan alasan, deleteTransactionEntry pasti menolak.
+    function dupSebabTakBisa(l){
+        if(effTs(l) < lockBefore) return 'periode sudah tutup buku';
+        if(typeof editLocked!=='undefined' && editLocked) return 'Mode Koreksi Data sedang terkunci';
+        if(typeof transferLinkedTo==='function' && transferLinkedTo(l.id)) return 'terikat transfer antar gudang';
+        if(l.type==='in'){
+            const batches = stockBatches[l.sku]||[];
+            const dibuat = (Array.isArray(l.createdBatches) && l.createdBatches.length)
+                ? l.createdBatches
+                : (l.batchIds||[]).filter(id=>id!=null).map(id=>({ id, qty:l.qty }));
+            const settle = Array.isArray(l.negSettlements) ? l.negSettlements : [];
+            if(!dibuat.length && !settle.length) return 'tidak menyimpan rincian batch';
+            for(const cb of dibuat){
+                const b = batches.find(bb=>bb.id===cb.id);
+                if(!b) return 'batch masuknya sudah habis terpakai transaksi keluar';
+                if(b.qty < cb.qty - 1e-9) return 'sebagian batch sudah terpakai transaksi keluar';
+            }
+        } else {
+            if(!l.deducted) return 'transaksi lama tanpa rincian batch';
+        }
+        return '';
+    }
+    function deteksiDuplikatLog(){
+        const peta={};
+        (transactionLog||[]).forEach(l=>{ if(!l || !(Number(l.qty)>0)) return;
+            const k=dupKunci(l); (peta[k]=peta[k]||[]).push(l); });
+        const grup=[];
+        Object.keys(peta).forEach(k=>{
+            const arr=peta[k]; if(arr.length<2) return;
+            arr.sort((a,b)=>(effTs(a)-effTs(b)) || ((a.id||0)-(b.id||0)));
+            const asli=arr[0], kembar=arr.slice(1);
+            // Baris yang tidak boleh disentuh. Diperiksa DI DEPAN, bukan dibiarkan gagal satu per
+            // satu saat dihapus: menampilkan 574 kelompok sebagai "bisa dibereskan" lalu gagal
+            // 1.591 kali berturut-turut jauh lebih buruk daripada mengatakan yang sebenarnya.
+            const bisa=[], terkunci=[];
+            kembar.forEach(l=>{
+                const alasan = dupSebabTakBisa(l);
+                if(alasan) terkunci.push({l, sebab:alasan}); else bisa.push(l);
+            });
+            const it=itemBySku(asli.sku)||{};
+            grup.push({ kunci:k, asli, kembar, bisa, terkunci,
+                        sku:asli.sku, nama:asli.itemName||it.name||'', satuan:it.baseUnit||'',
+                        gudang:asli.gudang||DEFAULT_GUDANG, qty:asli.qty, harga:asli.price||0,
+                        tgl:new Date(effTs(asli)).toLocaleDateString('id'),
+                        jam:arr.map(l=>new Date(effTs(l)).toLocaleTimeString('id')),
+                        nilaiKembar:kembar.reduce((s,l)=>s+Math.abs(Number(l.total)||0),0) });
+        });
+        grup.sort((a,b)=>b.nilaiKembar-a.nilaiKembar);
+        return grup;
+    }
+    window.periksaDuplikatTransaksi = function(){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        const grup=deteksiDuplikatLog();
+        if(!grup.length){ notify('Bersih','Tidak ada baris transaksi yang kembar persis.','success'); return; }
+        const rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+        const totalKembar=grup.reduce((s,g)=>s+g.kembar.length,0);
+        const totalNilai=grup.reduce((s,g)=>s+g.nilaiKembar,0);
+        const grupBisa=grup.filter(g=>g.bisa.length>0);
+        const barisBisa=grup.reduce((s,g)=>s+g.bisa.length,0);
+        const nilaiBisa=grup.reduce((s,g)=>s+g.bisa.reduce((a,l)=>a+Math.abs(Number(l.total)||0),0),0);
+        if(typeof editLocked!=='undefined' && editLocked){
+            notify('Mode Koreksi Terkunci','Buka dulu Mode Koreksi Data (tombol 🔓/🔒 di tab Transaksi) sebelum membereskan baris kembar. Tanpa itu tidak ada satu pun yang bisa dihapus.','warning');
+        }
+        const baris=grup.slice(0,300).map((g,i)=>`<tr>
+            <td style="text-align:center">${g.bisa.length?`<input type="checkbox" class="dupPick" data-i="${i}">`:'<span title="tidak bisa dihapus">🔒</span>'}</td>
+            <td class="mono">${dvzEsc(g.sku)}</td><td>${dvzEsc(String(g.nama).slice(0,22))}</td>
+            <td>${dvzEsc(gudangName(g.gudang))}</td><td>${dvzEsc(g.tgl)}</td>
+            <td style="text-align:right">${(Math.round(g.qty*1000)/1000).toLocaleString('id')} ${dvzEsc(g.satuan)}</td>
+            <td style="text-align:right">${rp(g.harga)}</td>
+            <td style="text-align:center">${g.kembar.length+1}x</td>
+            <td style="text-align:right;color:#b91c1c">${rp(g.nilaiKembar)}</td>
+            <td style="font-size:.68rem">${dvzEsc(g.jam.join(', ').slice(0,60))}</td>
+            <td style="font-size:.68rem">${g.terkunci.length?dvzEsc(g.terkunci.length+' terkunci: '+g.terkunci[0].sebab):'—'}</td></tr>`).join('');
+        Swal.fire({ title:'Baris Transaksi Kembar Persis', width:1150,
+            showCancelButton:true, confirmButtonText:'Hapus yang dicentang', cancelButtonText:'Tutup',
+            didOpen:()=>{ const b=document.getElementById('dupSemua');
+                if(b) b.addEventListener('click',()=>{ const c=document.querySelectorAll('.dupPick');
+                    const nyala=[...c].some(x=>!x.checked); c.forEach(x=>{x.checked=nyala;}); }); },
+            preConfirm:()=>[...document.querySelectorAll('.dupPick')].filter(x=>x.checked).map(x=>parseInt(x.dataset.i)),
+            html:`<div style="text-align:left;font-size:14px">
+              <p style="margin:0 0 8px"><b>${grup.length}</b> kelompok baris kembar persis — sama SKU, gudang, jumlah, harga, dan tanggal.
+              Total <b>${totalKembar}</b> baris salinan senilai <b style="color:#b91c1c">${rp(totalNilai)}</b>.</p>
+              <p style="margin:0 0 10px;font-size:.82rem;background:#e0f2fe;padding:8px;border-radius:6px">
+                Dari jumlah itu, hanya <b>${barisBisa}</b> baris di <b>${grupBisa.length}</b> kelompok (senilai <b>${rp(nilaiBisa)}</b>) yang <b>masih bisa dihapus</b>.
+                Sisanya barangnya sudah terlanjur dikeluarkan — batch-nya habis terpakai transaksi berikutnya, jadi stoknya tidak bisa dibalik lagi tanpa merusak perhitungan FIFO.
+                Untuk yang itu, koreksinya lewat transaksi penyesuaian, bukan lewat penghapusan.</p>
+              <p style="margin:0 0 10px;font-size:.8rem;background:#fef3c7;padding:8px;border-radius:6px">
+                Kembar <b>tidak selalu berarti salah</b>. Tiga kiriman 100 Kg dengan harga sama di hari yang sama itu mungkin memang terjadi.
+                Karena itu tidak ada yang tercentang otomatis — periksa dulu ke fisik atau surat jalannya, baru centang.
+                Yang dihapus hanya salinannya; <b>baris paling awal di tiap kelompok selalu dipertahankan</b>.</p>
+              <button id="dupSemua" type="button" class="swal2-styled" style="background:#64748b;font-size:.78rem;padding:4px 10px;margin:0 0 8px">Centang / hapus centang semua</button>
+              <div style="max-height:320px;overflow:auto"><table style="width:100%;font-size:.74rem;font-variant-numeric:tabular-nums">
+                <thead><tr><th></th><th style="text-align:left">SKU</th><th style="text-align:left">Nama</th><th style="text-align:left">Gudang</th>
+                <th style="text-align:left">Tanggal</th><th style="text-align:right">Jumlah</th><th style="text-align:right">Harga</th>
+                <th style="text-align:center">Tercatat</th><th style="text-align:right">Nilai salinan</th><th style="text-align:left">Jam</th><th style="text-align:left">Catatan</th></tr></thead>
+                <tbody>${baris}</tbody></table></div>
+            </div>` }).then(r=>{
+            if(!r.isConfirmed) return;
+            const pilih=(r.value||[]).map(i=>grup[i]).filter(Boolean);
+            if(!pilih.length){ notify('Tidak ada yang dipilih','Centang dulu kelompok yang memang salah posting.','info'); return; }
+            const nBaris=pilih.reduce((s,g)=>s+g.bisa.length,0);
+            const nNilai=pilih.reduce((s,g)=>s+g.bisa.reduce((a,l)=>a+Math.abs(Number(l.total)||0),0),0);
+            if(!confirm(`HAPUS ${nBaris} baris salinan senilai ${rp(nNilai)}?\n\nStok akan dikembalikan seperti sebelum baris-baris itu ada.\nBaris paling awal di tiap kelompok tetap dipertahankan.`)) return;
+            const pin=prompt('PIN Admin untuk menghapus baris kembar:');
+            if(pin===null) return;
+            if(pin!==soPins.admin){ notify('PIN Salah','','error'); return; }
+            const alasan=prompt('Alasan penghapusan (WAJIB, tercatat di Riwayat Edit & Hapus):','Baris kembar persis — salah posting berulang');
+            if(alasan===null) return;
+            if(!String(alasan).trim()){ notify('Alasan Wajib','','warning'); return; }
+            let ok=0, gagal=[];
+            pilih.forEach(g=>{
+                // Dihapus dari yang TERBARU dulu supaya pembalikan lapisan FIFO mengikuti urutan masuknya.
+                g.bisa.slice().sort((a,b)=>(effTs(b)-effTs(a))||((b.id||0)-(a.id||0))).forEach(l=>{
+                    const res=deleteTransactionEntry(l.id, String(alasan).trim());
+                    if(res && res.success) ok++; else gagal.push(`${l.sku} #${l.id}: ${res?res.msg:'gagal'}`);
+                });
+            });
+            dataVersi++; persist(); refreshUI();
+            Swal.fire({ title: gagal.length?'Selesai sebagian':'Selesai', icon: gagal.length?'warning':'success', width:660,
+                html:`<div style="text-align:left;font-size:14px"><b>${ok}</b> baris salinan dihapus, stok dikembalikan.
+                  ${gagal.length?`<br><br><b style="color:#b45309">${gagal.length} gagal:</b><div style="max-height:160px;overflow:auto;font-size:.76rem">${gagal.map(x=>dvzEsc(x)).join('<br>')}</div>`:''}
+                  <br><br>Seluruhnya tercatat di Riwayat Edit &amp; Hapus.</div>` });
+        });
+    };
+
     // ============ HARGA MEMAKAI SATUAN MENENGAH, KUANTITAS MEMAKAI SATUAN DASAR ============
     // Gejala kedua, berbeda dari pemisah desimal yang hilang. Untuk bahan ber-satuan dasar Gr/Ml,
     // sebagian transaksi lama mencatat HARGA per Kg/Liter sementara KUANTITAS-nya sudah dalam Gr/Ml.
@@ -6943,6 +7244,8 @@
     };
     document.getElementById('invDiagAngkaRusakBtn')?.addEventListener('click', ()=>perbaikiAngkaRusak());
     document.getElementById('invDiagHargaSatuanBtn')?.addEventListener('click', ()=>perbaikiHargaSatuanMid());
+    document.getElementById('invDiagHargaEkstremBtn')?.addEventListener('click', ()=>perbaikiHargaEkstrem());
+    document.getElementById('invDiagDuplikatBtn')?.addEventListener('click', ()=>periksaDuplikatTransaksi());
     document.getElementById('invDiagPpnTandaiBtn')?.addEventListener('click', ()=>catatPpnPembelianLama());
     document.getElementById('fixPpnMasterBtn')?.addEventListener('click', ()=>catatPpnPembelianLama());
     document.getElementById('invDiagPpnBtn')?.addEventListener('click', ()=>rebuildHistoricalCostInclPPN());
