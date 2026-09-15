@@ -636,6 +636,37 @@
             <div style="font-size:0.72rem; color:var(--text3); margin-top:6px;">💡 Isi "Stok Min" per barang supaya peringatan "Stok Rendah" bisa mendeteksinya — kosong/0 berarti belum dipantau.</div></div>
             <div style="margin-top:12px;"><button id="exportStockExcel" class="btn btn-secondary btn-sm">📊 Export Excel</button> <button id="exportStockPDF" class="btn btn-secondary btn-sm">📑 Export PDF</button> <button id="openInvDiagBtn" class="btn btn-warning btn-sm admin-only" title="Audit selisih batch/log/nilai stok">🩺 Diagnostic Inventory</button></div>
         </div>
+    <!-- 📆 UPLOAD STOK AWAL BULANAN (admin) -->
+    <div class="card admin-only" id="uploadOpeningCard" style="margin-bottom:20px;">
+        <div class="card-title"><div class="card-title-icon">📆</div> Upload Stok Awal Bulanan</div>
+        <div style="font-size:0.8rem; color:var(--text2); margin-bottom:10px; line-height:1.5;">
+            Menetapkan Stok Awal sebuah bulan dari <strong>hasil hitung fisik</strong>, bukan dari menyusun ulang riwayat transaksi.
+            Dipakai kalau riwayatnya tidak lengkap atau rusak — misalnya sebagian barang tidak sempat dihitung,
+            atau transaksi lama sudah diarsip Tutup Buku.
+            <br><br>
+            Angka yang diunggah <strong>dibekukan</strong>: transaksi bulan berjalan tidak bisa mengubahnya.
+            Data ini <strong>tidak masuk ke daftar transaksi</strong> dan <strong>tidak mengubah stok realtime</strong> —
+            murni sebagai dasar Stok Awal periode itu.
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; margin-bottom:12px;">
+            <div class="form-group" style="margin-bottom:0; min-width:170px;">
+                <label>Periode</label>
+                <input type="month" id="uoPeriode">
+            </div>
+            <div class="form-group" style="margin-bottom:0; min-width:190px;">
+                <label>Cakupan file</label>
+                <select id="uoGudang">
+                    <option value="">Semua gudang (ada kolom Gudang)</option>
+                </select>
+            </div>
+            <button id="uoTemplateBtn" class="btn btn-secondary">📥 Unduh Template</button>
+            <button id="uoPilihBtn" class="btn btn-primary">📤 Pilih File & Lihat Pratinjau</button>
+            <input type="file" id="uoFile" accept=".csv,.xlsx,.xls" style="display:none;">
+        </div>
+        <div id="uoStatus"></div>
+        <div id="uoHasil"></div>
+    </div>
+
     <!-- 🔧 KOREKSI & RESET STOK (admin — semua gudang yg sedang dilihat — dan akun gudang transit) -->
     <div class="card admin-only" id="koreksiResetCard" style="margin-bottom:20px;">
         <div class="card-title"><div class="card-title-icon">🔧</div> Koreksi &amp; Reset Stok <span id="resetGudangLabel" style="font-weight:400; font-size:0.8rem; color:var(--text3);"></span></div>
@@ -5636,6 +5667,228 @@
         return true;
     }
     // Alat Admin: tampilkan dulu seluruh dampaknya, baru minta persetujuan.
+    // ===================== UPLOAD STOK AWAL BULANAN =====================
+    // Kenapa fitur ini ada: menyusun ulang Stok Awal dari riwayat transaksi hanya jujur kalau
+    // riwayatnya utuh. Begitu ada Stok Opname yang separuh SKU-nya tidak sempat dihitung, upload
+    // stok awal yang bertumpuk, atau transaksi lama yang sudah diarsip Tutup Buku, rekonstruksi
+    // itu tidak akan pernah cocok dengan kenyataan — berapa pun pintarnya rumusnya.
+    // Jalan keluarnya bukan menghitung lebih pintar, tapi MENETAPKAN angkanya dari hitung fisik.
+    //
+    // Hasil unggahan disimpan sebagai Opening Resmi (officialOpenings) periode itu: dibekukan,
+    // tidak bisa diubah transaksi bulan berjalan. Tidak masuk transactionLog, tidak menyentuh
+    // stockBatches, tidak mengubah stok realtime.
+    let uoKandidat = null;
+
+    function uoIsiDropdownGudang(){
+        const sel=document.getElementById('uoGudang'); if(!sel) return;
+        const kini=sel.value;
+        sel.innerHTML='<option value="">Semua gudang (ada kolom Gudang)</option>'
+            + (GUDANG_LIST||[]).map(g=>`<option value="${dvzEsc(g.id)}">Hanya ${dvzEsc(g.name)}</option>`).join('');
+        if([...sel.options].some(o=>o.value===kini)) sel.value=kini;
+    }
+    function uoPeriodeTerpilih(){
+        const v=(document.getElementById('uoPeriode')||{}).value||'';
+        return /^\d{4}-\d{2}$/.test(v) ? v : '';
+    }
+    document.getElementById('uoTemplateBtn')?.addEventListener('click', ()=>{
+        if(typeof XLSX==='undefined'){ notify('Offline','Library Excel belum termuat.','warning'); return; }
+        const g=(document.getElementById('uoGudang')||{}).value||'';
+        const per=uoPeriodeTerpilih()||saPeriodeStr();
+        const contoh=(masterSKU||[]).filter(i=>i.status==='Aktif').slice(0,3);
+        const data=[['Kode Barang','Nama Barang','Gudang','Satuan Dasar','Qty Stok Awal','Harga per Satuan Dasar']];
+        contoh.forEach(i=>data.push([i.sku, i.name, g||'scm', i.baseUnit||'',
+            '', (i.lastBuyPrice>0&&i.buyContent>0)?Math.round(i.lastBuyPrice/i.buyContent*100)/100:'']));
+        data.push([]);
+        data.push(['PETUNJUK:']);
+        data.push(['1. Kolom "Gudang" diisi kode: '+(GUDANG_LIST||[]).map(x=>x.id).join(' / ')+'. Wajib ada kalau file mencakup lebih dari satu gudang.']);
+        data.push(['2. Qty diisi dalam SATUAN DASAR barang (lihat kolom Satuan Dasar), bukan per karton/pack.']);
+        data.push(['3. Harga juga per SATUAN DASAR. Kalau dikosongkan, dipakai harga beli terakhir dari Master Data.']);
+        data.push(['4. Barang yang tidak dicantumkan dianggap stoknya NOL pada awal periode ini.']);
+        const ws=XLSX.utils.aoa_to_sheet(data);
+        ws['!cols']=[{wch:18},{wch:38},{wch:16},{wch:14},{wch:16},{wch:22}];
+        const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Stok Awal');
+        XLSX.writeFile(wb, `template_stok_awal_${per}${g?'_'+g:''}.xlsx`);
+    });
+    document.getElementById('uoPilihBtn')?.addEventListener('click', ()=>{
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        if(!uoPeriodeTerpilih()){ notify('Periode Belum Diisi','Pilih dulu bulan yang mau ditetapkan Stok Awalnya.','warning'); return; }
+        document.getElementById('uoFile').click();
+    });
+    // Membaca file jadi baris opening. Pemeriksaan sengaja ketat: satu baris salah satuan cukup
+    // untuk merusak nilai persediaan satu perusahaan, dan itu sudah pernah terjadi.
+    function uoBacaBaris(aoa, gudangPaksa){
+        aoa=(aoa||[]).filter(r=>r && r.some(c=>String(c||'').trim()!==''));
+        if(!aoa.length) return { ok:false, pesan:'File kosong.' };
+        let hi=aoa.findIndex(r=>r.some(c=>/kode/i.test(String(c||''))) && r.some(c=>/qty|jumlah/i.test(String(c||''))));
+        if(hi<0) hi=0;
+        const H=aoa[hi].map(h=>String(h||'').trim().toUpperCase());
+        const kol=(...n)=>{ for(const x of n){ const i=H.findIndex(h=>h.includes(x)); if(i>-1) return i; } return -1; };
+        const iKode=kol('KODE'), iQty=kol('QTY','JUMLAH'), iHrg=kol('HARGA'), iGud=kol('GUDANG');
+        if(iKode<0 || iQty<0) return { ok:false, pesan:'Kolom "Kode Barang" dan "Qty Stok Awal" wajib ada. Gunakan template yang disediakan.' };
+        if(iGud<0 && !gudangPaksa) return { ok:false, pesan:'File tidak punya kolom "Gudang". Pilih satu gudang di dropdown "Cakupan file", atau tambahkan kolom Gudang ke file Anda. Sistem tidak akan menebak barang ini milik gudang mana.' };
+        const kodeGudang={}; (GUDANG_LIST||[]).forEach(g=>{ kodeGudang[String(g.id).toUpperCase()]=g.id;
+            kodeGudang[String(g.name).toUpperCase()]=g.id; });
+        const baris=[], tolak=[], peringatan=[];
+        for(let i=hi+1;i<aoa.length;i++){
+            const r=aoa[i].map(x=>String(x??'').trim());
+            const kode=r[iKode]; if(!kode) continue;
+            if(/^PETUNJUK|^\d\./i.test(kode)) continue;              // baris petunjuk di template
+            const it=itemBySku(kode);
+            if(!it){ tolak.push(`${kode}: tidak ada di Master Data`); continue; }
+            const g = gudangPaksa || kodeGudang[String(r[iGud]||'').toUpperCase()] || String(r[iGud]||'').toLowerCase().replace(/\s+/g,'');
+            if(!g){ tolak.push(`${kode}: kolom Gudang kosong`); continue; }
+            const qty=angkaID(r[iQty]);
+            if(!isFinite(qty)){ tolak.push(`${kode}: Qty tidak terbaca`); continue; }
+            if(qty===0) continue;                                     // nol = tidak perlu dicatat
+            // Penjaga yang sama dengan importir stok awal: angka sebesar ini hampir selalu berarti
+            // pemisah desimal hilang di file sumbernya.
+            if(Math.abs(qty)>1e7){ tolak.push(`${kode}: Qty ${qty.toLocaleString('id')} tidak masuk akal — kemungkinan pemisah desimal hilang saat file dibuat`); continue; }
+            const wajar=(it.lastBuyPrice>0 && it.buyContent>0) ? it.lastBuyPrice/it.buyContent : 0;
+            let harga = iHrg>-1 ? angkaID(r[iHrg]) : 0;
+            if(!(harga>0)) harga = wajar;
+            if(!(harga>0)){ peringatan.push(`${kode}: harga kosong dan Master belum punya harga beli — dinilai Rp0`); harga=0; }
+            else if(wajar>0 && harga > wajar*20){
+                tolak.push(`${kode}: harga Rp${Math.round(harga).toLocaleString('id')} tampak harga per ${it.buyUnit||'kemasan'}, bukan per ${it.baseUnit}. Wajarnya sekitar Rp${Math.round(wajar).toLocaleString('id')}/${it.baseUnit}`);
+                continue;
+            }
+            else if(wajar>0 && harga < wajar/20) peringatan.push(`${kode}: harga Rp${Math.round(harga).toLocaleString('id')} jauh di bawah harga Master Rp${Math.round(wajar).toLocaleString('id')}/${it.baseUnit}`);
+            baris.push({ sku:kode, gudang:g, qty, harga, nilai:qty*harga, nama:it.name||kode, satuan:it.baseUnit||'' });
+        }
+        if(!baris.length) return { ok:false, pesan:'Tidak ada baris yang bisa dipakai.'+(tolak.length?' Contoh masalah: '+tolak.slice(0,3).join('; '):'') , tolak };
+        return { ok:true, baris, tolak, peringatan };
+    }
+    document.getElementById('uoFile')?.addEventListener('change', function(e){
+        const file=e.target.files[0]; if(!file) return;
+        const gudangPaksa=(document.getElementById('uoGudang')||{}).value||'';
+        const selesai=(aoa)=>{ uoTampilkanPratinjau(uoBacaBaris(aoa, gudangPaksa), file.name); };
+        const reader=new FileReader();
+        if(/\.xlsx?$/i.test(file.name)){
+            if(typeof XLSX==='undefined'){ notify('Offline','Library Excel belum termuat. Gunakan file CSV.','warning'); e.target.value=''; return; }
+            reader.onload=()=>{ try{
+                const wb=XLSX.read(new Uint8Array(reader.result),{type:'array'});
+                const aoa=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,raw:true,defval:''})
+                    .map(r=>r.map(c=>typeof c==='number'?String(c).replace('.',','):String(c??'')));
+                selesai(aoa);
+            }catch(err){ notify('Gagal','File Excel tidak bisa dibaca: '+err.message,'error'); } e.target.value=''; };
+            reader.readAsArrayBuffer(file);
+        } else {
+            reader.onload=()=>{ const lines=String(reader.result).split(/\r?\n/).filter(l=>l.trim());
+                selesai(lines.map(l=>{ let o=[],c='',q=false;
+                    for(const ch of l){ if(ch==='"') q=!q; else if((ch===','||ch===';')&&!q){ o.push(c); c=''; } else c+=ch; }
+                    o.push(c); return o; }));
+                e.target.value=''; };
+            reader.readAsText(file);
+        }
+    });
+
+    // Pratinjau: seluruh dampaknya ditampilkan SEBELUM ada yang tersimpan.
+    function uoTampilkanPratinjau(hasil, namaFile){
+        const st=document.getElementById('uoStatus'), el=document.getElementById('uoHasil');
+        if(!el) return;
+        uoKandidat=null;
+        if(!hasil.ok){
+            st.innerHTML=`<div class="alert alert-warning" style="margin:0 0 10px;"><strong>File tidak bisa dipakai.</strong><br>${dvzEsc(hasil.pesan)}</div>`;
+            el.innerHTML = (hasil.tolak&&hasil.tolak.length)
+                ? `<div style="font-size:0.76rem; color:var(--text3);">${hasil.tolak.slice(0,15).map(dvzEsc).join('<br>')}${hasil.tolak.length>15?'<br>... +'+(hasil.tolak.length-15)+' lagi':''}</div>` : '';
+            return;
+        }
+        const per=uoPeriodeTerpilih();
+        const rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+        // bentuk rows sesuai format Opening Resmi: satu lapisan biaya per baris
+        const cutoff=periodeCutoff(per);
+        const rows=hasil.baris.map(b=>({ sku:b.sku, gudang:b.gudang, qty:b.qty, value:b.nilai,
+            batches:[{ qty:b.qty, price:b.harga, dateIn:cutoff, costSource:'Upload Stok Awal '+per, costAt:cutoff }] }));
+        const total=rows.reduce((a,r)=>a+r.value,0);
+        const per1={}; rows.forEach(r=>{ per1[r.gudang]=(per1[r.gudang]||0)+r.value; });
+        // pembanding: angka yang berlaku sekarang
+        const seka=getOpeningSnapshot(per);
+        const per0={}; if(seka.ok) (seka.rows||[]).forEach(r=>{ per0[r.gudang]=(per0[r.gudang]||0)+r.value; });
+        const gud=[...new Set([...Object.keys(per0), ...Object.keys(per1)])];
+        uoKandidat={ periode:per, rows, total, namaFile, jumlahBaris:rows.length,
+                     tolak:hasil.tolak||[], peringatan:hasil.peringatan||[] };
+        st.innerHTML=`<div class="alert alert-info" style="margin:0 0 10px;">
+            <strong>${rows.length.toLocaleString('id')} baris terbaca</strong> dari <span class="mono">${dvzEsc(namaFile)}</span> untuk periode <strong>${dvzEsc(labelPeriode(per))}</strong>.
+            ${hasil.tolak.length?`<span style="color:#b3261e;"> ${hasil.tolak.length} baris DITOLAK.</span>`:''}
+            ${hasil.peringatan.length?`<span style="color:#f59e0b;"> ${hasil.peringatan.length} baris perlu diperiksa.</span>`:''}
+            Belum ada yang tersimpan.</div>`;
+        el.innerHTML=`
+          <table style="width:100%; font-size:0.84rem; margin-bottom:12px; font-variant-numeric:tabular-nums;">
+            <thead><tr><th style="text-align:left;">Area</th><th style="text-align:right;">Stok Awal sekarang</th>
+              <th style="text-align:right;">Dari file ini</th><th style="text-align:right;">Selisih</th></tr></thead>
+            <tbody>
+              ${gud.map(g=>{ const a=per0[g]||0, b2=per1[g]||0, d=b2-a;
+                return `<tr><td>${dvzEsc(gudangName(g))}</td>
+                  <td style="text-align:right;">${seka.ok?rp(a):'—'}</td>
+                  <td style="text-align:right; color:var(--green);">${rp(b2)}</td>
+                  <td style="text-align:right;${Math.abs(d)>0.5?' color:#b3261e; font-weight:700;':''}">${seka.ok?rp(d):'—'}</td></tr>`; }).join('')}
+              <tr style="background:rgba(16,185,129,0.15); font-weight:800;">
+                <td>GRAND TOTAL</td><td style="text-align:right;">${seka.ok?rp(seka.totalValue):'—'}</td>
+                <td style="text-align:right;">${rp(total)}</td>
+                <td style="text-align:right;">${seka.ok?rp(total-seka.totalValue):'—'}</td></tr>
+            </tbody></table>
+          ${hasil.tolak.length?`<div class="alert alert-warning" style="margin:0 0 10px; text-align:left;">
+            <strong>${hasil.tolak.length} baris DITOLAK dan tidak ikut dihitung:</strong>
+            <div style="font-size:0.76rem; margin-top:5px; max-height:140px; overflow:auto;">${hasil.tolak.slice(0,30).map(dvzEsc).join('<br>')}${hasil.tolak.length>30?'<br>... +'+(hasil.tolak.length-30)+' lagi':''}</div>
+            <div style="font-size:0.74rem; margin-top:6px;">Betulkan di file lalu unggah ulang. Menyimpan sekarang berarti baris-baris itu dianggap stoknya nol.</div></div>`:''}
+          ${hasil.peringatan.length?`<div style="font-size:0.76rem; color:#f59e0b; margin-bottom:10px;">
+            ⚠ ${hasil.peringatan.slice(0,10).map(dvzEsc).join('<br>⚠ ')}${hasil.peringatan.length>10?'<br>... +'+(hasil.peringatan.length-10)+' lagi':''}</div>`:''}
+          <div class="table-wrapper" style="max-height:34vh; overflow:auto; margin-bottom:12px;">
+            <table style="font-size:0.78rem;"><thead><tr><th>Kode</th><th>Nama</th><th>Area</th>
+              <th style="text-align:right;">Qty</th><th>Satuan</th><th style="text-align:right;">Harga</th><th style="text-align:right;">Nilai</th></tr></thead>
+            <tbody>${hasil.baris.slice().sort((a,b)=>Math.abs(b.nilai)-Math.abs(a.nilai)).slice(0,60).map(b=>
+              `<tr><td class="mono">${dvzEsc(b.sku)}</td><td>${dvzEsc(String(b.nama).slice(0,30))}</td>
+               <td>${dvzEsc(gudangName(b.gudang))}</td>
+               <td style="text-align:right;">${Number(b.qty).toLocaleString('id',{maximumFractionDigits:3})}</td>
+               <td>${dvzEsc(b.satuan)}</td>
+               <td style="text-align:right;">${rp(b.harga)}</td>
+               <td style="text-align:right;">${rp(b.nilai)}</td></tr>`).join('')}</tbody></table>
+            ${rows.length>60?`<div style="font-size:0.74rem; color:var(--text3); padding:5px;">... +${rows.length-60} baris lagi</div>`:''}
+          </div>
+          <button id="uoSimpanBtn" class="btn btn-primary">✅ Tetapkan sebagai Stok Awal ${dvzEsc(labelPeriode(per))}</button>
+          <span style="font-size:0.74rem; color:var(--text3); margin-left:8px;">Perlu PIN Admin. Angka lama dicadangkan, tidak dihapus.</span>`;
+        document.getElementById('uoSimpanBtn')?.addEventListener('click', uoSimpan);
+    }
+    function uoSimpan(){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        if(!uoKandidat){ return; }
+        const k=uoKandidat, rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+        const lama=officialOpenings[k.periode];
+        const pin=prompt('PIN Admin untuk menetapkan Stok Awal '+k.periode+':');
+        if(pin===null) return;
+        if(pin!==soPins.admin){ notify('PIN Salah','','error'); return; }
+        if(!confirm(`Tetapkan Stok Awal ${labelPeriode(k.periode)}?\n\n`
+            + (lama?`SEBELUM : ${rp(lama.totalValue)}\n`:'SEBELUM : belum ditetapkan\n')
+            + `SESUDAH : ${rp(k.total)} (${k.jumlahBaris} baris)\n`
+            + (k.tolak.length?`\n${k.tolak.length} baris DITOLAK — barang itu akan dianggap stoknya NOL.\n`:'')
+            + `\nAngka ini dibekukan dan tidak akan berubah oleh transaksi bulan berjalan.`
+            + `\nTransaksi, batch, dan stok realtime tidak diubah sama sekali.`)) return;
+        const cadangan = lama ? (lama.sebelumnya||[]).concat([{ rows:lama.rows, totalValue:lama.totalValue,
+            createdAt:lama.createdAt, createdBy:lama.createdBy, source:lama.source, digantiPada:Date.now() }]) : [];
+        const entri = tulisOpeningResmi(k.periode, { rows:k.rows, totalValue:k.total },
+            'Upload Stok Awal — '+k.namaFile, currentUsername||deviceOperator||'');
+        entri.sebelumnya = cadangan;
+        entri.barisDitolak = k.tolak.length;
+        if(typeof auditLog!=='undefined') auditLog.unshift({ id:nextAuditId++, action:'edit', at:Date.now(),
+            by:currentUsername||deviceOperator||'', reason:`Stok Awal ${k.periode} ditetapkan dari upload "${k.namaFile}": `
+                + `${lama?rp(lama.totalValue):'(belum ada)'} -> ${rp(k.total)} · ${k.jumlahBaris} baris`
+                + (k.tolak.length?` · ${k.tolak.length} baris ditolak`:''),
+            sku:'-', itemName:'Upload Stok Awal', type:'policy',
+            before:{ stokAwal: lama?Math.round(lama.totalValue):null }, after:{ stokAwal:Math.round(k.total) } });
+        persist(); refreshUI();
+        uoKandidat=null;
+        document.getElementById('uoHasil').innerHTML='';
+        document.getElementById('uoStatus').innerHTML=`<div class="alert alert-success" style="margin:0 0 10px;">
+            <strong>Stok Awal ${dvzEsc(labelPeriode(k.periode))} ditetapkan: ${rp(k.total)}</strong><br>
+            <span style="font-size:0.78rem;">Angka ini dibekukan. Untuk menggantinya, unggah file baru — versi lama tetap tersimpan sebagai cadangan.</span></div>`;
+        notify('Stok Awal Ditetapkan', `${labelPeriode(k.periode)} = ${rp(k.total)} dari ${k.jumlahBaris} baris.`, 'success');
+    }
+    // Isi dropdown & periode default saat halaman siap.
+    try{
+        uoIsiDropdownGudang();
+        const el=document.getElementById('uoPeriode');
+        if(el && !el.value){ const d=new Date(); el.value=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+    }catch(e){}
+
     window.perbaikiAngkaRusak = function(){
         if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
         const daftar=deteksiAngkaRusak();
