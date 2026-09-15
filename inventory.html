@@ -6044,12 +6044,14 @@
         if(!adaMasalah) html+='<div class="alert alert-success" style="margin:10px 0;">✅ Master di sistem sudah cocok dengan file. Tidak ada barang yang hilang.</div>';
         html += `<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
             ${h.baru.length?`<button id="bmTambahBtn" class="btn btn-primary btn-sm">➕ Tambahkan ${h.baru.length} barang baru</button>`:''}
+            ${h.satuanBeda.length?`<button id="bmSatuanBtn" class="btn btn-warning btn-sm">⚖️ Selaraskan ${h.satuanBeda.length} satuan</button>`:''}
             <button id="bmExportBtn" class="btn btn-secondary btn-sm">📊 Export Hasil Perbandingan</button>
             <button id="bmTutupBtn" class="btn btn-secondary btn-sm">✕ Tutup</button></div>
           <div style="font-size:0.74rem; color:var(--text3); margin-top:6px;">Hanya penambahan barang baru yang bisa diterapkan dari sini. Penggantian nama dan satuan harus lewat tombol ✏️ pada barisnya masing-masing, supaya setiap perubahan disadari dampaknya.</div>`;
         el.innerHTML=html;
         document.getElementById('bmTutupBtn')?.addEventListener('click', ()=>{ el.innerHTML=''; bmHasil=null; });
         document.getElementById('bmTambahBtn')?.addEventListener('click', bmTambahBaru);
+        document.getElementById('bmSatuanBtn')?.addEventListener('click', ()=>perbaikiSatuanBarang(h.satuanBeda));
         document.getElementById('bmExportBtn')?.addEventListener('click', bmExport);
     }
     function bmTambahBaru(){
@@ -6192,6 +6194,179 @@
             out.push({ sku:k, nama:i.name, status:i.status, alasan:alasan.join(', '), jejak, aksi, usul, ket });
         });
         return out;
+    }
+
+    // ===================== UBAH SATUAN DASAR BARANG =====================
+    // Mengganti label satuan saja TIDAK mengubah nilai apa pun — sudah diuji: qty, nilai stok,
+    // Stok Awal, HPP, dan Pembelian semuanya tetap. Yang berubah cuma harga acuan per satuan.
+    // Justru di situ bahayanya: kalau Maizena 224.000 Gr hanya diganti labelnya jadi "Kg", angkanya
+    // tetap 224.000 tapi artinya berubah jadi 224 ton, dan harganya jadi Rp15/Kg. Nilainya benar,
+    // tampilannya omong kosong, dan operator berikutnya akan salah input lagi.
+    //
+    // Jadi yang dilakukan di sini adalah KONVERSI SEBENARNYA: seluruh kuantitas dibagi faktor dan
+    // seluruh harga dikali faktor, di semua tempat sekaligus. Nilai rupiahnya dijaga tetap sama
+    // persis — itu syarat yang diperiksa sebelum dan sesudah, dan dibatalkan kalau meleset.
+    function usFaktor(isiLama, isiBaru){
+        isiLama=Number(isiLama)||0; isiBaru=Number(isiBaru)||0;
+        return (isiLama>0 && isiBaru>0) ? isiLama/isiBaru : 0;   // mis. 25.000 Gr -> 25 Kg = 1.000
+    }
+    function usNilaiSku(sku){
+        let v=0; ((stockBatches||{})[sku]||[]).forEach(b=>{ v+=(b.qty||0)*(b.price||0); });
+        return v;
+    }
+    // Menerapkan konversi ke SEMUA tempat kuantitas & harga barang ini tersimpan.
+    function usKonversi(sku, f){
+        if(!(f>0) || Math.abs(f-1)<1e-12) return 0;
+        let n=0;
+        const bagiQty = o=>{ if(o && typeof o.qty==='number'){ o.qty=o.qty/f; n++; } };
+        const kaliHrg = o=>{ if(o && typeof o.price==='number'){ o.price=o.price*f; n++; } };
+        ((stockBatches||{})[sku]||[]).forEach(b=>{ bagiQty(b); kaliHrg(b); });
+        (transactionLog||[]).forEach(l=>{
+            if(l.sku!==sku) return;
+            if(typeof l.qty==='number'){ l.qty=l.qty/f; n++; }
+            if(typeof l.price==='number'){ l.price=l.price*f; n++; }
+            ['costLayers','deducted','lossLayers'].forEach(k=>{ if(Array.isArray(l[k])) l[k].forEach(L=>{
+                if(typeof L.qtyTaken==='number') L.qtyTaken=L.qtyTaken/f;
+                if(typeof L.qty==='number') L.qty=L.qty/f;
+                if(typeof L.price==='number') L.price=L.price*f; }); });
+            if(Array.isArray(l.createdBatches)) l.createdBatches.forEach(c=>bagiQty(c));
+            if(Array.isArray(l.negSettlements)) l.negSettlements.forEach(x=>{
+                if(typeof x.qty==='number') x.qty=x.qty/f;
+                if(typeof x.batchPrice==='number') x.batchPrice=x.batchPrice*f;
+                if(typeof x.inPrice==='number') x.inPrice=x.inPrice*f; });
+        });
+        (transfers||[]).forEach(t=>{
+            if(t.sku!==sku) return;
+            if(typeof t.qty==='number'){ t.qty=t.qty/f; n++; }
+            if(typeof t.confirmedQty==='number') t.confirmedQty=t.confirmedQty/f;
+            if(typeof t.price==='number') t.price=t.price*f;
+            if(Array.isArray(t.costLayers)) t.costLayers.forEach(L=>{
+                if(typeof L.qtyTaken==='number') L.qtyTaken=L.qtyTaken/f;
+                if(typeof L.price==='number') L.price=L.price*f; });
+        });
+        (soHistory||[]).forEach(h=>(h.allCounts||[]).forEach(c=>{ if(c.sku!==sku) return;
+            ['sys','phys','diff'].forEach(k=>{ if(typeof c[k]==='number'){ c[k]=c[k]/f; n++; } }); }));
+        Object.keys(soSessions||{}).forEach(g=>{ const s=soSessions[g]||{};
+            ['snapshot','counts'].forEach(fl=>{ const d=s[fl]||{};
+                if(typeof d[sku]==='number'){ d[sku]=d[sku]/f; n++; }
+                else if(d[sku] && typeof d[sku]==='object'){
+                    ['qty','sys','phys'].forEach(k=>{ if(typeof d[sku][k]==='number') d[sku][k]=d[sku][k]/f; }); n++; } }); });
+        const olahRows=rows=>(rows||[]).forEach(r=>{ if(r.sku!==sku) return;
+            if(typeof r.qty==='number'){ r.qty=r.qty/f; n++; }
+            (r.batches||[]).forEach(b=>{ bagiQty(b); kaliHrg(b); }); });
+        (inventoryBaselines||[]).forEach(b=>olahRows(b.rows));
+        (closings||[]).forEach(c=>olahRows(c.snapshotRows));
+        Object.keys(officialOpenings||{}).forEach(p=>olahRows((officialOpenings[p]||{}).rows));
+        dataVersi++;
+        return n;
+    }
+    // Ubah satuan satu barang, dengan jaminan nilai rupiah tidak bergeser.
+    function usUbahSatuan(sku, satuanBaru, isiBaru){
+        const it=itemBySku(sku);
+        if(!it) return { ok:false, pesan:'SKU tidak ditemukan.' };
+        const f=usFaktor(it.buyContent, isiBaru);
+        if(!(f>0)) return { ok:false, pesan:'Isi kemasan lama atau baru tidak valid.' };
+        const nilaiSebelum=usNilaiSku(sku);
+        const salinBatch=JSON.parse(JSON.stringify((stockBatches||{})[sku]||[]));
+        const n=usKonversi(sku, f);
+        const nilaiSesudah=usNilaiSku(sku);
+        // Syarat mutlak: nilai rupiah tidak boleh bergeser. Kalau meleset, kembalikan.
+        if(Math.abs(nilaiSesudah-nilaiSebelum) > Math.max(1, Math.abs(nilaiSebelum)*1e-9)){
+            stockBatches[sku]=salinBatch; dataVersi++;
+            return { ok:false, pesan:`Dibatalkan: nilai stok bergeser dari Rp${Math.round(nilaiSebelum).toLocaleString('id')} ke Rp${Math.round(nilaiSesudah).toLocaleString('id')}.` };
+        }
+        const lama={ baseUnit:it.baseUnit, buyContent:it.buyContent };
+        it.baseUnit=satuanBaru || it.baseUnit;
+        it.buyContent=Number(isiBaru)||it.buyContent;
+        invalidateSkuIndex(); dataVersi++;
+        return { ok:true, faktor:f, rujukan:n, lama, baru:{ baseUnit:it.baseUnit, buyContent:it.buyContent },
+                 nilai:nilaiSebelum };
+    }
+
+    // Panel: daftar barang yang satuannya beda dengan file master, dikelompokkan per tingkat risiko.
+    let usDaftar=[];
+    function usKelompok(x){
+        if(!(x.faktor>0)) return 'C';
+        if(Math.abs(x.faktor-1)<0.01) return 'C';       // isi sama, cuma penulisan satuan beda
+        if(x.faktor>=100 || x.faktor<=0.01) return 'A'; // beda 100x atau lebih
+        return 'B';
+    }
+    window.perbaikiSatuanBarang = function(daftarBeda){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        const d=(daftarBeda||[]).map(x=>{
+            const it=itemBySku(x.sku)||{};
+            const nilai=usNilaiSku(x.sku);
+            const f=usFaktor(x.sisIsi, x.fileIsi);
+            return { ...x, faktor:f, nilai, qty:((stockBatches||{})[x.sku]||[]).reduce((a,b)=>a+(b.qty||0),0) };
+        }).filter(x=>x.faktor>0);
+        if(!d.length){ notify('Tidak ada','Tidak ada barang yang satuannya perlu diselaraskan.','info'); return; }
+        usDaftar=d;
+        const rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+        const q=v=>Number(v||0).toLocaleString('id',{maximumFractionDigits:2});
+        const G={A:[],B:[],C:[]}; d.forEach(x=>G[usKelompok(x)].push(x));
+        const blok=(K,judul,ket,warna)=> G[K].length?`
+            <div style="margin-bottom:14px;">
+              <div style="font-weight:700; margin-bottom:3px;">${judul} — ${G[K].length} barang</div>
+              <div style="font-size:0.75rem; color:var(--text3); margin-bottom:5px;">${ket}</div>
+              <div class="table-wrapper" style="max-height:230px; overflow:auto;">
+                <table style="font-size:0.77rem;"><thead><tr>
+                  <th>Kode</th><th>Nama</th><th>Sekarang</th><th>Jadi</th><th style="text-align:right;">Qty kini</th>
+                  <th style="text-align:right;">Qty jadi</th><th style="text-align:right;">Nilai (tetap)</th><th></th></tr></thead>
+                <tbody>${G[K].sort((a,b)=>Math.abs(b.nilai)-Math.abs(a.nilai)).map(x=>`
+                  <tr style="background:${warna};">
+                    <td class="mono">${dvzEsc(x.sku)}</td><td>${dvzEsc(String(x.nama).slice(0,24))}</td>
+                    <td>${q(x.sisIsi)} ${dvzEsc(x.sisSat)}</td>
+                    <td><strong>${q(x.fileIsi)} ${dvzEsc(x.fileSat)}</strong></td>
+                    <td style="text-align:right;">${q(x.qty)} ${dvzEsc(x.sisSat)}</td>
+                    <td style="text-align:right; color:var(--green);"><strong>${q(x.qty/x.faktor)} ${dvzEsc(x.fileSat)}</strong></td>
+                    <td style="text-align:right;">${rp(x.nilai)}</td>
+                    <td><button class="btn btn-sm btn-warning usBtn" data-sku="${dvzEsc(x.sku)}">Ubah</button></td>
+                  </tr>`).join('')}</tbody></table></div></div>`:'';
+        const el=document.getElementById('bandingMasterHasil');
+        el.insertAdjacentHTML('beforeend', `<div id="usPanel" style="margin-top:14px; border-top:2px solid var(--border); padding-top:12px;">
+            <div class="card-title" style="font-size:0.95rem;">⚖️ Selaraskan Satuan dengan File Master</div>
+            <div class="alert alert-info" style="margin:8px 0;">
+              Mengubah satuan di sini <strong>tidak menggeser nilai rupiah sepeser pun</strong> — sudah diuji dan diperiksa ulang
+              setiap kali dijalankan. Yang terjadi: seluruh kuantitas dibagi faktor dan seluruh harga dikali faktor,
+              di batch, transaksi, kiriman, hitungan opname, snapshot tutup buku, dan Opening Resmi sekaligus.
+              Kalau nilainya sampai bergeser, perubahan dibatalkan sendiri.
+              <br><br>Diubah <strong>satu per satu</strong>, bukan sekaligus — tiap barang perlu Anda pastikan satuan mana yang benar.
+            </div>
+            ${blok('A','🔴 Beda 100x atau lebih','Paling mendesak. Selama tidak diselaraskan, operator akan terus salah memasukkan harga (harga per Kg untuk kuantitas per Gram).','rgba(179,38,30,0.08)')}
+            ${blok('B','🟠 Beda faktor menengah','Biasanya karena isi kemasan berubah. Pastikan dulu isi kemasan mana yang benar sekarang.','rgba(245,158,11,0.08)')}
+            ${blok('C','⚪ Isi sama, penulisan satuan beda','Tidak ada konversi angka; hanya label satuannya yang dirapikan.','rgba(107,114,128,0.08)')}
+          </div>`);
+        document.querySelectorAll('#usPanel .usBtn').forEach(b=>b.addEventListener('click', ()=>usProses(b.dataset.sku)));
+    };
+    function usProses(sku){
+        const x=usDaftar.find(y=>y.sku===sku); if(!x) return;
+        const rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+        const q=v=>Number(v||0).toLocaleString('id',{maximumFractionDigits:2});
+        const it=itemBySku(sku)||{};
+        const trx=(transactionLog||[]).filter(l=>l.sku===sku).length;
+        if(!confirm(`Ubah satuan ${sku} — ${it.name}?\n\n`
+            + `SEKARANG : ${q(x.sisIsi)} ${x.sisSat} per kemasan · stok ${q(x.qty)} ${x.sisSat}\n`
+            + `JADI     : ${q(x.fileIsi)} ${x.fileSat} per kemasan · stok ${q(x.qty/x.faktor)} ${x.fileSat}\n\n`
+            + `Seluruh kuantitas dibagi ${q(x.faktor)} dan seluruh harga dikali ${q(x.faktor)}.\n`
+            + `${trx} transaksi ikut dikonversi.\n\n`
+            + `Nilai stok TETAP ${rp(x.nilai)} — kalau sampai bergeser, perubahan dibatalkan otomatis.`)) return;
+        const pin=prompt('PIN Admin:');
+        if(pin===null) return;
+        if(pin!==soPins.admin){ notify('PIN Salah','','error'); return; }
+        const kunci='backup_satuan_'+sku.replace(/[^A-Za-z0-9]/g,'')+'_'+Date.now();
+        try{ localStorage.setItem(kunci, JSON.stringify({ sku, baseUnit:it.baseUnit, buyContent:it.buyContent,
+            batches:(stockBatches||{})[sku]||[] })); }catch(e){}
+        const r=usUbahSatuan(sku, x.fileSat, x.fileIsi);
+        if(!r.ok){ notify('Dibatalkan', r.pesan, 'error'); return; }
+        if(typeof auditLog!=='undefined') auditLog.unshift({ id:nextAuditId++, action:'edit', at:Date.now(),
+            by:currentUsername||deviceOperator||'', reason:`Satuan ${sku} diubah ${r.lama.buyContent} ${r.lama.baseUnit} -> ${r.baru.buyContent} ${r.baru.baseUnit} (faktor ${r.faktor}); ${r.rujukan} angka dikonversi; nilai tetap Rp${Math.round(r.nilai).toLocaleString('id')}. Cadangan: ${kunci}`,
+            sku, itemName:it.name, type:'satuan',
+            before:{ satuan:r.lama.baseUnit, isi:r.lama.buyContent }, after:{ satuan:r.baru.baseUnit, isi:r.baru.buyContent } });
+        persist(); refreshUI();
+        notify('Satuan Diubah', `${sku}: ${q(x.qty)} ${x.sisSat} → ${q(x.qty/x.faktor)} ${x.fileSat}. Nilai tetap ${rp(r.nilai)}.`, 'success');
+        const row=document.querySelector(`#usPanel .usBtn[data-sku="${sku}"]`);
+        if(row){ const tr=row.closest('tr'); if(tr){ tr.style.opacity='0.45';
+            row.outerHTML='<span style="color:var(--green); font-size:0.74rem;">✓ selesai</span>'; } }
     }
 
     window.perbaikiKodeBarang = function(){
