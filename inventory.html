@@ -4416,11 +4416,14 @@
         let _pk=document.getElementById('stokAwalPeringatan');
         if(_pk){
             const legacy=closingPerluValidasi();
+            const _wj = _saSnap.ok ? kewajaranOpening(_saSnap.totalValue) : { wajar:true };
             _pk.innerHTML = !_saSnap.ok
                 ? `<span style="color:#f59e0b;">⛔ Stok Awal periode ini belum bisa disusun — klik kartu ini untuk membangun Opening Resmi.</span>`
-                : (legacy.length
-                    ? `<span style="color:#f59e0b;">⚠️ ${legacy.length} snapshot Tutup Buku lama belum divalidasi — klik kartu ini untuk membandingkan.</span>`
-                    : '');
+                : (!_wj.wajar
+                    ? `<span style="color:#ef4444; font-weight:600;">⛔ ANGKA INI TIDAK MASUK AKAL — ${Math.round(_wj.rasio).toLocaleString('id')}x stok nyata (Rp ${Math.round(_wj.kini).toLocaleString('id')}). Jangan dipakai dan jangan ditutup-buku. Klik kartu ini.</span>`
+                    : (legacy.length
+                        ? `<span style="color:#f59e0b;">⚠️ ${legacy.length} snapshot Tutup Buku lama belum divalidasi — klik kartu ini untuk membandingkan.</span>`
+                        : ''));
         }
         let _pr=document.getElementById('racikSub'); if(_pr) _pr.innerHTML=`Periode: <strong>${_pl}</strong>`;
         let _ps=document.getElementById('pembelianSub'); if(_ps) _ps.innerHTML=`Periode: <strong>${_pl}</strong>`;
@@ -8156,6 +8159,24 @@
         const snapCutoff = getInventorySnapshotAt(cutoff);
         if(!snapCutoff.ok){ notify('Tidak bisa tutup buku', snapCutoff.warning, 'warning'); return; }
         let valueAtCutoff = snapCutoff.totalValue;
+        // Tutup Buku tidak punya undo: angkanya dibekukan jadi Opening bulan berikutnya, lalu
+        // transaksi lamanya DIHAPUS. Kalau angkanya rusak, buktinya ikut hilang bersamanya.
+        // snapCutoff.ok hanya berarti datanya lengkap, bukan bahwa angkanya masuk akal.
+        const tbWajar = kewajaranOpening(valueAtCutoff);
+        if(!tbWajar.wajar){
+            const ketik = prompt(
+                'TUTUP BUKU DITAHAN — ANGKA PENUTUP TIDAK MASUK AKAL\n\n'
+                + tbWajar.alasan + '\n\n'
+                + `Nilai penutup ${period} : Rp ${Math.round(valueAtCutoff).toLocaleString('id')}\n`
+                + `Stok nyata sekarang   : Rp ${Math.round(tbWajar.kini).toLocaleString('id')}\n\n`
+                + 'Kalau diteruskan, angka itu dibekukan PERMANEN sebagai Stok Awal bulan berikutnya, '
+                + 'lalu transaksi periode ini dihapus — jadi tidak bisa dihitung ulang lagi.\n\n'
+                + 'Bereskan dulu lewat panel Diagnostic, atau tetapkan Stok Awal dari hitung fisik.\n\n'
+                + 'Kalau Anda benar-benar yakin angkanya benar, ketik: SAYA YAKIN');
+            if(String(ketik||'').trim().toUpperCase()!=='SAYA YAKIN'){
+                notify('Dibatalkan','Tutup buku tidak dijalankan. Perbaiki dulu angkanya.','info'); return;
+            }
+        }
         let inTotal=0, hppTotal=0, susutTotal=0;
         toArchive.forEach(l=>{ if(l.type==='in') inTotal+=l.total; else if(l.outType==='susut' && !l.resetAdjustment) susutTotal+=l.total; else if(!l.resetAdjustment) hppTotal+=l.total; });
         // Kiriman yang belum dikonfirmasi = barang sudah keluar gudang asal tapi belum masuk gudang tujuan.
@@ -10469,6 +10490,28 @@
               <td style="text-align:right;${Math.abs(tb-ta)>0.5?' color:#b3261e;':''}">${(sebelum&&sesudah)?'Rp '+Math.round(tb-ta).toLocaleString('id'):'—'}</td></tr>
             </tbody></table>`;
     }
+    // ============ PENJAGA KEWAJARAN STOK AWAL ============
+    // getOpeningSnapshot hanya memeriksa apakah datanya LENGKAP, tidak pernah apakah angkanya
+    // MASUK AKAL. Akibatnya kartu Stok Awal pernah menampilkan Rp23,5 kuintiliun dengan status
+    // ok:true dan kolom peringatan kosong — dan Tutup Buku akan membekukannya tanpa berkata apa-apa.
+    // Pembandingnya stok realtime: kedua angka menghitung gudang yang sama, jadi selisih puluhan
+    // kali lipat berarti salah satunya rusak, bukan sekadar berbeda periode.
+    const KEWAJARAN_RASIO = 20;
+    function nilaiStokRealtime(){
+        let t=0;
+        const gud=[...new Set([...(typeof GUDANG_LIST!=='undefined'?GUDANG_LIST.map(g=>g.id||g):[]),
+                               'scm','cibadak','karangtengah', DEFAULT_GUDANG].filter(Boolean))];
+        (masterSKU||[]).forEach(it=>gud.forEach(g=>{ try{ t+=getStock(it.sku,g).value||0; }catch(e){} }));
+        return t;
+    }
+    function kewajaranOpening(total){
+        const kini=nilaiStokRealtime();
+        if(!(kini>0) || !(Math.abs(total)>0)) return { wajar:true, kini };
+        const rasio=Math.abs(total)/kini;
+        if(rasio < KEWAJARAN_RASIO) return { wajar:true, rasio, kini };
+        return { wajar:false, rasio, kini,
+                 alasan:`Stok Awal Rp ${Math.round(total).toLocaleString('id')} itu ${Math.round(rasio).toLocaleString('id')}x lipat nilai stok yang benar-benar ada sekarang (Rp ${Math.round(kini).toLocaleString('id')}). Dua angka ini menghitung gudang yang sama, jadi selisih sebesar itu berarti ada transaksi lama yang angkanya rusak — bukan sekadar beda periode.` };
+    }
     function renderOpeningResmi(){
         const el=document.getElementById('orIsi'); if(!el) return;
         const period=orPeriode, cutoff=periodeCutoff(period);
@@ -10491,10 +10534,25 @@
             ? `<div style="font-size:0.8rem; margin-bottom:10px;">✅ Lengkap — jangkar terdekat: <strong>${dvzEsc(lengkap.base.label)}</strong> (${new Date(lengkap.base.ts).toLocaleDateString('id')}), dan seluruh mutasi sesudahnya sampai ${new Date(cutoff).toLocaleDateString('id')} masih ada di sistem.</div>`
             : `<div class="alert alert-warning" style="margin:0 0 10px; text-align:left; font-size:0.8rem;"><strong>⛔ HISTORICAL DATA INCOMPLETE</strong><br>${dvzEsc(lengkap.alasan)}<br><span style="font-size:0.75rem;">Hitung ulang dari data sistem tidak akan jujur. Pakai impor arsip di bawah.</span></div>`;
 
+        // Kalau hitung ulang dari log menghasilkan angka yang tidak masuk akal, katakan sekarang —
+        // sebelum orang menekan tombol yang membekukannya. Hitung fisik lebih dipercaya daripada
+        // menyusun ulang riwayat yang sudah rusak.
+        const orSnapKini = getInventorySnapshotAt(cutoff);
+        const orWajar = orSnapKini.ok ? kewajaranOpening(orSnapKini.totalValue) : { wajar:true };
+        if(!orWajar.wajar){
+            html += `<div class="alert alert-danger" style="margin:0 0 10px; text-align:left; font-size:0.8rem;">
+                <strong>⛔ HITUNG ULANG MENGHASILKAN ANGKA YANG TIDAK MASUK AKAL</strong><br>
+                ${dvzEsc(orWajar.alasan)}<br>
+                <span style="font-size:0.75rem;">Membekukannya berarti mengunci angka rusak itu permanen. Perbaiki dulu lewat panel Diagnostic
+                (Perbaiki Angka Kehilangan Koma → Harga Salah Satuan → Harga Menyimpang Ekstrem → Periksa Baris Kembar),
+                atau tetapkan Stok Awal dari <strong>hasil hitung fisik</strong> lewat tombol Upload di bawah.</span></div>`;
+        }
         html += `<div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
-            <button id="orHitung" class="btn btn-sm btn-secondary"${bisaHitungUlang?'':' disabled'}>🔄 Hitung Ulang dari Data Sistem</button>
+            <button id="orHitung" class="btn btn-sm ${orWajar.wajar?'btn-secondary':'btn-secondary'}"${bisaHitungUlang?'':' disabled'}>🔄 Hitung Ulang dari Data Sistem</button>
             <button id="orImpor" class="btn btn-sm btn-warning">📥 Impor Arsip ${dvzEsc(periodeSebelum(period))} (CSV/XLSX)</button>
+            <button id="orKeUpload" class="btn btn-sm ${orWajar.wajar?'btn-secondary':'btn-primary'}">📆 Upload dari Hitung Fisik</button>
         </div>
+        <div style="font-size:0.72rem; color:var(--text3); margin-bottom:6px;">Dua tombol pertama menyusun ulang dari riwayat transaksi — hasilnya hanya sebaik riwayatnya. Tombol ketiga menetapkan Stok Awal dari hasil hitung fisik, dan itu yang dipakai kalau riwayatnya rusak atau ada barang yang tidak sempat dihitung.</div>
         <div style="font-size:0.72rem; color:var(--text3); margin-bottom:12px;">Data arsip yang diimpor <strong>hanya dipakai untuk menghitung opening</strong>. Tidak masuk transactionLog, tidak mengubah stok realtime, tidak mengubah batch.</div>`;
 
         if(orKandidat){
@@ -10523,6 +10581,23 @@
             renderOpeningResmi();
         });
         document.getElementById('orImpor')?.addEventListener('click', ()=>document.getElementById('orFileArsip').click());
+        // Modal ini memberi tahu bahwa Opening Resmi belum ada, tapi sebelumnya tidak pernah
+        // menunjuk ke satu-satunya alat yang membuatnya dari hitung fisik. Sekarang menunjuk.
+        document.getElementById('orKeUpload')?.addEventListener('click', ()=>{
+            document.getElementById('openingResmiModal').style.display='none';
+            document.querySelector('.tab-btn[data-tab="report"]')?.click();
+            document.querySelector('.reportSub[data-rsub="stok"]')?.click();
+            const per=document.getElementById('uoPeriode'); if(per && !per.value) per.value=orPeriode;
+            const kartu=document.getElementById('uploadOpeningCard');
+            if(kartu){
+                kartu.scrollIntoView({ behavior:'smooth', block:'center' });
+                const w=kartu.style.boxShadow;
+                kartu.style.boxShadow='0 0 0 3px var(--accent)';
+                setTimeout(()=>{ kartu.style.boxShadow=w; }, 2500);
+            } else {
+                notify('Kartu tidak ditemukan','Kartu Upload Stok Awal Bulanan hanya tampil untuk Admin di Laporan → Stok.','warning');
+            }
+        });
         document.getElementById('orSimpan')?.addEventListener('click', orSimpan);
     }
     document.getElementById('orFileArsip')?.addEventListener('change', function(e){
