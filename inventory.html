@@ -544,7 +544,7 @@
             <div style="font-size:0.75rem; color:var(--text3); margin-bottom:8px;">PPN yang dibayar saat pembelian — bisa dikreditkan/dikurangkan terhadap PPN Keluaran. Angka ini TIDAK termasuk dalam Nilai Pembelian/HPP di atas maupun di Dashboard, murni untuk keperluan balancing pajak periode ini.</div>
             <div id="pbPpnSummary" style="padding:12px 16px; background:var(--bg2); border-radius:var(--radius); font-size:0.85rem; margin-bottom:8px;"></div>
             <div class="card-title" style="margin-top:18px; font-size:0.95rem;"><div class="card-title-icon">🧾</div> Rincian Transaksi</div>
-            <div class="table-wrapper"><table id="pbDetailTable"><thead><tr><th>Tanggal</th><th>Gudang</th><th>Kode</th><th>Nama Barang</th><th>Jumlah</th><th>Harga Satuan</th><th>Total</th><th id="pbDetailColHead">Vendor</th><th>Ref</th><th>Aksi</th></tr></thead><tbody id="pbDetailBody"></tbody></table></div>
+            <div class="table-wrapper"><table id="pbDetailTable"><thead><tr><th>Tanggal</th><th>Gudang</th><th>Kode</th><th>Nama Barang</th><th>Jumlah</th><th>Satuan</th><th>Harga Satuan</th><th>Total</th><th id="pbDetailColHead">Vendor</th><th>Ref</th><th>Aksi</th></tr></thead><tbody id="pbDetailBody"></tbody></table></div>
             <div style="margin-top:12px;"><button id="pbExportExcel" class="btn btn-secondary btn-sm">📊 Export Excel</button></div>
         </div>
     </div>
@@ -595,7 +595,7 @@
             <div class="table-wrapper"><table id="pgJualTable"><thead><tr><th>Kode</th><th>Nama Barang</th><th>Jumlah</th><th>HPP</th><th>Harga Jual</th><th>Margin</th></tr></thead><tbody id="pgJualBody"></tbody></table></div>
             <div id="pgJualSummary" style="font-size:0.82rem; margin-top:6px; color:var(--text2);"></div>
             <div class="card-title" style="margin-top:18px; font-size:0.95rem;"><div class="card-title-icon">🧾</div> Rincian Transaksi</div>
-            <div class="table-wrapper"><table id="pgDetailTable"><thead><tr><th>Tanggal</th><th>Jenis</th><th>Gudang</th><th>Kode</th><th>Nama Barang</th><th>Jumlah</th><th>HPP Satuan</th><th>Total</th><th>Divisi</th><th>Area Bakery</th><th>Ref</th><th>Aksi</th></tr></thead><tbody id="pgDetailBody"></tbody></table></div>
+            <div class="table-wrapper"><table id="pgDetailTable"><thead><tr><th>Tanggal</th><th>Jenis</th><th>Gudang</th><th>Kode</th><th>Nama Barang</th><th>Jumlah</th><th>Satuan</th><th>HPP Satuan</th><th>Total</th><th>Divisi</th><th>Area Bakery</th><th>Ref</th><th>Aksi</th></tr></thead><tbody id="pgDetailBody"></tbody></table></div>
             <div style="margin-top:12px;"><button id="pgExportExcel" class="btn btn-secondary btn-sm">📊 Export Excel</button></div>
         </div>
     </div>
@@ -1231,6 +1231,14 @@
     function unitOf(skuOrItem){
         let it = (typeof skuOrItem === 'string') ? itemBySku(skuOrItem) : skuOrItem;
         return (it && it.baseUnit) ? it.baseUnit : '';
+    }
+    // Sel kolom "Satuan" untuk tabel rincian. Kalau Master tidak punya baseUnit, kolomnya
+    // TIDAK dibiarkan kosong begitu saja — angka tanpa satuan yang terlihat wajar itu justru
+    // yang berbahaya (180 Kg dan 180 Gr terlihat sama di layar). Ditandai supaya ketahuan.
+    function satuanCell(sku){
+        let u = unitOf(sku);
+        if(u) return `<td>${u}</td>`;
+        return `<td style="color:#ef4444; font-size:0.72rem;" title="Satuan dasar barang ini kosong di Master Data — angka di kolom Jumlah tidak punya arti sampai satuannya diisi.">⚠️ belum diisi</td>`;
     }
     // Pecahan kemasan sbg KETERANGAN SEKUNDER, mis. "1 Sak + 1 Kg + 250 Gr".
     // Hanya pelengkap; angka utama tetap satuan dasar. Konversi murni dari Master Data, tanpa asumsi.
@@ -3827,9 +3835,9 @@
         body.innerHTML = rows.length ? rows.slice(0,500).map(l=>{
             let locked=isEditLocked(l);
             let editCell = locked ? `<span style="color:var(--text3); font-size:0.7rem;">🔒</span>` : `<button class="btn btn-sm btn-secondary editLogBtnPb" data-id="${l.id}">✏️ Edit</button> <button class="btn btn-sm btn-warning delLogBtnPb" data-id="${l.id}">🗑️</button>`;
-            return `<tr><td>${new Date(effTs(l)).toLocaleString('id')}</td><td>${gudangName(l.gudang||DEFAULT_GUDANG)}</td><td class="mono">${l.sku}</td><td>${l.itemName||''}</td><td>${qtyLbl(l.sku, l.qty)}</td><td>Rp ${Math.round(l.price||0).toLocaleString('id')}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${(isProduksi?l.division:l.supplier)||'-'}</td><td>${l.ref||''}</td><td>${editCell}</td></tr>`;
+            return `<tr><td>${new Date(effTs(l)).toLocaleString('id')}</td><td>${gudangName(l.gudang||DEFAULT_GUDANG)}</td><td class="mono">${l.sku}</td><td>${l.itemName||''}</td><td>${(Math.round((Number(l.qty)||0)*1000)/1000).toLocaleString('id')}</td>${satuanCell(l.sku)}<td>Rp ${Math.round(l.price||0).toLocaleString('id')}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${(isProduksi?l.division:l.supplier)||'-'}</td><td>${l.ref||''}</td><td>${editCell}</td></tr>`;
         }).join('')
-            : `<tr><td colspan="9" style="text-align:center; color:var(--text3);">Tidak ada transaksi pada periode ini.</td></tr>`;
+            : `<tr><td colspan="11" style="text-align:center; color:var(--text3);">Tidak ada transaksi pada periode ini.</td></tr>`;
         body.querySelectorAll('.editLogBtnPb').forEach(btn=>btn.addEventListener('click',()=>openEditLog(parseInt(btn.dataset.id))));
         body.querySelectorAll('.delLogBtnPb').forEach(btn=>btn.addEventListener('click',()=>deleteLogEntry(parseInt(btn.dataset.id))));
         window.__pbRows = rows;
@@ -4271,9 +4279,9 @@
         body.innerHTML = rows.length ? rows.slice(0,500).map(l=>{
             let locked=isEditLocked(l);
             let editCell = locked ? `<span style="color:var(--text3); font-size:0.7rem;">🔒</span>` : `<button class="btn btn-sm btn-secondary editLogBtnPg" data-id="${l.id}">✏️ Edit</button> <button class="btn btn-sm btn-warning delLogBtnPg" data-id="${l.id}">🗑️</button>`;
-            return `<tr><td>${new Date(effTs(l)).toLocaleString('id')}</td><td>${l.outType==='susut'?'🗑️ Susut':(l.outType==='produksi'?'🧪 Racik':(l.outType==='transfer'?`🚚 Transfer → ${gudangName(l.transferTo||'')}`:'📤 Keluar'))}</td><td>${gudangName(l.gudang||DEFAULT_GUDANG)}</td><td class="mono">${l.sku}</td><td>${l.itemName||''}</td><td>${qtyLbl(l.sku, l.qty)}</td><td>Rp ${Math.round(l.price||0).toLocaleString('id')}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${l.division||(l.outType==='susut'?'Penyusutan':'-')}</td><td>${l.area||'-'}</td><td>${l.ref||''}</td><td style="white-space:nowrap;"><button class="btn btn-sm btn-secondary printSlipReport" data-id="${l.id}">🖨️</button> ${editCell}</td></tr>`;
+            return `<tr><td>${new Date(effTs(l)).toLocaleString('id')}</td><td>${l.outType==='susut'?'🗑️ Susut':(l.outType==='produksi'?'🧪 Racik':(l.outType==='transfer'?`🚚 Transfer → ${gudangName(l.transferTo||'')}`:'📤 Keluar'))}</td><td>${gudangName(l.gudang||DEFAULT_GUDANG)}</td><td class="mono">${l.sku}</td><td>${l.itemName||''}</td><td>${(Math.round((Number(l.qty)||0)*1000)/1000).toLocaleString('id')}</td>${satuanCell(l.sku)}<td>Rp ${Math.round(l.price||0).toLocaleString('id')}</td><td>Rp ${Math.round(l.total).toLocaleString('id')}</td><td>${l.division||(l.outType==='susut'?'Penyusutan':'-')}</td><td>${l.area||'-'}</td><td>${l.ref||''}</td><td style="white-space:nowrap;"><button class="btn btn-sm btn-secondary printSlipReport" data-id="${l.id}">🖨️</button> ${editCell}</td></tr>`;
         }).join('')
-            : `<tr><td colspan="11" style="text-align:center; color:var(--text3);">Tidak ada transaksi pada periode ini.</td></tr>`;
+            : `<tr><td colspan="13" style="text-align:center; color:var(--text3);">Tidak ada transaksi pada periode ini.</td></tr>`;
         body.querySelectorAll('.printSlipReport').forEach(btn=>btn.addEventListener('click',()=>printOutSlip(parseInt(btn.dataset.id))));
         body.querySelectorAll('.editLogBtnPg').forEach(btn=>btn.addEventListener('click',()=>openEditLog(parseInt(btn.dataset.id))));
         body.querySelectorAll('.delLogBtnPg').forEach(btn=>btn.addEventListener('click',()=>deleteLogEntry(parseInt(btn.dataset.id))));
