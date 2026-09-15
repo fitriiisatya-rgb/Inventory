@@ -839,7 +839,7 @@
 <!-- MASTER DATA (Barang, Supplier, Divisi) -->
 <div id="tab-master" class="tab-content">
     <div style="display:flex; gap:8px; margin-bottom:16px;"><button class="masterSub active" data-sub="barang">📦 Barang</button><button class="masterSub stok-hide" data-sub="supplier">🏢 Supplier</button><button class="masterSub stok-hide" data-sub="division">🏛️ Divisi</button><button class="masterSub admin-only stok-hide" data-sub="prodivisi">🏭 Divisi Produksi</button><button class="masterSub stok-hide" data-sub="hargajual">🏷️ Harga Jual</button><button class="masterSub admin-only stok-hide" data-sub="backup">💾 Backup</button></div>
-    <div id="sub-barang" class="masterContent"><div class="card"><div class="card-title"><div class="card-title-icon">📦</div> Master Barang + Konversi Satuan</div><div style="display:flex; gap:8px; margin-bottom:12px;"><input type="text" id="stockSearch" placeholder="Cari Kode/Nama/Barcode/Merk" style="flex:1"><select id="statusFilter" style="width:auto;"><option value="Aktif">Hanya Aktif</option><option value="all">Semua Status</option></select><button id="resetStock" class="btn btn-secondary btn-sm">Reset</button><button id="addItemBtn" class="btn btn-primary btn-sm admin-only">+ Barang Baru</button><label for="importStock" class="btn btn-secondary btn-sm admin-only stok-hide" style="cursor:pointer;">📂 Import CSV/Excel</label><input type="file" id="importStock" accept=".csv,.xlsx" style="display:none;"><button id="fixPpnMasterBtn" class="btn btn-warning btn-sm admin-only stok-hide" title="Perbaiki Harga Beli Terakhir agar include PPN">🧾 Perbaiki Harga incl PPN</button><button id="resetMasterBtn" class="btn btn-warning btn-sm admin-only stok-hide" title="Hapus SEMUA master barang">🗑️ Reset Master</button></div><div id="masterPpnBanner"></div><div class="table-wrapper"><table id="stockTable"><thead><tr><th>Kode</th><th>Nama</th><th>Kategori</th><th>Merk</th><th>Kemasan</th><th>Harga Beli Terakhir (incl. PPN)</th><th>Stok (Satuan Dasar)</th><th>Nilai (Rp)</th><th>Status</th><th>Aksi</th></tr></thead><tbody id="stockBody"></tbody></table></div></div></div>
+    <div id="sub-barang" class="masterContent"><div class="card"><div class="card-title"><div class="card-title-icon">📦</div> Master Barang + Konversi Satuan</div><div style="display:flex; gap:8px; margin-bottom:12px;"><input type="text" id="stockSearch" placeholder="Cari Kode/Nama/Barcode/Merk" style="flex:1"><select id="statusFilter" style="width:auto;"><option value="Aktif">Hanya Aktif</option><option value="all">Semua Status</option></select><button id="resetStock" class="btn btn-secondary btn-sm">Reset</button><button id="addItemBtn" class="btn btn-primary btn-sm admin-only">+ Barang Baru</button><label for="importStock" class="btn btn-secondary btn-sm admin-only stok-hide" style="cursor:pointer;">📂 Import CSV/Excel</label><input type="file" id="importStock" accept=".csv,.xlsx" style="display:none;"><button id="fixPpnMasterBtn" class="btn btn-warning btn-sm admin-only stok-hide" title="Perbaiki Harga Beli Terakhir agar include PPN">🧾 Perbaiki Harga incl PPN</button><button id="resetMasterBtn" class="btn btn-warning btn-sm admin-only stok-hide" title="Hapus SEMUA master barang">🗑️ Reset Master</button><button id="bandingMasterBtn" class="btn btn-secondary btn-sm admin-only stok-hide" title="Bandingkan master di sistem dengan file master Anda">🔍 Bandingkan dgn File Master</button><input type="file" id="bandingMasterFile" accept=".csv,.xlsx,.xls" style="display:none;"></div><div id="bandingMasterHasil"></div><div id="masterPpnBanner"></div><div class="table-wrapper"><table id="stockTable"><thead><tr><th>Kode</th><th>Nama</th><th>Kategori</th><th>Merk</th><th>Kemasan</th><th>Harga Beli Terakhir (incl. PPN)</th><th>Stok (Satuan Dasar)</th><th>Nilai (Rp)</th><th>Status</th><th>Aksi</th></tr></thead><tbody id="stockBody"></tbody></table></div></div></div>
     <div id="sub-supplier" class="masterContent" style="display:none;"><div class="card"><div class="card-title"><div class="card-title-icon">🏢</div> Supplier</div><div style="display:flex; gap:8px; margin-bottom:12px;" class="admin-only"><input type="text" id="newSupplier" placeholder="Nama supplier"><button id="addSupplier" class="btn btn-primary">Tambah</button></div><div class="table-wrapper"><table id="supplierTable"><thead><tr><th>ID</th><th>Nama</th><th>Aksi</th></tr></thead><tbody id="supplierBody"></tbody></table></div></div></div>
     <div id="sub-division" class="masterContent" style="display:none;"><div class="card"><div class="card-title"><div class="card-title-icon">🏛️</div> Divisi</div><div style="display:flex; gap:8px; margin-bottom:12px;" class="admin-only"><input type="text" id="newDivision" placeholder="Nama divisi"><button id="addDivision" class="btn btn-primary">Tambah</button></div><div class="table-wrapper"><table id="divisionTable"><thead><tr><th>ID</th><th>Nama</th><th>Aksi</th></tr></thead><tbody id="divisionBody"></tbody></table></div></div></div>
     <div id="sub-backup" class="masterContent admin-only" style="display:none;">
@@ -5888,6 +5888,218 @@
         const el=document.getElementById('uoPeriode');
         if(el && !el.value){ const d=new Date(); el.value=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
     }catch(e){}
+
+    // ===================== BANDINGKAN MASTER DENGAN FILE =====================
+    // Barang "hilang" hampir tidak pernah benar-benar terhapus. Yang terjadi biasanya kodenya
+    // dipakai barang lain, atau namanya berubah saat import — sehingga dicari dengan nama lama
+    // tidak ketemu, padahal transaksinya masih menempel di kode itu.
+    // Alat ini membandingkan master di sistem dengan file master Anda dan MELAPORKAN bedanya.
+    // Hanya penambahan SKU baru yang bisa diterapkan otomatis; penggantian nama dan satuan tidak,
+    // karena keduanya mengubah arti transaksi yang sudah terlanjur tercatat di kode itu.
+    let bmHasil=null;
+    function bmNorm(x){ return String(x==null?'':x).toLowerCase().replace(/[^a-z0-9]/g,''); }
+    function bmBacaFile(aoa){
+        aoa=(aoa||[]).filter(r=>r && r.some(c=>String(c||'').trim()!==''));
+        let hi=aoa.findIndex(r=>r.some(c=>/KODE\s*BAHAN|KODE BARANG/i.test(String(c||''))));
+        if(hi<0) hi=aoa.findIndex(r=>r.some(c=>/KODE/i.test(String(c||''))));
+        if(hi<0) return { ok:false, pesan:'Kolom "Kode Bahan" tidak ditemukan.' };
+        const H=aoa[hi].map(h=>String(h||'').trim().toUpperCase());
+        const kol=(...n)=>{ for(const x of n){ const i=H.findIndex(h=>h.includes(x)); if(i>-1) return i; } return -1; };
+        const iK=kol('KODE'), iN=kol('NAMA'), iIsi=kol('ISI DASAR','ISI'), iSat=kol('SATUAN DASAR','SATUAN'),
+              iHrg=kol('HARGA'), iSts=kol('STATUS');
+        if(iK<0) return { ok:false, pesan:'Kolom Kode tidak ditemukan.' };
+        const F={};
+        for(let i=hi+1;i<aoa.length;i++){
+            const r=aoa[i].map(x=>String(x??'').trim());
+            const k=r[iK]; if(!k || /^\d+\./.test(k) || /^CARA PAKAI|^PETUNJUK/i.test(k)) continue;
+            F[k]={ sku:k, nama:iN>-1?r[iN]:'', isi:iIsi>-1?angkaID(r[iIsi]):null,
+                   satuan:iSat>-1?r[iSat]:'', harga:iHrg>-1?angkaID(r[iHrg]):null,
+                   status:iSts>-1?r[iSts]:'' };
+        }
+        return Object.keys(F).length ? { ok:true, F } : { ok:false, pesan:'Tidak ada baris data yang terbaca.' };
+    }
+    function bmBandingkan(F){
+        const trx={}, stok={};
+        (transactionLog||[]).forEach(l=>{ trx[l.sku]=(trx[l.sku]||0)+1; });
+        Object.keys(stockBatches||{}).forEach(sk=>{
+            stok[sk]=(stockBatches[sk]||[]).reduce((a,b)=>a+(b.qty||0),0); });
+        const S={}; (masterSKU||[]).forEach(i=>S[i.sku]=i);
+        const hasil={ baru:[], hanyaSistem:[], namaBeda:[], satuanBeda:[], kodeAneh:[] };
+        Object.keys(F).forEach(k=>{
+            const f=F[k], m=S[k];
+            if(!m){ hasil.baru.push({ ...f, trx:trx[k]||0, stok:stok[k]||0 }); return; }
+            if(f.nama && bmNorm(f.nama)!==bmNorm(m.name)){
+                const a=bmNorm(f.nama), b=bmNorm(m.name);
+                if(!(a.startsWith(b.slice(0,18)) || b.startsWith(a.slice(0,18))))
+                    hasil.namaBeda.push({ sku:k, file:f.nama, sistem:m.name, trx:trx[k]||0, stok:stok[k]||0 });
+            }
+            const fi=Number(f.isi), fs=String(f.satuan||'').trim();
+            if(fi>0 && fs && (Math.abs(fi-(m.buyContent||0))>0.001 || fs.toLowerCase()!==String(m.baseUnit||'').toLowerCase()))
+                hasil.satuanBeda.push({ sku:k, nama:m.name, fileIsi:fi, fileSat:fs,
+                    sisIsi:m.buyContent, sisSat:m.baseUnit, trx:trx[k]||0, stok:stok[k]||0,
+                    faktor: (m.buyContent>0 && fi>0) ? m.buyContent/fi : null });
+        });
+        Object.keys(S).forEach(k=>{ if(!F[k]) hasil.hanyaSistem.push({ sku:k, nama:S[k].name,
+            status:S[k].status, trx:trx[k]||0, stok:stok[k]||0 }); });
+        // kode yang bentuknya tidak wajar — sumber "barang hilang" yang sering tidak disadari
+        (masterSKU||[]).forEach(i=>{
+            const k=String(i.sku||''); const alasan=[];
+            if(/\s/.test(k)) alasan.push('mengandung spasi');
+            if(bmNorm(k)===bmNorm(i.name)) alasan.push('kode sama dengan nama barang');
+            if(!/^[A-Za-z0-9._-]+$/.test(k)) alasan.push('ada karakter tidak lazim');
+            if(alasan.length) hasil.kodeAneh.push({ sku:k, nama:i.name, alasan:alasan.join(', '),
+                trx:trx[k]||0, stok:stok[k]||0 });
+        });
+        return hasil;
+    }
+    document.getElementById('bandingMasterBtn')?.addEventListener('click', ()=>{
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        document.getElementById('bandingMasterFile').click();
+    });
+    document.getElementById('bandingMasterFile')?.addEventListener('change', function(e){
+        const file=e.target.files[0]; if(!file) return;
+        const selesai=(aoa)=>{ const b=bmBacaFile(aoa);
+            if(!b.ok){ notify('File Tidak Terbaca', b.pesan, 'warning'); return; }
+            bmRender(bmBandingkan(b.F), file.name, Object.keys(b.F).length); };
+        const reader=new FileReader();
+        if(/\.xlsx?$/i.test(file.name)){
+            if(typeof XLSX==='undefined'){ notify('Offline','Library Excel belum termuat.','warning'); e.target.value=''; return; }
+            reader.onload=()=>{ try{
+                const wb=XLSX.read(new Uint8Array(reader.result),{type:'array'});
+                // pilih sheet yang benar-benar berisi kolom Kode Bahan, bukan sheet Petunjuk
+                let pick=wb.SheetNames[0];
+                for(const n of wb.SheetNames){
+                    const r=XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,defval:''});
+                    if(r.some(x=>x.some(c=>/KODE\s*BAHAN|KODE BARANG/i.test(String(c||''))))){ pick=n; break; }
+                }
+                const aoa=XLSX.utils.sheet_to_json(wb.Sheets[pick],{header:1,raw:true,defval:''})
+                    .map(r=>r.map(c=>typeof c==='number'?String(c).replace('.',','):String(c??'')));
+                selesai(aoa);
+            }catch(err){ notify('Gagal','File Excel tidak bisa dibaca: '+err.message,'error'); } e.target.value=''; };
+            reader.readAsArrayBuffer(file);
+        } else {
+            reader.onload=()=>{ const lines=String(reader.result).split(/\r?\n/).filter(l=>l.trim());
+                selesai(lines.map(l=>{ let o=[],c='',q=false;
+                    for(const ch of l){ if(ch==='"') q=!q; else if((ch===','||ch===';')&&!q){ o.push(c); c=''; } else c+=ch; }
+                    o.push(c); return o; })); e.target.value=''; };
+            reader.readAsText(file);
+        }
+    });
+
+    function bmRender(h, namaFile, jml){
+        bmHasil=h;
+        const el=document.getElementById('bandingMasterHasil'); if(!el) return;
+        const q=v=>Number(v||0).toLocaleString('id',{maximumFractionDigits:1});
+        const tabel=(judul, ket, kolom, baris, warna)=> baris.length?`
+            <div style="margin-bottom:14px;">
+              <div style="font-weight:700; margin-bottom:3px;">${judul} — ${baris.length}</div>
+              <div style="font-size:0.75rem; color:var(--text3); margin-bottom:5px;">${ket}</div>
+              <div class="table-wrapper" style="max-height:240px; overflow:auto;">
+                <table style="font-size:0.78rem;"><thead><tr>${kolom.map(c=>`<th${c.r?' style="text-align:right;"':''}>${c.t}</th>`).join('')}</tr></thead>
+                <tbody>${baris.join('')}</tbody></table></div></div>`:'';
+        let html=`<div class="alert alert-info" style="margin:10px 0;">
+            Dibandingkan dengan <span class="mono">${dvzEsc(namaFile)}</span> — ${jml.toLocaleString('id')} kode di file,
+            ${(masterSKU||[]).length.toLocaleString('id')} di sistem. <strong>Tidak ada data yang diubah.</strong></div>`;
+
+        html += tabel('🔴 Kode sama, BARANG BEDA',
+            'Transaksi di kode ini tercatat atas nama yang ada di sistem. Kalau nama di file yang benar, berarti transaksinya menempel pada barang yang salah. Perlu diperiksa manual — sistem tidak akan menebak mana yang benar.',
+            [{t:'Kode'},{t:'Nama di FILE'},{t:'Nama di SISTEM'},{t:'Transaksi',r:1},{t:'Stok',r:1}],
+            h.namaBeda.map(x=>`<tr style="background:rgba(179,38,30,0.10);"><td class="mono">${dvzEsc(x.sku)}</td>
+              <td>${dvzEsc(x.file)}</td><td><strong>${dvzEsc(x.sistem)}</strong></td>
+              <td style="text-align:right;">${x.trx}</td><td style="text-align:right;">${q(x.stok)}</td></tr>`));
+
+        html += tabel('🟠 Kode sama, SATUAN / ISI BEDA',
+            'Ini penyebab nilai stok bisa meleset ribuan kali lipat: qty dicatat dalam satuan yang satu, harga dalam satuan yang lain. Mengubah satuan di sini akan mengubah SELURUH nilai historis barang tsb, jadi tidak diterapkan otomatis.',
+            [{t:'Kode'},{t:'Nama'},{t:'File'},{t:'Sistem'},{t:'Faktor',r:1},{t:'Transaksi',r:1},{t:'Stok',r:1}],
+            h.satuanBeda.map(x=>`<tr style="background:rgba(245,158,11,0.10);"><td class="mono">${dvzEsc(x.sku)}</td>
+              <td>${dvzEsc(String(x.nama).slice(0,26))}</td>
+              <td>${q(x.fileIsi)} ${dvzEsc(x.fileSat)}</td><td><strong>${q(x.sisIsi)} ${dvzEsc(x.sisSat)}</strong></td>
+              <td style="text-align:right;">${x.faktor?(Math.round(x.faktor*100)/100)+'x':'-'}</td>
+              <td style="text-align:right;">${x.trx}</td><td style="text-align:right;">${q(x.stok)}</td></tr>`));
+
+        html += tabel('🟢 Ada di FILE, belum ada di sistem',
+            'Barang ini tidak akan pernah muncul di layar mana pun karena memang belum terdaftar. Aman ditambahkan — tidak ada transaksi yang menempel.',
+            [{t:'Kode'},{t:'Nama'},{t:'Isi'},{t:'Satuan'},{t:'Harga Beli',r:1},{t:'Status'}],
+            h.baru.map(x=>`<tr style="background:rgba(16,185,129,0.10);"><td class="mono">${dvzEsc(x.sku)}</td>
+              <td>${dvzEsc(x.nama)}</td><td>${q(x.isi)}</td><td>${dvzEsc(x.satuan)}</td>
+              <td style="text-align:right;">${x.harga?('Rp '+Math.round(x.harga).toLocaleString('id')):'-'}</td>
+              <td>${dvzEsc(x.status||'Aktif')}</td></tr>`));
+
+        html += tabel('⚪ Ada di sistem, tidak ada di file',
+            'Biasanya barang yang ditambahkan langsung lewat aplikasi setelah file master dibuat. TIDAK dihapus — banyak di antaranya punya transaksi dan stok.',
+            [{t:'Kode'},{t:'Nama'},{t:'Status'},{t:'Transaksi',r:1},{t:'Stok',r:1}],
+            h.hanyaSistem.map(x=>`<tr><td class="mono">${dvzEsc(x.sku)}</td><td>${dvzEsc(String(x.nama).slice(0,30))}</td>
+              <td>${dvzEsc(x.status)}</td><td style="text-align:right;">${x.trx}</td>
+              <td style="text-align:right;">${q(x.stok)}</td></tr>`));
+
+        html += tabel('⚠️ Kode barang bentuknya tidak wajar',
+            'Kode seperti ini bikin barang sulit dicari dan gampang dianggap hilang. Muncul dari import yang kolomnya bergeser atau kode yang diketik manual.',
+            [{t:'Kode'},{t:'Nama'},{t:'Masalah'},{t:'Transaksi',r:1},{t:'Stok',r:1}],
+            h.kodeAneh.map(x=>`<tr style="background:rgba(245,158,11,0.10);"><td class="mono">${dvzEsc(x.sku)}</td>
+              <td>${dvzEsc(String(x.nama).slice(0,28))}</td><td style="font-size:0.74rem;">${dvzEsc(x.alasan)}</td>
+              <td style="text-align:right;">${x.trx}</td><td style="text-align:right;">${q(x.stok)}</td></tr>`));
+
+        const adaMasalah=h.namaBeda.length+h.satuanBeda.length+h.baru.length+h.kodeAneh.length;
+        if(!adaMasalah) html+='<div class="alert alert-success" style="margin:10px 0;">✅ Master di sistem sudah cocok dengan file. Tidak ada barang yang hilang.</div>';
+        html += `<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+            ${h.baru.length?`<button id="bmTambahBtn" class="btn btn-primary btn-sm">➕ Tambahkan ${h.baru.length} barang baru</button>`:''}
+            <button id="bmExportBtn" class="btn btn-secondary btn-sm">📊 Export Hasil Perbandingan</button>
+            <button id="bmTutupBtn" class="btn btn-secondary btn-sm">✕ Tutup</button></div>
+          <div style="font-size:0.74rem; color:var(--text3); margin-top:6px;">Hanya penambahan barang baru yang bisa diterapkan dari sini. Penggantian nama dan satuan harus lewat tombol ✏️ pada barisnya masing-masing, supaya setiap perubahan disadari dampaknya.</div>`;
+        el.innerHTML=html;
+        document.getElementById('bmTutupBtn')?.addEventListener('click', ()=>{ el.innerHTML=''; bmHasil=null; });
+        document.getElementById('bmTambahBtn')?.addEventListener('click', bmTambahBaru);
+        document.getElementById('bmExportBtn')?.addEventListener('click', bmExport);
+    }
+    function bmTambahBaru(){
+        if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
+        if(!bmHasil || !bmHasil.baru.length) return;
+        const daftar=bmHasil.baru;
+        if(!confirm(`Tambahkan ${daftar.length} barang baru ke Master?\n\n`
+            + daftar.slice(0,10).map(x=>`• ${x.sku} — ${x.nama}`).join('\n')
+            + (daftar.length>10?`\n... +${daftar.length-10} lagi`:'')
+            + `\n\nStoknya mulai dari NOL. Tidak ada transaksi yang dibuat.`)) return;
+        const pin=prompt('PIN Admin:');
+        if(pin===null) return;
+        if(pin!==soPins.admin){ notify('PIN Salah','','error'); return; }
+        let n=0;
+        daftar.forEach(x=>{
+            if(itemBySku(x.sku)) return;
+            masterSKU.push({ sku:x.sku, barcode:'', name:x.nama||x.sku, category:'', merk:'', distributor:'',
+                buyUnit:'', buyContent:(x.isi>0?x.isi:1), midUnit:'', midContent:0,
+                baseUnit:x.satuan||'Pcs', lastBuyPrice:(x.harga>0?x.harga:0),
+                status:(String(x.status||'').toLowerCase().startsWith('tidak')?'Tidak Aktif':'Aktif'),
+                minStock:0, keterangan:'' });
+            if(!stockBatches[x.sku]) stockBatches[x.sku]=[];
+            n++;
+        });
+        invalidateSkuIndex();
+        if(typeof auditLog!=='undefined') auditLog.unshift({ id:nextAuditId++, action:'edit', at:Date.now(),
+            by:currentUsername||deviceOperator||'', reason:`Tambah ${n} barang baru dari perbandingan file master`,
+            sku:'-', itemName:'Master Barang', type:'policy', before:{jumlahSku:(masterSKU.length-n)}, after:{jumlahSku:masterSKU.length} });
+        persist(); refreshUI();
+        notify('Barang Ditambahkan', `${n} barang baru masuk ke Master dengan stok nol.`, 'success');
+        document.getElementById('bandingMasterHasil').innerHTML=''; bmHasil=null;
+    }
+    function bmExport(){
+        if(!bmHasil) return;
+        if(typeof XLSX==='undefined'){ notify('Offline','Library Excel belum termuat.','warning'); return; }
+        const wb=XLSX.utils.book_new();
+        const S=(nama, head, rows)=>{ if(!rows.length) return;
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head].concat(rows)), nama); };
+        S('Barang Beda', ['Kode','Nama di File','Nama di Sistem','Transaksi','Stok'],
+          bmHasil.namaBeda.map(x=>[x.sku,x.file,x.sistem,x.trx,x.stok]));
+        S('Satuan Beda', ['Kode','Nama','Isi File','Satuan File','Isi Sistem','Satuan Sistem','Faktor','Transaksi','Stok'],
+          bmHasil.satuanBeda.map(x=>[x.sku,x.nama,x.fileIsi,x.fileSat,x.sisIsi,x.sisSat,x.faktor,x.trx,x.stok]));
+        S('Belum Ada di Sistem', ['Kode','Nama','Isi','Satuan','Harga Beli','Status'],
+          bmHasil.baru.map(x=>[x.sku,x.nama,x.isi,x.satuan,x.harga,x.status]));
+        S('Hanya di Sistem', ['Kode','Nama','Status','Transaksi','Stok'],
+          bmHasil.hanyaSistem.map(x=>[x.sku,x.nama,x.status,x.trx,x.stok]));
+        S('Kode Tidak Wajar', ['Kode','Nama','Masalah','Transaksi','Stok'],
+          bmHasil.kodeAneh.map(x=>[x.sku,x.nama,x.alasan,x.trx,x.stok]));
+        if(!wb.SheetNames.length){ notify('Kosong','Tidak ada perbedaan untuk diexport.','info'); return; }
+        XLSX.writeFile(wb, 'perbandingan_master_'+new Date().toISOString().slice(0,10)+'.xlsx');
+    }
 
     window.perbaikiAngkaRusak = function(){
         if(currentRole!=='admin'){ notify('Ditolak','Hanya Admin.','error'); return; }
