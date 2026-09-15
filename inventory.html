@@ -4003,8 +4003,40 @@
         let reason=prompt('Alasan koreksi (wajib, tercatat di riwayat):','hasil hitung fisik');
         if(reason===null || !reason.trim()) return;
         let diff=target-cur;
-        if(!confirm(`Ubah stok ${it.name} di ${gudangName(gudang)} dari ${cur.toLocaleString('id')} menjadi ${target.toLocaleString('id')} ${it.baseUnit}?`)) return;
         let basePrice = estimateItemCost(it) || bestKnownUnitCost(it, gudang);
+        // ===== PENJAGA KEWAJARAN KOREKSI STOK =====
+        // Sebelum ini, konfirmasinya hanya menyebut angka kuantitas — tidak pernah nilai rupiahnya.
+        // Satu sesi koreksi enam baris pernah menambah Rp27,78 miliar tanpa ada yang menyadarinya,
+        // karena "dari 100 menjadi 700.000" tidak terbaca semengerikan "bertambah Rp4,9 miliar".
+        // Sekarang dampak rupiahnya selalu ditampilkan, dan perubahan ekstrem minta konfirmasi kedua.
+        const hargaPakai = basePrice>0 ? basePrice : 0;
+        const dampak = Math.abs(diff) * hargaPakai;
+        const nilaiKini = getStock(koreksiPickedSku,gudang).value;
+        const nilaiJadi = target * (target>0 ? ((nilaiKini + diff*hargaPakai)/target) : 0);
+        const rpf = v => 'Rp ' + Math.round(v).toLocaleString('id');
+        const wajarMaster = (it.lastBuyPrice>0 && it.buyContent>0) ? it.lastBuyPrice/it.buyContent : 0;
+        let alarm=[];
+        if(Math.abs(target) > 1e7)
+            alarm.push(`Jumlah ${target.toLocaleString('id')} ${it.baseUnit} tidak masuk akal — kemungkinan pemisah desimal hilang saat mengetik.`);
+        if(cur>0 && target/cur >= 100)
+            alarm.push(`Stok melonjak ${Math.round(target/cur).toLocaleString('id')}x lipat dari ${cur.toLocaleString('id')} menjadi ${target.toLocaleString('id')}.`);
+        if(diff>0 && dampak >= 100e6)
+            alarm.push(`Nilai persediaan BERTAMBAH ${rpf(dampak)} hanya dari koreksi ini.`);
+        if(wajarMaster>0 && hargaPakai>0 && (hargaPakai/wajarMaster>5 || hargaPakai/wajarMaster<0.2))
+            alarm.push(`Harga yang dipakai ${rpf(hargaPakai)}/${it.baseUnit}, sementara harga Master ${rpf(wajarMaster)}/${it.baseUnit}.`);
+        if(!confirm(`Ubah stok ${it.name} di ${gudangName(gudang)}?\n\n`
+            + `Jumlah  : ${cur.toLocaleString('id')} → ${target.toLocaleString('id')} ${it.baseUnit}  (${diff>0?'+':''}${diff.toLocaleString('id')})\n`
+            + `Harga   : ${rpf(hargaPakai)} / ${it.baseUnit}\n`
+            + `NILAI   : ${rpf(nilaiKini)} → ${rpf(nilaiJadi)}  (${diff>0?'+':'−'}${rpf(dampak)})`
+            + (alarm.length ? `\n\n⚠️ PERIKSA DULU:\n• ${alarm.join('\n• ')}` : ''))) return;
+        if(alarm.length){
+            const ketik = prompt(`Perubahan ini tidak wajar dan nilainya ${rpf(dampak)}.\n\n`
+                + alarm.map(a=>'• '+a).join('\n')
+                + `\n\nKalau Anda yakin angkanya benar, ketik: SAYA YAKIN`);
+            if(String(ketik||'').trim().toUpperCase()!=='SAYA YAKIN'){
+                notify('Dibatalkan','Koreksi stok tidak jadi disimpan.','info'); return;
+            }
+        }
         let res = diff>0
             ? await processTransaction(it.sku,'in',diff,basePrice>0?basePrice:0.01,null,null,'Koreksi Stok: '+reason.trim(),true,{gudang, source:'koreksi', by:currentUsername||deviceOperator, costUnknown:!(basePrice>0)})
             : await processTransaction(it.sku,'out',Math.abs(diff),0,null,null,'Koreksi Stok: '+reason.trim(),true,{gudang, outType:'susut', desc:'Koreksi stok: '+reason.trim(), by:currentUsername||deviceOperator});
