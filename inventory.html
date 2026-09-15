@@ -1364,6 +1364,89 @@
         else { alert(title + "\n" + (msg || "")); }
     }
 
+    // ===================== PENYIMPANAN RAMPING =====================
+    // localStorage Chrome dibatasi ~5 MB per situs. Dengan 6.500+ transaksi, batas itu tersentuh dan
+    // penyimpanan GAGAL TOTAL — pesan errornya menyebut kunci yang kebetulan ditulis terakhir
+    // (mis. gudang_transfers), padahal yang memenuhi kuota adalah trans_log.
+    //
+    // Yang dilakukan: sebelum ditulis, tiap baris dibuang field-nya yang nilainya sama dengan bawaan
+    // (string kosong, null, 0, false, array kosong) atau yang memang tidak pernah dibaca. Saat dimuat,
+    // field itu DIKEMBALIKAN ke nilai bawaannya, sehingga objek di memori identik dengan sebelumnya.
+    // Ini bukan kompresi yang mengubah arti data: tidak ada satu pun angka atau teks yang hilang.
+    //
+    // beforeStock & afterStock sengaja tidak dikembalikan: keduanya hanya pernah DITULIS, tidak pernah
+    // dibaca di mana pun. canUndoUntil yang sudah lewat juga dibuang — jendela undo 15 menit.
+    const BAWAAN_LOG = { supplier:'', division:'', desc:'', area:'', ref:'', by:'', itemName:'',
+        ppn:0, exp:null, uploadId:null, effectiveTimestamp:null, soAdjustOf:null, batchId:null,
+        transferTo:null, outType:undefined, source:undefined, canUndoUntil:null,
+        resetAdjustment:false, costUnknown:false, costInclPpn:false, nonStockMovement:false,
+        deficitVariance:0, edited:false, uid:null, lossLayers:undefined,
+        negSettlements:[], batchIds:[], deducted:[], costLayers:[], createdBatches:[] };
+    const BAWAAN_TRANSFER = { ref:'', note:'', sentBy:'', confirmedBy:'', itemName:'',
+        confirmedAt:null, confirmedQty:null, inLogId:null, lossLogId:null, lossUid:null,
+        confirmUid:null, cancelUid:null, invoiceId:undefined, jenis:undefined,
+        effectiveTimestamp:null, outTotal:null, costIncomplete:false, costIncompleteReason:'',
+        costUnknown:false, costLayers:[] };
+    const BAWAAN_BATCH = { exp:null, supplier:'', ref:'', costUnknown:false,
+        sourceDateIn:undefined, receivedAt:undefined };
+
+    function samaDenganBawaan(nilai, bawaan){
+        if(Array.isArray(bawaan)) return Array.isArray(nilai) && nilai.length===0;
+        if(bawaan===undefined) return nilai===undefined || nilai===null;
+        return nilai===bawaan;
+    }
+    function rampingkanBaris(o, bawaan, buang){
+        const hasil={};
+        for(const k in o){
+            if(buang && buang.indexOf(k)>-1) continue;
+            const v=o[k];
+            if(v===undefined) continue;
+            if(k in bawaan && samaDenganBawaan(v, bawaan[k])) continue;
+            hasil[k]=v;
+        }
+        return hasil;
+    }
+    function kembangkanBaris(o, bawaan){
+        for(const k in bawaan){
+            if(bawaan[k]===undefined) continue;          // memang boleh tidak ada
+            if(!(k in o)) o[k] = Array.isArray(bawaan[k]) ? [] : bawaan[k];
+        }
+        return o;
+    }
+    const kini = () => Date.now();
+    function rampingkanLog(arr){
+        const t=kini();
+        return (arr||[]).map(l=>{
+            const salin = rampingkanBaris(l, BAWAAN_LOG, ['beforeStock','afterStock']);
+            if(salin.canUndoUntil && salin.canUndoUntil < t) delete salin.canUndoUntil;
+            return salin;
+        });
+    }
+    const kembangkanLog = arr => (arr||[]).map(l=>kembangkanBaris(l, BAWAAN_LOG));
+    const rampingkanTransfer = arr => (arr||[]).map(t=>rampingkanBaris(t, BAWAAN_TRANSFER, null));
+    const kembangkanTransfer = arr => (arr||[]).map(t=>kembangkanBaris(t, BAWAAN_TRANSFER));
+    function rampingkanBatch(peta){
+        const o={}; for(const sku in (peta||{})) o[sku]=(peta[sku]||[]).map(b=>rampingkanBaris(b, BAWAAN_BATCH, null));
+        return o;
+    }
+    function kembangkanBatch(peta){
+        for(const sku in (peta||{})) (peta[sku]||[]).forEach(b=>kembangkanBaris(b, BAWAAN_BATCH));
+        return peta||{};
+    }
+    // Berapa besar data sekarang, supaya bisa diperingatkan SEBELUM kuota benar-benar habis.
+    function ukuranPenyimpanan(){
+        let total=0; const rinci=[];
+        try{
+            for(let i=0;i<localStorage.length;i++){
+                const k=localStorage.key(i); const v=localStorage.getItem(k)||'';
+                const n=(k.length+v.length)*2;   // UTF-16
+                total+=n; rinci.push({kunci:k, bytes:n});
+            }
+        }catch(e){}
+        rinci.sort((a,b)=>b.bytes-a.bytes);
+        return { total, rinci, batas:5*1024*1024 };
+    }
+
     function persistLocal() {
         invalidateSkuIndex(); // master mungkin baru berubah -> indeks kode bahan harus dibangun ulang
         dataVersi++;
@@ -1371,8 +1454,8 @@
         if (!storageOK) return; // data tetap tersimpan di memori selama halaman terbuka
         try {
             localStorage.setItem(STORAGE.SKU, JSON.stringify(masterSKU));
-            localStorage.setItem(STORAGE.BATCH, JSON.stringify(stockBatches));
-            localStorage.setItem(STORAGE.LOG, JSON.stringify(transactionLog));
+            localStorage.setItem(STORAGE.BATCH, JSON.stringify(rampingkanBatch(stockBatches)));
+            localStorage.setItem(STORAGE.LOG, JSON.stringify(rampingkanLog(transactionLog)));
             localStorage.setItem(STORAGE.SUP, JSON.stringify(suppliers));
             localStorage.setItem(STORAGE.DIV, JSON.stringify(divisions));
             localStorage.setItem(STORAGE.IDS, JSON.stringify({ nextLogId, nextSupplierId, nextDivisionId, nextBatchId, nextTransferId }));
@@ -1381,11 +1464,39 @@
             localStorage.setItem(STORAGE.ALIAS, JSON.stringify(invoiceAliases));
             localStorage.setItem('gudang_extra_names', JSON.stringify(gudangExtraNames));
             localStorage.setItem('produksi_divisi', JSON.stringify(produksiDivisi));
-            localStorage.setItem(STORAGE.TRANSFER, JSON.stringify(transfers));
+            localStorage.setItem(STORAGE.TRANSFER, JSON.stringify(rampingkanTransfer(transfers)));
             localStorage.setItem("closings", JSON.stringify({closings, officialOpenings, lockBefore, editLocked, categoryMarkup, auditLog, nextAuditId}));
+            // Peringatan DINI: begitu pemakaian lewat 80%, beri tahu selagi masih sempat dibereskan.
+            // Menunggu sampai benar-benar gagal berarti sudah ada perubahan yang tidak tersimpan.
+            try{
+                const u=ukuranPenyimpanan();
+                const persen=u.total/u.batas;
+                if(persen>0.8 && !window.__peringatanKuota){
+                    window.__peringatanKuota=true;
+                    notify('Penyimpanan Hampir Penuh',
+                        `Penyimpanan browser terpakai ${Math.round(persen*100)}% (${Math.round(u.total/1024).toLocaleString('id')} KB dari ${Math.round(u.batas/1024).toLocaleString('id')} KB). `
+                        + `Terbesar: ${u.rinci.slice(0,2).map(x=>x.kunci+' '+Math.round(x.bytes/1024).toLocaleString('id')+' KB').join(', ')}. `
+                        + `Lakukan Tutup Buku periode lama, atau sinkronkan ke Google Sheets, sebelum penyimpanan benar-benar penuh.`, 'warning');
+                }
+            }catch(e){}
         } catch (e) {
             console.error("Gagal simpan:", e);
-            notify("Peringatan", "Data gagal disimpan ke penyimpanan browser: " + e.message, "warning");
+            // Pesan bawaan browser menyebut kunci yang KEBETULAN sedang ditulis saat kuota habis —
+            // itu menyesatkan, karena biang keroknya hampir selalu kunci terbesar (trans_log).
+            let rinci='';
+            try{
+                const u=ukuranPenyimpanan();
+                rinci = ` Terpakai ${Math.round(u.total/1024).toLocaleString('id')} KB dari batas ~${Math.round(u.batas/1024).toLocaleString('id')} KB. `
+                      + `Yang terbesar: ${u.rinci.slice(0,3).map(x=>x.kunci+' '+Math.round(x.bytes/1024).toLocaleString('id')+' KB').join(', ')}.`;
+            }catch(e2){}
+            const penuh = /quota|exceeded|QuotaExceeded/i.test(String(e && (e.name||e.message)));
+            notify("Data TIDAK Tersimpan",
+                (penuh
+                  ? "Penyimpanan browser PENUH." + rinci
+                    + " Perubahan Anda masih ada di layar tapi BELUM tersimpan — jangan tutup tab ini."
+                    + " Tekan ⚙️ Sync untuk mengamankan data ke Google Sheets, lalu lakukan Tutup Buku periode lama untuk melegakan ruang."
+                  : "Gagal menyimpan ke penyimpanan browser: " + e.message
+                    + " Perubahan belum tersimpan — jangan tutup tab ini."), "error");
         }
     }
 
@@ -1489,13 +1600,17 @@
     }
     function applyState(s) {
         invalidateSkuIndex();
-        masterSKU = s.masterSKU||[]; stockBatches = s.stockBatches||{}; transactionLog = s.transactionLog||[];
+        // Dikembangkan juga di sini: perangkat lain (atau versi mendatang) bisa saja mengirim bentuk
+        // ramping. Mengembangkan data yang sudah lengkap tidak mengubah apa pun.
+        masterSKU = s.masterSKU||[];
+        stockBatches = kembangkanBatch(s.stockBatches||{});
+        transactionLog = kembangkanLog(s.transactionLog||[]);
         suppliers = s.suppliers||[]; divisions = s.divisions||[];
         const ids = s.ids||{};
         nextLogId = ids.nextLogId||1; nextSupplierId = ids.nextSupplierId||(suppliers.length+1);
         nextDivisionId = ids.nextDivisionId||(divisions.length+1); nextBatchId = ids.nextBatchId||1;
         nextTransferId = ids.nextTransferId||1;
-        transfers = s.transfers||[];
+        transfers = kembangkanTransfer(s.transfers||[]);
         const so = s.so||{};
         if(so.soSessions){
             soSessions = {
@@ -1879,15 +1994,15 @@
         if (storageOK) { try { savedSku = localStorage.getItem(STORAGE.SKU); } catch (e) {} }
         if (savedSku && JSON.parse(savedSku).length) {
             masterSKU = JSON.parse(savedSku);
-            stockBatches = JSON.parse(localStorage.getItem(STORAGE.BATCH) || "{}");
-            transactionLog = JSON.parse(localStorage.getItem(STORAGE.LOG) || "[]");
+            stockBatches = kembangkanBatch(JSON.parse(localStorage.getItem(STORAGE.BATCH) || "{}"));
+            transactionLog = kembangkanLog(JSON.parse(localStorage.getItem(STORAGE.LOG) || "[]"));
             suppliers = JSON.parse(localStorage.getItem(STORAGE.SUP) || "[]");
             divisions = JSON.parse(localStorage.getItem(STORAGE.DIV) || "[]");
             const ids = JSON.parse(localStorage.getItem(STORAGE.IDS) || "{}");
             nextLogId = ids.nextLogId || 1; nextSupplierId = ids.nextSupplierId || (suppliers.length+1);
             nextDivisionId = ids.nextDivisionId || (divisions.length+1); nextBatchId = ids.nextBatchId || 1;
             nextTransferId = ids.nextTransferId || 1;
-            transfers = JSON.parse(localStorage.getItem(STORAGE.TRANSFER) || "[]");
+            transfers = kembangkanTransfer(JSON.parse(localStorage.getItem(STORAGE.TRANSFER) || "[]"));
             const so = JSON.parse(localStorage.getItem(STORAGE.SO) || "{}");
             if(so.soSessions){ soSessions = { scm: so.soSessions.scm||soSessions.scm, cibadak: so.soSessions.cibadak||soSessions.cibadak, karangtengah: so.soSessions.karangtengah||soSessions.karangtengah }; }
             else if(so.soSession){ let g=so.soSession.gudang||DEFAULT_GUDANG; soSessions[g]=so.soSession; } // kompatibilitas data lama
