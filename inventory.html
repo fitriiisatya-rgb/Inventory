@@ -2412,11 +2412,18 @@
             let dibuat = [];
             for (let L of layers) {
                 if (!(L.qty > 0)) continue;
-                // FIFO di gudang ini berjalan menurut KAPAN barang diterima di sini (dateIn = txTs),
-                // bukan tanggal masuk di gudang asal — kalau dipakai tanggal asal, kiriman lama bisa
-                // menyalip stok yang sudah lebih dulu ada di sini. Harga tetap harga lapisan asal,
-                // dan umur aslinya disimpan di sourceDateIn untuk penelusuran.
-                let b = { id:nextBatchId++, qty:L.qty, price:L.price, dateIn: txTs,
+                // Tanggal batch = TANGGAL BERLAKU transaksinya. Untuk penerimaan kiriman antar
+                // gudang, itu berarti tanggal KIRIM, bukan tanggal tombol "Terima" ditekan.
+                //
+                // Versi sebelumnya memakai txTs (waktu konfirmasi) dengan alasan kiriman lama tidak
+                // boleh menyalip stok yang sudah ada di sini. Alasan itu kalah oleh masalah yang
+                // lebih besar: mesin replay historis (terapkanLogKeLapisan) mengantrekan kiriman
+                // memakai effTs, yaitu tanggal kirim. Selama batch nyata dan mesin replay memakai
+                // tanggal berbeda, urutan FIFO keduanya tidak akan pernah sama dan Diagnostic akan
+                // terus menunjukkan selisih nilai yang tidak bisa dijelaskan.
+                // Waktu kedatangan sebenarnya tetap dicatat di receivedAt untuk penelusuran.
+                const tsBatch = opts.effectiveTimestamp || txTs;
+                let b = { id:nextBatchId++, qty:L.qty, price:L.price, dateIn: tsBatch,
                           exp:opts.exp||null, supplier:supName, ref, gudang };
                 if (pakaiDateInAsal) { b.sourceDateIn = L.dateIn; b.receivedAt = txTs; }
                 stockBatches[sku].push(b);
@@ -3331,8 +3338,8 @@
             const src = cocok
                 ? l.costLayers.map(L=>({ qty:Number(L.qtyTaken)||0, price:Number(L.price)||0, dateIn:Number(L.dateIn)||t }))
                 : [{ qty:l.qty, price:(l.qty>0 ? (l.total||l.qty*(l.price||0))/l.qty : 0), dateIn:t }];
-            // Kiriman antar gudang mulai mengantre di gudang tujuan sejak DITERIMA, bukan sejak
-            // masuk gudang asal — sama seperti perilaku confirmTransfer.
+            // Kiriman antar gudang mengantre di gudang tujuan memakai TANGGAL BERLAKU kiriman
+            // (tanggal kirim), sama persis dengan dateIn batch yang dibuat confirmTransfer.
             const pakaiT = (l.source==='transfer');
             for(const L of src){
                 let sisa=L.qty;
