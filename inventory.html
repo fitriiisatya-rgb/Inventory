@@ -5801,21 +5801,26 @@
             kodeGudang[String(g.name).toUpperCase()]=g.id; });
         const baris=[], tolak=[], peringatan=[];
         for(let i=hi+1;i<aoa.length;i++){
-            const r=aoa[i].map(x=>String(x??'').trim());
+            // Sel angka HARUS tetap angka. Sebelumnya seluruh baris di-String() dulu, sehingga sel
+            // numerik 25,848 jadi teks "25.848" lalu dibaca angkaID sebagai 25.848 — aturan ribuan
+            // ala Indonesia — dan kuantitasnya melonjak 1.000x tanpa satu pun peringatan muncul.
+            // Persis jenis kerusakan yang alat-alat perbaikan di Diagnostic dibuat untuk bersihkan.
+            const mentah=aoa[i];
+            const r=mentah.map(x=>String(x??'').trim());
             const kode=r[iKode]; if(!kode) continue;
             if(/^PETUNJUK|^\d\./i.test(kode)) continue;              // baris petunjuk di template
             const it=itemBySku(kode);
             if(!it){ tolak.push(`${kode}: tidak ada di Master Data`); continue; }
             const g = gudangPaksa || kodeGudang[String(r[iGud]||'').toUpperCase()] || String(r[iGud]||'').toLowerCase().replace(/\s+/g,'');
             if(!g){ tolak.push(`${kode}: kolom Gudang kosong`); continue; }
-            const qty=angkaID(r[iQty]);
+            const qty=angkaID(mentah[iQty]);
             if(!isFinite(qty)){ tolak.push(`${kode}: Qty tidak terbaca`); continue; }
             if(qty===0) continue;                                     // nol = tidak perlu dicatat
             // Penjaga yang sama dengan importir stok awal: angka sebesar ini hampir selalu berarti
             // pemisah desimal hilang di file sumbernya.
             if(Math.abs(qty)>1e7){ tolak.push(`${kode}: Qty ${qty.toLocaleString('id')} tidak masuk akal — kemungkinan pemisah desimal hilang saat file dibuat`); continue; }
             const wajar=(it.lastBuyPrice>0 && it.buyContent>0) ? it.lastBuyPrice/it.buyContent : 0;
-            let harga = iHrg>-1 ? angkaID(r[iHrg]) : 0;
+            let harga = iHrg>-1 ? angkaID(mentah[iHrg]) : 0;
             if(!(harga>0)) harga = wajar;
             if(!(harga>0)){ peringatan.push(`${kode}: harga kosong dan Master belum punya harga beli — dinilai Rp0`); harga=0; }
             else if(wajar>0 && harga > wajar*20){
@@ -5981,10 +5986,11 @@
         if(iK<0) return { ok:false, pesan:'Kolom Kode tidak ditemukan.' };
         const F={};
         for(let i=hi+1;i<aoa.length;i++){
-            const r=aoa[i].map(x=>String(x??'').trim());
+            const mentah=aoa[i];
+            const r=mentah.map(x=>String(x??'').trim());
             const k=r[iK]; if(!k || /^\d+\./.test(k) || /^CARA PAKAI|^PETUNJUK/i.test(k)) continue;
-            F[k]={ sku:k, nama:iN>-1?r[iN]:'', isi:iIsi>-1?angkaID(r[iIsi]):null,
-                   satuan:iSat>-1?r[iSat]:'', harga:iHrg>-1?angkaID(r[iHrg]):null,
+            F[k]={ sku:k, nama:iN>-1?r[iN]:'', isi:iIsi>-1?angkaID(mentah[iIsi]):null,
+                   satuan:iSat>-1?r[iSat]:'', harga:iHrg>-1?angkaID(mentah[iHrg]):null,
                    status:iSts>-1?r[iSts]:'' };
         }
         return Object.keys(F).length ? { ok:true, F } : { ok:false, pesan:'Tidak ada baris data yang terbaca.' };
@@ -9568,14 +9574,16 @@
                     iGud=col('GUDANG'); // kolom opsional: daftarkan barang ke katalog gudang transit tertentu
                 let stokAwalList=[];
                 for(let li=1; li<rows.length; li++){
-                    let p=rows[li].map(s=>String(s??'').trim());
+                    // Angka dibaca dari sel aslinya — lihat catatan di uoBacaBaris soal "25.848".
+                    let mentah=rows[li];
+                    let p=mentah.map(s=>String(s??'').trim());
                     let kode=p[iKode]; if(!kode) continue;
                     let data={ barcode:iBar>-1?p[iBar]:'', name:p[iNama]||kode, category:p[iKat]||'Umum', merk:iMerk>-1?p[iMerk]:'',
                         distributor:iDist>-1?p[iDist]:'', buyUnit:iKem>-1?(p[iKem]||'Pcs'):'Pcs',
                         baseUnit:iSatD>-1?((p[iSatD]||'Pcs').charAt(0).toUpperCase()+(p[iSatD]||'Pcs').slice(1).toLowerCase()):'Pcs',
-                        buyContent:iIsi>-1?(numId(p[iIsi])||1):1,
-                        midContent:iIsiK>-1?numId(p[iIsiK]):0, midUnit:iSatK>-1?p[iSatK]:'',
-                        lastBuyPrice:iHrg>-1?numId(p[iHrg]):0,
+                        buyContent:iIsi>-1?(numId(mentah[iIsi])||1):1,
+                        midContent:iIsiK>-1?numId(mentah[iIsiK]):0, midUnit:iSatK>-1?p[iSatK]:'',
+                        lastBuyPrice:iHrg>-1?numId(mentah[iHrg]):0,
                         status:iSts>-1?(String(p[iSts]).toLowerCase()==='aktif'?'Aktif':'Tidak Aktif'):'Aktif',
                         note:iKet>-1?p[iKet]:'' };
                     let ex=itemBySku(kode);
@@ -9591,8 +9599,8 @@
                     }
                     // Kolom opsional STOK AWAL (+ SATUAN STOK AWAL) dan/atau STOK AWAL KEMASAN (format lama)
                     if(iSA>-1 || iSAK>-1){
-                        let sBase = iSA>-1 ? numId(p[iSA]) : 0;
-                        let sBuy = iSAK>-1 ? numId(p[iSAK]) : 0;
+                        let sBase = iSA>-1 ? numId(mentah[iSA]) : 0;
+                        let sBuy = iSAK>-1 ? numId(mentah[iSAK]) : 0;
                         let hasVal = (iSA>-1 && String(p[iSA]||'').trim()!=='') || (iSAK>-1 && String(p[iSAK]||'').trim()!=='');
                         if(hasVal){
                             let it=itemBySku(kode);
@@ -10971,12 +10979,14 @@
             let uploadId = 'SA'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
             let success=0, skipped=0, fails=[];
             for(let raw of dataRows){
+                // Sel angka dibaca dari nilai aslinya, bukan dari hasil String(). Lihat catatan di
+                // uoBacaBaris: "25,848" yang jadi teks "25.848" dibaca sebagai dua puluh lima ribu.
                 let p=raw.map(s=>String(s??'').trim());
                 let kode=p[iKode]; if(!kode) continue;
                 let item=itemBySku(kode);
                 if(!item){ fails.push(`${kode}: SKU tidak ditemukan di master barang`); continue; }
                 if(!isTransitItemAllowed(item, gudang)){ fails.push(`${kode} - ${item.name}: bukan barang area ${gudangName(gudang)}`); continue; }
-                let qty=numId(p[iJumlah]);
+                let qty=numId(raw[iJumlah]);
                 if(!(qty>0)){ skipped++; continue; }
                 // PENJAGA JUMLAH. Penjaga harga di bawah tidak pernah menangkap kasus ini: barisnya
                 // berharga wajar, yang gila justru jumlahnya. Penyebabnya file sumber yang kehilangan
@@ -10988,7 +10998,7 @@
                         + `Periksa kolom Jumlah di file Anda, simpan ulang sebagai CSV/XLSX dengan angka yang benar.`);
                     continue;
                 }
-                let price = iHarga>-1 ? numId(p[iHarga]) : 0;
+                let price = iHarga>-1 ? numId(raw[iHarga]) : 0;
                 if(!(price>0)) price = (item.lastBuyPrice>0 ? item.lastBuyPrice/(item.buyContent||1) : 1);
                 // Kolom Harga harus per SATUAN DASAR. Kesalahan paling sering: mengisi harga per kemasan
                 // (mis. Rp333.000/karton isi 5.000 Gr) sehingga nilai stok membengkak ribuan kali lipat —
