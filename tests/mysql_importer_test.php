@@ -32,7 +32,7 @@ use App\Services\InventoryService;
 use App\Services\ImportSimpleMasterService;
 use App\Services\ImportOpeningStockService;
 use App\Services\ImportHistoricalTransactionService;
-use App\Services\ValidationException;
+use App\Services\ImportValidationException;
 
 $pdo = Database::connection();
 echo "Connected via driver: " . $pdo->getAttribute(PDO::ATTR_DRIVER_NAME) . "\n\n";
@@ -76,7 +76,7 @@ unlink($csv);
 $csvBad = tmpCsv("supplier_code,supplier_name,status\n,No Code Supplier,ACTIVE\n");
 $batchIdBad = ImportSimpleMasterService::stage($pdo, 'SUPPLIER', $csvBad, 'bad.csv', $userId);
 $rejected = false;
-try { ImportSimpleMasterService::commit($pdo, 'SUPPLIER', $batchIdBad, $userId); } catch (ValidationException $e) { $rejected = true; }
+try { ImportSimpleMasterService::commit($pdo, 'SUPPLIER', $batchIdBad, $userId); } catch (ImportValidationException $e) { $rejected = true; }
 check('Supplier import with missing code is rejected', $rejected);
 unlink($csvBad);
 

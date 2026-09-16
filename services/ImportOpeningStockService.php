@@ -105,13 +105,13 @@ final class ImportOpeningStockService
         $opening->execute(['id' => $openingId]);
         $opening = $opening->fetch();
         if (!$opening) {
-            throw new ValidationException(['stock opening batch not found']);
+            throw new NotFoundException('stock opening batch not found');
         }
 
         $errorCount = $pdo->prepare("SELECT COUNT(*) FROM stock_opening_lines WHERE stock_opening_id = :id AND row_status = 'ERROR'");
         $errorCount->execute(['id' => $openingId]);
         if ((int) $errorCount->fetchColumn() > 0) {
-            throw new ValidationException(['import rejected: one or more ERROR rows in this opening stock batch']);
+            throw new ImportValidationException(['import rejected: one or more ERROR rows in this opening stock batch']);
         }
 
         $lines = $pdo->prepare("SELECT * FROM stock_opening_lines WHERE stock_opening_id = :id AND row_status IN ('VALID','WARNING')");

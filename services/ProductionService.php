@@ -129,7 +129,7 @@ final class ProductionService
         $header->execute(['id' => $productionId]);
         $header = $header->fetch();
         if (!$header) {
-            throw new ValidationException(['production not found']);
+            throw new NotFoundException('production not found');
         }
         $inputs = $pdo->prepare('SELECT * FROM production_inputs WHERE production_id = :id');
         $inputs->execute(['id' => $productionId]);

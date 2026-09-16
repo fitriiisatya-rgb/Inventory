@@ -172,7 +172,7 @@ final class StockAdjustmentService
         $batches = Database::lockFifoBatches($pdo, $p['item_id'], $p['warehouse_id']);
         $available = round(array_sum(array_column($batches, 'qty_base')), self::QTY_SCALE);
         if ($qtyToRemove > $available && empty($p['allow_negative_stock'])) {
-            throw new InsufficientStockException($qtyToRemove, $available);
+            throw new NegativeStockException($qtyToRemove, $available);
         }
 
         $txId = self::insertTransactionHeader($pdo, $p, $transactionDate, $now);

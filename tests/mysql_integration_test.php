@@ -112,9 +112,17 @@ $companyDuringTransit = InventoryService::companyTotalValue($pdo);
 check('Company total value unchanged during transit', approx($companyDuringTransit['total_value'], $companyBefore['total_value']), "before={$companyBefore['total_value']} during={$companyDuringTransit['total_value']}");
 
 // double receive must be impossible
-Database::transaction(fn (PDO $tx) => TransferService::receive($tx, $transferId, ['created_by' => $userId]));
-$secondReceive = Database::transaction(fn (PDO $tx) => TransferService::receive($tx, $transferId, ['created_by' => $userId]));
-check('Second receive is idempotent (no error, no double effect)', $secondReceive['idempotent_replay'] === true);
+$receiveRequestUuid = uid('receive-req');
+Database::transaction(fn (PDO $tx) => TransferService::receive($tx, $transferId, ['created_by' => $userId, 'request_uuid' => $receiveRequestUuid]));
+$secondReceive = Database::transaction(fn (PDO $tx) => TransferService::receive($tx, $transferId, ['created_by' => $userId, 'request_uuid' => $receiveRequestUuid]));
+check('Second receive with the SAME request_uuid is idempotent (no error, no double effect)', $secondReceive['idempotent_replay'] === true);
+$thirdReceiveRejected = false;
+try {
+    Database::transaction(fn (PDO $tx) => TransferService::receive($tx, $transferId, ['created_by' => $userId, 'request_uuid' => uid('different-req')]));
+} catch (\App\Services\TransferAlreadyReceivedException $e) {
+    $thirdReceiveRejected = true;
+}
+check('A genuinely NEW receive attempt (different request_uuid) on an already-RECEIVED transfer is rejected TRANSFER_ALREADY_RECEIVED', $thirdReceiveRejected);
 
 $stockA2 = InventoryService::currentStock($pdo, $itemT, $whA);
 $stockB2 = InventoryService::currentStock($pdo, $itemT, $whB);
@@ -287,6 +295,17 @@ check('Transaction dated inside the closed period is rejected PERIOD_LOCKED', $p
 // idempotent close
 $closeAgain = Database::transaction(fn (PDO $tx) => BookClosingService::close($tx, '2026-08-01', '2026-12-31', $userId));
 check('Re-closing an already-LOCKED period is idempotent', $closeAgain['idempotent_replay'] === true);
+
+// D0.4: next_closeable_period — cannot skip ahead to an arbitrary future period
+$previewAfterClose = BookClosingService::preview($pdo, '2027-01-01', '2027-01-31');
+check('preview() reports next_closeable_period_start = day after the last LOCKED period_end', $previewAfterClose['next_closeable_period_start'] === '2027-01-01', "got {$previewAfterClose['next_closeable_period_start']}");
+$skipAheadRejected = false;
+try {
+    Database::transaction(fn (PDO $tx) => BookClosingService::close($tx, '2027-03-01', '2027-03-31', $userId));
+} catch (ValidationException $e) {
+    $skipAheadRejected = true;
+}
+check('close() rejects skipping ahead to a period other than next_closeable_period', $skipAheadRejected);
 
 // =============================================================================
 echo "\n== RECONCILIATION: sample output ==\n";

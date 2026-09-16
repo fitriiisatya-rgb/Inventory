@@ -84,10 +84,17 @@ final class TransferService
     public static function receive(PDO $pdo, int $transferId, array $p): array
     {
         $transfer = self::find($pdo, $transferId);
+        $requestUuid = $p['request_uuid'] ?? null;
 
         if ($transfer['status'] === 'RECEIVED') {
-            // Double receive must be impossible — report success without touching anything again.
-            return ['success' => true, 'idempotent_replay' => true, 'transfer_id' => $transferId];
+            // Same request retried (e.g. a network timeout) — safe no-op. A genuinely NEW
+            // attempt (no matching request_uuid) against an already-received transfer is an
+            // error: double receive must be impossible, not silently "successful" for someone
+            // who didn't actually just receive it.
+            if ($requestUuid !== null && $requestUuid === $transfer['receive_request_uuid']) {
+                return ['success' => true, 'idempotent_replay' => true, 'transfer_id' => $transferId];
+            }
+            throw new TransferAlreadyReceivedException($transferId);
         }
         if ($transfer['status'] !== 'PENDING') {
             throw new ValidationException(["transfer is {$transfer['status']}, cannot be received"]);
@@ -125,8 +132,8 @@ final class TransferService
                 ->execute(['in_line_id' => $inResult['line_id'], 'id' => $line['id']]);
         }
 
-        $pdo->prepare('UPDATE warehouse_transfers SET status = \'RECEIVED\', receive_date = :now, received_by = :by WHERE id = :id')
-            ->execute(['now' => $receiveDate, 'by' => $p['created_by'], 'id' => $transferId]);
+        $pdo->prepare('UPDATE warehouse_transfers SET status = \'RECEIVED\', receive_date = :now, received_by = :by, receive_request_uuid = :req_uuid WHERE id = :id')
+            ->execute(['now' => $receiveDate, 'by' => $p['created_by'], 'req_uuid' => $requestUuid, 'id' => $transferId]);
 
         AuditService::log($pdo, $p['created_by'], $p['username'] ?? 'system', 'TRANSFER_RECEIVE', 'warehouse_transfers', $transferId, null, ['lines_received' => count($lines)], null);
 
@@ -136,9 +143,13 @@ final class TransferService
     public static function cancel(PDO $pdo, int $transferId, array $p): array
     {
         $transfer = self::find($pdo, $transferId);
+        $requestUuid = $p['request_uuid'] ?? null;
 
         if ($transfer['status'] === 'CANCELLED') {
-            return ['success' => true, 'idempotent_replay' => true, 'transfer_id' => $transferId];
+            if ($requestUuid !== null && $requestUuid === $transfer['cancel_request_uuid']) {
+                return ['success' => true, 'idempotent_replay' => true, 'transfer_id' => $transferId];
+            }
+            throw new TransferAlreadyCancelledException($transferId);
         }
         if ($transfer['status'] !== 'PENDING') {
             throw new ValidationException(['only a PENDING (not yet received) transfer can be cancelled']);
@@ -171,8 +182,8 @@ final class TransferService
         )->execute(['id' => $transferId]);
 
         $now = date('Y-m-d H:i:s');
-        $pdo->prepare('UPDATE warehouse_transfers SET status = \'CANCELLED\', cancel_reason = :reason, cancelled_by = :by, cancelled_at = :now WHERE id = :id')
-            ->execute(['reason' => $p['reason'], 'by' => $p['created_by'], 'now' => $now, 'id' => $transferId]);
+        $pdo->prepare('UPDATE warehouse_transfers SET status = \'CANCELLED\', cancel_reason = :reason, cancelled_by = :by, cancelled_at = :now, cancel_request_uuid = :req_uuid WHERE id = :id')
+            ->execute(['reason' => $p['reason'], 'by' => $p['created_by'], 'now' => $now, 'req_uuid' => $requestUuid, 'id' => $transferId]);
 
         AuditService::log($pdo, $p['created_by'], $p['username'] ?? 'system', 'TRANSFER_CANCEL', 'warehouse_transfers', $transferId, null, null, $p['reason']);
 
@@ -204,7 +215,7 @@ final class TransferService
         $stmt->execute(['id' => $transferId]);
         $row = $stmt->fetch();
         if (!$row) {
-            throw new ValidationException(['transfer not found']);
+            throw new NotFoundException('transfer not found');
         }
         return $row;
     }

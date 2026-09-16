@@ -1,0 +1,627 @@
+openapi: 3.0.3
+info:
+  title: Inventory FIFO Pro API
+  description: >
+    Machine-readable companion to docs/API_CONTRACT.md (the narrative
+    version — read that for permissions, business rules and worked
+    examples). Frozen as of PHASE D0.3; do not change response shape or
+    error codes during Phase D without updating both files.
+  version: "1.0.0"
+servers:
+  - url: /api
+security:
+  - sessionCookie: []
+tags:
+  - name: auth
+  - name: master
+  - name: inventory
+  - name: transactions
+  - name: transfers
+  - name: stock-opname
+  - name: stock-adjustments
+  - name: production
+  - name: book-closing
+  - name: reconciliation
+  - name: import
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: inv_session
+  schemas:
+    SuccessEnvelope:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        data: {}
+        message: { type: string }
+      required: [success, data, message]
+    ErrorEnvelope:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - UNAUTHENTICATED
+                - FORBIDDEN
+                - CSRF_INVALID
+                - VALIDATION_ERROR
+                - NOT_FOUND
+                - DUPLICATE_REQUEST
+                - PERIOD_LOCKED
+                - NEGATIVE_STOCK
+                - PRICE_ANOMALY
+                - COST_REQUIRED
+                - OPNAME_ACTIVE
+                - TRANSFER_ALREADY_RECEIVED
+                - TRANSFER_ALREADY_CANCELLED
+                - INSUFFICIENT_STOCK
+                - IMPORT_VALIDATION_FAILED
+                - RATE_LIMITED
+                - INTERNAL_ERROR
+            message: { type: string }
+          required: [code, message]
+      required: [success, error]
+  parameters:
+    itemId:
+      name: item_id
+      in: query
+      required: true
+      schema: { type: integer }
+    warehouseId:
+      name: warehouse_id
+      in: query
+      required: true
+      schema: { type: integer }
+  responses:
+    Unauthenticated:
+      description: No valid session
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    Forbidden:
+      description: Missing permission or outside role scope
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    ValidationError:
+      description: Malformed/incomplete request or business-rule violation
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+    NotFound:
+      description: Entity not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } }
+  requestBodies:
+    Empty:
+      required: false
+      content:
+        application/json:
+          schema: { type: object }
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        '200': { description: Logged in, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '429': { description: Rate limited, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+  /auth/logout:
+    post:
+      tags: [auth]
+      responses:
+        '200': { description: Logged out, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /auth/me:
+    get:
+      tags: [auth]
+      security: []
+      responses:
+        '200': { description: Current session (or null), content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+
+  /items:
+    get:
+      tags: [master]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+  /warehouses:
+    get:
+      tags: [master]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /suppliers:
+    get:
+      tags: [master]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /divisions:
+    get:
+      tags: [master]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+
+  /inventory/current:
+    get:
+      tags: [inventory]
+      parameters:
+        - $ref: '#/components/parameters/itemId'
+        - $ref: '#/components/parameters/warehouseId'
+      responses:
+        '200': { description: '{qty_base, value}', content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /inventory/current/{sku}:
+    get:
+      tags: [inventory]
+      parameters:
+        - name: sku
+          in: path
+          required: true
+          schema: { type: string }
+        - name: warehouse_id
+          in: query
+          required: false
+          schema: { type: integer }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /inventory/batches:
+    get:
+      tags: [inventory]
+      parameters:
+        - $ref: '#/components/parameters/itemId'
+        - $ref: '#/components/parameters/warehouseId'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /inventory/value:
+    get:
+      tags: [inventory]
+      responses:
+        '200': { description: '{on_hand_value, in_transit_value, total_value}', content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /inventory/in-transit:
+    get:
+      tags: [inventory]
+      responses:
+        '200': { description: '{in_transit_value}', content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /inventory/ledger:
+    get:
+      tags: [inventory]
+      parameters:
+        - $ref: '#/components/parameters/itemId'
+        - $ref: '#/components/parameters/warehouseId'
+      responses:
+        '200': { description: chronological ledger rows, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+
+  /transactions/in:
+    post:
+      tags: [transactions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction_uuid, item_id, warehouse_id, input_qty, input_unit_id, unit_price_input, transaction_date]
+              properties:
+                transaction_uuid: { type: string, format: uuid }
+                item_id: { type: integer }
+                warehouse_id: { type: integer }
+                input_qty: { type: number }
+                input_unit_id: { type: integer }
+                unit_price_input: { type: number }
+                transaction_date: { type: string, format: date-time }
+                supplier_id: { type: integer, nullable: true }
+                reference_no: { type: string, nullable: true }
+                anomaly_approved_by: { type: integer, nullable: true }
+      responses:
+        '200': { description: Posted, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '423': { description: PERIOD_LOCKED or OPNAME_ACTIVE, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+  /transactions/out:
+    post:
+      tags: [transactions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction_uuid, item_id, warehouse_id, input_qty, input_unit_id, transaction_date]
+              properties:
+                transaction_uuid: { type: string, format: uuid }
+                item_id: { type: integer }
+                warehouse_id: { type: integer }
+                input_qty: { type: number }
+                input_unit_id: { type: integer }
+                transaction_date: { type: string, format: date-time }
+                division_id: { type: integer, nullable: true }
+                allow_negative_stock: { type: boolean }
+                negative_stock_reason: { type: string, nullable: true }
+      responses:
+        '200': { description: Posted, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /transactions/{id}/void:
+    post:
+      tags: [transactions]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_uuid, reason]
+              properties:
+                request_uuid: { type: string, format: uuid }
+                reason: { type: string }
+                superadmin_override: { type: boolean }
+      responses:
+        '200': { description: Voided, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '423': { description: PERIOD_LOCKED, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+
+  /transfers:
+    post:
+      tags: [transfers]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transfer_uuid, from_warehouse_id, to_warehouse_id, ship_date, lines]
+              properties:
+                transfer_uuid: { type: string, format: uuid }
+                from_warehouse_id: { type: integer }
+                to_warehouse_id: { type: integer }
+                ship_date: { type: string, format: date-time }
+                lines:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      item_id: { type: integer }
+                      input_qty: { type: number }
+                      input_unit_id: { type: integer }
+      responses:
+        '200': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+    get:
+      tags: [transfers]
+      responses:
+        '200': { description: All transfers, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /transfers/pending:
+    get:
+      tags: [transfers]
+      responses:
+        '200': { description: Pending transfers, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /transfers/{id}:
+    get:
+      tags: [transfers]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        '200': { description: Transfer detail, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /transfers/{id}/receive:
+    post:
+      tags: [transfers]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                request_uuid: { type: string, format: uuid }
+                receive_date: { type: string, format: date-time }
+      responses:
+        '200': { description: Received, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '409': { description: TRANSFER_ALREADY_RECEIVED, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+  /transfers/{id}/cancel:
+    post:
+      tags: [transfers]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                request_uuid: { type: string, format: uuid }
+                reason: { type: string }
+      responses:
+        '200': { description: Cancelled, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '409': { description: TRANSFER_ALREADY_CANCELLED, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+
+  /stock-opname:
+    post:
+      tags: [stock-opname]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [warehouse_id]
+              properties:
+                warehouse_id: { type: integer }
+                item_ids: { type: array, items: { type: integer }, nullable: true }
+      responses:
+        '200': { description: 'Session started {session_id}', content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /stock-opname/{id}:
+    get:
+      tags: [stock-opname]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        '200': { description: Session + lines, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /stock-opname/{id}/count:
+    post:
+      tags: [stock-opname]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                counts:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      item_id: { type: integer }
+                      counted_qty_base: { type: number }
+      responses:
+        '200': { description: Counts recorded, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /stock-opname/{id}/finalize:
+    post:
+      tags: [stock-opname]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        '200': { description: Finalized, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /stock-opname/{id}/post:
+    post:
+      tags: [stock-opname]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cost_overrides:
+                  type: object
+                  additionalProperties: { type: number }
+      responses:
+        '200': { description: Posted, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '422': { description: COST_REQUIRED, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+
+  /stock-adjustments:
+    post:
+      tags: [stock-adjustments]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction_uuid, item_id, warehouse_id, qty_base_delta, adjustment_type, reason]
+              properties:
+                transaction_uuid: { type: string, format: uuid }
+                item_id: { type: integer }
+                warehouse_id: { type: integer }
+                qty_base_delta: { type: number }
+                adjustment_type: { type: string, enum: [OPNAME, CORRECTION, DAMAGE, EXPIRED, LOSS, OTHER, NEGATIVE_OVERRIDE] }
+                reason: { type: string }
+                reference_no: { type: string, nullable: true }
+                override_cost_base: { type: number, nullable: true }
+      responses:
+        '200': { description: Posted, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '422': { description: COST_REQUIRED or NEGATIVE_STOCK, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+
+  /production:
+    post:
+      tags: [production]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [production_uuid, warehouse_id, production_date, inputs, output]
+              properties:
+                production_uuid: { type: string, format: uuid }
+                warehouse_id: { type: integer }
+                production_date: { type: string, format: date-time }
+                division_id: { type: integer, nullable: true }
+                inputs:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      item_id: { type: integer }
+                      input_qty: { type: number }
+                      input_unit_id: { type: integer }
+                output:
+                  type: object
+                  properties:
+                    item_id: { type: integer }
+                    output_qty: { type: number }
+                    output_unit_id: { type: integer, nullable: true }
+      responses:
+        '200': { description: Posted, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /production/{id}:
+    get:
+      tags: [production]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        '200': { description: Production detail, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /book-closing/preview:
+    post:
+      tags: [book-closing]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [period_start, period_end]
+              properties:
+                period_start: { type: string, format: date }
+                period_end: { type: string, format: date }
+      responses:
+        '200': { description: Preview, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /book-closing/close:
+    post:
+      tags: [book-closing]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [period_start, period_end]
+              properties:
+                period_start: { type: string, format: date }
+                period_end: { type: string, format: date }
+      responses:
+        '200': { description: Closed, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /book-closing:
+    get:
+      tags: [book-closing]
+      responses:
+        '200': { description: All closings, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /book-closing/next-closeable:
+    get:
+      tags: [book-closing]
+      responses:
+        '200': { description: '{next_closeable_period_start}', content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+
+  /reconciliation:
+    get:
+      tags: [reconciliation]
+      responses:
+        '200': { description: Reconciliation report, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+
+  /import/master-item/stage:
+    post:
+      tags: [import]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_path]
+              properties:
+                file_path: { type: string }
+                file_name: { type: string, nullable: true }
+      responses:
+        '200': { description: '{import_batch_id}', content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /import/master-item/{id}/commit:
+    post:
+      tags: [import]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        '200': { description: Committed, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '422': { description: IMPORT_VALIDATION_FAILED, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+  /import/{type}/stage:
+    post:
+      tags: [import]
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema: { type: string, enum: [supplier, division, warehouse] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_path]
+              properties:
+                file_path: { type: string }
+                file_name: { type: string, nullable: true }
+      responses:
+        '200': { description: '{import_batch_id}', content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /import/{type}/{id}/commit:
+    post:
+      tags: [import]
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema: { type: string, enum: [supplier, division, warehouse] }
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: Committed, content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '422': { description: IMPORT_VALIDATION_FAILED, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+  /import/opening-stock/stage:
+    post:
+      tags: [import]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_path]
+              properties:
+                file_path: { type: string }
+                file_name: { type: string, nullable: true }
+      responses:
+        '200': { description: '{stock_opening_id}', content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /import/opening-stock/{id}/commit:
+    post:
+      tags: [import]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        '200': { description: 'Committed — creates real batches', content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '422': { description: IMPORT_VALIDATION_FAILED, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+  /import/historical/stage:
+    post:
+      tags: [import]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_path]
+              properties:
+                file_path: { type: string }
+                file_name: { type: string, nullable: true }
+      responses:
+        '200': { description: '{import_batch_id}', content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+  /import/historical/{id}/commit:
+    post:
+      tags: [import]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        '200': { description: 'Committed — never touches stock (inventory_effect=0)', content: { application/json: { schema: { $ref: '#/components/schemas/SuccessEnvelope' } } } }
+        '422': { description: IMPORT_VALIDATION_FAILED, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }

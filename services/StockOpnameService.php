@@ -57,7 +57,7 @@ final class StockOpnameService
         $session->execute(['id' => $sessionId]);
         $session = $session->fetch();
         if (!$session) {
-            throw new ValidationException(['opname session not found']);
+            throw new NotFoundException('opname session not found');
         }
         $lines = $pdo->prepare(
             'SELECT sol.*, i.sku, i.name FROM stock_opname_lines sol JOIN items i ON i.id = sol.item_id WHERE session_id = :id ORDER BY i.name'
@@ -135,7 +135,7 @@ final class StockOpnameService
         $session->execute(['id' => $sessionId]);
         $session = $session->fetch();
         if (!$session) {
-            throw new ValidationException(['opname session not found']);
+            throw new NotFoundException('opname session not found');
         }
 
         if ($session['status'] === 'POSTED') {
@@ -196,7 +196,7 @@ final class StockOpnameService
         $stmt->execute(['id' => $sessionId]);
         $session = $stmt->fetch();
         if (!$session) {
-            throw new ValidationException(['opname session not found']);
+            throw new NotFoundException('opname session not found');
         }
         if ($session['status'] !== $expected) {
             throw new ValidationException(["opname session must be {$expected}, currently {$session['status']}"]);

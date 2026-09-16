@@ -150,7 +150,8 @@ final class InventoryService
         if (in_array($transactionType, self::NEGATIVE_TYPES, true)) {
             return -abs($baseQty);
         }
-        // ADJUSTMENT: base_qty is already signed by StockAdjustmentService.
+        // ADJUSTMENT (StockAdjustmentService) and REVERSAL (VoidService) both
+        // store base_qty already signed at post time — used as-is.
         return $baseQty;
     }
 }

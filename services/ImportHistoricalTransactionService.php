@@ -108,10 +108,10 @@ final class ImportHistoricalTransactionService
         $batch->execute(['id' => $importBatchId]);
         $batch = $batch->fetch();
         if (!$batch) {
-            throw new ValidationException(['import batch not found']);
+            throw new NotFoundException('import batch not found');
         }
         if ((int) $batch['error_rows'] > 0) {
-            throw new ValidationException(['import rejected: batch has ' . $batch['error_rows'] . ' ERROR row(s)']);
+            throw new ImportValidationException(['import rejected: batch has ' . $batch['error_rows'] . ' ERROR row(s)']);
         }
 
         $rowsStmt = $pdo->prepare(

@@ -21,9 +21,30 @@ use PDO;
  */
 final class BookClosingService
 {
+    /**
+     * PHASE D0.4: the day after the last LOCKED period's period_end, or NULL
+     * if nothing has ever been closed (the very first closing is
+     * unconstrained — there is no prior period to continue from). The
+     * frontend is expected to show ONLY this period for closing — never let
+     * a user pick an arbitrary future period (Section: "User jangan diberi
+     * pilihan langsung closing Oktober").
+     */
+    public static function nextCloseablePeriodStart(PDO $pdo): ?string
+    {
+        $lastEnd = $pdo->query("SELECT MAX(period_end) FROM book_closings WHERE status = 'LOCKED'")->fetchColumn();
+        if ($lastEnd === false || $lastEnd === null) {
+            return null;
+        }
+        return date('Y-m-d', strtotime((string) $lastEnd . ' +1 day'));
+    }
+
     public static function preview(PDO $pdo, string $periodStart, string $periodEnd): array
     {
         $blockers = self::blockers($pdo, $periodStart, $periodEnd);
+        $nextCloseable = self::nextCloseablePeriodStart($pdo);
+        if ($nextCloseable !== null && $periodStart !== $nextCloseable) {
+            $blockers[] = "periods must close in chronological order — next_closeable_period starts {$nextCloseable}";
+        }
 
         $onHand = InventoryService::companyOnHandValue($pdo);
         $inTransit = InventoryService::inTransitValue($pdo);
@@ -35,6 +56,7 @@ final class BookClosingService
         return [
             'period_start' => $periodStart,
             'period_end' => $periodEnd,
+            'next_closeable_period_start' => $nextCloseable,
             'ending_inventory_value' => $onHand,
             'in_transit_value' => $inTransit,
             'total_company_value' => round($onHand + $inTransit, 4),
@@ -53,6 +75,11 @@ final class BookClosingService
         $existing = $existing->fetch();
         if ($existing && $existing['status'] === 'LOCKED') {
             return ['success' => true, 'idempotent_replay' => true, 'book_closing_id' => (int) $existing['id']];
+        }
+
+        $nextCloseable = self::nextCloseablePeriodStart($pdo);
+        if ($nextCloseable !== null && $periodStart !== $nextCloseable) {
+            throw new ValidationException(["periods must close in chronological order — next_closeable_period starts {$nextCloseable}, not {$periodStart}"]);
         }
 
         $blockers = self::blockers($pdo, $periodStart, $periodEnd);
@@ -116,7 +143,7 @@ final class BookClosingService
 
         AuditService::log($pdo, $userId, 'system', 'BOOK_CLOSE', 'book_closings', $closingId, null, $preview, null);
 
-        return ['success' => true, 'book_closing_id' => $closingId] + $preview;
+        return ['success' => true, 'book_closing_id' => $closingId, 'closed_by' => $userId, 'closed_at' => $now] + $preview;
     }
 
     public static function listAll(PDO $pdo): array

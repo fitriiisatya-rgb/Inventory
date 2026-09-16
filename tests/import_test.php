@@ -9,7 +9,7 @@ require_once __DIR__ . '/../services/UnitConversionService.php';
 require_once __DIR__ . '/../services/ImportMasterItemService.php';
 
 use App\Services\ImportMasterItemService;
-use App\Services\ValidationException;
+use App\Services\ImportValidationException;
 
 function fresh_pdo(): PDO
 {
@@ -62,7 +62,7 @@ check('stage: 1 valid + 1 error detected', (int) $batch2['valid_rows'] === 1 && 
 $rejected = false;
 try {
     ImportMasterItemService::commit($pdo2, $batchId2, 1);
-} catch (ValidationException $e) {
+} catch (ImportValidationException $e) {
     $rejected = true;
 }
 check('commit throws ValidationException while any row is ERROR', $rejected);

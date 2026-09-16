@@ -208,7 +208,7 @@ CREATE TABLE inventory_transactions (
     -- for the whole multi-line request.
     transaction_uuid    VARCHAR(100) NOT NULL UNIQUE,
     transaction_type    ENUM('IN','OUT','TRANSFER_OUT','TRANSFER_IN','ADJUSTMENT',
-                              'OPNAME','PRODUCTION_IN','PRODUCTION_OUT','OPENING') NOT NULL,
+                              'OPNAME','PRODUCTION_IN','PRODUCTION_OUT','OPENING','REVERSAL') NOT NULL,
     transaction_date    DATETIME NOT NULL,                -- business-effective date (drives FIFO ordering)
     posting_date        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     warehouse_id        INT UNSIGNED NOT NULL,
@@ -412,6 +412,12 @@ CREATE TABLE warehouse_transfers (
     cancel_reason        VARCHAR(255) NULL,
     cancelled_by          INT UNSIGNED NULL,
     cancelled_at          DATETIME NULL,
+    -- Distinguish "same request retried" (idempotent no-op) from "a genuinely
+    -- new attempt to receive/cancel a transfer that's already in that state"
+    -- (TRANSFER_ALREADY_RECEIVED / TRANSFER_ALREADY_CANCELLED) — see VoidService's
+    -- sibling pattern for transactions.
+    receive_request_uuid  VARCHAR(100) NULL,
+    cancel_request_uuid   VARCHAR(100) NULL,
     created_by           INT UNSIGNED NOT NULL,
     received_by          INT UNSIGNED NULL,
     created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -616,6 +622,7 @@ INSERT INTO permissions (code, description) VALUES
     ('TRANSACTION_IN_CREATE',      'Create incoming stock transactions'),
     ('TRANSACTION_OUT_CREATE',     'Create outgoing stock transactions'),
     ('TRANSACTION_VOID',           'Void/reverse a posted transaction'),
+    ('TRANSACTION_VOID_LOCKED_PERIOD', 'Void a transaction dated inside an already-LOCKED period (documented superadmin correction mechanism)'),
     ('STOCK_ALLOW_NEGATIVE',       'Override negative-stock block'),
     ('PRICE_ANOMALY_APPROVE',      'Approve a price-anomaly transaction'),
     ('MASTER_ITEM_MANAGE',         'Create/edit item master data'),
@@ -638,7 +645,7 @@ SELECT r.id, p.id FROM roles r CROSS JOIN permissions p WHERE r.code = 'SUPERADM
 
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r, permissions p
-WHERE r.code = 'ADMIN' AND p.code NOT IN ('SYSTEM_SETTINGS_MANAGE','USER_MANAGE');
+WHERE r.code = 'ADMIN' AND p.code NOT IN ('SYSTEM_SETTINGS_MANAGE','USER_MANAGE','TRANSACTION_VOID_LOCKED_PERIOD');
 
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r, permissions p

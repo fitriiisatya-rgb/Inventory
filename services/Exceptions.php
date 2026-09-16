@@ -5,7 +5,7 @@ namespace App\Services;
 
 use RuntimeException;
 
-/** Section 8: OUT/TRANSFER_OUT/PRODUCTION_IN would take stock below zero and no override was granted. */
+/** Section 8: OUT/TRANSFER_OUT/PRODUCTION_IN would take stock below zero and no override was granted. Error code: INSUFFICIENT_STOCK. */
 final class InsufficientStockException extends RuntimeException
 {
     public function __construct(
@@ -13,10 +13,78 @@ final class InsufficientStockException extends RuntimeException
         public readonly float $availableBaseQty
     ) {
         parent::__construct(sprintf(
-            'STOCK_INSUFFICIENT: requested %.6f but only %.6f available',
+            'INSUFFICIENT_STOCK: requested %.6f but only %.6f available',
             $requestedBaseQty,
             $availableBaseQty
         ));
+    }
+}
+
+/** A stock adjustment/correction would take stock below zero and no override was granted. Error code: NEGATIVE_STOCK (distinct from a plain OUT transaction's INSUFFICIENT_STOCK). */
+final class NegativeStockException extends RuntimeException
+{
+    public function __construct(
+        public readonly float $requestedBaseQty,
+        public readonly float $availableBaseQty
+    ) {
+        parent::__construct(sprintf(
+            'NEGATIVE_STOCK: adjustment of %.6f would take stock below zero (only %.6f available)',
+            $requestedBaseQty,
+            $availableBaseQty
+        ));
+    }
+}
+
+/** A requested entity (by id, or by natural key) does not exist. Error code: NOT_FOUND. */
+final class NotFoundException extends RuntimeException
+{
+    public function __construct(string $what)
+    {
+        parent::__construct("NOT_FOUND: {$what}");
+    }
+}
+
+/** Genuinely new attempt (different request_uuid) to receive a transfer that is already RECEIVED. */
+final class TransferAlreadyReceivedException extends RuntimeException
+{
+    public function __construct(public readonly int $transferId)
+    {
+        parent::__construct("TRANSFER_ALREADY_RECEIVED: transfer {$transferId} has already been received");
+    }
+}
+
+/** Genuinely new attempt (different request_uuid) to cancel a transfer that is already CANCELLED. */
+final class TransferAlreadyCancelledException extends RuntimeException
+{
+    public function __construct(public readonly int $transferId)
+    {
+        parent::__construct("TRANSFER_ALREADY_CANCELLED: transfer {$transferId} has already been cancelled");
+    }
+}
+
+/**
+ * Two concurrent requests raced with the SAME idempotency key and both
+ * passed the "does this uuid already exist" pre-check before either had
+ * committed — the DB's own UNIQUE constraint on transaction_uuid is the
+ * real backstop, and its violation is translated to this. Error code:
+ * DUPLICATE_REQUEST (409). This is different from the normal idempotent-
+ * replay path (a uuid found already committed returns success, not this).
+ */
+final class DuplicateRequestException extends RuntimeException
+{
+    public function __construct()
+    {
+        parent::__construct('DUPLICATE_REQUEST: this request is already being processed or was just processed');
+    }
+}
+
+/** Import commit refused because the staged batch has ERROR rows. Error code: IMPORT_VALIDATION_FAILED. */
+final class ImportValidationException extends RuntimeException
+{
+    /** @param string[] $errors */
+    public function __construct(public readonly array $errors)
+    {
+        parent::__construct('IMPORT_VALIDATION_FAILED: ' . implode('; ', $errors));
     }
 }
 

@@ -111,10 +111,10 @@ final class ImportSimpleMasterService
         $batch->execute(['id' => $importBatchId, 'type' => $importType]);
         $batch = $batch->fetch();
         if (!$batch) {
-            throw new ValidationException(['import batch not found for this type']);
+            throw new NotFoundException('import batch not found for this type');
         }
         if ((int) $batch['error_rows'] > 0) {
-            throw new ValidationException(['import rejected: batch has ' . $batch['error_rows'] . ' ERROR row(s)']);
+            throw new ImportValidationException(['import rejected: batch has ' . $batch['error_rows'] . ' ERROR row(s)']);
         }
 
         $rowsStmt = $pdo->prepare(
