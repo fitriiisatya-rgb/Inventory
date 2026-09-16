@@ -82,6 +82,7 @@ Errors: `UNAUTHENTICATED` (invalid credentials, code 401), `RATE_LIMITED`.
 | GET | `/warehouses` | any authenticated user | array of warehouse rows |
 | GET | `/suppliers` | any authenticated user | array of supplier rows |
 | GET | `/divisions` | any authenticated user | array of division rows |
+| GET | `/items/{id}/units` | any authenticated user | array of `{id, code, name, conversion_to_base, is_purchase_default}` — this item's currently-open unit conversions (base unit included), for populating a transaction form's unit dropdown. Added in Phase D5/D6. |
 
 ## Inventory (InventoryService — single source of truth, Section 7)
 

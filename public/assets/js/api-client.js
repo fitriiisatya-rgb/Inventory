@@ -109,6 +109,7 @@ const InvApi = (() => {
         listWarehouses: () => request('GET', '/warehouses'),
         listSuppliers: () => request('GET', '/suppliers'),
         listDivisions: () => request('GET', '/divisions'),
+        itemUnits: (itemId) => request('GET', `/items/${itemId}/units`),
 
         // ---- inventory (single source of truth) ----
         currentStock: (itemId, warehouseId) => request('GET', `/inventory/current?item_id=${itemId}&warehouse_id=${warehouseId}`),

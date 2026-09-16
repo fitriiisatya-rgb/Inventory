@@ -249,6 +249,20 @@ $routes = [
         inv_require_auth();
         inv_ok($pdo->query('SELECT * FROM divisions ORDER BY name')->fetchAll(), 'OK');
     },
+    // Units this item may be transacted in (its base unit plus any configured
+    // purchase/middle conversions) — Transaction IN/OUT forms need this to
+    // offer only valid units rather than free-typed unit ids.
+    'GET /items/{id}/units' => function (array $params) use ($pdo) {
+        inv_require_auth();
+        $stmt = $pdo->prepare(
+            'SELECT u.id, u.code, u.name, c.conversion_to_base, c.is_purchase_default
+             FROM item_unit_conversions c JOIN units u ON u.id = c.unit_id
+             WHERE c.item_id = :item_id AND c.valid_to IS NULL
+             ORDER BY c.is_purchase_default DESC, c.conversion_to_base DESC'
+        );
+        $stmt->execute(['item_id' => (int) $params['id']]);
+        inv_ok($stmt->fetchAll(), 'OK');
+    },
 
     // ---- InventoryService: single source of truth reads (Section 7) ----
     'GET /inventory/current' => function () use ($pdo, $query) {

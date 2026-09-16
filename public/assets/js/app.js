@@ -40,6 +40,10 @@
             Dashboard.render(document.getElementById('tab-dashboard'));
         } else if (name === 'master') {
             renderMasterTab(document.getElementById('tab-master'));
+        } else if (name === 'laporan') {
+            Reports.render(document.getElementById('tab-laporan'));
+        } else if (name === 'transaksi') {
+            Transactions.render(document.getElementById('tab-transaksi'));
         }
     }
 
