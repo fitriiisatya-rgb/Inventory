@@ -137,6 +137,8 @@ final class ImportMasterItemService
         $pdo->prepare('UPDATE import_batches SET status = \'COMMITTED\', committed_by = :by, committed_at = :at WHERE id = :id')
             ->execute(['by' => $committedBy, 'at' => date('Y-m-d H:i:s'), 'id' => $importBatchId]);
 
+        AuditService::log($pdo, $committedBy, 'system', 'MASTER_ITEM_IMPORT', 'import_batches', $importBatchId, null, ['items_created' => $created], null);
+
         return ['imported' => $created, 'skipped' => 0];
     }
 
@@ -195,9 +197,9 @@ final class ImportMasterItemService
         if ($handle === false) {
             throw new ValidationException(["cannot open file: {$path}"]);
         }
-        $header = fgetcsv($handle);
+        $header = fgetcsv($handle, null, ",", "\"", "");
         $rows = [];
-        while (($line = fgetcsv($handle)) !== false) {
+        while (($line = fgetcsv($handle, null, ",", "\"", "")) !== false) {
             if (count($line) === 1 && $line[0] === null) {
                 continue;
             }

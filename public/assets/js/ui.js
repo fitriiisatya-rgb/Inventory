@@ -1,0 +1,100 @@
+/**
+ * Shared UI helpers: toasts, modal open/close, number/date formatting,
+ * connection-lost banner. Pure DOM/presentation — no business logic,
+ * no direct fetch calls (that's api-client.js's job only).
+ */
+const UI = (() => {
+    let toastContainer = null;
+
+    function ensureToastContainer() {
+        if (!toastContainer) {
+            toastContainer = document.createElement('div');
+            toastContainer.className = 'toast-container';
+            document.body.appendChild(toastContainer);
+        }
+        return toastContainer;
+    }
+
+    function toast(message, type = 'info', durationMs = 4000) {
+        const container = ensureToastContainer();
+        const el = document.createElement('div');
+        el.className = `toast toast-${type}`;
+        el.textContent = message;
+        container.appendChild(el);
+        setTimeout(() => el.remove(), durationMs);
+    }
+
+    function showConnectionBanner(show) {
+        let banner = document.getElementById('connection-banner');
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.id = 'connection-banner';
+            banner.className = 'connection-banner';
+            banner.textContent = 'Sistem sedang tidak dapat terhubung ke server.';
+            document.body.prepend(banner);
+        }
+        banner.classList.toggle('show', show);
+    }
+
+    function openModal(id) {
+        document.getElementById(id)?.classList.add('open');
+    }
+    function closeModal(id) {
+        document.getElementById(id)?.classList.remove('open');
+    }
+
+    function formatMoney(value) {
+        const n = Number(value) || 0;
+        return 'Rp ' + n.toLocaleString('id-ID', { maximumFractionDigits: 2 });
+    }
+    function formatNumber(value, decimals = 2) {
+        const n = Number(value) || 0;
+        return n.toLocaleString('id-ID', { maximumFractionDigits: decimals });
+    }
+    function formatDate(value) {
+        if (!value) return '-';
+        const d = new Date(value.replace(' ', 'T'));
+        if (isNaN(d.getTime())) return value;
+        return d.toLocaleString('id-ID', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+
+    function badgeClass(status) {
+        const map = {
+            PENDING: 'badge-pending', RECEIVED: 'badge-received', CANCELLED: 'badge-cancelled',
+            OPEN: 'badge-open', FINALIZED: 'badge-finalized', POSTED: 'badge-posted',
+            VOID: 'badge-void', LOCKED: 'badge-locked', PASS: 'badge-pass',
+            WARNING: 'badge-warning', ERROR: 'badge-error',
+        };
+        return map[String(status).toUpperCase()] || 'badge-pending';
+    }
+
+    // Generic error → toast for any InvApi.ApiError/NetworkError thrown by a caller.
+    function handleApiError(err) {
+        if (err && err.code === 'NETWORK_ERROR') {
+            showConnectionBanner(true);
+            toast(err.message, 'error');
+            return;
+        }
+        toast((err && err.message) || 'Terjadi kesalahan', 'error');
+    }
+
+    function el(tag, attrs = {}, children = []) {
+        const node = document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs)) {
+            if (k === 'class') node.className = v;
+            else if (k === 'html') node.innerHTML = v;
+            else node.setAttribute(k, v);
+        }
+        for (const child of [].concat(children)) {
+            if (child == null) continue;
+            node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
+        }
+        return node;
+    }
+
+    return {
+        toast, showConnectionBanner, openModal, closeModal,
+        formatMoney, formatNumber, formatDate, badgeClass,
+        handleApiError, el,
+    };
+})();

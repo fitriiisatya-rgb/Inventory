@@ -453,10 +453,88 @@ $routes = [
         inv_ok(ReconciliationService::run($pdo), 'OK');
     },
 
+    // ---- Audit Log (PHASE D13) ----
+    'GET /audit-logs' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+
+        $where = [];
+        $params = [];
+        if (!empty($query['date_from'])) { $where[] = 'a.created_at >= :date_from'; $params['date_from'] = $query['date_from'] . ' 00:00:00'; }
+        if (!empty($query['date_to'])) { $where[] = 'a.created_at <= :date_to'; $params['date_to'] = $query['date_to'] . ' 23:59:59'; }
+        if (!empty($query['username'])) { $where[] = 'a.username_snapshot LIKE :username'; $params['username'] = '%' . $query['username'] . '%'; }
+        if (!empty($query['action_code'])) { $where[] = 'a.action_code = :action_code'; $params['action_code'] = $query['action_code']; }
+        if (!empty($query['entity_type'])) { $where[] = 'a.entity_type = :entity_type'; $params['entity_type'] = $query['entity_type']; }
+        $sql = 'SELECT a.* FROM audit_logs a' . (empty($where) ? '' : ' WHERE ' . implode(' AND ', $where)) . ' ORDER BY a.id DESC LIMIT 500';
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        inv_ok($stmt->fetchAll(), 'OK');
+    },
+
     // ---- Import module (PHASE E/E2). `file_path` must be a path already on
     // the server's disk (e.g. placed by a separate upload step) — this pass
     // does not implement multipart file upload handling itself (PHASE D12
     // gap, documented in docs/PHASE_C2_ENDPOINTS.md). ----
+    // PHASE D12: real multipart upload — closes the "file_path must already be
+    // on disk" gap noted in docs/PHASE_C2_ENDPOINTS.md. Saved under a
+    // dedicated, non-web-reachable storage/imports/ directory with a
+    // generated name (never the client's own filename) so this can't be used
+    // to overwrite or traverse into anything else on disk.
+    'POST /import/upload' => function () use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
+        if (empty($_FILES['file']) || ($_FILES['file']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            inv_error(422, 'VALIDATION_ERROR', 'No file uploaded (expected multipart/form-data field "file")');
+        }
+        $originalName = basename((string) $_FILES['file']['name']);
+        $ext = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+        if (!in_array($ext, ['csv', 'xlsx'], true)) {
+            inv_error(422, 'VALIDATION_ERROR', 'Only .csv or .xlsx files are accepted');
+        }
+        $storageDir = __DIR__ . '/../storage/imports';
+        if (!is_dir($storageDir)) {
+            mkdir($storageDir, 0755, true);
+        }
+        $storedName = date('Ymd_His') . '_' . bin2hex(random_bytes(8)) . '.' . $ext;
+        $destination = $storageDir . '/' . $storedName;
+        if (!move_uploaded_file($_FILES['file']['tmp_name'], $destination)) {
+            inv_error(500, 'INTERNAL_ERROR', 'Failed to store uploaded file');
+        }
+        inv_ok(['file_path' => $destination, 'file_name' => $originalName], 'Uploaded');
+    },
+
+    // PHASE D12: preview staged rows before commit (generic import_batches/import_rows path).
+    'GET /import/batches/{id}/rows' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
+        $batch = $pdo->prepare('SELECT * FROM import_batches WHERE id = :id');
+        $batch->execute(['id' => (int) $params['id']]);
+        $batch = $batch->fetch();
+        if (!$batch) {
+            inv_error(404, 'NOT_FOUND', 'import batch not found');
+        }
+        $rows = $pdo->prepare('SELECT * FROM import_rows WHERE import_batch_id = :id ORDER BY row_no');
+        $rows->execute(['id' => (int) $params['id']]);
+        inv_ok(['batch' => $batch, 'rows' => $rows->fetchAll()], 'OK');
+    },
+    // PHASE D12: preview for the Opening Stock path, which stages into stock_opening_lines instead.
+    'GET /import/opening-stock/{id}/rows' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
+        $opening = $pdo->prepare('SELECT * FROM stock_openings WHERE id = :id');
+        $opening->execute(['id' => (int) $params['id']]);
+        $opening = $opening->fetch();
+        if (!$opening) {
+            inv_error(404, 'NOT_FOUND', 'stock opening batch not found');
+        }
+        $lines = $pdo->prepare(
+            'SELECT sol.*, i.sku, i.name FROM stock_opening_lines sol JOIN items i ON i.id = sol.item_id
+             WHERE stock_opening_id = :id ORDER BY sol.id'
+        );
+        $lines->execute(['id' => (int) $params['id']]);
+        inv_ok(['opening' => $opening, 'lines' => $lines->fetchAll()], 'OK');
+    },
+
     'POST /import/master-item/stage' => function () use ($pdo, $input) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'IMPORT_MANAGE');

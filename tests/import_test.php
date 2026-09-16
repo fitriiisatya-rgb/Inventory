@@ -5,6 +5,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../services/Database.php';
 require_once __DIR__ . '/../services/Exceptions.php';
+require_once __DIR__ . '/../services/AuditService.php';
 require_once __DIR__ . '/../services/UnitConversionService.php';
 require_once __DIR__ . '/../services/ImportMasterItemService.php';
 

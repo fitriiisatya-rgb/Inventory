@@ -132,6 +132,8 @@ final class ImportHistoricalTransactionService
         $pdo->prepare('UPDATE import_batches SET status = \'COMMITTED\', committed_by = :by, committed_at = :now WHERE id = :id')
             ->execute(['by' => $committedBy, 'now' => date('Y-m-d H:i:s'), 'id' => $importBatchId]);
 
+        AuditService::log($pdo, $committedBy, 'system', 'HISTORICAL_TRANSACTION_IMPORT', 'import_batches', $importBatchId, null, ['rows_created' => $created], null);
+
         return ['imported' => $created];
     }
 
@@ -207,9 +209,9 @@ final class ImportHistoricalTransactionService
         if ($handle === false) {
             throw new ValidationException(["cannot open file: {$path}"]);
         }
-        $header = fgetcsv($handle);
+        $header = fgetcsv($handle, null, ",", "\"", "");
         $rows = [];
-        while (($line = fgetcsv($handle)) !== false) {
+        while (($line = fgetcsv($handle, null, ",", "\"", "")) !== false) {
             if (count($line) === 1 && $line[0] === null) {
                 continue;
             }

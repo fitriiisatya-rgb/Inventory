@@ -161,9 +161,9 @@ final class ImportOpeningStockService
         if ($handle === false) {
             throw new ValidationException(["cannot open file: {$path}"]);
         }
-        $header = fgetcsv($handle);
+        $header = fgetcsv($handle, null, ",", "\"", "");
         $rows = [];
-        while (($line = fgetcsv($handle)) !== false) {
+        while (($line = fgetcsv($handle, null, ",", "\"", "")) !== false) {
             if (count($line) === 1 && $line[0] === null) {
                 continue;
             }
