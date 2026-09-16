@@ -19,6 +19,7 @@ require_once __DIR__ . '/../services/Exceptions.php';
 require_once __DIR__ . '/../services/AuditService.php';
 require_once __DIR__ . '/../services/AuthService.php';
 require_once __DIR__ . '/../services/UnitConversionService.php';
+require_once __DIR__ . '/../services/UnitNormalizationService.php';
 require_once __DIR__ . '/../services/PriceAnomalyService.php';
 require_once __DIR__ . '/../services/IdempotencyService.php';
 require_once __DIR__ . '/../services/InventoryService.php';
@@ -31,6 +32,7 @@ require_once __DIR__ . '/../services/TransferService.php';
 require_once __DIR__ . '/../services/ProductionService.php';
 require_once __DIR__ . '/../services/BookClosingService.php';
 require_once __DIR__ . '/../services/ReconciliationService.php';
+require_once __DIR__ . '/../services/SystemHealthService.php';
 require_once __DIR__ . '/../services/VoidService.php';
 require_once __DIR__ . '/../services/ImportMasterItemService.php';
 require_once __DIR__ . '/../services/ImportSimpleMasterService.php';
@@ -60,6 +62,7 @@ use App\Services\StockAdjustmentService;
 use App\Services\ProductionService;
 use App\Services\BookClosingService;
 use App\Services\ReconciliationService;
+use App\Services\SystemHealthService;
 use App\Services\VoidService;
 use App\Services\ImportMasterItemService;
 use App\Services\ImportSimpleMasterService;
@@ -173,11 +176,18 @@ if (!in_array($method, ['GET', 'HEAD', 'OPTIONS'], true) && $path !== '/auth/log
     }
 }
 
-function inv_require_auth(): array
+function inv_require_auth(bool $allowPasswordChangePending = false): array
 {
     $user = AuthService::currentUser();
     if ($user === null) {
         inv_error(401, 'UNAUTHENTICATED', 'Not authenticated');
+    }
+    // PHASE G21: a provisioned account (temp generated password) can do
+    // nothing except change its password until it does — enforced here so
+    // every other route in this file inherits the block automatically,
+    // without needing its own check.
+    if (!$allowPasswordChangePending && !empty($user['must_change_password'])) {
+        inv_error(403, 'PASSWORD_CHANGE_REQUIRED', 'Password must be changed before continuing');
     }
     return $user;
 }
@@ -219,7 +229,11 @@ $routes = [
         if ($user === null) {
             inv_error(401, 'UNAUTHENTICATED', 'Invalid credentials');
         }
-        inv_ok(['username' => $user['username'], 'role' => $user['role_code'], 'csrf_token' => AuthService::csrfToken()], 'Logged in');
+        inv_ok([
+            'username' => $user['username'], 'role' => $user['role_code'],
+            'must_change_password' => (bool) $user['must_change_password'],
+            'csrf_token' => AuthService::csrfToken(),
+        ], 'Logged in');
     },
     'POST /auth/logout' => function () {
         AuthService::logout();
@@ -231,6 +245,12 @@ $routes = [
             $user['csrf_token'] = AuthService::csrfToken();
         }
         inv_ok($user, 'OK');
+    },
+    // PHASE G21: the one action allowed while must_change_password=1.
+    'POST /auth/change-password' => function () use ($pdo, $input) {
+        $user = inv_require_auth(true);
+        AuthService::changePassword($pdo, (int) $user['id'], (string) ($input['current_password'] ?? ''), (string) ($input['new_password'] ?? ''));
+        inv_ok(null, 'Password changed');
     },
 
     'GET /items' => function () use ($pdo) {
@@ -486,6 +506,15 @@ $routes = [
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'RECONCILIATION_VIEW');
         inv_ok(ReconciliationService::run($pdo), 'OK');
+    },
+
+    // ---- System Health (PHASE G25 — post-go-live monitoring) ----
+    'GET /system/health' => function () use ($pdo) {
+        $user = inv_require_auth();
+        if (!in_array($user['role_code'], ['ADMIN', 'SUPERADMIN'], true)) {
+            inv_error(403, 'FORBIDDEN', 'System health is restricted to ADMIN/SUPERADMIN');
+        }
+        inv_ok(SystemHealthService::check($pdo), 'OK');
     },
 
     // ---- Audit Log (PHASE D13) ----

@@ -6,17 +6,33 @@
 (() => {
     const loginScreen = document.getElementById('login-screen');
     const appShell = document.getElementById('app-shell');
+    const changePasswordScreen = document.getElementById('change-password-screen');
     const loginForm = document.getElementById('login-form');
     const loginAlert = document.getElementById('login-alert');
     const loginSubmit = document.getElementById('login-submit');
+    const changePasswordForm = document.getElementById('change-password-form');
+    const changePasswordAlert = document.getElementById('change-password-alert');
+    const changePasswordSubmit = document.getElementById('change-password-submit');
 
     function showLogin() {
         loginScreen.style.display = 'block';
+        changePasswordScreen.style.display = 'none';
+        appShell.style.display = 'none';
+    }
+
+    function showChangePassword() {
+        loginScreen.style.display = 'none';
+        changePasswordScreen.style.display = 'block';
         appShell.style.display = 'none';
     }
 
     async function showApp() {
+        if (Auth.user().must_change_password) {
+            showChangePassword();
+            return;
+        }
         loginScreen.style.display = 'none';
+        changePasswordScreen.style.display = 'none';
         appShell.style.display = 'block';
         const user = Auth.user();
         document.getElementById('username-chip').textContent = user.username;
@@ -104,6 +120,26 @@
             loginAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Login gagal'));
         } finally {
             loginSubmit.disabled = false;
+        }
+    });
+
+    changePasswordForm.addEventListener('submit', async (evt) => {
+        evt.preventDefault();
+        changePasswordAlert.innerHTML = '';
+        changePasswordSubmit.disabled = true;
+        try {
+            const current = document.getElementById('change-password-current').value;
+            const next = document.getElementById('change-password-new').value;
+            await InvApi.changePassword(current, next);
+            UI.toast('Password berhasil diganti. Silakan login ulang dengan password baru.', 'success');
+            await Auth.logout();
+            document.getElementById('change-password-current').value = '';
+            document.getElementById('change-password-new').value = '';
+            showLogin();
+        } catch (err) {
+            changePasswordAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal mengganti password'));
+        } finally {
+            changePasswordSubmit.disabled = false;
         }
     });
 

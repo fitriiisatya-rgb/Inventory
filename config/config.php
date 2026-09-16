@@ -80,6 +80,15 @@ return [
         'price_anomaly_low_multiplier'  => (float) inv_env('PRICE_ANOMALY_LOW_MULTIPLIER', 0.2),
         'allow_negative_stock_default'  => (bool) inv_env('ALLOW_NEGATIVE_STOCK_DEFAULT', false),
     ],
+    // PHASE G12: deliberately unset by default. This is NOT chosen by this
+    // codebase — a human picks it, in writing, only after every gate in
+    // docs/PHASE_G_CUTOVER_CHECKLIST.md is green. Nothing in this repo
+    // reads this key yet; it exists so the *deployment config* has a named
+    // place to record the decision once made, rather than the date living
+    // only in someone's memory or a chat message.
+    'cutover' => [
+        'cutover_date' => inv_env('CUTOVER_DATE', null), // e.g. '2026-10-01' — set only after full checklist sign-off
+    ],
     'log' => [
         'path' => $root . '/' . inv_env('LOG_PATH', 'storage/logs/app.log'),
     ],

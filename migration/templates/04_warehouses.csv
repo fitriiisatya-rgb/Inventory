@@ -1,0 +1,4 @@
+warehouse_code,warehouse_name,warehouse_type,status
+SCM,Gudang SCM,MAIN,ACTIVE
+CBD,Gudang Cibadak,TRANSIT,ACTIVE
+KT,Gudang Karang Tengah,TRANSIT,ACTIVE

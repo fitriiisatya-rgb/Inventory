@@ -1,0 +1,4 @@
+transaction_date,posting_date,type,warehouse_code,sku,qty_base,unit_cost_base,total,supplier_code,division_code,reference,description,original_legacy_id,operator
+2026-08-01,2026-08-01,IN,SCM,RM-TP-001,5000,12.0,60000,SUP-001,,PO-2026-0801,Pembelian rutin,LEGACY-000123,budi
+2026-08-02,2026-08-02,OUT,SCM,RM-TP-001,1000,12.0,12000,,PROD-KT,WO-2026-0802,Dipakai produksi,LEGACY-000124,siti
+2026-08-03,2026-08-03,TRANSFER_OUT,SCM,RM-GL-002,500,15.0,7500,,,TRF-2026-0803,Transfer ke Cibadak,LEGACY-000125,budi

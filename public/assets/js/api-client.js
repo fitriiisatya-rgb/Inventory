@@ -103,6 +103,7 @@ const InvApi = (() => {
         login: (username, password) => request('POST', '/auth/login', { username, password }),
         logout: () => request('POST', '/auth/logout'),
         me: () => request('GET', '/auth/me'),
+        changePassword: (currentPassword, newPassword) => request('POST', '/auth/change-password', { current_password: currentPassword, new_password: newPassword }),
 
         // ---- master ----
         listItems: () => request('GET', '/items'),

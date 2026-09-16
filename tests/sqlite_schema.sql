@@ -65,6 +65,8 @@ CREATE TABLE items (
     brand TEXT,
     base_unit_id INTEGER NOT NULL,
     minimum_stock REAL NOT NULL DEFAULT 0,
+    default_supplier_id INTEGER,
+    notes TEXT,
     status TEXT NOT NULL DEFAULT 'ACTIVE',
     locked_at TEXT,
     created_at TEXT,
@@ -219,3 +221,13 @@ CREATE TABLE audit_logs (
     reason TEXT,
     created_at TEXT
 );
+
+-- PHASE G2.1: mirrors the canonical unit list seeded in database/schema.sql
+-- so UnitNormalizationService behaves identically under test — production
+-- always has these rows present (seeded at install time) before any import
+-- ever runs, so tests must start from the same baseline rather than relying
+-- on auto-creation.
+INSERT INTO units (code, name) VALUES
+    ('GR','Gram'), ('KG','Kilogram'), ('ML','Mililiter'), ('LTR','Liter'),
+    ('PCS','Pieces'), ('BOX','Box'), ('KARTON','Karton'), ('KARUNG','Karung'), ('LUSIN','Lusin'),
+    ('PACK','Pack'), ('ROLL','Roll');

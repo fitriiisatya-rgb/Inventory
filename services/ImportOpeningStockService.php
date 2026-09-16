@@ -21,6 +21,11 @@ use PDO;
  */
 final class ImportOpeningStockService
 {
+    // PHASE G15: control-total mismatch tolerance — anything beyond plain
+    // decimal rounding is treated as a real discrepancy, never silently
+    // accepted.
+    private const CONTROL_TOTAL_TOLERANCE = 1.0;
+
     public static function stage(PDO $pdo, string $csvPath, string $fileName, int $createdBy): int
     {
         $rows = self::readCsv($csvPath);
@@ -55,7 +60,41 @@ final class ImportOpeningStockService
             ]);
         }
 
+        self::recordControlTotal($pdo, $openingId);
+
         return $openingId;
+    }
+
+    /**
+     * PHASE G15: snapshots the expected total value (overall + per
+     * warehouse) from the rows AS STAGED — computed once, before commit
+     * ever runs, so commit() has an independent figure to check itself
+     * against rather than trusting its own arithmetic.
+     */
+    private static function recordControlTotal(PDO $pdo, int $openingId): void
+    {
+        $overall = $pdo->prepare(
+            "SELECT COALESCE(SUM(qty_base * unit_cost_base), 0) FROM stock_opening_lines
+             WHERE stock_opening_id = :id AND row_status IN ('VALID','WARNING')"
+        );
+        $overall->execute(['id' => $openingId]);
+        $total = round((float) $overall->fetchColumn(), 4);
+
+        $perWarehouse = $pdo->prepare(
+            "SELECT w.code, COALESCE(SUM(sol.qty_base * sol.unit_cost_base), 0) AS value
+             FROM stock_opening_lines sol
+             JOIN warehouses w ON w.id = sol.warehouse_id
+             WHERE sol.stock_opening_id = :id AND sol.row_status IN ('VALID','WARNING')
+             GROUP BY w.code"
+        );
+        $perWarehouse->execute(['id' => $openingId]);
+        $byWarehouse = [];
+        foreach ($perWarehouse->fetchAll() as $row) {
+            $byWarehouse[$row['code']] = round((float) $row['value'], 4);
+        }
+
+        $pdo->prepare('UPDATE stock_openings SET control_total_value = :total, control_total_by_warehouse = :by_wh WHERE id = :id')
+            ->execute(['total' => $total, 'by_wh' => json_encode($byWarehouse, JSON_UNESCAPED_UNICODE), 'id' => $openingId]);
     }
 
     /** @return array{0:string,1:string[],2:?int,3:?int} */
@@ -140,12 +179,39 @@ final class ImportOpeningStockService
             $created++;
         }
 
+        // PHASE G15: verify what actually landed matches the control total
+        // computed at staging time, BEFORE flipping status to COMMITTED.
+        // A mismatch throws here — the caller always wraps commit() in
+        // Database::transaction(), so this exception rolls back every batch
+        // just created in this loop rather than leaving a partial import.
+        self::assertControlTotalMatches($pdo, $openingId, (float) $opening['control_total_value']);
+
         $pdo->prepare('UPDATE stock_openings SET status = \'COMMITTED\', committed_by = :by, committed_at = :now WHERE id = :id')
             ->execute(['by' => $committedBy, 'now' => date('Y-m-d H:i:s'), 'id' => $openingId]);
 
-        AuditService::log($pdo, $committedBy, 'system', 'OPENING_IMPORT', 'stock_openings', $openingId, null, ['lines_created' => $created], null);
+        AuditService::log($pdo, $committedBy, 'system', 'OPENING_IMPORT', 'stock_openings', $openingId, null, ['lines_created' => $created, 'control_total_value' => $opening['control_total_value']], null);
 
-        return ['imported' => $created];
+        return ['imported' => $created, 'control_total_value' => (float) $opening['control_total_value']];
+    }
+
+    private static function assertControlTotalMatches(PDO $pdo, int $openingId, float $expectedTotal): void
+    {
+        $actual = $pdo->prepare(
+            'SELECT COALESCE(SUM(b.qty_base * b.unit_cost_base), 0)
+             FROM stock_opening_lines sol
+             JOIN inventory_batches b ON b.id = sol.created_batch_id
+             WHERE sol.stock_opening_id = :id AND sol.created_batch_id IS NOT NULL'
+        );
+        $actual->execute(['id' => $openingId]);
+        $actualTotal = round((float) $actual->fetchColumn(), 4);
+
+        if (abs($expectedTotal - $actualTotal) > self::CONTROL_TOTAL_TOLERANCE) {
+            throw new ValidationException([
+                "opening control total mismatch: staged total was Rp" . number_format($expectedTotal, 2) .
+                " but committed batches total Rp" . number_format($actualTotal, 2) .
+                " — import rolled back, nothing was committed",
+            ]);
+        }
     }
 
     private static function baseUnitId(PDO $pdo, int $itemId): int

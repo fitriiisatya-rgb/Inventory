@@ -4,4 +4,10 @@ node_modules/
 storage/logs/*.log
 storage/imports/*
 !storage/imports/.gitkeep
+migration/workspace/raw/*
+migration/workspace/normalized/*
+migration/workspace/approved/*
+migration/workspace/rejected/*
+migration/workspace/reports/*
+!migration/workspace/*/.gitkeep
 vendor/

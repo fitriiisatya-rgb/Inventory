@@ -29,6 +29,11 @@ final class ImportSimpleMasterService
         'WAREHOUSE' => ['code' => 'warehouse_code', 'name' => 'warehouse_name'],
     ];
 
+    // PHASE G3/G5: extra columns beyond code/name/status, specific to each
+    // type. Optional — never required, so existing minimal templates keep
+    // working unchanged.
+    private const WAREHOUSE_TYPES = ['MAIN', 'TRANSIT'];
+
     public static function stage(PDO $pdo, string $importType, string $csvPath, string $fileName, int $uploadedBy): int
     {
         self::assertKnownType($importType);
@@ -99,6 +104,13 @@ final class ImportSimpleMasterService
             return ['ERROR', ["status must be ACTIVE or INACTIVE, got: {$status}"]];
         }
 
+        if (isset($row['warehouse_type']) && trim((string) $row['warehouse_type']) !== '') {
+            $type = strtoupper(trim((string) $row['warehouse_type']));
+            if (!in_array($type, self::WAREHOUSE_TYPES, true)) {
+                return ['ERROR', ['warehouse_type must be MAIN or TRANSIT, got: ' . $type]];
+            }
+        }
+
         return ['VALID', []];
     }
 
@@ -124,14 +136,23 @@ final class ImportSimpleMasterService
         $rows = $rowsStmt->fetchAll();
 
         $columns = self::COLUMNS[$importType];
-        $insert = $pdo->prepare("INSERT INTO {$table} (code, name, is_active) VALUES (:code, :name, :active)");
+        $insert = self::buildInsertStatement($pdo, $table, $importType);
         $created = 0;
         foreach ($rows as $importRow) {
             $data = json_decode($importRow['raw_data'], true);
-            $insert->execute([
+            $params = [
                 'code' => trim($data[$columns['code']]), 'name' => trim($data[$columns['name']]),
                 'active' => strtoupper(trim($data['status'] ?? 'ACTIVE')) === 'ACTIVE' ? 1 : 0,
-            ]);
+            ];
+            if ($importType === 'SUPPLIER') {
+                $params['contact_name'] = trim((string) ($data['contact_name'] ?? '')) ?: null;
+                $params['phone'] = trim((string) ($data['phone'] ?? '')) ?: null;
+                $params['notes'] = trim((string) ($data['notes'] ?? '')) ?: null;
+            }
+            if ($importType === 'WAREHOUSE') {
+                $params['warehouse_type'] = strtoupper(trim((string) ($data['warehouse_type'] ?? ''))) ?: 'MAIN';
+            }
+            $insert->execute($params);
             $entityId = (int) $pdo->lastInsertId();
             $pdo->prepare('UPDATE import_rows SET created_entity_id = :entity_id WHERE id = :id')
                 ->execute(['entity_id' => $entityId, 'id' => $importRow['id']]);
@@ -144,6 +165,22 @@ final class ImportSimpleMasterService
         AuditService::log($pdo, $committedBy, 'system', "{$importType}_IMPORT", 'import_batches', $importBatchId, null, ['rows_created' => $created], null);
 
         return ['imported' => $created, 'skipped' => 0];
+    }
+
+    private static function buildInsertStatement(PDO $pdo, string $table, string $importType): \PDOStatement
+    {
+        if ($importType === 'SUPPLIER') {
+            return $pdo->prepare(
+                "INSERT INTO {$table} (code, name, contact_name, phone, notes, is_active)
+                 VALUES (:code, :name, :contact_name, :phone, :notes, :active)"
+            );
+        }
+        if ($importType === 'WAREHOUSE') {
+            return $pdo->prepare(
+                "INSERT INTO {$table} (code, name, warehouse_type, is_active) VALUES (:code, :name, :warehouse_type, :active)"
+            );
+        }
+        return $pdo->prepare("INSERT INTO {$table} (code, name, is_active) VALUES (:code, :name, :active)");
     }
 
     private static function assertKnownType(string $importType): void

@@ -48,6 +48,7 @@ existing code's *meaning* never changes without a version bump to this file.
 | `INSUFFICIENT_STOCK` | 422 | A plain OUT/TRANSFER_OUT/PRODUCTION_IN transaction would take stock below zero and no override was granted. |
 | `IMPORT_VALIDATION_FAILED` | 422 | An import batch/commit has ERROR rows and was rejected (all-or-nothing). |
 | `RATE_LIMITED` | 429 | Too many failed login attempts (5 / 15 min per username). Not in the brief's minimal list but required for login — documented here rather than silently added. |
+| `PASSWORD_CHANGE_REQUIRED` | 403 | The authenticated account has `must_change_password=1` (Phase G21 provisioning) and is calling any endpoint other than `POST /auth/change-password`. |
 | `INTERNAL_ERROR` | 500 | Unhandled server error. Logged server-side; never leaks a stack trace to the client. |
 
 `INSUFFICIENT_STOCK` vs `NEGATIVE_STOCK`: both mean "would go below zero
@@ -68,11 +69,24 @@ returned by `login` or `GET /auth/me`.
 
 | Method | Path | Auth | Request | Response `data` |
 |---|---|---|---|---|
-| POST | `/auth/login` | none | `{username, password}` | `{username, role, csrf_token}` |
+| POST | `/auth/login` | none | `{username, password}` | `{username, role, must_change_password, csrf_token}` |
 | POST | `/auth/logout` | session | — | `null` |
-| GET | `/auth/me` | none (returns `null` if not logged in) | — | `{id, username, role_code, division_id, warehouse_id, csrf_token}` or `null` |
+| GET | `/auth/me` | none (returns `null` if not logged in) | — | `{id, username, role_code, division_id, warehouse_id, must_change_password, csrf_token}` or `null` |
+| POST | `/auth/change-password` | session (the ONE endpoint allowed while `must_change_password=1`) | `{current_password, new_password}` | `null` |
 
 Errors: `UNAUTHENTICATED` (invalid credentials, code 401), `RATE_LIMITED`.
+
+### Forced password change (Phase G21)
+
+An account created by `scripts/provision_user.php` starts with
+`must_change_password=1` and a temporary generated password. While that
+flag is set, **every** endpoint except `POST /auth/change-password` (and
+`GET /auth/me` / `POST /auth/logout`, which never required auth to begin
+with) returns `403 PASSWORD_CHANGE_REQUIRED` — enforced once, centrally,
+in `inv_require_auth()`, so no individual route needs its own check. The
+frontend should treat `must_change_password: true` on login/`/auth/me` as
+an immediate redirect to a change-password screen, not wait for a blocked
+call to discover it.
 
 ## Master data (read-only for all roles with `INVENTORY_VIEW` or higher)
 
@@ -194,7 +208,24 @@ opname, out-of-order period, or later-dated data already posted).
 | GET | `/reconciliation` | `RECONCILIATION_VIEW` | `{total_sku, sku_with_stock, qty_per_warehouse, value_per_warehouse, company_inventory_value, in_transit_value, company_total_value, checks: {check_name: {status, count, rows}}, go_live_ready}` |
 
 `go_live_ready` is `false` if **any** check's `status` is `ERROR` — no
-partial-pass reading.
+partial-pass reading. Current `checks` keys: `negative_stock`,
+`zero_cost_batch`, `abnormal_cost_batch`, `orphan_batch`, `duplicate_sku`,
+`unknown_sku_or_warehouse`, `unbalanced_fifo_allocation` (Phase E3), plus
+the Phase G14 pre-cutover checks: `opening_value_consistency`,
+`historical_inventory_effect_zero`, `missing_unit_conversion`,
+`missing_cost`, `duplicate_legacy_transaction`,
+`opening_vs_current_consistency`.
+
+## System Health (Phase G25 — post-go-live monitoring)
+
+| Method | Path | Permission | Response `data` |
+|---|---|---|---|
+| GET | `/system/health` | role ADMIN or SUPERADMIN only (not a permission code — checked directly) | `{db_connection: {ok, error}, last_successful_transaction, failed_requests_today, price_anomaly_count, pending_transfer_count, active_opname_count, negative_stock_count, zero_cost_batch_count, checked_at}` |
+
+`failed_requests_today` is always `null` — this codebase has no
+request-level access log to count against; see
+`docs/PHASE_G25_HEALTH_ENDPOINT.md` for the reasoning and what it would
+take to add.
 
 ## Import module (Section 13-17 / E2)
 

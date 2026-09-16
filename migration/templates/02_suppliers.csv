@@ -1,0 +1,3 @@
+supplier_code,supplier_name,status,contact_name,phone,notes
+SUP-001,PT Sumber Makmur,ACTIVE,Budi Santoso,0812-3456-7890,Contoh baris — hapus sebelum isi data asli
+SUP-002,CV Gula Nusantara,ACTIVE,Siti Aminah,0813-9876-5432,Contoh baris — hapus sebelum isi data asli

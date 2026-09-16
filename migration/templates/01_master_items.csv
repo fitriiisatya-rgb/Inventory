@@ -1,0 +1,4 @@
+sku,barcode,name,category,brand,base_unit,purchase_unit,purchase_conversion,middle_unit,middle_conversion,minimum_stock,status,default_supplier_code,notes
+RM-TP-001,8991234567890,Tepung Terigu,Bahan Baku,Segitiga Biru,GR,SAK,25000,KG,1000,5000,ACTIVE,SUP-001,Contoh baris — hapus sebelum isi data asli
+RM-GL-002,8991234567891,Gula Pasir,Bahan Baku,Gulaku,GR,KARUNG,50000,KG,1000,3000,ACTIVE,SUP-002,Contoh baris — hapus sebelum isi data asli
+FG-RT-003,,Roti Tawar,Barang Jadi,,PCS,,,,,20,ACTIVE,,Contoh: barang jadi tanpa purchase unit — hapus sebelum isi data asli

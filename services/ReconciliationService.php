@@ -92,6 +92,85 @@ final class ReconciliationService
         )->fetchAll();
         $checks['unbalanced_fifo_allocation'] = self::check($unbalanced, 'ERROR');
 
+        // ---- PHASE G14: pre-cutover-specific checks ----
+
+        // opening_value_consistency: every COMMITTED opening's own staged
+        // control_total_value (G15, computed BEFORE commit) must still match
+        // what actually landed in inventory_batches for the lines it created.
+        // A mismatch means either the commit was interrupted, or something
+        // touched those batches outside the opening import itself.
+        $openingValueMismatch = $pdo->query(
+            "SELECT so.id AS stock_opening_id, so.control_total_value AS expected,
+                    COALESCE(SUM(b.qty_base * b.unit_cost_base), 0) AS actual
+             FROM stock_openings so
+             JOIN stock_opening_lines sol ON sol.stock_opening_id = so.id AND sol.created_batch_id IS NOT NULL
+             JOIN inventory_batches b ON b.id = sol.created_batch_id
+             WHERE so.status = 'COMMITTED' AND so.control_total_value IS NOT NULL
+             GROUP BY so.id, so.control_total_value
+             HAVING ABS(so.control_total_value - COALESCE(SUM(b.qty_base * b.unit_cost_base), 0)) > 1"
+        )->fetchAll();
+        $checks['opening_value_consistency'] = self::check($openingValueMismatch, 'ERROR');
+
+        // historical_inventory_effect_zero: safety net — the importer always
+        // forces is_historical_import=1/inventory_effect=0, but this check
+        // catches it independently in case of direct data manipulation.
+        $historicalEffectViolation = $pdo->query(
+            "SELECT id, transaction_type, transaction_date FROM inventory_transactions
+             WHERE is_historical_import = 1 AND inventory_effect <> 0"
+        )->fetchAll();
+        $checks['historical_inventory_effect_zero'] = self::check($historicalEffectViolation, 'ERROR');
+
+        // missing_unit_conversion: an item with posted stock but no currently
+        // -open conversion row for its own base unit — should be impossible
+        // (every item gets an identity conversion at creation) but would
+        // silently break future postings if it ever happened.
+        $missingConversion = $pdo->query(
+            "SELECT i.id AS item_id, i.sku FROM items i
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM item_unit_conversions c
+                 WHERE c.item_id = i.id AND c.unit_id = i.base_unit_id AND c.valid_to IS NULL
+             )"
+        )->fetchAll();
+        $checks['missing_unit_conversion'] = self::check($missingConversion, 'ERROR');
+
+        // missing_cost: opening lines that committed with a positive quantity
+        // but no positive cost — G6.1 requires stage()-time validation to
+        // reject this, so a hit here means that safeguard was bypassed.
+        $missingCost = $pdo->query(
+            "SELECT sol.id AS stock_opening_line_id, sol.stock_opening_id, sol.item_id, sol.qty_base, sol.unit_cost_base
+             FROM stock_opening_lines sol
+             JOIN stock_openings so ON so.id = sol.stock_opening_id AND so.status = 'COMMITTED'
+             WHERE sol.qty_base > 0 AND sol.unit_cost_base <= 0"
+        )->fetchAll();
+        $checks['missing_cost'] = self::check($missingCost, 'ERROR');
+
+        // duplicate_legacy_transaction: two historical rows sharing the same
+        // reference_no + type + warehouse + date almost always means the
+        // same legacy record was imported twice (e.g. the same file
+        // uploaded twice, or two overlapping historical files).
+        $duplicateLegacy = $pdo->query(
+            "SELECT reference_no, transaction_type, warehouse_id, transaction_date, COUNT(*) AS n
+             FROM inventory_transactions
+             WHERE is_historical_import = 1 AND reference_no IS NOT NULL AND reference_no <> ''
+             GROUP BY reference_no, transaction_type, warehouse_id, transaction_date
+             HAVING COUNT(*) > 1"
+        )->fetchAll();
+        $checks['duplicate_legacy_transaction'] = self::check($duplicateLegacy, 'WARNING');
+
+        // opening_vs_current_consistency: every batch an opening import
+        // created must still be traceable — this system never hard-deletes
+        // a batch row, so a missing target here means the FIFO trail from
+        // that opening was corrupted (broken referential integrity), not a
+        // normal consequence of later consumption/adjustment.
+        $openingBatchMissing = $pdo->query(
+            "SELECT sol.id AS stock_opening_line_id, sol.stock_opening_id, sol.created_batch_id
+             FROM stock_opening_lines sol
+             JOIN stock_openings so ON so.id = sol.stock_opening_id AND so.status = 'COMMITTED'
+             WHERE sol.created_batch_id IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM inventory_batches b WHERE b.id = sol.created_batch_id)"
+        )->fetchAll();
+        $checks['opening_vs_current_consistency'] = self::check($openingBatchMissing, 'ERROR');
+
         $goLiveReady = true;
         foreach ($checks as $check) {
             if ($check['status'] === 'ERROR') {

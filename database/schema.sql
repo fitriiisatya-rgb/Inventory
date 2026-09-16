@@ -55,6 +55,10 @@ CREATE TABLE users (
     division_id     INT UNSIGNED NULL,              -- scopes DIVISION-role users
     warehouse_id    INT UNSIGNED NULL,              -- scopes STOCK-role users to one warehouse; NULL = all warehouses
     is_active       TINYINT(1)   NOT NULL DEFAULT 1,
+    -- PHASE G21: a provisioned account (temp generated password) must change
+    -- it before doing anything else — enforced server-side in AuthService,
+    -- never left to the frontend to honor voluntarily.
+    must_change_password TINYINT(1) NOT NULL DEFAULT 0,
     last_login_at   DATETIME NULL,
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -81,6 +85,10 @@ CREATE TABLE warehouses (
     id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     code            VARCHAR(30)  NOT NULL UNIQUE,
     name            VARCHAR(100) NOT NULL,
+    -- PHASE G5: MAIN = a real stocking location; TRANSIT = an in-transit/
+    -- staging point. Purely descriptive metadata — never changes FIFO or
+    -- transfer behavior, which is driven by explicit transfer records.
+    warehouse_type  ENUM('MAIN','TRANSIT') NOT NULL DEFAULT 'MAIN',
     is_active       TINYINT(1)   NOT NULL DEFAULT 1,
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -90,6 +98,9 @@ CREATE TABLE suppliers (
     id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     code            VARCHAR(30)  NOT NULL UNIQUE,
     name            VARCHAR(150) NOT NULL,
+    contact_name    VARCHAR(100) NULL,
+    phone           VARCHAR(30)  NULL,
+    notes           VARCHAR(255) NULL,
     is_active       TINYINT(1)   NOT NULL DEFAULT 1,
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -119,6 +130,8 @@ CREATE TABLE items (
     brand           VARCHAR(100) NULL,
     base_unit_id    INT UNSIGNED NOT NULL,
     minimum_stock   DECIMAL(20,6) NOT NULL DEFAULT 0,
+    default_supplier_id INT UNSIGNED NULL,
+    notes           VARCHAR(255) NULL,
     status          ENUM('ACTIVE','INACTIVE') NOT NULL DEFAULT 'ACTIVE',
     -- Set the first time any posted transaction references this item.
     -- While NULL, base_unit_id and every conversion row may still be edited
@@ -127,6 +140,7 @@ CREATE TABLE items (
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_items_base_unit FOREIGN KEY (base_unit_id) REFERENCES units(id),
+    CONSTRAINT fk_items_default_supplier FOREIGN KEY (default_supplier_id) REFERENCES suppliers(id),
     INDEX idx_items_status (status),
     INDEX idx_items_barcode (barcode)
 ) ENGINE=InnoDB;
@@ -297,6 +311,12 @@ CREATE TABLE stock_openings (
     cutoff_date     DATE NOT NULL,
     description     VARCHAR(255) NULL,
     status          ENUM('DRAFT','VALIDATED','COMMITTED') NOT NULL DEFAULT 'DRAFT',
+    -- PHASE G15: control total computed from the staged rows themselves,
+    -- BEFORE commit — the batches actually created at commit must sum to
+    -- exactly this (within tolerance) or the import is rolled back rather
+    -- than silently accepted with a mismatch.
+    control_total_value        DECIMAL(20,4) NULL,
+    control_total_by_warehouse JSON NULL,
     created_by      INT UNSIGNED NOT NULL,
     committed_by    INT UNSIGNED NULL,
     committed_at    DATETIME NULL,
@@ -661,9 +681,14 @@ INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r, permissions p
 WHERE r.code = 'VIEWER' AND p.code IN ('INVENTORY_VIEW','AUDIT_LOG_VIEW','RECONCILIATION_VIEW');
 
+-- PHASE G2.1: this is the canonical unit list. Any spelling/case variant a
+-- user types (e.g. "gram", "Kg", "sack") is normalized in
+-- services/UnitNormalizationService.php to one of these codes before it
+-- ever reaches the database — never guessed, never auto-converted.
 INSERT INTO units (code, name) VALUES
     ('GR','Gram'), ('KG','Kilogram'), ('ML','Mililiter'), ('LTR','Liter'),
-    ('PCS','Pieces'), ('BOX','Box'), ('KARTON','Karton'), ('KARUNG','Karung'), ('LUSIN','Lusin');
+    ('PCS','Pieces'), ('BOX','Box'), ('KARTON','Karton'), ('KARUNG','Karung'), ('LUSIN','Lusin'),
+    ('PACK','Pack'), ('ROLL','Roll');
 
 INSERT INTO system_settings (setting_key, setting_value, description) VALUES
     ('price_anomaly_high_multiplier', '5',    'Reject/flag when new unit cost > reference price x this multiplier'),

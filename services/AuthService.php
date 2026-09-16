@@ -59,9 +59,35 @@ final class AuthService
         $_SESSION['role_code'] = $user['role_code'];
         $_SESSION['division_id'] = $user['division_id'];
         $_SESSION['warehouse_id'] = $user['warehouse_id'];
+        $_SESSION['must_change_password'] = (bool) $user['must_change_password'];
         $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 
         return $user;
+    }
+
+    /**
+     * PHASE G21: the only self-service action a user with
+     * must_change_password=1 is allowed to take (enforced in
+     * public/index.php's inv_require_auth(), not here — this method just
+     * performs the change once the caller has already been let through).
+     */
+    public static function changePassword(PDO $pdo, int $userId, string $currentPassword, string $newPassword): void
+    {
+        if (strlen($newPassword) < 8) {
+            throw new ValidationException(['new password must be at least 8 characters']);
+        }
+
+        $stmt = $pdo->prepare('SELECT password_hash FROM users WHERE id = :id');
+        $stmt->execute(['id' => $userId]);
+        $hash = $stmt->fetchColumn();
+        if ($hash === false || !password_verify($currentPassword, $hash)) {
+            throw new ValidationException(['current password is incorrect']);
+        }
+
+        $pdo->prepare('UPDATE users SET password_hash = :hash, must_change_password = 0, updated_at = :now WHERE id = :id')
+            ->execute(['hash' => password_hash($newPassword, PASSWORD_BCRYPT), 'now' => date('Y-m-d H:i:s'), 'id' => $userId]);
+
+        $_SESSION['must_change_password'] = false;
     }
 
     private static function assertNotRateLimited(PDO $pdo, string $username, ?string $ip): void
@@ -95,6 +121,7 @@ final class AuthService
             'role_code' => $_SESSION['role_code'],
             'division_id' => $_SESSION['division_id'] ?? null,
             'warehouse_id' => $_SESSION['warehouse_id'] ?? null,
+            'must_change_password' => (bool) ($_SESSION['must_change_password'] ?? false),
         ];
     }
 

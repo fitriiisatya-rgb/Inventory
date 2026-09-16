@@ -1,0 +1,4 @@
+cutoff_date,warehouse_code,sku,quantity_base,unit_cost_base,expired_date,batch_reference,notes
+2026-09-30,SCM,RM-TP-001,125000,12.5,2027-01-31,OPENING-001,"Hasil stock opname final — contoh baris, hapus sebelum isi data asli"
+2026-09-30,SCM,RM-GL-002,80000,15.0,,OPENING-002,Contoh baris — hapus sebelum isi data asli
+2026-09-30,CBD,RM-TP-001,30000,12.5,2027-01-31,OPENING-003,Contoh baris — hapus sebelum isi data asli

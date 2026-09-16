@@ -7,6 +7,7 @@ require_once __DIR__ . '/../services/Database.php';
 require_once __DIR__ . '/../services/Exceptions.php';
 require_once __DIR__ . '/../services/AuditService.php';
 require_once __DIR__ . '/../services/UnitConversionService.php';
+require_once __DIR__ . '/../services/UnitNormalizationService.php';
 require_once __DIR__ . '/../services/ImportMasterItemService.php';
 
 use App\Services\ImportMasterItemService;
