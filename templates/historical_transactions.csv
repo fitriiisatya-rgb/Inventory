@@ -1,0 +1,2 @@
+transaction_date,transaction_type,warehouse_code,sku,input_qty,input_unit,unit_price_input,supplier_code,division_code,reference_no,notes
+2026-09-05,OUT,WH-001,DUMMY-001,10,KG,0,,DIV-001,REF-DUMMY-0001,"is_historical_import=1, inventory_effect=0 — reporting only, does not touch stock"

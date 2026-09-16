@@ -1,0 +1,2 @@
+Reserved for per-resource route files as the API surface grows.
+Current routes are inline in public/index.php (see README.md status table).

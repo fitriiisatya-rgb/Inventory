@@ -1,0 +1,11 @@
+# Deployment note (see docs/DEPLOYMENT.md): the vhost document root SHOULD
+# be set to /public directly, which makes this file unnecessary. It exists
+# only as a second line of defense if a host is ever misconfigured to point
+# at the repository root instead.
+RewriteEngine On
+RewriteCond %{REQUEST_URI} !^/public/
+RewriteRule ^(.*)$ /public/$1 [L]
+
+<FilesMatch "\.(env|sql|log)$">
+    Require all denied
+</FilesMatch>

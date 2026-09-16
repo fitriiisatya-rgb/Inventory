@@ -1,0 +1,2 @@
+sku,barcode,name,category,brand,base_unit,purchase_unit,purchase_conversion,middle_unit,middle_conversion,minimum_stock,status
+DUMMY-001,8991234567890,Contoh Tepung Terigu,Bahan Baku,Merk Contoh,GR,KARUNG,25000,KG,1000,5000,ACTIVE

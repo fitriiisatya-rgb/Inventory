@@ -1,0 +1,2 @@
+cutoff_date,warehouse_code,sku,quantity_base,unit_cost_base,expired_date,batch_reference
+2026-09-30,WH-001,DUMMY-001,12500,12,,OPN-2026-09-DUMMY-001-1
