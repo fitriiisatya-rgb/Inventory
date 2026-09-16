@@ -53,13 +53,25 @@ CREATE TABLE users (
     email           VARCHAR(150) NULL,
     role_id         INT UNSIGNED NOT NULL,
     division_id     INT UNSIGNED NULL,              -- scopes DIVISION-role users
+    warehouse_id    INT UNSIGNED NULL,              -- scopes STOCK-role users to one warehouse; NULL = all warehouses
     is_active       TINYINT(1)   NOT NULL DEFAULT 1,
     last_login_at   DATETIME NULL,
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_users_role FOREIGN KEY (role_id) REFERENCES roles(id),
     CONSTRAINT fk_users_division FOREIGN KEY (division_id) REFERENCES divisions(id)
+    -- fk_users_warehouse added later via ALTER TABLE, once `warehouses` exists (Section 2)
 ) ENGINE=InnoDB;
+
+CREATE TABLE login_attempts (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    username        VARCHAR(60) NOT NULL,
+    ip_address      VARCHAR(45) NULL,
+    success         TINYINT(1) NOT NULL,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_login_attempts_lookup (username, created_at)
+) ENGINE=InnoDB
+COMMENT='Section 23/PHASE C3: backs simple server-side login rate limiting — counts recent failures per username (+ip) rather than trusting the client.';
 
 -- ============================================================================
 -- 2. ORGANIZATION MASTERS
@@ -189,7 +201,12 @@ COMMENT='FIFO layers. Consumption order is always (received_date ASC, id ASC) �
 
 CREATE TABLE inventory_transactions (
     id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    transaction_uuid    CHAR(36) NOT NULL UNIQUE,        -- client-generated idempotency key
+    -- Client-generated idempotency key. VARCHAR(100), not CHAR(36): a plain
+    -- transaction posts a bare UUID, but TransferService/ProductionService/
+    -- StockOpnameService derive composite keys (e.g. "{uuid}:OUT:{item_id}",
+    -- one per line) so that idempotency is enforced per line, not just once
+    -- for the whole multi-line request.
+    transaction_uuid    VARCHAR(100) NOT NULL UNIQUE,
     transaction_type    ENUM('IN','OUT','TRANSFER_OUT','TRANSFER_IN','ADJUSTMENT',
                               'OPNAME','PRODUCTION_IN','PRODUCTION_OUT','OPENING') NOT NULL,
     transaction_date    DATETIME NOT NULL,                -- business-effective date (drives FIFO ordering)
@@ -315,25 +332,40 @@ CREATE TABLE stock_opname_sessions (
     id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     warehouse_id    INT UNSIGNED NOT NULL,
     session_date    DATE NOT NULL,
-    status          ENUM('OPEN','POSTED','CANCELLED') NOT NULL DEFAULT 'OPEN',
+    session_uuid    CHAR(36) NOT NULL UNIQUE,
+    -- OPEN: counting in progress: FINALIZED: counts locked, variance computed,
+    -- awaiting review/post; POSTED: adjustments created, session closed.
+    -- Movement in `warehouse_id` is blocked while status IN ('OPEN','FINALIZED').
+    status          ENUM('OPEN','FINALIZED','POSTED','CANCELLED') NOT NULL DEFAULT 'OPEN',
     created_by      INT UNSIGNED NOT NULL,
+    finalized_by    INT UNSIGNED NULL,
+    finalized_at    DATETIME NULL,
     posted_by       INT UNSIGNED NULL,
     posted_at       DATETIME NULL,
+    cancelled_by    INT UNSIGNED NULL,
+    cancelled_at    DATETIME NULL,
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_sos_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
     CONSTRAINT fk_sos_creator FOREIGN KEY (created_by) REFERENCES users(id),
-    CONSTRAINT fk_sos_poster FOREIGN KEY (posted_by) REFERENCES users(id)
-) ENGINE=InnoDB;
+    CONSTRAINT fk_sos_finalizer FOREIGN KEY (finalized_by) REFERENCES users(id),
+    CONSTRAINT fk_sos_poster FOREIGN KEY (posted_by) REFERENCES users(id),
+    CONSTRAINT fk_sos_canceller FOREIGN KEY (cancelled_by) REFERENCES users(id),
+    INDEX idx_sos_active_warehouse (warehouse_id, status)
+) ENGINE=InnoDB
+COMMENT='Only one OPEN/FINALIZED session per warehouse should exist at a time — enforced in StockOpnameService, not by a DB constraint (a partial-uniqueness need MySQL cannot express directly without the same generated-column trick as item_unit_conversions; left to the service layer here since it also has to explain itself in the API error).';
 
 CREATE TABLE stock_opname_lines (
     id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     session_id          INT UNSIGNED NOT NULL,
     item_id             INT UNSIGNED NOT NULL,
-    system_qty_base     DECIMAL(20,6) NOT NULL,
-    counted_qty_base    DECIMAL(20,6) NOT NULL,
-    variance_qty_base   DECIMAL(20,6) NOT NULL,          -- counted - system
-    unit_cost_base      DECIMAL(20,4) NOT NULL,
+    system_qty_base     DECIMAL(20,6) NOT NULL,          -- snapshotted at session start (StockOpnameService::start)
+    counted_qty_base    DECIMAL(20,6) NULL,              -- NULL until /count submits a physical count
+    is_counted          TINYINT(1) NOT NULL DEFAULT 0,
+    variance_qty_base   DECIMAL(20,6) NULL,              -- counted - system, computed at /finalize
+    unit_cost_base      DECIMAL(20,4) NOT NULL,           -- system cost at session start (used for OUT variance)
     adjustment_id       BIGINT UNSIGNED NULL,             -- link once variance is posted as a stock_adjustment
+    cost_required       TINYINT(1) NOT NULL DEFAULT 0,    -- true when variance is IN and no reliable cost exists yet
+    override_cost_base  DECIMAL(20,4) NULL,               -- admin-supplied cost when cost_required was flagged
     notes               VARCHAR(255) NULL,
     CONSTRAINT fk_sol2_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
     CONSTRAINT fk_sol2_item FOREIGN KEY (item_id) REFERENCES items(id),
@@ -344,10 +376,13 @@ CREATE TABLE stock_adjustments (
     id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     item_id             INT UNSIGNED NOT NULL,
     warehouse_id        INT UNSIGNED NOT NULL,
-    adjustment_type     ENUM('DAMAGE','CORRECTION','OPNAME_VARIANCE','NEGATIVE_OVERRIDE') NOT NULL,
+    adjustment_type     ENUM('OPNAME','CORRECTION','DAMAGE','EXPIRED','LOSS','OTHER','NEGATIVE_OVERRIDE') NOT NULL,
     qty_base_delta      DECIMAL(20,6) NOT NULL,           -- signed
+    before_qty_base     DECIMAL(20,6) NOT NULL,
+    after_qty_base      DECIMAL(20,6) NOT NULL,
     unit_cost_base      DECIMAL(20,4) NOT NULL,
     transaction_id       BIGINT UNSIGNED NULL,             -- the ADJUSTMENT-type inventory_transactions row this posted as
+    reference_no         VARCHAR(100) NULL,                -- e.g. opname session id, external doc number
     reason               VARCHAR(255) NOT NULL,
     requires_approval    TINYINT(1) NOT NULL DEFAULT 0,
     approved_by          INT UNSIGNED NULL,
@@ -359,7 +394,8 @@ CREATE TABLE stock_adjustments (
     CONSTRAINT fk_sa_tx FOREIGN KEY (transaction_id) REFERENCES inventory_transactions(id),
     CONSTRAINT fk_sa_approver FOREIGN KEY (approved_by) REFERENCES users(id),
     CONSTRAINT fk_sa_creator FOREIGN KEY (created_by) REFERENCES users(id)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB
+COMMENT='Never a silent adjustment: reason is NOT NULL, before/after qty are always recorded, and every row is either linked to an ADJUSTMENT-type inventory_transactions row or explicitly why not.';
 
 -- ============================================================================
 -- 7. WAREHOUSE TRANSFERS
@@ -374,6 +410,8 @@ CREATE TABLE warehouse_transfers (
     ship_date           DATETIME NOT NULL,                -- FIFO batch date on the receiving side (Section: "tanggal kirim")
     receive_date        DATETIME NULL,
     cancel_reason        VARCHAR(255) NULL,
+    cancelled_by          INT UNSIGNED NULL,
+    cancelled_at          DATETIME NULL,
     created_by           INT UNSIGNED NOT NULL,
     received_by          INT UNSIGNED NULL,
     created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -381,6 +419,7 @@ CREATE TABLE warehouse_transfers (
     CONSTRAINT fk_wt_to FOREIGN KEY (to_warehouse_id) REFERENCES warehouses(id),
     CONSTRAINT fk_wt_creator FOREIGN KEY (created_by) REFERENCES users(id),
     CONSTRAINT fk_wt_receiver FOREIGN KEY (received_by) REFERENCES users(id),
+    CONSTRAINT fk_wt_canceller FOREIGN KEY (cancelled_by) REFERENCES users(id),
     CONSTRAINT chk_wt_diff_wh CHECK (from_warehouse_id <> to_warehouse_id),
     INDEX idx_wt_status (status)
 ) ENGINE=InnoDB;
@@ -475,7 +514,11 @@ CREATE TABLE book_closings (
     period_start        DATE NOT NULL,
     period_end          DATE NOT NULL,
     status              ENUM('DRAFT','LOCKED') NOT NULL DEFAULT 'DRAFT',
-    total_closing_value DECIMAL(24,4) NOT NULL DEFAULT 0,
+    total_closing_value DECIMAL(24,4) NOT NULL DEFAULT 0,   -- ending inventory value across all warehouses
+    total_in_transit_value DECIMAL(24,4) NOT NULL DEFAULT 0,
+    purchase_total      DECIMAL(24,4) NOT NULL DEFAULT 0,   -- sum of IN transactions in the period
+    usage_total         DECIMAL(24,4) NOT NULL DEFAULT 0,   -- HPP: sum of OUT (type 'pakai'/production input) transactions in the period
+    shrinkage_total     DECIMAL(24,4) NOT NULL DEFAULT 0,   -- sum of negative stock_adjustments (DAMAGE/EXPIRED/LOSS/opname-out) in the period
     locked_by            INT UNSIGNED NULL,
     locked_at            DATETIME NULL,
     created_by            INT UNSIGNED NOT NULL,
@@ -552,6 +595,10 @@ CREATE TABLE import_rows (
 ALTER TABLE inventory_transactions
     ADD CONSTRAINT fk_tx_book_closing FOREIGN KEY (book_closing_id) REFERENCES book_closings(id);
 
+-- Deferred FK: users.warehouse_id references warehouses(id), defined after `users`.
+ALTER TABLE users
+    ADD CONSTRAINT fk_users_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id);
+
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- ============================================================================
@@ -580,7 +627,11 @@ INSERT INTO permissions (code, description) VALUES
     ('BOOK_CLOSING_MANAGE',        'Lock/unlock accounting periods'),
     ('AUDIT_LOG_VIEW',             'View audit log'),
     ('USER_MANAGE',                'Manage users and roles'),
-    ('SYSTEM_SETTINGS_MANAGE',     'Edit system settings');
+    ('SYSTEM_SETTINGS_MANAGE',     'Edit system settings'),
+    ('STOCK_ADJUSTMENT_CREATE',    'Post a manual stock adjustment'),
+    ('STOCK_ADJUSTMENT_APPROVE',   'Approve a stock adjustment that requires approval'),
+    ('RECONCILIATION_VIEW',        'View the pre-go-live reconciliation report'),
+    ('INVENTORY_VIEW',             'Read current stock, batches, value, ledger (VIEWER baseline)');
 
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r CROSS JOIN permissions p WHERE r.code = 'SUPERADMIN';
@@ -592,11 +643,16 @@ WHERE r.code = 'ADMIN' AND p.code NOT IN ('SYSTEM_SETTINGS_MANAGE','USER_MANAGE'
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r, permissions p
 WHERE r.code = 'STOCK' AND p.code IN
-    ('TRANSACTION_IN_CREATE','TRANSACTION_OUT_CREATE','WAREHOUSE_TRANSFER_MANAGE','STOCK_OPNAME_MANAGE');
+    ('TRANSACTION_IN_CREATE','TRANSACTION_OUT_CREATE','WAREHOUSE_TRANSFER_MANAGE','STOCK_OPNAME_MANAGE',
+     'STOCK_ADJUSTMENT_CREATE','INVENTORY_VIEW');
 
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r, permissions p
-WHERE r.code = 'DIVISION' AND p.code IN ('TRANSACTION_OUT_CREATE','PRODUCTION_MANAGE');
+WHERE r.code = 'DIVISION' AND p.code IN ('TRANSACTION_OUT_CREATE','PRODUCTION_MANAGE','INVENTORY_VIEW');
+
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r, permissions p
+WHERE r.code = 'VIEWER' AND p.code IN ('INVENTORY_VIEW','AUDIT_LOG_VIEW','RECONCILIATION_VIEW');
 
 INSERT INTO units (code, name) VALUES
     ('GR','Gram'), ('KG','Kilogram'), ('ML','Mililiter'), ('LTR','Liter'),

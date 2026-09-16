@@ -31,9 +31,16 @@ if ((int) $existing > 0) {
 }
 
 fwrite(STDOUT, "Password for {$username}: ");
-system('stty -echo');
+// stty requires a real TTY (fails harmlessly under e.g. a piped/non-interactive
+// shell) — fall back to a plain, unmasked read rather than aborting the install.
+$hasTty = @stream_isatty(STDIN) && stripos(PHP_OS, 'WIN') !== 0;
+if ($hasTty) {
+    system('stty -echo');
+}
 $password = trim((string) fgets(STDIN));
-system('stty echo');
+if ($hasTty) {
+    system('stty echo');
+}
 fwrite(STDOUT, "\n");
 
 if (strlen($password) < 8) {
@@ -49,7 +56,7 @@ if ($roleId === false) {
 
 $stmt = $pdo->prepare(
     'INSERT INTO users (username, password_hash, full_name, role_id, is_active, created_at, updated_at)
-     VALUES (:username, :hash, :full_name, :role_id, 1, :now, :now)'
+     VALUES (:username, :hash, :full_name, :role_id, 1, :now, :now2)'
 );
 $stmt->execute([
     'username' => $username,
@@ -57,6 +64,7 @@ $stmt->execute([
     'full_name' => $fullName,
     'role_id' => $roleId,
     'now' => date('Y-m-d H:i:s'),
+    'now2' => date('Y-m-d H:i:s'),
 ]);
 
 fwrite(STDOUT, "Created SUPERADMIN user '{$username}' (id " . $pdo->lastInsertId() . ").\n");

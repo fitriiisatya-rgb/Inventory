@@ -81,3 +81,24 @@ erDiagram
   correction. This directly replaces the old system's Tutup Buku behavior
   of deleting posted transactions after freezing a snapshot (Section A.5
   item 6 in the Phase A analysis).
+
+## PHASE C2 schema additions (see `database/schema.sql` for the exact DDL)
+
+- `users.warehouse_id` — scopes a STOCK-role user to one warehouse (NULL = all).
+- `login_attempts` — backs server-side login rate limiting (Section C3).
+- `stock_opname_sessions.status` gained `FINALIZED` (between `OPEN` and
+  `POSTED`) and `session_uuid`; `stock_opname_lines` gained `is_counted`,
+  `cost_required`, `override_cost_base` — the count → finalize → post flow
+  needs to distinguish "not yet counted" from "counted zero", and a
+  variance that increases stock needs an explicit, non-fabricated cost.
+- `stock_adjustments.adjustment_type` expanded to
+  `OPNAME|CORRECTION|DAMAGE|EXPIRED|LOSS|OTHER|NEGATIVE_OVERRIDE`; gained
+  `before_qty_base`/`after_qty_base`/`reference_no` so no adjustment is ever
+  silent (Section 3 of the brief).
+- `book_closings` gained `total_in_transit_value`, `purchase_total`,
+  `usage_total`, `shrinkage_total` — the closing snapshot needed to report
+  more than just the ending inventory number.
+- `warehouse_transfers` gained `cancelled_by`/`cancelled_at`.
+- `inventory_transactions.transaction_uuid` widened from `CHAR(36)` to
+  `VARCHAR(100)`: Transfer/Production/Opname derive composite per-line
+  idempotency keys (`{uuid}:OUT:{item_id}`) that don't fit in a bare UUID.

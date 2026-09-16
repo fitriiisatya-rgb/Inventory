@@ -193,6 +193,19 @@ CREATE TABLE import_rows (
     created_entity_id INTEGER
 );
 
+CREATE TABLE book_closings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'DRAFT'
+);
+
+CREATE TABLE stock_opname_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    warehouse_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'OPEN'
+);
+
 CREATE TABLE audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,

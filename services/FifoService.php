@@ -24,12 +24,28 @@ final class FifoService
      */
     public static function postIn(PDO $pdo, array $p): array
     {
+        assert_required_fields($p, ['transaction_uuid', 'item_id', 'warehouse_id', 'input_qty', 'input_unit_id', 'unit_price_input', 'transaction_date', 'created_by']);
+
         $existing = IdempotencyService::findTransaction($pdo, $p['transaction_uuid']);
         if ($existing) {
             return ['success' => true, 'idempotent_replay' => true, 'transaction_id' => (int) $existing['id']];
         }
 
-        if (!($p['input_qty'] > 0) || !($p['unit_price_input'] > 0)) {
+        // Callers sometimes forward a value straight out of a DB fetch (e.g. TransferService,
+        // ProductionService) — MySQL/PDO returns DECIMAL columns as PHP strings, which strict_types
+        // would otherwise reject at the first typed (int/float) parameter downstream.
+        $p = self::normalizeNumeric($p, ['item_id', 'warehouse_id', 'input_unit_id', 'supplier_id', 'division_id', 'anomaly_approved_by'], ['input_qty', 'unit_price_input']);
+
+        PeriodLockService::assertNotLocked($pdo, $p['transaction_date']);
+        if (empty($p['bypass_warehouse_lock'])) {
+            WarehouseLockService::assertNotLocked($pdo, $p['warehouse_id']);
+        }
+
+        // A real purchase must have price > 0 (Section 9). The one documented exception is a
+        // reviewed, explicitly-flagged zero-cost Opening Stock line (ImportOpeningStockService) —
+        // never a silent default, and never available to a normal Transaksi Masuk.
+        $priceFloor = !empty($p['allow_zero_price']) ? 0 : 0.0000001;
+        if (!($p['input_qty'] > 0) || $p['unit_price_input'] < $priceFloor) {
             throw new ValidationException(['input_qty and unit_price_input must both be > 0']);
         }
 
@@ -64,7 +80,7 @@ final class FifoService
         );
         $now = date('Y-m-d H:i:s');
         $txStmt->execute([
-            'uuid' => $p['transaction_uuid'], 'type' => 'IN', 'tx_date' => $p['transaction_date'],
+            'uuid' => $p['transaction_uuid'], 'type' => $p['transaction_type'] ?? 'IN', 'tx_date' => $p['transaction_date'],
             'post_date' => $now, 'wh' => $p['warehouse_id'], 'supplier' => $p['supplier_id'] ?? null,
             'division' => $p['division_id'] ?? null, 'ref' => $p['reference_no'] ?? null,
             'status_posted' => 'POSTED', 'created_by' => $p['created_by'], 'created_at' => $now,
@@ -137,9 +153,18 @@ final class FifoService
      */
     public static function postOut(PDO $pdo, array $p): array
     {
+        assert_required_fields($p, ['transaction_uuid', 'item_id', 'warehouse_id', 'input_qty', 'input_unit_id', 'transaction_date', 'created_by']);
+
         $existing = IdempotencyService::findTransaction($pdo, $p['transaction_uuid']);
         if ($existing) {
             return ['success' => true, 'idempotent_replay' => true, 'transaction_id' => (int) $existing['id']];
+        }
+
+        $p = self::normalizeNumeric($p, ['item_id', 'warehouse_id', 'input_unit_id', 'division_id'], ['input_qty']);
+
+        PeriodLockService::assertNotLocked($pdo, $p['transaction_date']);
+        if (empty($p['bypass_warehouse_lock'])) {
+            WarehouseLockService::assertNotLocked($pdo, $p['warehouse_id']);
         }
 
         if (!($p['input_qty'] > 0)) {
@@ -281,15 +306,10 @@ final class FifoService
         ];
     }
 
+    /** @deprecated kept for call-site compatibility; delegates to the actual source of truth. */
     public static function currentStock(PDO $pdo, int $itemId, int $warehouseId): array
     {
-        $stmt = $pdo->prepare(
-            'SELECT COALESCE(SUM(qty_base), 0) AS qty, COALESCE(SUM(qty_base * unit_cost_base), 0) AS value
-             FROM inventory_batches WHERE item_id = :item_id AND warehouse_id = :wh'
-        );
-        $stmt->execute(['item_id' => $itemId, 'wh' => $warehouseId]);
-        $row = $stmt->fetch();
-        return ['qty_base' => round((float) $row['qty'], self::QTY_SCALE), 'value' => round((float) $row['value'], self::MONEY_SCALE)];
+        return InventoryService::currentStock($pdo, $itemId, $warehouseId);
     }
 
     private static function itemName(PDO $pdo, int $itemId): string
@@ -297,5 +317,21 @@ final class FifoService
         $stmt = $pdo->prepare('SELECT name FROM items WHERE id = :id');
         $stmt->execute(['id' => $itemId]);
         return (string) ($stmt->fetchColumn() ?: '');
+    }
+
+    /** @param string[] $intKeys @param string[] $floatKeys */
+    private static function normalizeNumeric(array $p, array $intKeys, array $floatKeys): array
+    {
+        foreach ($intKeys as $key) {
+            if (isset($p[$key])) {
+                $p[$key] = (int) $p[$key];
+            }
+        }
+        foreach ($floatKeys as $key) {
+            if (isset($p[$key])) {
+                $p[$key] = (float) $p[$key];
+            }
+        }
+        return $p;
     }
 }
