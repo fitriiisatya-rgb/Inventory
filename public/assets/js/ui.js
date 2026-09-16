@@ -78,6 +78,26 @@ const UI = (() => {
         toast((err && err.message) || 'Terjadi kesalahan', 'error');
     }
 
+    // D14: client-side export of whatever rows/columns the caller already
+    // fetched from the API for the view on screen — never a stale or
+    // separately-accumulated local dataset.
+    function exportCsv(filename, columns, rows) {
+        const escape = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+        const lines = [columns.map(([, label]) => escape(label)).join(',')];
+        rows.forEach((row) => {
+            lines.push(columns.map(([key]) => escape(typeof key === 'function' ? key(row) : row[key])).join(','));
+        });
+        const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    }
+
     function el(tag, attrs = {}, children = []) {
         const node = document.createElement(tag);
         for (const [k, v] of Object.entries(attrs)) {

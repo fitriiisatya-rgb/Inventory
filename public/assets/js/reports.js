@@ -55,6 +55,7 @@ const Reports = (() => {
                 ]),
             ]));
 
+            const voidableTypes = ['IN', 'OUT', 'ADJUSTMENT'];
             const rows = ledger.map((row) => UI.el('tr', {}, [
                 UI.el('td', {}, UI.formatDate(row.date)),
                 UI.el('td', {}, row.transaction_type),
@@ -64,16 +65,63 @@ const Reports = (() => {
                 UI.el('td', {}, UI.formatNumber(row.balance_qty)),
                 UI.el('td', {}, UI.formatMoney(row.unit_cost_base)),
                 UI.el('td', {}, UI.formatMoney(row.value)),
+                UI.el('td', {}, voidableTypes.includes(row.transaction_type)
+                    ? UI.el('button', { class: 'btn btn-danger btn-sm ledger-void-btn', 'data-tx-id': String(row.transaction_id) }, 'Batalkan')
+                    : '-'),
             ]));
             ledgerBox.appendChild(UI.el('div', { class: 'table-wrapper' }, [
                 UI.el('table', {}, [
-                    UI.el('thead', {}, [UI.el('tr', {}, ['Tanggal', 'Jenis', 'Referensi', 'Masuk', 'Keluar', 'Saldo', 'Harga Satuan', 'Nilai'].map((h) => UI.el('th', {}, h)))]),
-                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '8' }, 'Belum ada transaksi untuk kombinasi ini')])]),
+                    UI.el('thead', {}, [UI.el('tr', {}, ['Tanggal', 'Jenis', 'Referensi', 'Masuk', 'Keluar', 'Saldo', 'Harga Satuan', 'Nilai', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
+                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '9' }, 'Belum ada transaksi untuk kombinasi ini')])]),
                 ]),
             ]));
+            ledgerBox.querySelectorAll('.ledger-void-btn').forEach((btn) => btn.addEventListener('click', () => voidTransaction(Number(btn.dataset.txId), btn)));
+
+            if (ledger.length) {
+                const exportBtn = UI.el('button', { class: 'btn btn-secondary btn-sm', style: 'margin-bottom:10px;' }, '⬇️ Export CSV');
+                exportBtn.addEventListener('click', () => UI.exportCsv(`ledger-${itemId}-${warehouseId}.csv`, [
+                    ['date', 'Tanggal'], ['transaction_type', 'Jenis'], ['reference', 'Referensi'],
+                    ['in_qty', 'Masuk'], ['out_qty', 'Keluar'], ['balance_qty', 'Saldo'],
+                    ['unit_cost_base', 'Harga Satuan'], ['value', 'Nilai'],
+                ], ledger));
+                ledgerBox.insertBefore(exportBtn, ledgerBox.firstChild);
+            }
         } catch (err) {
             UI.handleApiError(err);
             currentBox.innerHTML = `<div class="alert alert-error">Gagal memuat laporan: ${(err && err.message) || ''}</div>`;
+        }
+    }
+
+    const voidUuids = new Map();
+
+    async function voidTransaction(transactionId, btn) {
+        const reason = prompt(`Alasan pembatalan transaksi #${transactionId} (wajib):`);
+        if (!reason || !reason.trim()) return;
+        if (!voidUuids.has(transactionId)) voidUuids.set(transactionId, InvApi.newRequestUuid());
+        btn.disabled = true;
+        try {
+            await InvApi.voidTransaction(transactionId, { request_uuid: voidUuids.get(transactionId), reason: reason.trim() });
+            UI.toast(`Transaksi #${transactionId} dibatalkan (reversal dibuat).`, 'success');
+            voidUuids.delete(transactionId);
+            loadReport();
+        } catch (err) {
+            if (err && err.code === 'PERIOD_LOCKED') {
+                const override = confirm(`${err.message}\n\nPeriode ini sudah TERKUNCI. Lanjutkan sebagai SUPERADMIN OVERRIDE (tercatat di audit log)?`);
+                if (override) {
+                    try {
+                        await InvApi.voidTransaction(transactionId, { request_uuid: voidUuids.get(transactionId), reason: reason.trim(), superadmin_override: true });
+                        UI.toast(`Transaksi #${transactionId} dibatalkan (override periode terkunci).`, 'success');
+                        voidUuids.delete(transactionId);
+                        loadReport();
+                        return;
+                    } catch (err2) {
+                        UI.handleApiError(err2);
+                    }
+                }
+            } else {
+                UI.handleApiError(err);
+            }
+            btn.disabled = false;
         }
     }
 

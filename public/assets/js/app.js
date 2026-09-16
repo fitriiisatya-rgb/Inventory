@@ -43,13 +43,21 @@
         } else if (name === 'laporan') {
             Reports.render(document.getElementById('tab-laporan'));
         } else if (name === 'transaksi') {
-            Transactions.render(document.getElementById('tab-transaksi'));
+            const tabEl = document.getElementById('tab-transaksi');
+            Transactions.render(tabEl);
+            Adjustments.render(tabEl);
         } else if (name === 'transfer') {
             Transfers.render(document.getElementById('tab-transfer'));
         } else if (name === 'produksi') {
             Production.render(document.getElementById('tab-produksi'));
         } else if (name === 'opname') {
             StockOpname.render(document.getElementById('tab-opname'));
+        } else if (name === 'import') {
+            Imports.render(document.getElementById('tab-import'));
+        } else if (name === 'audit') {
+            Audit.render(document.getElementById('tab-audit'));
+        } else if (name === 'closing') {
+            Closing.render(document.getElementById('tab-closing'));
         }
     }
 
