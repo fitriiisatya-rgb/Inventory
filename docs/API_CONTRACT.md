@@ -137,6 +137,7 @@ the SAME `request_uuid` on a retry, a fresh one otherwise.
 | Method | Path | Permission | Request | Response `data` |
 |---|---|---|---|---|
 | POST | `/stock-opname` | `STOCK_OPNAME_MANAGE` (+ warehouse scope) | `{warehouse_id, item_ids?}` | `{session_id}` |
+| GET | `/stock-opname` | any authenticated user | query: `warehouse_id?, status?` | array of session rows (no lines) — used to discover an already-active session for a warehouse before starting a new one. Added in Phase D9. |
 | GET | `/stock-opname/{id}` | any authenticated user | — | session + lines |
 | POST | `/stock-opname/{id}/count` | `STOCK_OPNAME_MANAGE` | `{counts: [{item_id, counted_qty_base}]}` | session + lines |
 | POST | `/stock-opname/{id}/finalize` | `STOCK_OPNAME_MANAGE` | — | session + lines (with `variance_qty_base`, `cost_required`) |

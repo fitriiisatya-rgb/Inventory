@@ -44,8 +44,8 @@
         <div class="tabs">
             <button class="tab-btn active" data-tab="dashboard">🏠 Dashboard</button>
             <button class="tab-btn" data-tab="transaksi" data-require-permission="TRANSACTION_IN_CREATE,TRANSACTION_OUT_CREATE">📥 Transaksi</button>
-            <button class="tab-btn" data-tab="transfer" data-require-permission="TRANSFER_CREATE">🚚 Transfer</button>
-            <button class="tab-btn" data-tab="produksi" data-require-permission="PRODUCTION_CREATE">🏭 Produksi</button>
+            <button class="tab-btn" data-tab="transfer" data-require-permission="WAREHOUSE_TRANSFER_MANAGE">🚚 Transfer</button>
+            <button class="tab-btn" data-tab="produksi" data-require-permission="PRODUCTION_MANAGE">🏭 Produksi</button>
             <button class="tab-btn" data-tab="opname" data-require-permission="STOCK_OPNAME_MANAGE">📋 Stok Opname</button>
             <button class="tab-btn" data-tab="laporan">📊 Laporan</button>
             <button class="tab-btn" data-tab="master">🗂️ Master Data</button>
@@ -58,9 +58,9 @@
     <main class="app-main">
         <div class="tab-content active" id="tab-dashboard"></div>
         <div class="tab-content" id="tab-transaksi"></div>
-        <div class="tab-content" id="tab-transfer"><div class="card">Modul Transfer Antar Gudang — segera hadir pada milestone D7.</div></div>
-        <div class="tab-content" id="tab-produksi"><div class="card">Modul Produksi/Racik — segera hadir pada milestone D8.</div></div>
-        <div class="tab-content" id="tab-opname"><div class="card">Modul Stok Opname — segera hadir pada milestone D9.</div></div>
+        <div class="tab-content" id="tab-transfer"></div>
+        <div class="tab-content" id="tab-produksi"></div>
+        <div class="tab-content" id="tab-opname"></div>
         <div class="tab-content" id="tab-laporan"></div>
         <div class="tab-content" id="tab-master"></div>
         <div class="tab-content" id="tab-import"><div class="card">Modul Import — segera hadir pada milestone D12.</div></div>
@@ -78,6 +78,9 @@
 <script src="assets/js/dashboard.js"></script>
 <script src="assets/js/reports.js"></script>
 <script src="assets/js/transactions.js"></script>
+<script src="assets/js/transfers.js"></script>
+<script src="assets/js/production.js"></script>
+<script src="assets/js/stock-opname.js"></script>
 <script src="assets/js/app.js"></script>
 </body>
 </html>

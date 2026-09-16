@@ -381,6 +381,27 @@ $routes = [
         $sessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, (int) $input['warehouse_id'], $user['id'], $input['item_ids'] ?? null));
         inv_ok(['session_id' => $sessionId], 'Opname session started');
     },
+    // List sessions (optionally filtered) so the UI can discover whether a
+    // warehouse already has an active opname session before starting a new
+    // one, and show the "STOCK OPNAME ACTIVE" banner without needing the
+    // session id memorized client-side.
+    'GET /stock-opname' => function () use ($pdo, $query) {
+        inv_require_auth();
+        $sql = 'SELECT * FROM stock_opname_sessions WHERE 1=1';
+        $params = [];
+        if (isset($query['warehouse_id'])) {
+            $sql .= ' AND warehouse_id = :wh';
+            $params['wh'] = (int) $query['warehouse_id'];
+        }
+        if (isset($query['status'])) {
+            $sql .= ' AND status = :status';
+            $params['status'] = $query['status'];
+        }
+        $sql .= ' ORDER BY created_at DESC';
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        inv_ok($stmt->fetchAll(), 'OK');
+    },
     'GET /stock-opname/{id}' => function (array $params) use ($pdo) {
         inv_require_auth();
         inv_ok(StockOpnameService::get($pdo, (int) $params['id']), 'OK');

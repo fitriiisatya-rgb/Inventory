@@ -133,6 +133,10 @@ const InvApi = (() => {
         getTransfer: (id) => request('GET', `/transfers/${id}`),
 
         // ---- stock opname ----
+        listOpnameSessions: (filters = {}) => {
+            const qs = new URLSearchParams(filters).toString();
+            return request('GET', `/stock-opname${qs ? `?${qs}` : ''}`);
+        },
         startOpname: (payload) => request('POST', '/stock-opname', payload),
         getOpname: (id) => request('GET', `/stock-opname/${id}`),
         countOpname: (id, counts) => request('POST', `/stock-opname/${id}/count`, { counts }),

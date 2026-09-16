@@ -44,6 +44,12 @@
             Reports.render(document.getElementById('tab-laporan'));
         } else if (name === 'transaksi') {
             Transactions.render(document.getElementById('tab-transaksi'));
+        } else if (name === 'transfer') {
+            Transfers.render(document.getElementById('tab-transfer'));
+        } else if (name === 'produksi') {
+            Production.render(document.getElementById('tab-produksi'));
+        } else if (name === 'opname') {
+            StockOpname.render(document.getElementById('tab-opname'));
         }
     }
 
