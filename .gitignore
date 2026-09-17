@@ -34,6 +34,7 @@ migration/workspace/reports/*
 !migration/workspace/reports/unit_conversion_summary_v3.md
 !migration/workspace/reports/unit_conversion_summary_v4.md
 !migration/workspace/reports/unit_conversion_summary_v5.md
+!migration/workspace/reports/reconciliation_01_15_sep_partial.xlsx
 vendor/
 __pycache__/
 *.pyc
