@@ -13,5 +13,7 @@ migration/workspace/reports/*
 # Generated review artifacts (not raw production data) are tracked deliverables:
 !migration/workspace/normalized/unit_conversion_review.xlsx
 !migration/workspace/normalized/unit_conversion_candidates.json
+!migration/workspace/normalized/unit_conversion_candidates_real.json
+!migration/workspace/normalized/warehouse_unit_comparison.csv
 !migration/workspace/reports/unit_conversion_summary.md
 vendor/
