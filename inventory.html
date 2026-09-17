@@ -1085,6 +1085,12 @@
         <button id="invDiagExportBtn" class="btn btn-secondary btn-sm">📊 Export CSV</button>
         <button id="invDiagAngkaRusakBtn" class="btn btn-warning btn-sm">🔢 Perbaiki Angka Kehilangan Koma</button>
         <button id="invDiagHargaSatuanBtn" class="btn btn-warning btn-sm">⚖️ Perbaiki Harga Salah Satuan</button>
+    <div id="pemulihanKartu" style="margin:14px 0; padding:12px 14px; background:var(--bg2); border-radius:var(--radius); border:1px solid var(--border);">
+        <div style="font-weight:800; margin-bottom:2px;">🩹 Pemulihan Data — urutan yang benar</div>
+        <div style="font-size:0.75rem; color:var(--text3); margin-bottom:10px;">Statusnya dihitung ulang dari data yang ada sekarang, bukan dari catatan manual. Kerjakan dari atas ke bawah.</div>
+        <div id="pemulihanIsi"></div>
+        <button id="pemulihanRefresh" class="btn btn-secondary btn-sm" style="margin-top:10px;">🔄 Periksa Ulang</button>
+    </div>
         <button id="invDiagHargaEkstremBtn" class="btn btn-warning btn-sm">💥 Perbaiki Harga Menyimpang Ekstrem</button>
         <button id="invDiagDuplikatBtn" class="btn btn-warning btn-sm">👯 Periksa Baris Kembar</button>
         <button id="invDiagPpnTandaiBtn" class="btn btn-warning btn-sm">① Catat PPN pada Pembelian Lama</button>
@@ -7255,6 +7261,8 @@
     document.getElementById('invDiagHargaSatuanBtn')?.addEventListener('click', ()=>perbaikiHargaSatuanMid());
     document.getElementById('invDiagHargaEkstremBtn')?.addEventListener('click', ()=>perbaikiHargaEkstrem());
     document.getElementById('invDiagDuplikatBtn')?.addEventListener('click', ()=>periksaDuplikatTransaksi());
+    document.getElementById('pemulihanRefresh')?.addEventListener('click', ()=>renderPemulihan());
+    document.getElementById('invDiagRunBtn')?.addEventListener('click', ()=>{ try{ renderPemulihan(); }catch(e){} });
     document.getElementById('invDiagPpnTandaiBtn')?.addEventListener('click', ()=>catatPpnPembelianLama());
     document.getElementById('fixPpnMasterBtn')?.addEventListener('click', ()=>catatPpnPembelianLama());
     document.getElementById('invDiagPpnBtn')?.addEventListener('click', ()=>rebuildHistoricalCostInclPPN());
@@ -7628,6 +7636,52 @@
         { let p=new Date(String(cdStr0)+'T23:59:59.999'); if(!isNaN(p.getTime())) countDate=p.getTime(); }
         let cdLbl=new Date(countDate).toLocaleDateString('id');
         if(!confirm(`Selesaikan sesi opname ${gudangName(gudang)}?\n\nTanggal hitung fisik: ${cdLbl}\nHasil hitungan langsung final. Kekurangan tercatat sebagai pemakaian, kelebihan sebagai penyesuaian masuk.`)) return;
+        // ===== PENJAGA KEWAJARAN ADJUSTMENT OPNAME =====
+        // SO tidak membuat harga yang salah — dia MENGALIKANNYA dengan jumlah fisik yang besar.
+        // Satu baris Meises pernah masuk 363.864 Gr x Rp46.179/Gr = Rp16,8 miliar, padahal harga
+        // wajarnya Rp50,18/Gr: harga per karton yang dulu terketik ke kolom per gram, tidur selama
+        // kuantitasnya kecil, lalu meledak begitu SO menghitung stok sebenarnya.
+        // Kesalahan kedua ada di sisi jumlah: gram diketik ke kolom kilogram. Untuk itu tidak ada
+        // pembanding di dalam sistem, jadi yang bisa dilakukan hanya menunjukkan kelipatannya.
+        {
+            const rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+            const alarmHarga=[], alarmJumlah=[]; let nilaiTambah=0, nilaiKurang=0;
+            for(const i of items){
+                const fq=soFinalQty(i); if(fq===null) continue;
+                const sys=soSession.snapshot[i.sku]||0;
+                const d=fq-sys; if(d===0) continue;
+                const it=itemBySku(i.sku)||{};
+                const hrg=bestKnownUnitCostAt(i.sku,gudang,countDate).price||0;
+                const wajar=(it.lastBuyPrice>0 && it.buyContent>0) ? it.lastBuyPrice/it.buyContent : 0;
+                if(d>0) nilaiTambah+=d*hrg; else nilaiKurang+=Math.abs(d)*hrg;
+                if(wajar>0 && hrg>0 && hrg/wajar>=20)
+                    alarmHarga.push(`${i.sku} ${(it.name||'').slice(0,26)} — harga ${rp(hrg)}/${it.baseUnit||''} vs Master ${rp(wajar)}/${it.baseUnit||''} (${Math.round(hrg/wajar).toLocaleString('id')}x) → adjustment ${rp(Math.abs(d)*hrg)}`);
+                if(sys>0){
+                    const r=fq/sys;
+                    for(const f of [1000,100,0.001,0.01]){
+                        if(Math.abs(r/f-1)<=0.05){
+                            alarmJumlah.push(`${i.sku} ${(it.name||'').slice(0,26)} — sistem ${sys.toLocaleString('id')} → hitung fisik ${fq.toLocaleString('id')} ${it.baseUnit||''} (tepat ${f>=1?f.toLocaleString('id')+'x':'1/'+Math.round(1/f).toLocaleString('id')}). Satuan tertukar?`);
+                            break;
+                        }
+                    }
+                }
+            }
+            if(alarmHarga.length || alarmJumlah.length){
+                const pesan =
+                    `ADJUSTMENT OPNAME INI TAMPAK TIDAK WAJAR\n\n`
+                    + `Nilai yang akan DITAMBAH  : ${rp(nilaiTambah)}\n`
+                    + `Nilai yang akan DIKURANGI : ${rp(nilaiKurang)}\n\n`
+                    + (alarmHarga.length ? `HARGA MENCURIGAKAN (${alarmHarga.length} bahan)\nHarga diwarisi dari pembelian terakhir. Kalau pembelian itu salah satuan, SO akan mengalikannya dengan seluruh stok fisik:\n` + alarmHarga.slice(0,6).join('\n') + (alarmHarga.length>6?`\n+${alarmHarga.length-6} lainnya`:'') + '\n\n' : '')
+                    + (alarmJumlah.length ? `JUMLAH MENCURIGAKAN (${alarmJumlah.length} bahan)\n` + alarmJumlah.slice(0,6).join('\n') + (alarmJumlah.length>6?`\n+${alarmJumlah.length-6} lainnya`:'') + '\n\n' : '')
+                    + `Disarankan: BATALKAN, bereskan dulu lewat panel Diagnostic (Perbaiki Harga Salah Satuan), lalu selesaikan opname ini lagi. Hitungan fisiknya tidak hilang.\n\n`
+                    + `Kalau Anda sudah memeriksa dan yakin angkanya benar, ketik: SAYA YAKIN`;
+                const ketik=prompt(pesan);
+                if(String(ketik||'').trim().toUpperCase()!=='SAYA YAKIN'){
+                    notify('Dibatalkan','Opname belum diselesaikan. Hitungan fisiknya tetap tersimpan.','info');
+                    return;
+                }
+            }
+        }
         let diffs=[], allCounts=[], totalDiff=0, notCounted=0;
         for(let i of items){
             let c=soSession.counts[i.sku]||{};
@@ -10520,6 +10574,88 @@
         return { wajar:false, rasio, kini,
                  alasan:`Stok Awal Rp ${Math.round(total).toLocaleString('id')} itu ${Math.round(rasio).toLocaleString('id')}x lipat nilai stok yang benar-benar ada sekarang (Rp ${Math.round(kini).toLocaleString('id')}). Dua angka ini menghitung gudang yang sama, jadi selisih sebesar itu berarti ada transaksi lama yang angkanya rusak — bukan sekadar beda periode.` };
     }
+    // ====================== PANEL PEMULIHAN DATA ======================
+    // Enam langkah, berurutan, dengan status yang DIHITUNG dari data — bukan daftar centang manual.
+    // Urutannya bukan selera: stok realtime dibereskan lebih dulu karena itu yang dipakai tiap hari
+    // dan terus memburuk selama dibiarkan; Tutup Buku terakhir karena tidak bisa dibatalkan.
+    function pemulihanLangkah(){
+        const rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+        const L=[];
+        // 1. stok realtime vs Opening Resmi yang sudah dibekukan
+        const kini=nilaiStokRealtime();
+        const per=(typeof officialOpenings!=='undefined'&&officialOpenings)||{};
+        const beku=per[saPeriodeStr()];
+        let s1;
+        if(!beku) s1={st:'tunggu', ket:`Stok realtime sekarang ${rp(kini)}. Belum ada Stok Awal resmi sebagai pembanding — kerjakan langkah 2 dulu, atau unggah hasil hitung fisik ke tiap gudang lewat kartu \u201cUpload Stok Awal Gudang\u201d di halaman ini.`};
+        else {
+            const r=beku.totalValue>0?kini/beku.totalValue:0;
+            s1=(r>=0.5&&r<=2) ? {st:'ok', ket:`Stok realtime ${rp(kini)} sejalan dengan Stok Awal resmi ${rp(beku.totalValue)}.`}
+                              : {st:'bahaya', ket:`Stok realtime ${rp(kini)} vs Stok Awal resmi ${rp(beku.totalValue)} — beda ${r>=1?Math.round(r)+'x':'1/'+Math.round(1/r)+'x'}. Betulkan per gudang lewat kartu \u201cUpload Stok Awal Gudang\u201d dari hasil hitung fisik.`};
+        }
+        L.push({n:1, judul:'Betulkan stok realtime dari hitungan fisik', ...s1});
+        // 2. Stok Awal periode ini
+        const snap=getOpeningSnapshot(saPeriodeStr());
+        const wj=snap.ok?kewajaranOpening(snap.totalValue):{wajar:true};
+        L.push({n:2, judul:'Bekukan Stok Awal '+labelPeriode(saPeriodeStr()),
+            st: beku ? 'ok' : (!snap.ok ? 'bahaya' : (!wj.wajar ? 'bahaya' : 'tunggu')),
+            ket: beku ? `Sudah dibekukan: ${rp(beku.totalValue)} (${(beku.rows||[]).length} baris, sumber: ${beku.source||'-'}).`
+               : (!snap.ok ? 'Data historis tidak lengkap — tetapkan dari hasil hitung fisik lewat kartu \u201cUpload Stok Awal Bulanan\u201d.'
+               : (!wj.wajar ? `Hitung ulang menghasilkan ${rp(snap.totalValue)} — ${Math.round(wj.rasio).toLocaleString('id')}x stok nyata. JANGAN dibekukan. Pakai \u201cUpload Stok Awal Bulanan\u201d dari hitung fisik.`
+               : `Belum dibekukan. Angka hitung ulang ${rp(snap.totalValue)} tampak wajar.`)),
+            tombol: beku?null:{label:'Buka Upload Stok Awal Bulanan', aksi:'uo'}});
+        // 3-6: pekerjaan pembersihan
+        const a=deteksiAngkaRusak().filter(d=>d.bisa).length;
+        const b=deteksiHargaSatuanMid().length;
+        const c=deteksiHargaMenyimpang();
+        const dup=deteksiDuplikatLog();
+        const dupBisa=dup.reduce((x,g)=>x+g.bisa.length,0);
+        const sisa=a+b+c.pasti.length;
+        L.push({n:3, judul:'Bersihkan buku transaksi',
+            st: sisa? 'kerja':'ok',
+            ket: sisa? `Masih ada ${a} baris kehilangan koma, ${b} baris harga salah satuan, ${c.pasti.length} baris harga menyimpang ekstrem (+${c.ragu.length} perlu diperiksa manusia).`
+                     : `Bersih. ${c.ragu.length} baris masih perlu diperiksa manusia.`,
+            tombol: sisa?{label:'Jalankan berurutan', aksi:'bersih'}:null});
+        L.push({n:4, judul:'Periksa baris kembar',
+            st: dupBisa? 'kerja':(dup.length?'tunggu':'ok'),
+            ket: dup.length? `${dup.length} kelompok kembar; ${dupBisa} baris masih bisa dihapus, sisanya batch-nya sudah terpakai transaksi keluar.`:'Tidak ada baris kembar.',
+            tombol: dup.length?{label:'Periksa', aksi:'dup'}:null});
+        // 5. kiriman pending yang memblokir tutup buku bulan lalu
+        const cutoff=periodeCutoff(saPeriodeStr());
+        const pend=(typeof transfers!=='undefined'?transfers:[]).filter(t=>t.status==='pending'&&transferEffTs(t)<cutoff);
+        const nilaiPend=pend.reduce((x,t)=>{const ol=cariOutLogTransfer(t); return x+(ol?(ol.total||0):(t.qty*(t.price||0)));},0);
+        L.push({n:5, judul:'Selesaikan kiriman antar gudang yang menggantung',
+            st: pend.length?'kerja':'ok',
+            ket: pend.length? `${pend.length} kiriman bertanggal sebelum ${new Date(cutoff).toLocaleDateString('id')} belum dikonfirmasi diterima — ${rp(nilaiPend)}. Ini memblokir Tutup Buku.`:'Tidak ada yang menggantung.'});
+        // 6. tutup buku
+        const siap = beku && !pend.length && !sisa;
+        L.push({n:6, judul:'Tutup Buku',
+            st: siap?'kerja':'tunggu',
+            ket: siap? 'Syaratnya sudah terpenuhi. Tutup Buku tidak bisa dibatalkan — pastikan angkanya sudah Anda akui benar.'
+                     : 'Menunggu langkah di atas selesai.'});
+        return L;
+    }
+    function renderPemulihan(){
+        const el=document.getElementById('pemulihanIsi'); if(!el) return;
+        let L; try{ L=pemulihanLangkah(); }catch(e){ el.innerHTML='<div style="color:#ef4444">Gagal memeriksa: '+dvzEsc(e.message)+'</div>'; return; }
+        const ikon={ok:'✅', kerja:'🔧', bahaya:'⛔', tunggu:'⏳'};
+        const warna={ok:'#10b981', kerja:'#f59e0b', bahaya:'#ef4444', tunggu:'var(--text3)'};
+        el.innerHTML=L.map(x=>`<div style="display:flex; gap:9px; padding:7px 0; border-top:1px solid var(--border);">
+            <div style="font-size:1rem; line-height:1.2;">${ikon[x.st]||'•'}</div>
+            <div style="flex:1; min-width:0;">
+              <div style="font-weight:700; font-size:0.84rem; color:${warna[x.st]};">${x.n}. ${dvzEsc(x.judul)}</div>
+              <div style="font-size:0.76rem; color:var(--text2); line-height:1.45;">${dvzEsc(x.ket)}</div>
+              ${x.tombol?`<button class="btn btn-secondary btn-sm pemulihanAksi" data-aksi="${x.tombol.aksi}" style="margin-top:5px;">${dvzEsc(x.tombol.label)}</button>`:''}
+            </div></div>`).join('');
+        el.querySelectorAll('.pemulihanAksi').forEach(btn=>btn.addEventListener('click',()=>{
+            const a=btn.dataset.aksi;
+            if(a==='uo'){ document.querySelector('.reportSub[data-rsub="stok"]')?.click();
+                const k=document.getElementById('uploadOpeningCard');
+                if(k){ k.scrollIntoView({behavior:'smooth',block:'center'});
+                       const w=k.style.boxShadow; k.style.boxShadow='0 0 0 3px var(--accent)'; setTimeout(()=>{k.style.boxShadow=w;},2500); } }
+            else if(a==='bersih'){ perbaikiAngkaRusak(); }
+            else if(a==='dup'){ periksaDuplikatTransaksi(); }
+        }));
+    }
     function renderOpeningResmi(){
         const el=document.getElementById('orIsi'); if(!el) return;
         const period=orPeriode, cutoff=periodeCutoff(period);
@@ -10977,6 +11113,36 @@
             // gudang transit: tolak barang di luar daftar area ini, meski SKU-nya valid di master SCM
             // Satu kali upload = satu batch ber-ID, supaya bisa dibatalkan sekaligus kalau salah file.
             let uploadId = 'SA'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+            // Barang yang FISIKNYA ADA tapi belum terdaftar di katalog gudang transit akan ditolak
+            // satu per satu, dan hitungan fisik yang benar jadi hilang tanpa jalan keluar. Hitungan
+            // fisik lebih berwenang daripada katalog: kalau barangnya ada di gudang, katalognya yang
+            // ketinggalan. Ditawarkan sekali di muka — tidak pernah didaftarkan diam-diam.
+            if(gudang && gudang!==DEFAULT_GUDANG && typeof isTransitItemAllowed==='function'){
+                const belum=[];
+                for(const raw of dataRows){
+                    const q=raw.map(x=>String(x??'').trim());
+                    const kd=q[iKode]; if(!kd) continue;
+                    const it=itemBySku(kd); if(!it) continue;
+                    if(isTransitItemAllowed(it, gudang)) continue;
+                    const jml=numId(raw[iJumlah]); if(!(jml>0)) continue;
+                    const hr=(iHarga>-1?numId(raw[iHarga]):0) || (it.lastBuyPrice>0?it.lastBuyPrice/(it.buyContent||1):0);
+                    belum.push({ it, qty:jml, nilai:jml*hr });
+                }
+                if(belum.length){
+                    const nilai=belum.reduce((a,x)=>a+x.nilai,0);
+                    const daftar=belum.slice(0,8).map(x=>'• '+(x.it.name||x.it.sku)).join('\n');
+                    const ya=confirm(
+                        `${belum.length} barang ada fisiknya di ${gudangName(gudang)}, tapi belum terdaftar di katalog gudang itu.\n\n`
+                        + `Nilainya Rp ${Math.round(nilai).toLocaleString('id')}.\n\n`
+                        + daftar + (belum.length>8?`\n• +${belum.length-8} lainnya`:'')
+                        + `\n\nDaftarkan sekaligus supaya hitungan fisiknya ikut masuk?\n`
+                        + `OK = daftarkan lalu lanjut.  Batal = barang-barang ini dilewati.`);
+                    if(ya){
+                        let n=0; belum.forEach(x=>{ if(daftarkanKeGudang(x.it.name, gudang)) n++; });
+                        if(n) notify('Katalog Diperbarui', n+' barang didaftarkan ke '+gudangName(gudang)+'.', 'success');
+                    }
+                }
+            }
             let success=0, skipped=0, fails=[];
             for(let raw of dataRows){
                 // Sel angka dibaca dari nilai aslinya, bukan dari hasil String(). Lihat catatan di
