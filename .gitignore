@@ -10,4 +10,8 @@ migration/workspace/approved/*
 migration/workspace/rejected/*
 migration/workspace/reports/*
 !migration/workspace/*/.gitkeep
+# Generated review artifacts (not raw production data) are tracked deliverables:
+!migration/workspace/normalized/unit_conversion_review.xlsx
+!migration/workspace/normalized/unit_conversion_candidates.json
+!migration/workspace/reports/unit_conversion_summary.md
 vendor/

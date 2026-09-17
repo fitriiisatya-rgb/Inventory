@@ -345,6 +345,64 @@ CREATE TABLE stock_opening_lines (
 ) ENGINE=InnoDB;
 
 -- ============================================================================
+-- 5B. UNIT CONVERSION CANDIDATE REVIEW (PHASE G-DATA 1B)
+--
+-- Pure staging/review data — NEVER read by FifoService/UnitConversionService
+-- and NEVER affects a live posting. `sku` is a plain string, not a FK to
+-- `items`, because some rows here are for SKUs that don't exist in the
+-- master yet (new Global Master candidates) or whose identity is still in
+-- conflict (BLOCKED rows). An approved row is promoted into the real,
+-- FIFO-facing `item_unit_conversions` table via
+-- UnitConversionService::openNewVersion() — a separate, explicit step,
+-- never automatic.
+-- ============================================================================
+
+CREATE TABLE unit_conversion_candidates (
+    id                              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    sku                             VARCHAR(40)  NOT NULL,
+    item_name                       VARCHAR(200) NULL,
+    current_source                 VARCHAR(100) NULL,   -- which warehouse/source file this candidate came from, or 'MULTIPLE'
+
+    global_base_unit_candidate      VARCHAR(20)  NULL,
+    legacy_base_unit                VARCHAR(20)  NULL,
+    middle_unit_candidate           VARCHAR(20)  NULL,
+    middle_conversion_to_base       DECIMAL(20,6) NULL,
+    purchase_unit_candidate         VARCHAR(20)  NULL,
+    purchase_conversion_to_base     DECIMAL(20,6) NULL,
+
+    gudang_besar_display_unit       VARCHAR(20)  NULL,
+    cibadak_display_unit            VARCHAR(20)  NULL,
+    karangtengah_display_unit       VARCHAR(20)  NULL,
+
+    name_derived_candidate          VARCHAR(255) NULL,   -- e.g. "25 KG from '@25Kg' in item name"
+    price_ratio_evidence            JSON NULL,           -- {ratio, price_a, unit_a, source_a, price_b, unit_b, source_b}
+    legacy_evidence                 JSON NULL,           -- {legacy_source, legacy_value, source_field}[]
+
+    -- Section 10: source priority drives confidence, never auto-approval.
+    confidence                      ENUM('HIGH','MEDIUM','LOW') NULL,
+    issue_code                      VARCHAR(255) NULL,   -- comma-separated if more than one applies
+    issue_detail                    TEXT NULL,
+    review_status                   ENUM('PENDING','BLOCKED','APPROVED','REJECTED') NOT NULL DEFAULT 'PENDING',
+
+    approved_base_unit               VARCHAR(20) NULL,
+    approved_middle_unit             VARCHAR(20) NULL,
+    approved_middle_conversion       DECIMAL(20,6) NULL,
+    approved_purchase_unit           VARCHAR(20) NULL,
+    approved_purchase_conversion     DECIMAL(20,6) NULL,
+    approved                         ENUM('YES') NULL,   -- NULL/blank = not approved; never auto-set
+    correction_note                  TEXT NULL,
+
+    approved_by                      INT UNSIGNED NULL,
+    approved_at                      DATETIME NULL,
+    created_at                       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at                       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_ucc_approver FOREIGN KEY (approved_by) REFERENCES users(id),
+    INDEX idx_ucc_sku (sku),
+    INDEX idx_ucc_review_status (review_status)
+) ENGINE=InnoDB
+COMMENT='Phase G-DATA 1B: unit conversion reconstruction candidates — review-only until a human sets approved=YES, which a separate promotion step then writes into item_unit_conversions.';
+
+-- ============================================================================
 -- 6. STOCK OPNAME, ADJUSTMENTS
 -- ============================================================================
 
