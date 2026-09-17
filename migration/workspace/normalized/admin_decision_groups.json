@@ -1,0 +1,232 @@
+{
+  "decision_groups": [
+    {
+      "group_id": "TOPPER_SET_VS_PCS",
+      "business_question": "Untuk produk Topper Ultah @12 set, apakah satu kemasan berisi 12 SET dan dalam sistem lama 1 SET memang dicatat sebagai 1 PCS?",
+      "affected_sku_count": 17,
+      "representative_sku": "111904",
+      "representative_item": "Topper Ultah Boboboi @12 set",
+      "current_global_base": "PCS",
+      "name_evidence": "@12 set",
+      "legacy_evidence": "12.0 Pcs",
+      "transaction_evidence": "PCS",
+      "possible_interpretation": "111904: name=@12 set legacy=12.0Pcs; 111905: name=@12 set legacy=12.0Pcs; 111906: name=@12 set legacy=12.0Pcs; 111907: name=@12 set legacy=12.0Pcs; 111908: name=@12 set legacy=12.0Pcs",
+      "recommended_choices": "A: 1 SET = 1 PCS (pakai konversi ini untuk seluruh family) | B: SET dan PCS berbeda (butuh faktor konversi lain) | C: Data lama salah; gunakan unit lain | D: Perlu cek fisik",
+      "admin_decision": "",
+      "admin_notes": "",
+      "affected_skus": [
+        "111904",
+        "111905",
+        "111906",
+        "111907",
+        "111908",
+        "111909",
+        "111910",
+        "111911",
+        "111912",
+        "111913",
+        "111914",
+        "111915",
+        "111916",
+        "111917",
+        "111918",
+        "111919",
+        "111921"
+      ],
+      "affected_items": [
+        "Topper Ultah Boboboi @12 set",
+        "Topper Ultah Hewan @12 set",
+        "Topper Ultah Baby Shark @12 set",
+        "Topper Ultah Hello kitty @12 set",
+        "Topper Ultah Tayoo @12 set",
+        "Topper Ultah Dinosaurus @12set",
+        "Topper Ultah Doraemon @12set",
+        "Topper Ultah Cars @12set",
+        "Topper Ultah Upin Ipin @12set",
+        "Topper Ultah Astronot @12set",
+        "Topper Ultah Batman @12set",
+        "Topper Ultah Ultraman @12set",
+        "Topper Ultah Thomas @12 set",
+        "Topper Ultah kuda foni @12 set",
+        "Topper Ultah Princess @12 set",
+        "Topper Ultah Mermaid @12 set",
+        "Topper kertas @12 set"
+      ]
+    },
+    {
+      "group_id": "PACK_VS_PCS",
+      "business_question": "Untuk produk berikut, apakah jumlah PACK pada nama produk adalah jumlah PCS riil per unit inventory, atau hanya istilah kemasan yang tidak memengaruhi hitungan stok (stok tetap dihitung per PCS)?",
+      "affected_sku_count": 4,
+      "representative_sku": "100503",
+      "representative_item": "Mix K600 @100Pcs",
+      "current_global_base": "PACK",
+      "name_evidence": "@100Pcs",
+      "legacy_evidence": "1.0 Pack",
+      "transaction_evidence": "PACK",
+      "possible_interpretation": "100503: name=@100Pcs legacy=1.0Pack; 111507: name=@10 pack legacy=1.0Pcs; 111508: name=@10 pack legacy=1.0Pcs; 333404: name=@50 Pak legacy=1.0Pcs",
+      "recommended_choices": "A: 1 PACK = jumlah PCS sesuai nama (pakai sebagai faktor konversi) | B: PACK hanya istilah kemasan; stok tetap per PCS (tidak ada konversi) | C: Data lama salah; gunakan unit lain | D: Perlu cek fisik",
+      "admin_decision": "",
+      "admin_notes": "",
+      "affected_skus": [
+        "100503",
+        "111507",
+        "111508",
+        "333404"
+      ],
+      "affected_items": [
+        "Mix K600 @100Pcs",
+        "Balon foil angka 0-9 @10 pack",
+        "Balon foil huruf A-Z @10 pack",
+        "Papercase 3051 Dark Green (Muffin)@50 Pak"
+      ]
+    },
+    {
+      "group_id": "SAME_UNIT_LEGACY_DEFAULT_VS_NAME_COUNT",
+      "business_question": "Untuk produk PCS berikut, sistem lama mencatat faktor kemasan = 1 (tidak ada konversi), tetapi nama produk menyiratkan jumlah isi per kemasan yang berbeda. Apakah kami boleh memakai jumlah dari nama produk sebagai faktor konversi resmi?",
+      "affected_sku_count": 3,
+      "representative_sku": "333502",
+      "representative_item": "Sticker Bolu Amor Oval @43Pcs",
+      "current_global_base": "PCS",
+      "name_evidence": "@43Pcs",
+      "legacy_evidence": "1.0 Pcs",
+      "transaction_evidence": "PCS",
+      "possible_interpretation": "333502: name=@43Pcs legacy=1.0Pcs; 555911: name=@250 Pcs legacy=1.0Pcs; 666201: name=@25Pcs legacy=1.0Pcs",
+      "recommended_choices": "A: Ya, pakai jumlah dari nama produk | B: Tidak, faktor lama (=1) yang benar | C: Data lama salah; gunakan unit lain | D: Perlu cek fisik",
+      "admin_decision": "",
+      "admin_notes": "",
+      "affected_skus": [
+        "333502",
+        "555911",
+        "666201"
+      ],
+      "affected_items": [
+        "Sticker Bolu Amor Oval @43Pcs",
+        "Dus General @250 Pcs",
+        "Papper Cup Kecil @25Pcs"
+      ]
+    },
+    {
+      "group_id": "SHEET_VS_PCS",
+      "business_question": "Untuk produk kertas berikut, apakah 1 SHEET memang sama dengan 1 PCS pada sistem ini?",
+      "affected_sku_count": 1,
+      "representative_sku": "333211",
+      "representative_item": "BAKING PAPER 40X60 CM @500 SHEET",
+      "current_global_base": "PCS",
+      "name_evidence": "@500 SHEET",
+      "legacy_evidence": "500.0 Pcs",
+      "transaction_evidence": "PCS",
+      "possible_interpretation": "333211: name=@500 SHEET legacy=500.0Pcs",
+      "recommended_choices": "A: 1 SHEET = 1 PCS | B: SHEET dan PCS berbeda | C: Data lama salah; gunakan unit lain | D: Perlu cek fisik",
+      "admin_decision": "",
+      "admin_notes": "",
+      "affected_skus": [
+        "333211"
+      ],
+      "affected_items": [
+        "BAKING PAPER 40X60 CM @500 SHEET"
+      ]
+    },
+    {
+      "group_id": "ROLL_VS_PCS",
+      "business_question": "Untuk produk berikut, apakah 1 ROLL memang sama dengan 1 PCS pada sistem ini?",
+      "affected_sku_count": 1,
+      "representative_sku": "444803",
+      "representative_item": "Pm (S) Strech Film 45Cm @6Roll",
+      "current_global_base": "PCS",
+      "name_evidence": "@6Roll",
+      "legacy_evidence": "1.0 Pcs",
+      "transaction_evidence": "PCS",
+      "possible_interpretation": "444803: name=@6Roll legacy=1.0Pcs",
+      "recommended_choices": "A: 1 ROLL = 1 PCS | B: ROLL dan PCS berbeda | C: Data lama salah; gunakan unit lain | D: Perlu cek fisik",
+      "admin_decision": "",
+      "admin_notes": "",
+      "affected_skus": [
+        "444803"
+      ],
+      "affected_items": [
+        "Pm (S) Strech Film 45Cm @6Roll"
+      ]
+    },
+    {
+      "group_id": "SET_VS_PCS",
+      "business_question": "Untuk produk berikut, apakah SET dan PCS memang unit yang sama (1 SET = 1 PCS) pada sistem ini?",
+      "affected_sku_count": 1,
+      "representative_sku": "666105",
+      "representative_item": "Mika Chiffon 20Ddm @250 Pcs",
+      "current_global_base": "SET",
+      "name_evidence": "@250 Pcs",
+      "legacy_evidence": "250.0 Set",
+      "transaction_evidence": "SET",
+      "possible_interpretation": "666105: name=@250 Pcs legacy=250.0Set",
+      "recommended_choices": "A: 1 SET = 1 PCS | B: SET dan PCS berbeda | C: Data lama salah; gunakan unit lain | D: Perlu cek fisik",
+      "admin_decision": "",
+      "admin_notes": "",
+      "affected_skus": [
+        "666105"
+      ],
+      "affected_items": [
+        "Mika Chiffon 20Ddm @250 Pcs"
+      ]
+    }
+  ],
+  "unique_cases": [
+    {
+      "sku": "100201",
+      "item_name": "CHEFMATE 3 IN 1 @500GRX20",
+      "current_base": "KG",
+      "legacy": "20.0 Kg",
+      "name_evidence": "500GRX20",
+      "transaction_evidence": null,
+      "exact_question": "SKU 100201 (CHEFMATE 3 IN 1 @500GRX20): evidence disagrees (SAME_UNIT_DIFFERENT_FACTOR) -- please confirm the correct base/packaging conversion.",
+      "semantic_tag": "SAME_UNIT_DIFFERENT_FACTOR"
+    },
+    {
+      "sku": "140541",
+      "item_name": "CREAMFILL CLASSIC BANANA",
+      "current_base": "KG",
+      "legacy": "1.0 Kg",
+      "name_evidence": "Normalization trace: PRICE_RATIO: raw=136GR -> normalized=136.0GR (CONFLICT); LEGACY: raw=1.0KG -> normalized=1000.0GR (",
+      "transaction_evidence": "KG",
+      "exact_question": "SKU 140541 (CREAMFILL CLASSIC BANANA): evidence disagrees (SAME_UNIT_DIFFERENT_FACTOR) -- please confirm the correct base/packaging conversion.",
+      "semantic_tag": "SAME_UNIT_DIFFERENT_FACTOR"
+    },
+    {
+      "sku": "400111",
+      "item_name": "Delifruit Dark Cherry 50 @2,7 Kg",
+      "current_base": "KG",
+      "legacy": "2.7 Pcs",
+      "name_evidence": "@2,7 Kg",
+      "transaction_evidence": "KG",
+      "exact_question": "SKU 400111 (Delifruit Dark Cherry 50 @2,7 Kg): evidence disagrees (SAME_UNIT_DIFFERENT_FACTOR) -- please confirm the correct base/packaging conversion.",
+      "semantic_tag": "SAME_UNIT_DIFFERENT_FACTOR"
+    },
+    {
+      "sku": "900501",
+      "item_name": "Wilton Blackforest @1Liter",
+      "current_base": "KG",
+      "legacy": "1.0 Kg",
+      "name_evidence": "@1Liter",
+      "transaction_evidence": "KG",
+      "exact_question": "SKU 900501 (Wilton Blackforest @1Liter): evidence disagrees (CROSS_DIMENSION_AMBIGUOUS) -- please confirm the correct base/packaging conversion.",
+      "semantic_tag": "CROSS_DIMENSION_AMBIGUOUS"
+    }
+  ],
+  "movement_review_skus": [
+    "100304",
+    "150116",
+    "400201",
+    "555410",
+    "666408",
+    "777212",
+    "777419",
+    "800401"
+  ],
+  "resolved_count_by_reason": {
+    "COMPOSITE_PACKAGE_AGREEMENT": 2,
+    "CONTENT_WEIGHT_PER_INVENTORY_UNIT": 8,
+    "NAME_TRIVIAL_BASE_UNIT": 16,
+    "NAME_STRUCTURE_REVIEW": 10,
+    "PRODUCT_VARIANT_TEXT": 4,
+    "CONTENT_QTY_PER_INVENTORY_UNIT": 2
+  }
+}
