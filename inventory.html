@@ -1480,8 +1480,80 @@
         for(const sku in (peta||{})) (peta[sku]||[]).forEach(b=>kembangkanBaris(b, BAWAAN_BATCH));
         return peta||{};
     }
+    // ===== KAMUS TEKS BERULANG =====
+    // Kolom terboros di buku transaksi bukan angkanya, melainkan teks yang sama diketik ulang
+    // ribuan kali: ref 1.134 KB ("Transfer dari Gudang SCM ..."), itemName 298 KB, gudang 106 KB.
+    // Disimpan sekali di kamus, barisnya menunjuk lewat indeks. Lossless — isinya kembali persis.
+    //
+    // Kolom yang PERNAH berisi angka pada data ini dikeluarkan dari kamus seluruhnya, dan daftar
+    // kolom yang benar-benar dikamuskan ikut ditulis ke berkasnya. Tanpa itu, sebuah ref yang
+    // kebetulan berupa angka tidak bisa dibedakan dari indeks kamus saat dibaca kembali.
+    const FIELD_KAMUS = ['ref','itemName','by','supplier','division','desc','area','gudang',
+                         'uploadId','transferTo','source','outType','note','itemSku','fromGudang','toGudang'];
+    function kemasKamus(rows){
+        rows = rows||[];
+        const aman = FIELD_KAMUS.filter(k=>!rows.some(r=>r && typeof r[k]==='number'));
+        const hitung=new Map();
+        rows.forEach(r=>{ if(!r) return; aman.forEach(k=>{ const v=r[k];
+            if(typeof v==='string' && v.length>1) hitung.set(v,(hitung.get(v)||0)+1); }); });
+        const kamus=[], idx=new Map();
+        hitung.forEach((n,v)=>{ if(n>=2){ idx.set(v, kamus.length); kamus.push(v); } });
+        if(!kamus.length) return rows;                       // tidak ada yang berulang: simpan apa adanya
+        const baris=rows.map(r=>{
+            if(!r) return r;
+            let salin=null;
+            for(const k of aman){ const v=r[k];
+                if(typeof v==='string' && idx.has(v)){ if(!salin) salin=Object.assign({},r); salin[k]=idx.get(v); } }
+            return salin||r;
+        });
+        return { __kamus:1, medan:aman, kamus, baris };
+    }
+    function bongkarKamus(v){
+        if(Array.isArray(v)) return v;                       // berkas format lama
+        if(!v || !v.__kamus) return [];
+        const kamus=v.kamus||[], medan=v.medan||FIELD_KAMUS;
+        return (v.baris||[]).map(r=>{
+            if(!r) return r;
+            for(const k of medan){ const x=r[k];
+                if(typeof x==='number' && kamus[x]!==undefined) r[k]=kamus[x]; }
+            return r;
+        });
+    }
     // Berapa besar data sekarang, supaya bisa diperingatkan SEBELUM kuota benar-benar habis.
-    function ukuranPenyimpanan(){
+    //
+    // Batasnya TIDAK boleh ditebak. Angka 5 MB yang dulu dipatok di sini membuat peringatan
+    // melaporkan "terpakai 185%" pada peramban yang kuotanya memang lebih besar — padahal
+    // datanya tersimpan dengan selamat. Persentase di atas 100% membuat orang panik pada
+    // masalah yang salah, dan menutupi kenyataan bahwa sisanya memang benar-benar menipis.
+    //
+    // Yang dilakukan sekarang: menimbang sisa ruang dengan mencoba menulis kunci sementara
+    // yang membesar, lalu menghapusnya lagi. Batas = yang terpakai + yang masih muat. Itu
+    // fakta tentang peramban di depan pengguna, bukan asumsi tentang peramban pada umumnya.
+    let __sisaRuangCache=null, __sisaRuangPada=0;
+    function sisaRuangPenyimpanan(paksa){
+        const t=Date.now();
+        if(!paksa && __sisaRuangCache!=null && (t-__sisaRuangPada)<60000) return __sisaRuangCache;
+        const K='__uji_ruang__';
+        let muat=0;
+        const coba=n=>{ try{ localStorage.setItem(K,'x'.repeat(n/2)); return true; }catch(e){ return false; } };
+        try{
+            // MENURUN dari 32 MB, ambil blok terbesar yang masih muat, lalu satu putaran
+            // penghalusan. Paling banyak belasan penulisan — bukan ratusan, supaya peramban
+            // tidak tersendat hanya untuk menghitung sisa ruang.
+            for(let blok=32*1024*1024; blok>=64*1024; blok=Math.floor(blok/2)){
+                if(coba(blok)){ muat=blok; break; }
+            }
+            if(muat){
+                for(let tambah=muat/2; tambah>=64*1024; tambah=Math.floor(tambah/2)){
+                    if(coba(muat+tambah)) muat+=tambah;
+                }
+            }
+        }catch(e){}
+        try{ localStorage.removeItem(K); }catch(e){}
+        __sisaRuangCache=muat; __sisaRuangPada=t;
+        return muat;
+    }
+    function ukuranPenyimpanan(opts){
         let total=0; const rinci=[];
         try{
             for(let i=0;i<localStorage.length;i++){
@@ -1491,7 +1563,10 @@
             }
         }catch(e){}
         rinci.sort((a,b)=>b.bytes-a.bytes);
-        return { total, rinci, batas:5*1024*1024 };
+        const sisa=(opts&&opts.tanpaUkurSisa)?0:sisaRuangPenyimpanan(opts&&opts.paksa);
+        // Data yang sudah tersimpan itu bukti bahwa kuotanya minimal sebesar itu.
+        const batas=Math.max(total+sisa, total);
+        return { total, rinci, batas, sisa };
     }
 
     // ===== SEMUA KOLOM ANGKA MENERIMA PECAHAN =====
@@ -1527,7 +1602,7 @@
         try {
             localStorage.setItem(STORAGE.SKU, JSON.stringify(masterSKU));
             localStorage.setItem(STORAGE.BATCH, JSON.stringify(rampingkanBatch(stockBatches)));
-            localStorage.setItem(STORAGE.LOG, JSON.stringify(rampingkanLog(transactionLog)));
+            localStorage.setItem(STORAGE.LOG, JSON.stringify(kemasKamus(rampingkanLog(transactionLog))));
             localStorage.setItem(STORAGE.SUP, JSON.stringify(suppliers));
             localStorage.setItem(STORAGE.DIV, JSON.stringify(divisions));
             localStorage.setItem(STORAGE.IDS, JSON.stringify({ nextLogId, nextSupplierId, nextDivisionId, nextBatchId, nextTransferId }));
@@ -1536,19 +1611,21 @@
             localStorage.setItem(STORAGE.ALIAS, JSON.stringify(invoiceAliases));
             localStorage.setItem('gudang_extra_names', JSON.stringify(gudangExtraNames));
             localStorage.setItem('produksi_divisi', JSON.stringify(produksiDivisi));
-            localStorage.setItem(STORAGE.TRANSFER, JSON.stringify(rampingkanTransfer(transfers)));
+            localStorage.setItem(STORAGE.TRANSFER, JSON.stringify(kemasKamus(rampingkanTransfer(transfers))));
             localStorage.setItem("closings", JSON.stringify({closings, officialOpenings, lockBefore, editLocked, categoryMarkup, auditLog, nextAuditId}));
             // Peringatan DINI: begitu pemakaian lewat 80%, beri tahu selagi masih sempat dibereskan.
             // Menunggu sampai benar-benar gagal berarti sudah ada perubahan yang tidak tersimpan.
             try{
                 const u=ukuranPenyimpanan();
-                const persen=u.total/u.batas;
+                const persen=u.batas>0 ? u.total/u.batas : 0;
                 if(persen>0.8 && !window.__peringatanKuota){
                     window.__peringatanKuota=true;
+                    const mb=n=>(n/1048576).toFixed(1).replace('.',',')+' MB';
                     notify('Penyimpanan Hampir Penuh',
-                        `Penyimpanan browser terpakai ${Math.round(persen*100)}% (${Math.round(u.total/1024).toLocaleString('id')} KB dari ${Math.round(u.batas/1024).toLocaleString('id')} KB). `
-                        + `Terbesar: ${u.rinci.slice(0,2).map(x=>x.kunci+' '+Math.round(x.bytes/1024).toLocaleString('id')+' KB').join(', ')}. `
-                        + `Lakukan Tutup Buku periode lama, atau sinkronkan ke Google Sheets, sebelum penyimpanan benar-benar penuh.`, 'warning');
+                        `Terpakai ${mb(u.total)}, sisa ruang tinggal ${mb(u.sisa)} (${Math.round(persen*100)}%). `
+                        + `Terbesar: ${u.rinci.slice(0,2).map(x=>x.kunci+' '+mb(x.bytes)).join(', ')}. `
+                        + `Data Anda AMAN — yang tersimpan tidak hilang. Tapi begitu sisanya habis, transaksi baru akan gagal disimpan. `
+                        + `Sinkronkan ke Google Sheets, lalu lakukan Tutup Buku periode lama.`, 'warning');
                 }
             }catch(e){}
         } catch (e) {
@@ -2067,14 +2144,14 @@
         if (savedSku && JSON.parse(savedSku).length) {
             masterSKU = JSON.parse(savedSku);
             stockBatches = kembangkanBatch(JSON.parse(localStorage.getItem(STORAGE.BATCH) || "{}"));
-            transactionLog = kembangkanLog(JSON.parse(localStorage.getItem(STORAGE.LOG) || "[]"));
+            transactionLog = kembangkanLog(bongkarKamus(JSON.parse(localStorage.getItem(STORAGE.LOG) || "[]")));
             suppliers = JSON.parse(localStorage.getItem(STORAGE.SUP) || "[]");
             divisions = JSON.parse(localStorage.getItem(STORAGE.DIV) || "[]");
             const ids = JSON.parse(localStorage.getItem(STORAGE.IDS) || "{}");
             nextLogId = ids.nextLogId || 1; nextSupplierId = ids.nextSupplierId || (suppliers.length+1);
             nextDivisionId = ids.nextDivisionId || (divisions.length+1); nextBatchId = ids.nextBatchId || 1;
             nextTransferId = ids.nextTransferId || 1;
-            transfers = kembangkanTransfer(JSON.parse(localStorage.getItem(STORAGE.TRANSFER) || "[]"));
+            transfers = kembangkanTransfer(bongkarKamus(JSON.parse(localStorage.getItem(STORAGE.TRANSFER) || "[]")));
             const so = JSON.parse(localStorage.getItem(STORAGE.SO) || "{}");
             if(so.soSessions){ soSessions = { scm: so.soSessions.scm||soSessions.scm, cibadak: so.soSessions.cibadak||soSessions.cibadak, karangtengah: so.soSessions.karangtengah||soSessions.karangtengah }; }
             else if(so.soSession){ let g=so.soSession.gudang||DEFAULT_GUDANG; soSessions[g]=so.soSession; } // kompatibilitas data lama
