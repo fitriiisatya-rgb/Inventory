@@ -5870,6 +5870,24 @@
     });
     // Membaca file jadi baris opening. Pemeriksaan sengaja ketat: satu baris salah satuan cukup
     // untuk merusak nilai persediaan satu perusahaan, dan itu sudah pernah terjadi.
+    // Menolak sebuah baris tanpa memberi tahu jalan keluarnya membuat orang harus menebak kode
+    // sendiri, dan lima baris yang ditolak berubah jadi satu putaran bolak-balik berkas. Padahal
+    // nama barangnya ada di kolom sebelah dan padanannya bisa dicari.
+    function tebakSkuDariNama(nama){
+        const n=normItemName(nama); if(!n || n.length<3) return null;
+        const pas=(masterSKU||[]).filter(m=>normItemName(m.name)===n);
+        if(pas.length===1) return pas[0];
+        if(pas.length>1) return null;                 // ambigu: jangan menebak
+        const longgar=(masterSKU||[]).filter(m=>{ const x=normItemName(m.name);
+            return x && (x.indexOf(n)===0 || n.indexOf(x)===0); });
+        return longgar.length===1 ? longgar[0] : null;
+    }
+    function usulPembagiHarga(harga, it){
+        const wajar=(it && it.lastBuyPrice>0 && it.buyContent>0) ? it.lastBuyPrice/it.buyContent : 0;
+        if(!(wajar>0) || !(harga>0)) return null;
+        const k=heCariFaktor(harga/wajar, it);
+        return k ? { faktor:k.f, sesudah:harga/k.f, sebab:k.sebab } : null;
+    }
     function uoBacaBaris(aoa, gudangPaksa){
         aoa=(aoa||[]).filter(r=>r && r.some(c=>String(c||'').trim()!==''));
         if(!aoa.length) return { ok:false, pesan:'File kosong.' };
@@ -5877,7 +5895,7 @@
         if(hi<0) hi=0;
         const H=aoa[hi].map(h=>String(h||'').trim().toUpperCase());
         const kol=(...n)=>{ for(const x of n){ const i=H.findIndex(h=>h.includes(x)); if(i>-1) return i; } return -1; };
-        const iKode=kol('KODE'), iQty=kol('QTY','JUMLAH'), iHrg=kol('HARGA'), iGud=kol('GUDANG');
+        const iKode=kol('KODE'), iQty=kol('QTY','JUMLAH'), iHrg=kol('HARGA'), iGud=kol('GUDANG'), iNama=kol('NAMA');
         if(iKode<0 || iQty<0) return { ok:false, pesan:'Kolom "Kode Barang" dan "Qty Stok Awal" wajib ada. Gunakan template yang disediakan.' };
         if(iGud<0 && !gudangPaksa) return { ok:false, pesan:'File tidak punya kolom "Gudang". Pilih satu gudang di dropdown "Cakupan file", atau tambahkan kolom Gudang ke file Anda. Sistem tidak akan menebak barang ini milik gudang mana.' };
         const kodeGudang={}; (GUDANG_LIST||[]).forEach(g=>{ kodeGudang[String(g.id).toUpperCase()]=g.id;
@@ -5893,7 +5911,11 @@
             const kode=r[iKode]; if(!kode) continue;
             if(/^PETUNJUK|^\d\./i.test(kode)) continue;              // baris petunjuk di template
             const it=itemBySku(kode);
-            if(!it){ tolak.push(`${kode}: tidak ada di Master Data`); continue; }
+            if(!it){
+                const tebak = iNama>-1 ? tebakSkuDariNama(r[iNama]) : null;
+                tolak.push(`${kode}: tidak ada di Master Data`
+                    + (tebak ? ` — sepertinya ini ${tebak.sku} (${tebak.name}). Ganti kolom Kode Barang jadi ${tebak.sku}.` : ''));
+                continue; }
             const g = gudangPaksa || kodeGudang[String(r[iGud]||'').toUpperCase()] || String(r[iGud]||'').toLowerCase().replace(/\s+/g,'');
             if(!g){ tolak.push(`${kode}: kolom Gudang kosong`); continue; }
             const qty=angkaID(mentah[iQty]);
@@ -5907,7 +5929,9 @@
             if(!(harga>0)) harga = wajar;
             if(!(harga>0)){ peringatan.push(`${kode}: harga kosong dan Master belum punya harga beli — dinilai Rp0`); harga=0; }
             else if(wajar>0 && harga > wajar*20){
-                tolak.push(`${kode}: harga Rp${Math.round(harga).toLocaleString('id')} tampak harga per ${it.buyUnit||'kemasan'}, bukan per ${it.baseUnit}. Wajarnya sekitar Rp${Math.round(wajar).toLocaleString('id')}/${it.baseUnit}`);
+                const u=usulPembagiHarga(harga, it);
+                tolak.push(`${kode}: harga Rp${Math.round(harga).toLocaleString('id')} tampak harga per ${it.buyUnit||'kemasan'}, bukan per ${it.baseUnit}. Wajarnya sekitar Rp${Math.round(wajar).toLocaleString('id')}/${it.baseUnit}`
+                    + (u ? ` — kalau itu ${u.sebab}, isi ${String(Math.round(u.sesudah*1000)/1000).replace('.',',')} (dibagi ${u.faktor.toLocaleString('id')}).` : ''));
                 continue;
             }
             else if(wajar>0 && harga < wajar/20) peringatan.push(`${kode}: harga Rp${Math.round(harga).toLocaleString('id')} jauh di bawah harga Master Rp${Math.round(wajar).toLocaleString('id')}/${it.baseUnit}`);
@@ -11184,7 +11208,7 @@
         }
         async function applyRows(header, dataRows){
             let col=n=>header.findIndex(h=>h.includes(n));
-            let iKode=col('KODE'), iJumlah=col('JUMLAH'), iHarga=col('HARGA'), iExp=col('KEDALUWARSA');
+            let iKode=col('KODE'), iJumlah=col('JUMLAH'), iHarga=col('HARGA'), iExp=col('KEDALUWARSA'), iNamaRef=col('NAMA');
             if(iExp===-1) iExp=col('EXPIRED');
             if(iKode===-1 || iJumlah===-1){ notify('Format Tidak Dikenali','File harus punya kolom "Kode Barang" dan "Jumlah Stok Awal" (gunakan template yang disediakan).','error'); return; }
             // gudang transit: tolak barang di luar daftar area ini, meski SKU-nya valid di master SCM
@@ -11227,7 +11251,11 @@
                 let p=raw.map(s=>String(s??'').trim());
                 let kode=p[iKode]; if(!kode) continue;
                 let item=itemBySku(kode);
-                if(!item){ fails.push(`${kode}: SKU tidak ditemukan di master barang`); continue; }
+                if(!item){
+                    const tebak = iNamaRef>-1 ? tebakSkuDariNama(p[iNamaRef]) : null;
+                    fails.push(`${kode}: SKU tidak ditemukan di master barang`
+                        + (tebak ? ` — sepertinya ini ${tebak.sku} (${tebak.name}). Ganti kolom Kode Barang jadi ${tebak.sku}.` : ''));
+                    continue; }
                 if(!isTransitItemAllowed(item, gudang)){ fails.push(`${kode} - ${item.name}: bukan barang area ${gudangName(gudang)}`); continue; }
                 let qty=numId(raw[iJumlah]);
                 if(!(qty>0)){ skipped++; continue; }
@@ -11248,7 +11276,9 @@
                 // inilah penyebab munculnya angka seperti Rp45 miliar untuk 40 unit. Ditolak, bukan didiamkan.
                 let wajar = item.lastBuyPrice>0 ? item.lastBuyPrice/(item.buyContent||1) : 0;
                 if(wajar>0 && price > wajar*20){
-                    fails.push(`${kode}: harga Rp${Math.round(price).toLocaleString('id')} tampak harga per ${item.buyUnit||'kemasan'}, bukan per ${item.baseUnit}. Harga wajar ±Rp${Math.round(wajar).toLocaleString('id')}/${item.baseUnit} (isi ${item.buyContent} ${item.baseUnit} per ${item.buyUnit||'kemasan'}).`);
+                    const uu=usulPembagiHarga(price, item);
+                    fails.push(`${kode}: harga Rp${Math.round(price).toLocaleString('id')} tampak harga per ${item.buyUnit||'kemasan'}, bukan per ${item.baseUnit}. Harga wajar ±Rp${Math.round(wajar).toLocaleString('id')}/${item.baseUnit} (isi ${item.buyContent} ${item.baseUnit} per ${item.buyUnit||'kemasan'}).`
+                        + (uu ? ` Kalau itu ${uu.sebab}, isi ${String(Math.round(uu.sesudah*1000)/1000).replace('.',',')} (dibagi ${uu.faktor.toLocaleString('id')}).` : ''));
                     continue;
                 }
                 let expVal = null;
