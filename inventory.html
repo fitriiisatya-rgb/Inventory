@@ -8163,28 +8163,72 @@
         // index yang dipakai di <option> tetap index ASLI di soHistory (bukan index hasil filter),
         // supaya rkBuildRows() dan tombol koreksi tanggal tetap menunjuk ke sesi yang benar.
         let visible = (currentRole==='stok') ? soHistory.filter(h=>(h.gudang||DEFAULT_GUDANG)===myGudang()) : soHistory;
-        if(!visible.length){
-            sel.innerHTML='<option value="">— belum ada sesi opname selesai —</option>';
+        const adaOpening = (()=>{ try{ return Object.keys(officialOpenings||{}).length>0; }catch(e){ return false; } })();
+        if(!visible.length && !adaOpening){
+            sel.innerHTML='<option value="">— belum ada sesi opname maupun Stok Awal resmi —</option>';
             document.getElementById('rkSummary').innerHTML='Belum ada sesi opname yang diselesaikan. Rekonsiliasi baru bisa dibuat setelah sesi opname ditutup dan adjustment-nya diposting.';
             document.getElementById('rkBody').innerHTML=''; return;
         }
         let cur=sel.value;
-        sel.innerHTML=visible.map(h=>{
+        // Stok Awal resmi juga boleh jadi titik awal jembatan. Sesudah opening ditetapkan dari
+        // hitung fisik, "Stok Awal + masuk - keluar = stok sistem" itulah persamaan yang benar-benar
+        // dipakai orang untuk memeriksa gudangnya — bukan sesi opname yang mungkin sudah lama lewat.
+        let opsiOpening=[];
+        try{
+            const per=(typeof officialOpenings!=='undefined'&&officialOpenings)||{};
+            Object.keys(per).sort().reverse().forEach(prd=>{
+                const gud=[...new Set((per[prd].rows||[]).map(r=>r.gudang||DEFAULT_GUDANG))];
+                gud.forEach(g=>{
+                    if(currentRole==='stok' && g!==myGudang()) return;
+                    const n=(per[prd].rows||[]).filter(r=>(r.gudang||DEFAULT_GUDANG)===g).length;
+                    opsiOpening.push(`<option value="OP|${prd}|${g}">📆 Stok Awal ${labelPeriode(prd)} — ${gudangName(g)} (${n} bahan)</option>`);
+                });
+            });
+        }catch(e){}
+        sel.innerHTML=opsiOpening.join('')+visible.map(h=>{
             let idx=soHistory.indexOf(h);
             let d=new Date(h.date).toLocaleDateString('id',{day:'numeric',month:'short',year:'numeric'});
             let sc=(h.scope&&h.scope!=='all')?h.scope:'Semua Kategori';
-            return `<option value="${idx}">${d} — ${gudangName(h.gudang||DEFAULT_GUDANG)} — ${sc} (${h.totalSku} bahan)</option>`;
+            return `<option value="${idx}">🧾 Opname ${d} — ${gudangName(h.gudang||DEFAULT_GUDANG)} — ${sc} (${h.totalSku} bahan)</option>`;
         }).join('');
         if(cur) sel.value=cur;
         let end=document.getElementById('rkEnd');
         if(!end.value){ let t=new Date(); end.value=`${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`; }
         renderRekonSO();
     }
+    // Menyusun "sesi semu" dari Opening Resmi supaya jembatannya memakai jalur hitung yang sama
+    // persis dengan rekonsiliasi opname — satu rumus, bukan dua yang bisa berbeda diam-diam.
+    function rkSesiDariOpening(periode, gudang){
+        const op=((typeof officialOpenings!=='undefined'&&officialOpenings)||{})[periode];
+        if(!op) return null;
+        const baris=(op.rows||[]).filter(r=>(r.gudang||DEFAULT_GUDANG)===gudang);
+        if(!baris.length) return null;
+        const cutoff=periodeCutoff(periode);
+        return {
+            __opening:true, periode, gudang,
+            date: op.createdAt || cutoff,
+            countDate: cutoff-1,                 // mutasi SEJAK cutoff ikut terhitung
+            scope:'all', totalSku: baris.length,
+            allCounts: baris.map(r=>{ const it=itemBySku(r.sku)||{};
+                return { sku:r.sku, name:it.name||r.sku, sys:r.qty, phys:r.qty, diff:0 }; }),
+            differences: []
+        };
+    }
     function rkBuildRows(){
-        let idx=parseInt(document.getElementById('rkSesiSel').value);
-        if(isNaN(idx)||!soHistory[idx]) return null;
-        let h=soHistory[idx];
-        let gudang=h.gudang||DEFAULT_GUDANG;
+        const raw=document.getElementById('rkSesiSel').value;
+        let h, gudang;
+        if(typeof raw==='string' && raw.indexOf('OP|')===0){
+            const bag=raw.split('|');
+            h=rkSesiDariOpening(bag[1], bag[2]);
+            if(!h) return null;
+            gudang=h.gudang;
+            if(currentRole==='stok' && gudang!==myGudang()) return null;
+        } else {
+            let idx=parseInt(raw);
+            if(isNaN(idx)||!soHistory[idx]) return null;
+            h=soHistory[idx];
+            gudang=h.gudang||DEFAULT_GUDANG;
+        }
         // Akun gudang transit tidak boleh membuka sesi gudang lain walau index-nya "diketik paksa".
         if(currentRole==='stok' && gudang!==myGudang()) return null;
         let endStr=document.getElementById('rkEnd').value;
@@ -8253,14 +8297,19 @@
         let postedDate=new Date(data.h.date).toLocaleDateString('id',{day:'numeric',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'});
         let bedaTanggal = new Date(bridgeStartTs).toDateString()!==new Date(data.h.date).toDateString();
         let neracaDate=new Date(data.endStr+'T12:00:00').toLocaleDateString('id',{day:'numeric',month:'long',year:'numeric'});
+        const dariOpening = !!data.h.__opening;
+        const labelAwal = dariOpening
+            ? `📆 Stok Awal resmi <strong>${labelPeriode(data.h.periode)}</strong> (${gudangName(data.gudang)})`
+            : `📋 Hitung fisik <strong>${soDate}</strong> (${gudangName(data.gudang)})`;
         document.getElementById('rkSummary').innerHTML=
-            `📋 Hitung fisik <strong>${soDate}</strong> (${gudangName(data.gudang)}) &nbsp;&rarr;&nbsp; 🗓️ Saldo per <strong>${neracaDate}</strong><br>
-             ${bedaTanggal?`<span style="color:var(--text3); font-size:0.75rem;">Diposting ke sistem pada ${postedDate} — tekan 📅 Ubah tgl hitung fisik kalau tanggal ini keliru.</span><br>`:''}
+            `${labelAwal} &nbsp;&rarr;&nbsp; 🗓️ Saldo per <strong>${neracaDate}</strong><br>
+             ${dariOpening?`<span style="color:var(--text3); font-size:0.75rem;">Stok Awal + masuk − keluar = seharusnya. Kolom <strong>Beda</strong> menunjukkan selisihnya terhadap stok sistem.</span><br>`
+                : (bedaTanggal?`<span style="color:var(--text3); font-size:0.75rem;">Diposting ke sistem pada ${postedDate} — tekan 📅 Ubah tgl hitung fisik kalau tanggal ini keliru.</span><br>`:'')}
              ${data.rows.length} bahan · mutasi periode antara: <strong style="color:#10b981;">+${totMasuk.toLocaleString('id')}</strong> masuk / <strong style="color:#ef4444;">−${totKeluar.toLocaleString('id')}</strong> keluar (satuan dasar)<br>
              💰 Estimasi nilai stok per tanggal neraca: <strong>Rp ${Math.round(totNilai).toLocaleString('id')}</strong>
-             ${tanpaHitung?`<br><span style="color:var(--text3);">${tanpaHitung} bahan tidak dihitung saat opname — saldo awalnya memakai angka sistem (dianggap sesuai).</span>`:''}`;
+             ${(!dariOpening&&tanpaHitung)?`<br><span style="color:var(--text3);">${tanpaHitung} bahan tidak dihitung saat opname — saldo awalnya memakai angka sistem (dianggap sesuai).</span>`:''}`;
         let warn=document.getElementById('rkWarn'); warn.innerHTML='';
-        if(data.luarCount) warn.innerHTML+=`<div class="alert alert-warning" style="margin-bottom:8px;">⚠️ ${data.luarCount} bahan bermutasi di periode ini tapi tidak termasuk cakupan sesi opname (mis. baru ditambahkan setelahnya). Ditampilkan dengan saldo awal 0 dan ditandai <em>di luar sesi</em> — saldo akhirnya belum pernah diverifikasi fisik.</div>`;
+        if(data.luarCount) warn.innerHTML+=`<div class="alert alert-warning" style="margin-bottom:8px;">⚠️ ${data.luarCount} bahan bermutasi di periode ini tapi tidak ada di ${dariOpening?'daftar Stok Awal':'cakupan sesi opname'}. Ditampilkan dengan saldo awal 0 dan ditandai <em>di luar sesi</em> — saldo akhirnya belum pernah diverifikasi fisik.</div>`;
         if(data.isToday && bedaCount) warn.innerHTML+=`<div class="alert alert-warning" style="margin-bottom:8px;">⚠️ ${bedaCount} bahan: saldo hitungan jembatan tidak sama dengan stok sistem. Biasanya karena ada transaksi yang di-backdate ke sebelum tanggal opname, atau adjustment manual. Periksa kolom Beda.</div>`;
         if(!data.isToday) warn.innerHTML+=`<div style="font-size:0.75rem; color:var(--text3); margin-bottom:8px;">ℹ️ Tanggal neraca di masa lalu — kolom Stok Sistem menampilkan posisi hari ini (bukan posisi tanggal tsb), jadi kolom Beda sengaja dikosongkan.</div>`;
         if(closings && closings.length) warn.innerHTML+=`<div style="font-size:0.75rem; color:var(--text3); margin-bottom:8px;">ℹ️ Transaksi periode yang sudah tutup buku sudah dipindah ke arsip spreadsheet dan tidak ikut terhitung di sini. Buat rekonsiliasi ini <strong>sebelum</strong> tutup buku.</div>`;
@@ -8309,7 +8358,10 @@
         w.document.close();
     }
     document.getElementById('rkFixDate')?.addEventListener('click', function(){
-        let idx=parseInt(document.getElementById('rkSesiSel').value);
+        const rawSel=document.getElementById('rkSesiSel').value;
+        if(typeof rawSel==='string' && rawSel.indexOf('OP|')===0){
+            notify('Tidak berlaku','Yang dipilih adalah Stok Awal resmi, bukan sesi opname. Tanggalnya mengikuti awal periode dan tidak diubah dari sini.','info'); return; }
+        let idx=parseInt(rawSel);
         if(isNaN(idx)||!soHistory[idx]){ notify('Pilih sesi','Pilih sesi opname dulu.','warning'); return; }
         let h=soHistory[idx];
         if(currentRole==='stok' && (h.gudang||DEFAULT_GUDANG)!==myGudang()){ notify('Ditolak','Sesi ini bukan milik gudang Anda.','error'); return; }
