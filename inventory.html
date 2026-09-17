@@ -1336,13 +1336,43 @@
     let dataVersi = 0; // dinaikkan tiap data disimpan -> cache jangkar saldo dibangun ulang
     let __skuIndex = null, __skuIndexSrc = null, __skuIndexLen = -1;
     function invalidateSkuIndex(){ __skuIndex = null; }
+    // Kode barang dari berkas Excel hampir tidak pernah bersih: ada spasi ikutan, huruf kecil,
+    // tanda hubung panjang hasil salin-tempel, spasi tak-putus, atau nol di depan yang hilang.
+    // Master ini sendiri memuat 1.161 kode berblok tiga digit dan hanya DUA berblok empat
+    // (RM-SO-26-0001, RM-SO-26-0002) — orang yang mengetik ulang hampir pasti menulis tiga.
+    // Perbedaan seperti itu bukan barang yang berbeda, tapi pencarian yang terlalu kaku
+    // memperlakukannya begitu, lalu melapor "tidak ada di Master Data" untuk barang yang jelas ada.
+    //
+    // Pencocokan persis tetap didahulukan. Bentuk yang dinormalkan hanya dipakai sebagai cadangan,
+    // dan HANYA kalau bentuk itu menunjuk tepat satu barang — kalau dua kode berbeda menormal ke
+    // bentuk yang sama, keduanya dibuang dari indeks cadangan supaya tidak ada yang salah tunjuk.
+    function normKodeSku(v){
+        let x = String(v==null?'':v);
+        x = x.replace(/[\u2010-\u2015\u2212]/g, '-');          // – — − menjadi -
+        x = x.replace(/[\u00A0\u200B-\u200D\uFEFF]/g, '');    // spasi tak-putus & lebar-nol
+        x = x.trim().toUpperCase().replace(/\s+/g, '');
+        x = x.replace(/(^|-)0+(\d)/g, '$1$2');                  // 0001 -> 1, tanpa menyentuh angka 0
+        return x;
+    }
+    let __skuIndexNorm = null;
     function itemBySku(sku){
         if(!__skuIndex || __skuIndexSrc !== masterSKU || __skuIndexLen !== masterSKU.length){
-            __skuIndex = new Map();
+            __skuIndex = new Map(); __skuIndexNorm = new Map();
+            const bentrok = new Set();
             for(const it of masterSKU) __skuIndex.set(it.sku, it);
+            for(const it of masterSKU){
+                const k = normKodeSku(it.sku);
+                if(!k) continue;
+                if(__skuIndexNorm.has(k) && __skuIndexNorm.get(k) !== it) bentrok.add(k);
+                else __skuIndexNorm.set(k, it);
+            }
+            bentrok.forEach(k=>__skuIndexNorm.delete(k));
             __skuIndexSrc = masterSKU; __skuIndexLen = masterSKU.length;
         }
-        return __skuIndex.get(sku); // undefined kalau tidak ada — sama persis dengan perilaku .find()
+        const pas = __skuIndex.get(sku);
+        if(pas) return pas;
+        if(sku==null || sku==='') return undefined;
+        return __skuIndexNorm.get(normKodeSku(sku));   // cadangan: beda spasi/huruf/nol di depan
     }
     let nextLogId = 1, nextSupplierId = 1, nextDivisionId = 1, nextBatchId = 1;
     // Sesi opname hitung-buta-ganda. counts[sku] = { p1:{qty,d,notes,at}, p2:{...}, recount, final, note }
@@ -5873,6 +5903,18 @@
     // Menolak sebuah baris tanpa memberi tahu jalan keluarnya membuat orang harus menebak kode
     // sendiri, dan lima baris yang ditolak berubah jadi satu putaran bolak-balik berkas. Padahal
     // nama barangnya ada di kolom sebelah dan padanannya bisa dicari.
+    // Menampilkan isi sel apa adanya, dengan penanda untuk hal yang tidak kelihatan di layar:
+    // spasi ikutan dan tanda hubung panjang itulah yang paling sering bikin kode "sudah betul"
+    // tetap tidak ketemu.
+    function kodeTampak(v){
+        const asli=String(v==null?'':v);
+        const catatan=[];
+        if(/^\s|\s$/.test(asli)) catatan.push('ada spasi di awal/akhir');
+        if(/[\u2010-\u2015\u2212]/.test(asli)) catatan.push('tanda hubung panjang (–), bukan tanda minus biasa');
+        if(/[\u00A0\u200B-\u200D\uFEFF]/.test(asli)) catatan.push('ada spasi tak-putus/karakter tersembunyi');
+        if(/[a-z]/.test(asli)) catatan.push('ada huruf kecil');
+        return catatan.length ? `"${asli}" (${catatan.join(', ')})` : `"${asli}"`;
+    }
     function tebakSkuDariNama(nama){
         const n=normItemName(nama); if(!n || n.length<3) return null;
         const pas=(masterSKU||[]).filter(m=>normItemName(m.name)===n);
@@ -5913,7 +5955,7 @@
             const it=itemBySku(kode);
             if(!it){
                 const tebak = iNama>-1 ? tebakSkuDariNama(r[iNama]) : null;
-                tolak.push(`${kode}: tidak ada di Master Data`
+                tolak.push(`${kodeTampak(mentah[iKode])}: tidak ada di Master Data`
                     + (tebak ? ` — sepertinya ini ${tebak.sku} (${tebak.name}). Ganti kolom Kode Barang jadi ${tebak.sku}.` : ''));
                 continue; }
             const g = gudangPaksa || kodeGudang[String(r[iGud]||'').toUpperCase()] || String(r[iGud]||'').toLowerCase().replace(/\s+/g,'');
@@ -11253,7 +11295,7 @@
                 let item=itemBySku(kode);
                 if(!item){
                     const tebak = iNamaRef>-1 ? tebakSkuDariNama(p[iNamaRef]) : null;
-                    fails.push(`${kode}: SKU tidak ditemukan di master barang`
+                    fails.push(`${kodeTampak(raw[iKode])}: SKU tidak ditemukan di master barang`
                         + (tebak ? ` — sepertinya ini ${tebak.sku} (${tebak.name}). Ganti kolom Kode Barang jadi ${tebak.sku}.` : ''));
                     continue; }
                 if(!isTransitItemAllowed(item, gudang)){ fails.push(`${kode} - ${item.name}: bukan barang area ${gudangName(gudang)}`); continue; }
