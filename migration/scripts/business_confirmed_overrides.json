@@ -1,0 +1,37 @@
+{
+  "_readme": "Business-confirmed overrides for Phase G-DATA 1B.1. Each entry is a DIRECT, explicit confirmation from the business owner/admin for that exact SKU only -- never generalized to any other SKU, even one with a similar pattern (e.g. 140541 shows a similar ~136x price ratio but has NOT been confirmed and is intentionally left unresolved). Applied by apply_business_confirmed_overrides.py on top of the detector-only output in unit_conversion_candidates_real.json. Legacy evidence is never deleted -- it is kept in the record for audit, superseded by these overrides where they conflict.",
+  "999208": {
+    "item_name": "PREMIX MENTEGA BASIC",
+    "override_type": "PACKAGING_CONVERSION",
+    "conversion_source": "BUSINESS_CONFIRMED",
+    "review_status": "APPROVED",
+    "approved_base_unit": "KG",
+    "approved_purchase_unit": "PCS",
+    "approved_purchase_conversion": 15.0,
+    "correction_note": "Owner confirmed 1 PCS/kemasan = 15 KG.",
+    "resolves_issue_codes": ["PRICE_RATIO_SUPPORTS_CONVERSION", "CONVERSION_CONFLICT"]
+  },
+  "999209": {
+    "item_name": "PREMIX MENTEGA ROTI",
+    "override_type": "PACKAGING_CONVERSION",
+    "conversion_source": "BUSINESS_CONFIRMED",
+    "review_status": "APPROVED",
+    "approved_base_unit": "KG",
+    "approved_purchase_unit": "PCS",
+    "approved_purchase_conversion": 15.0,
+    "correction_note": "Owner confirmed 1 PCS/kemasan = 15 KG.",
+    "resolves_issue_codes": ["PRICE_RATIO_SUPPORTS_CONVERSION", "CONVERSION_CONFLICT"]
+  },
+  "140539": {
+    "item_name": "MUTIARA PUTIH 8 MM",
+    "override_type": "PRICE_BASIS_NORMALIZATION",
+    "conversion_source": "BUSINESS_CONFIRMED",
+    "price_source": "BUSINESS_CONFIRMED",
+    "review_status": "APPROVED",
+    "approved_base_unit": "KG",
+    "unit_cost_base_kg": 305000.0,
+    "unit_cost_base_gr_equivalent": 305.0,
+    "correction_note": "Owner confirmed actual price Rp305.000/KG, equivalent Rp305/GR. The Karang Tengah opening-stock raw value of Rp305 was recorded under the KG label but is actually a per-GR figure -- a unit-price-basis mismatch (KG vs GR), NOT a 1000x packaging conversion. No purchase_conversion factor is derived from this case.",
+    "resolves_issue_codes": ["UNIT_LABEL_MISMATCH"]
+  }
+}
