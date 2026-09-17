@@ -16,8 +16,21 @@ use PDO;
  * expiry, batch_reference) the generic JSON-blob staging doesn't give you
  * for free validation.
  *
- * Expected CSV header (see templates/opening_stock.csv):
- * cutoff_date,warehouse_code,sku,quantity_base,unit_cost_base,expired_date,batch_reference
+ * PHASE G-DATA 2: also accepts final_opening_stock_template.xlsx directly
+ * (migration/templates/final_opening_stock_template.xlsx) — sniffed by
+ * file extension — in addition to the original CSV format, and always
+ * posts in the item's Global Base Unit (Section 1's LOW-confidence
+ * policy: a purchase-unit conversion is never required to post an
+ * opening line). Row-level validation now lives in
+ * OpeningValidationService so it can be unit-tested independently.
+ *
+ * Expected CSV/XLSX columns (template header names; the original CSV's
+ * lowercase snake_case names remain accepted as aliases — see
+ * OpeningValidationService and normalizeRow() below):
+ *   Cutoff Date, Warehouse Code, SKU, Item Name, Global Base Unit,
+ *   Opening Qty Base, Unit Cost Base, Opening Value (ignored — server
+ *   recalculates), Expiry Date, Batch Reference, Source,
+ *   Verification Status, Approved By, Notes
  */
 final class ImportOpeningStockService
 {
@@ -26,14 +39,24 @@ final class ImportOpeningStockService
     // accepted.
     private const CONTROL_TOTAL_TOLERANCE = 1.0;
 
-    public static function stage(PDO $pdo, string $csvPath, string $fileName, int $createdBy): int
+    public static function stage(PDO $pdo, string $filePath, string $fileName, int $createdBy): int
     {
-        $rows = self::readCsv($csvPath);
+        $rows = str_ends_with(strtolower($fileName), '.xlsx')
+            ? self::readXlsx($filePath)
+            : self::readCsv($filePath);
         if (empty($rows)) {
             throw new ValidationException(['file has no data rows']);
         }
 
-        $cutoffDate = trim((string) $rows[0]['cutoff_date']);
+        $cutoffError = OpeningValidationService::checkCutoffConsistency($rows);
+        if ($cutoffError !== null) {
+            throw new ValidationException([$cutoffError]);
+        }
+
+        $cutoffDate = trim((string) self::col($rows[0], 'cutoff_date', 'Cutoff Date'));
+        if ($cutoffDate === '') {
+            throw new ValidationException(['Cutoff Date is required']);
+        }
 
         $headerStmt = $pdo->prepare(
             'INSERT INTO stock_openings (cutoff_date, description, status, created_by, created_at)
@@ -44,18 +67,44 @@ final class ImportOpeningStockService
 
         $lineStmt = $pdo->prepare(
             'INSERT INTO stock_opening_lines
-                (stock_opening_id, item_id, warehouse_id, qty_base, unit_cost_base, expiry_date, batch_reference, row_status, row_messages)
-             VALUES (:opening_id, :item_id, :warehouse_id, :qty, :cost, :expiry, :batch_ref, :status, :messages)'
+                (stock_opening_id, item_id, warehouse_id, qty_base, unit_cost_base, expiry_date, batch_reference,
+                 item_name_reference, global_base_unit_reference, source, verification_status, approved_by_name, notes,
+                 row_status, row_messages)
+             VALUES (:opening_id, :item_id, :warehouse_id, :qty, :cost, :expiry, :batch_ref,
+                     :item_name_ref, :base_unit_ref, :source, :verification_status, :approved_by_name, :notes,
+                     :status, :messages)'
         );
 
+        $seen = [];
         foreach ($rows as $row) {
-            [$status, $messages, $itemId, $warehouseId] = self::validateRow($pdo, $row);
+            $row = self::normalizeRow($row);
+            $result = OpeningValidationService::validateRow($pdo, $row);
+            $status = $result['status'];
+            $messages = $result['messages'];
+
+            // Friendly duplicate pre-check (the DB unique key on
+            // stock_opening_id+item_id+warehouse_id+batch_reference is the
+            // real backstop, but a clear message here beats a raw
+            // constraint-violation error surfacing to the user).
+            $dupKey = ($result['item_id'] ?? 'null') . '|' . ($result['warehouse_id'] ?? 'null') . '|' . trim((string) ($row['batch_reference'] ?? ''));
+            if ($status !== 'ERROR' && isset($seen[$dupKey])) {
+                $status = 'ERROR';
+                $messages[] = 'duplicate warehouse + SKU + batch_reference within this same upload';
+            }
+            $seen[$dupKey] = true;
+
             $lineStmt->execute([
-                'opening_id' => $openingId, 'item_id' => $itemId, 'warehouse_id' => $warehouseId,
-                'qty' => $row['quantity_base'] !== '' ? (float) $row['quantity_base'] : 0,
-                'cost' => $row['unit_cost_base'] !== '' ? (float) $row['unit_cost_base'] : 0,
-                'expiry' => $row['expired_date'] !== '' ? $row['expired_date'] : null,
-                'batch_ref' => $row['batch_reference'] ?? null,
+                'opening_id' => $openingId, 'item_id' => $result['item_id'], 'warehouse_id' => $result['warehouse_id'],
+                'qty' => is_numeric($row['opening_qty_base'] ?? null) ? (float) $row['opening_qty_base'] : 0,
+                'cost' => is_numeric($row['unit_cost_base'] ?? null) ? (float) $row['unit_cost_base'] : 0,
+                'expiry' => $row['expiry_date'] !== '' ? $row['expiry_date'] : null,
+                'batch_ref' => $row['batch_reference'] !== '' ? $row['batch_reference'] : null,
+                'item_name_ref' => $row['item_name'] !== '' ? $row['item_name'] : null,
+                'base_unit_ref' => $row['global_base_unit'] !== '' ? strtoupper($row['global_base_unit']) : null,
+                'source' => $row['source'] !== '' ? $row['source'] : null,
+                'verification_status' => $row['verification_status'] !== '' ? $row['verification_status'] : null,
+                'approved_by_name' => $row['approved_by'] !== '' ? $row['approved_by'] : null,
+                'notes' => $row['notes'] !== '' ? $row['notes'] : null,
                 'status' => $status, 'messages' => json_encode($messages, JSON_UNESCAPED_UNICODE),
             ]);
         }
@@ -63,6 +112,40 @@ final class ImportOpeningStockService
         self::recordControlTotal($pdo, $openingId);
 
         return $openingId;
+    }
+
+    /**
+     * Accepts either the new template's Capitalized-With-Spaces headers or
+     * the original lowercase snake_case CSV headers — never both mixed
+     * silently wrong; each column simply falls back through its aliases.
+     */
+    private static function normalizeRow(array $row): array
+    {
+        return [
+            'cutoff_date' => trim((string) self::col($row, 'cutoff_date', 'Cutoff Date')),
+            'warehouse_code' => trim((string) self::col($row, 'warehouse_code', 'Warehouse Code')),
+            'sku' => trim((string) self::col($row, 'sku', 'SKU')),
+            'item_name' => trim((string) self::col($row, 'item_name', 'Item Name', 'Item Name (reference)')),
+            'global_base_unit' => trim((string) self::col($row, 'global_base_unit', 'Global Base Unit')),
+            'opening_qty_base' => self::col($row, 'opening_qty_base', 'Opening Qty Base', 'quantity_base'),
+            'unit_cost_base' => self::col($row, 'unit_cost_base', 'Unit Cost Base'),
+            'expiry_date' => trim((string) self::col($row, 'expiry_date', 'Expiry Date', 'expired_date')),
+            'batch_reference' => trim((string) self::col($row, 'batch_reference', 'Batch Reference')),
+            'source' => trim((string) self::col($row, 'source', 'Source')),
+            'verification_status' => trim((string) self::col($row, 'verification_status', 'Verification Status')),
+            'approved_by' => trim((string) self::col($row, 'approved_by', 'Approved By')),
+            'notes' => trim((string) self::col($row, 'notes', 'Notes')),
+        ];
+    }
+
+    private static function col(array $row, string ...$keys): string
+    {
+        foreach ($keys as $key) {
+            if (array_key_exists($key, $row) && $row[$key] !== null) {
+                return (string) $row[$key];
+            }
+        }
+        return '';
     }
 
     /**
@@ -95,47 +178,6 @@ final class ImportOpeningStockService
 
         $pdo->prepare('UPDATE stock_openings SET control_total_value = :total, control_total_by_warehouse = :by_wh WHERE id = :id')
             ->execute(['total' => $total, 'by_wh' => json_encode($byWarehouse, JSON_UNESCAPED_UNICODE), 'id' => $openingId]);
-    }
-
-    /** @return array{0:string,1:string[],2:?int,3:?int} */
-    private static function validateRow(PDO $pdo, array $row): array
-    {
-        $messages = [];
-
-        $whCode = trim((string) ($row['warehouse_code'] ?? ''));
-        $whStmt = $pdo->prepare('SELECT id FROM warehouses WHERE code = :code');
-        $whStmt->execute(['code' => $whCode]);
-        $warehouseId = $whStmt->fetchColumn();
-        if ($warehouseId === false) {
-            return ['ERROR', ["unknown warehouse_code: {$whCode}"], null, null];
-        }
-
-        $sku = trim((string) ($row['sku'] ?? ''));
-        $itemStmt = $pdo->prepare('SELECT id FROM items WHERE sku = :sku');
-        $itemStmt->execute(['sku' => $sku]);
-        $itemId = $itemStmt->fetchColumn();
-        if ($itemId === false) {
-            return ['ERROR', ["unknown SKU: {$sku}"], null, (int) $warehouseId];
-        }
-
-        $qty = $row['quantity_base'] ?? '';
-        if ($qty === '' || !((float) $qty > 0)) {
-            return ['ERROR', ['quantity_base must be > 0'], (int) $itemId, (int) $warehouseId];
-        }
-        if ((float) $qty < 0) {
-            return ['ERROR', ['negative opening quantity is not allowed'], (int) $itemId, (int) $warehouseId];
-        }
-
-        $cost = $row['unit_cost_base'] ?? '';
-        if ($cost === '' || (float) $cost < 0) {
-            return ['ERROR', ['unit_cost_base must be >= 0'], (int) $itemId, (int) $warehouseId];
-        }
-        if ((float) $cost === 0.0) {
-            $messages[] = 'zero cost opening — verify this is intentional';
-            return ['WARNING', $messages, (int) $itemId, (int) $warehouseId];
-        }
-
-        return ['VALID', $messages, (int) $itemId, (int) $warehouseId];
     }
 
     public static function commit(PDO $pdo, int $openingId, int $committedBy): array
@@ -237,5 +279,137 @@ final class ImportOpeningStockService
         }
         fclose($handle);
         return $rows;
+    }
+
+    /**
+     * Dependency-free .xlsx reader (an xlsx is just a zip of XML parts) —
+     * reads the first sheet's shared strings + cell grid. No Composer
+     * package is used anywhere in this codebase (Section 2 constraint),
+     * so this stays intentionally minimal: it reads text/number cell
+     * values only, exactly what the opening template needs.
+     */
+    private static function readXlsx(string $path): array
+    {
+        $zip = new \ZipArchive();
+        if ($zip->open($path) !== true) {
+            throw new ValidationException(["cannot open xlsx file: {$path}"]);
+        }
+
+        $sharedStrings = [];
+        $sharedXml = $zip->getFromName('xl/sharedStrings.xml');
+        if ($sharedXml !== false) {
+            $sst = simplexml_load_string($sharedXml);
+            foreach ($sst->si as $si) {
+                $sharedStrings[] = isset($si->t) ? (string) $si->t : implode('', array_map('strval', (array) ($si->r ?? [])));
+            }
+        }
+
+        // The data sheet is NOT reliably "sheet1.xml" — an INSTRUCTIONS sheet
+        // (as in final_opening_stock_template.xlsx) is commonly created
+        // first, so sheet1.xml maps to IT, not the data. Resolve the target
+        // worksheet part properly: workbook.xml (sheet name -> r:id) +
+        // workbook.xml.rels (r:id -> part path). Prefers a sheet literally
+        // named "Template" or "Data"; otherwise takes the last sheet
+        // (INSTRUCTIONS sheets are conventionally placed first).
+        $workbookXml = $zip->getFromName('xl/workbook.xml');
+        $relsXml = $zip->getFromName('xl/_rels/workbook.xml.rels');
+        $sheetXml = false;
+        if ($workbookXml !== false && $relsXml !== false) {
+            $wb = simplexml_load_string($workbookXml);
+            $rels = simplexml_load_string($relsXml);
+            $targetById = [];
+            foreach ($rels->Relationship as $rel) {
+                $targetById[(string) $rel['Id']] = ltrim((string) $rel['Target'], '/');
+            }
+            $ns = $wb->getNamespaces(true);
+            $rNs = $ns['r'] ?? 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+            $chosenTarget = null;
+            $lastTarget = null;
+            foreach ($wb->sheets->sheet as $sheetEl) {
+                $attrs = $sheetEl->attributes($rNs);
+                $rid = (string) $attrs['id'];
+                $target = $targetById[$rid] ?? null;
+                if ($target === null) {
+                    continue;
+                }
+                $target = str_starts_with($target, 'xl/') ? $target : ('xl/' . $target);
+                $lastTarget = $target;
+                if (in_array(strtolower((string) $sheetEl['name']), ['template', 'data'], true)) {
+                    $chosenTarget = $target;
+                }
+            }
+            $target = $chosenTarget ?? $lastTarget;
+            if ($target !== null) {
+                $sheetXml = $zip->getFromName($target);
+            }
+        }
+        if ($sheetXml === false) {
+            $sheetXml = $zip->getFromName('xl/worksheets/sheet1.xml');
+        }
+        $zip->close();
+        if ($sheetXml === false) {
+            throw new ValidationException(['xlsx file has no readable worksheet']);
+        }
+
+        $sheet = simplexml_load_string($sheetXml);
+        $grid = [];
+        foreach ($sheet->sheetData->row as $rowXml) {
+            $rowIndex = (int) $rowXml['r'];
+            foreach ($rowXml->c as $cellXml) {
+                $ref = (string) $cellXml['r'];
+                preg_match('/^([A-Z]+)(\d+)$/', $ref, $m);
+                $col = $m[1] ?? null;
+                if ($col === null) {
+                    continue;
+                }
+                $type = (string) $cellXml['t'];
+                if ($type === 'inlineStr') {
+                    // <c t="inlineStr"><is><t>text</t></is></c> — no shared-string index,
+                    // the text sits directly under is/t (openpyxl writes this form).
+                    $value = isset($cellXml->is->t) ? (string) $cellXml->is->t : '';
+                } else {
+                    $raw = isset($cellXml->v) ? (string) $cellXml->v : '';
+                    $value = $type === 's' && $raw !== '' ? ($sharedStrings[(int) $raw] ?? '') : $raw;
+                }
+                $grid[$rowIndex][$col] = $value;
+            }
+        }
+
+        if (empty($grid)) {
+            return [];
+        }
+        ksort($grid);
+        $rowNumbers = array_keys($grid);
+        $headerRowNum = array_shift($rowNumbers);
+        $headerRow = $grid[$headerRowNum];
+        ksort($headerRow);
+        $headers = array_values($headerRow);
+
+        $rows = [];
+        foreach ($rowNumbers as $rowNum) {
+            $cells = $grid[$rowNum];
+            $row = [];
+            foreach ($headers as $i => $headerName) {
+                $colLetter = self::colLetterAt($i);
+                $row[$headerName] = $cells[$colLetter] ?? '';
+            }
+            // Skip fully-blank trailing rows.
+            if (implode('', $row) !== '') {
+                $rows[] = $row;
+            }
+        }
+        return $rows;
+    }
+
+    private static function colLetterAt(int $index): string
+    {
+        $letter = '';
+        $index++;
+        while ($index > 0) {
+            $index--;
+            $letter = chr(65 + ($index % 26)) . $letter;
+            $index = intdiv($index, 26);
+        }
+        return $letter;
     }
 }

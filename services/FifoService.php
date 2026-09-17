@@ -51,7 +51,7 @@ final class FifoService
 
         $conversion = UnitConversionService::getActiveConversion($pdo, $p['item_id'], $p['input_unit_id'], $p['transaction_date']);
         if ($conversion === null) {
-            throw new ValidationException(['no active unit conversion for this item/unit as of the transaction date']);
+            throw new UnitConversionNotApprovedException((int) $p['item_id'], (int) $p['input_unit_id']);
         }
         $factor = (float) $conversion['conversion_to_base'];
 
@@ -173,7 +173,7 @@ final class FifoService
 
         $conversion = UnitConversionService::getActiveConversion($pdo, $p['item_id'], $p['input_unit_id'], $p['transaction_date']);
         if ($conversion === null) {
-            throw new ValidationException(['no active unit conversion for this item/unit as of the transaction date']);
+            throw new UnitConversionNotApprovedException((int) $p['item_id'], (int) $p['input_unit_id']);
         }
         $factor = (float) $conversion['conversion_to_base'];
         $baseQtyRequested = round($p['input_qty'] * $factor, self::QTY_SCALE);

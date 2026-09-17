@@ -42,6 +42,7 @@ existing code's *meaning* never changes without a version bump to this file.
 | `NEGATIVE_STOCK` | 422 | A stock adjustment/correction would take stock below zero and no override was granted. |
 | `PRICE_ANOMALY` | 422 | Unit cost is outside the configured reference-price band (Section 9) and wasn't explicitly approved. |
 | `COST_REQUIRED` | 422 | A stock-increasing adjustment has no reliable cost and none was supplied — never defaulted to a fake value. |
+| `UNIT_CONVERSION_NOT_APPROVED` | 422 | PHASE G-DATA 2: a transaction was posted in a unit with no active, approved `item_unit_conversions` row for that item as of the transaction date. Post in the item's base unit (`GET /items/{id}/units` lists only approved units) or get the conversion approved first — never guessed. Opening stock is unaffected: it always posts directly in the item's Global Base Unit and never needs a purchase-unit conversion to succeed. |
 | `OPNAME_ACTIVE` | 423 | The target warehouse has an active Stock Opname session (OPEN/FINALIZED) blocking movement. |
 | `TRANSFER_ALREADY_RECEIVED` | 409 | A **new** (non-retried) attempt to receive a transfer that's already RECEIVED. |
 | `TRANSFER_ALREADY_CANCELLED` | 409 | A **new** (non-retried) attempt to cancel a transfer that's already CANCELLED. |
@@ -239,8 +240,10 @@ on the server's disk) rather than a multipart upload — see
 | POST | `/import/master-item/{id}/commit` | `IMPORT_MANAGE` | — | `{imported, skipped}` |
 | POST | `/import/{supplier\|division\|warehouse}/stage` | `IMPORT_MANAGE` | `{file_path, file_name?}` | `{import_batch_id}` |
 | POST | `/import/{supplier\|division\|warehouse}/{id}/commit` | `IMPORT_MANAGE` | — | `{imported, skipped}` |
-| POST | `/import/opening-stock/stage` | `IMPORT_MANAGE` | `{file_path, file_name?}` | `{stock_opening_id}` |
+| POST | `/import/opening-stock/stage` | `IMPORT_MANAGE` | `{file_path, file_name?}` | `{stock_opening_id}` — PHASE G-DATA 2: accepts `final_opening_stock_template.xlsx` directly (sniffed by `file_name` extension) as well as the original CSV format |
 | POST | `/import/opening-stock/{id}/commit` | `IMPORT_MANAGE` | — | `{imported}` — creates REAL batches, `inventory_effect=1` |
+| GET | `/import/opening-stock/{id}/reconciliation` | any authenticated | — | PHASE G-DATA 2 Section 12: the GO_LIVE_READY checklist (`negative_qty`, `missing_cost`, `unknown_sku`, `unknown_warehouse`, `base_unit_mismatch`, `duplicate_opening`, `error_rows`, `opening_control_total_match`, `current_stock_equals_opening`, `historical_inventory_effect_zero`, `go_live_ready`) — read-only, never mutates |
+| GET | `/movement-reconciliation-reviews` | any authenticated | — | PHASE G-DATA 2 Section 11: the historical movement-vs-final-stock evidence rows — informational only, kept separate from unit-conversion and opening questions, never alters final opening |
 | POST | `/import/historical/stage` | `IMPORT_MANAGE` | `{file_path, file_name?}` | `{import_batch_id}` |
 | POST | `/import/historical/{id}/commit` | `IMPORT_MANAGE` | — | `{imported}` — `is_historical_import=1, inventory_effect=0`, never touches stock |
 

@@ -334,6 +334,17 @@ CREATE TABLE stock_opening_lines (
     unit_cost_base      DECIMAL(20,4) NOT NULL,
     expiry_date         DATE NULL,
     batch_reference      VARCHAR(100) NULL,
+    -- PHASE G-DATA 2: carried through from final_opening_stock_template.xlsx
+    -- for audit/cross-check only — never authoritative. item_name_reference
+    -- and global_base_unit_reference are compared against the real
+    -- items/units master at validation time (mismatch = ERROR/WARNING);
+    -- they are not what gets posted.
+    item_name_reference        VARCHAR(200) NULL,
+    global_base_unit_reference VARCHAR(20)  NULL,
+    source                     VARCHAR(100) NULL,   -- e.g. "Final verified stock - Gudang Besar 2026-09-30"
+    verification_status        VARCHAR(30)  NULL,   -- free-text from the template, e.g. "Verified by stock count"
+    approved_by_name            VARCHAR(150) NULL,   -- free-text owner/admin name from the template (not a users.id — this predates any login)
+    notes                       VARCHAR(255) NULL,
     row_status          ENUM('VALID','WARNING','ERROR') NOT NULL DEFAULT 'VALID',
     row_messages         JSON NULL,
     created_batch_id     BIGINT UNSIGNED NULL,            -- filled in once committed
@@ -343,6 +354,42 @@ CREATE TABLE stock_opening_lines (
     CONSTRAINT fk_sol_batch FOREIGN KEY (created_batch_id) REFERENCES inventory_batches(id),
     UNIQUE KEY uq_sol_item_wh (stock_opening_id, item_id, warehouse_id, batch_reference)
 ) ENGINE=InnoDB;
+
+-- ============================================================================
+-- 5A. MOVEMENT RECONCILIATION REVIEW (PHASE G-DATA 2)
+--
+-- The 8 SKUs flagged during Phase G-DATA 1B/1B.1 real-data reconciliation
+-- (opening + IN - OUT arithmetic disagreeing with a small theoretical
+-- negative). Historical evidence ONLY — final opening stock (from the
+-- owner's verified stock count) is always authoritative and is NEVER
+-- adjusted to make this historical arithmetic match. Kept in its own
+-- table, deliberately separate from stock_opening_lines/unit_conversion_
+-- candidates, so a movement question is never confused with a unit-
+-- conversion question or a final-opening-quantity question.
+-- ============================================================================
+
+CREATE TABLE movement_reconciliation_reviews (
+    id                          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    sku                         VARCHAR(40)  NOT NULL,
+    item_name                   VARCHAR(200) NULL,
+    warehouse_code               VARCHAR(30)  NOT NULL,
+    unit                         VARCHAR(20)  NULL,
+    historical_opening           DECIMAL(20,6) NULL,   -- September opening qty (evidence only)
+    historical_in                DECIMAL(20,6) NULL,
+    historical_out               DECIMAL(20,6) NULL,
+    historical_calculated_ending DECIMAL(20,6) NULL,   -- opening + in - out, as historically computed
+    verified_final_opening       DECIMAL(20,6) NULL,   -- filled in once the owner's final stock file arrives
+    difference                   DECIMAL(20,6) NULL,   -- verified_final_opening - historical_calculated_ending
+    status                        ENUM('PENDING_FINAL_STOCK','MATCHES','DIFFERS','ACCEPTED_AS_IS') NOT NULL DEFAULT 'PENDING_FINAL_STOCK',
+    reason                        VARCHAR(255) NULL,    -- e.g. timing, rounding, missing small movement
+    notes                         VARCHAR(255) NULL,
+    source                        VARCHAR(150) NULL,    -- which analysis round/file this evidence came from
+    created_at                    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at                    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_mrr_sku_warehouse (sku, warehouse_code),
+    INDEX idx_mrr_sku (sku)
+) ENGINE=InnoDB
+COMMENT='Phase G-DATA 2: historical movement-vs-final-stock evidence, informational only — never alters final opening.';
 
 -- ============================================================================
 -- 5B. UNIT CONVERSION CANDIDATE REVIEW (PHASE G-DATA 1B)
@@ -379,7 +426,10 @@ CREATE TABLE unit_conversion_candidates (
     legacy_evidence                 JSON NULL,           -- {legacy_source, legacy_value, source_field}[]
 
     -- Section 10: source priority drives confidence, never auto-approval.
-    confidence                      ENUM('HIGH','MEDIUM','LOW') NULL,
+    -- BUSINESS_CONFIRMED (PHASE G-DATA 1B.1/1B.3) = an explicit owner/admin
+    -- confirmation, distinct from the detector's own HIGH/MEDIUM/LOW scale —
+    -- never conflated with an auto-derived score.
+    confidence                      ENUM('HIGH','MEDIUM','LOW','BUSINESS_CONFIRMED') NULL,
     issue_code                      VARCHAR(255) NULL,   -- comma-separated if more than one applies
     issue_detail                    TEXT NULL,
     review_status                   ENUM('PENDING','BLOCKED','APPROVED','REJECTED') NOT NULL DEFAULT 'PENDING',
@@ -392,12 +442,19 @@ CREATE TABLE unit_conversion_candidates (
     approved                         ENUM('YES') NULL,   -- NULL/blank = not approved; never auto-set
     correction_note                  TEXT NULL,
 
+    -- PHASE G-DATA 2: audit trail preserved when a business/admin decision
+    -- promotes a candidate — never deletes the detector's own evidence above.
+    conversion_source                VARCHAR(30)  NULL,   -- e.g. BUSINESS_CONFIRMED, ADMIN_DECISION_CONFIRMED
+    admin_source_answer              TEXT NULL,            -- the owner/admin's own words, verbatim
+    prior_detector_evidence          JSON NULL,            -- issue_code/confidence/review_status snapshot before the override
+
     approved_by                      INT UNSIGNED NULL,
+    approved_by_name                 VARCHAR(150) NULL,    -- free-text owner/admin name, for rounds that predate a login-bound approver
     approved_at                      DATETIME NULL,
     created_at                       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at                       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_ucc_approver FOREIGN KEY (approved_by) REFERENCES users(id),
-    INDEX idx_ucc_sku (sku),
+    UNIQUE KEY uq_ucc_sku (sku),
     INDEX idx_ucc_review_status (review_status)
 ) ENGINE=InnoDB
 COMMENT='Phase G-DATA 1B: unit conversion reconstruction candidates — review-only until a human sets approved=YES, which a separate promotion step then writes into item_unit_conversions.';
@@ -743,10 +800,15 @@ WHERE r.code = 'VIEWER' AND p.code IN ('INVENTORY_VIEW','AUDIT_LOG_VIEW','RECONC
 -- user types (e.g. "gram", "Kg", "sack") is normalized in
 -- services/UnitNormalizationService.php to one of these codes before it
 -- ever reaches the database — never guessed, never auto-converted.
+-- PHASE G-DATA 1B.2: PAIL/JAR/SET/SHEET/METER/BATANG added after being
+-- confirmed as real units in use across the actual catalog (never added
+-- speculatively — see migration/workspace/reports/unit_conversion_summary_v3.md
+-- section 13 and the semantic-grouping round's BATANG discovery).
 INSERT INTO units (code, name) VALUES
     ('GR','Gram'), ('KG','Kilogram'), ('ML','Mililiter'), ('LTR','Liter'),
     ('PCS','Pieces'), ('BOX','Box'), ('KARTON','Karton'), ('KARUNG','Karung'), ('LUSIN','Lusin'),
-    ('PACK','Pack'), ('ROLL','Roll');
+    ('PACK','Pack'), ('ROLL','Roll'),
+    ('PAIL','Pail'), ('JAR','Jar'), ('SET','Set'), ('SHEET','Sheet'), ('METER','Meter'), ('BATANG','Batang');
 
 INSERT INTO system_settings (setting_key, setting_value, description) VALUES
     ('price_anomaly_high_multiplier', '5',    'Reject/flag when new unit cost > reference price x this multiplier'),

@@ -24,6 +24,7 @@ require_once __DIR__ . '/../services/PeriodLockService.php';
 require_once __DIR__ . '/../services/WarehouseLockService.php';
 require_once __DIR__ . '/../services/FifoService.php';
 require_once __DIR__ . '/../services/ImportSimpleMasterService.php';
+require_once __DIR__ . '/../services/OpeningValidationService.php';
 require_once __DIR__ . '/../services/ImportOpeningStockService.php';
 require_once __DIR__ . '/../services/ImportHistoricalTransactionService.php';
 

@@ -37,6 +37,10 @@ require_once __DIR__ . '/../services/VoidService.php';
 require_once __DIR__ . '/../services/ImportMasterItemService.php';
 require_once __DIR__ . '/../services/ImportSimpleMasterService.php';
 require_once __DIR__ . '/../services/ImportOpeningStockService.php';
+require_once __DIR__ . '/../services/OpeningValidationService.php';
+require_once __DIR__ . '/../services/CostNormalizationService.php';
+require_once __DIR__ . '/../services/OpeningReconciliationService.php';
+require_once __DIR__ . '/../services/MovementReconciliationReviewService.php';
 require_once __DIR__ . '/../services/ImportHistoricalTransactionService.php';
 
 use App\Services\AuthService;
@@ -47,12 +51,15 @@ use App\Services\PriceAnomalyException;
 use App\Services\PeriodLockedException;
 use App\Services\WarehouseLockedException;
 use App\Services\CostRequiredException;
+use App\Services\UnitConversionNotApprovedException;
 use App\Services\RateLimitedException;
 use App\Services\NotFoundException;
 use App\Services\TransferAlreadyReceivedException;
 use App\Services\TransferAlreadyCancelledException;
 use App\Services\DuplicateRequestException;
 use App\Services\ImportValidationException;
+use App\Services\OpeningReconciliationService;
+use App\Services\MovementReconciliationReviewService;
 use App\Services\ValidationException;
 use App\Services\FifoService;
 use App\Services\InventoryService;
@@ -147,6 +154,7 @@ set_exception_handler(function (Throwable $e) use ($path) {
         PeriodLockedException::class              => ['code' => 423, 'label' => 'PERIOD_LOCKED'],
         WarehouseLockedException::class           => ['code' => 423, 'label' => 'OPNAME_ACTIVE'],
         CostRequiredException::class              => ['code' => 422, 'label' => 'COST_REQUIRED'],
+        UnitConversionNotApprovedException::class => ['code' => 422, 'label' => 'UNIT_CONVERSION_NOT_APPROVED'],
         RateLimitedException::class               => ['code' => 429, 'label' => 'RATE_LIMITED'],
         NotFoundException::class                  => ['code' => 404, 'label' => 'NOT_FOUND'],
         TransferAlreadyReceivedException::class   => ['code' => 409, 'label' => 'TRANSFER_ALREADY_RECEIVED'],
@@ -644,6 +652,20 @@ $routes = [
         inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
         $result = Database::transaction(fn (PDO $tx) => ImportOpeningStockService::commit($tx, (int) $params['id'], $user['id']));
         inv_ok($result, 'Committed');
+    },
+    // PHASE G-DATA 2 Section 12: GO_LIVE_READY gate for a staged final
+    // opening batch — read-only, never mutates data.
+    'GET /import/opening-stock/{id}/reconciliation' => function (array $params) use ($pdo) {
+        inv_require_auth();
+        inv_ok(OpeningReconciliationService::report($pdo, (int) $params['id']), 'OK');
+    },
+    // PHASE G-DATA 2 Section 11: the 8 historical movement-reconciliation
+    // rows, kept deliberately separate from unit-conversion and opening
+    // questions. Read-only list; verified_final_opening is filled in via a
+    // separate step once the owner's final stock file confirms it.
+    'GET /movement-reconciliation-reviews' => function () use ($pdo) {
+        inv_require_auth();
+        inv_ok(MovementReconciliationReviewService::list($pdo), 'OK');
     },
 
     'POST /import/historical/stage' => function () use ($pdo, $input) {

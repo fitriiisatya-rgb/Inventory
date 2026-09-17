@@ -146,6 +146,25 @@ final class CostRequiredException extends RuntimeException
     }
 }
 
+/**
+ * PHASE G-DATA 2: a transaction was posted in a unit that has no active,
+ * approved conversion for this item as of the transaction date. The
+ * caller must re-post in the item's base unit (always available — every
+ * item gets an identity base-unit conversion at creation) or in another
+ * unit that already has an approved conversion. Never silently falls
+ * back to a guessed factor. Error code: UNIT_CONVERSION_NOT_APPROVED.
+ */
+final class UnitConversionNotApprovedException extends RuntimeException
+{
+    public function __construct(public readonly int $itemId, public readonly int $unitId)
+    {
+        parent::__construct(
+            "UNIT_CONVERSION_NOT_APPROVED: item {$itemId} has no active, approved conversion for unit {$unitId} — " .
+            "post in the item's base unit or another approved unit instead"
+        );
+    }
+}
+
 final class ValidationException extends RuntimeException
 {
     /** @param string[] $errors */
