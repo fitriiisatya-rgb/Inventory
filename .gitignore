@@ -17,3 +17,5 @@ migration/workspace/reports/*
 !migration/workspace/normalized/warehouse_unit_comparison.csv
 !migration/workspace/reports/unit_conversion_summary.md
 vendor/
+__pycache__/
+*.pyc
