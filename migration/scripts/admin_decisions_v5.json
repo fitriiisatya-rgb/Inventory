@@ -1,0 +1,103 @@
+{
+  "_readme": "Owner/admin answers to admin_decision_groups.xlsx (Phase G-DATA 1B.2), received as a screenshot with numbered answers. Recorded here verbatim (source_answer) plus the derived resolution applied by apply_admin_decisions_v5.py. Every SKU listed was explicitly covered by the owner's answer -- nothing here is inferred beyond what was said for SKUs not directly named within a group (e.g. base-unit / purchase-unit values applied to the full Topper family come from the owner's explicit 'A ya, 1 set = 1 pcs. 1 pack isi 12 pcs' answer to that named group).",
+
+  "group_answers": {
+    "TOPPER_SET_VS_PCS": {
+      "source_answer": "A ya, 1 set = 1 pcs. 1 pack isi 12 pcs",
+      "resolution": "SET and PCS are the same countable unit (identity, factor 1). Purchase unit Pack = 12 Pcs (matches existing legacy data exactly).",
+      "approved_base_unit": "PCS",
+      "approved_purchase_unit": "Pack",
+      "approved_purchase_conversion": 12.0,
+      "skus": ["111904", "111905", "111906", "111907", "111908", "111909", "111910", "111911", "111912", "111913", "111914", "111915", "111916", "111917", "111918", "111919", "111921"]
+    },
+    "PACK_VS_PCS": {
+      "source_answer": "Iya isi pcs dalam 1 pak",
+      "resolution": "PACK contains the PCS count implied by each SKU's own product name; use it as the purchase conversion.",
+      "per_sku": {
+        "111507": {"approved_base_unit": "PCS", "approved_purchase_unit": "Pack", "approved_purchase_conversion": 10.0},
+        "111508": {"approved_base_unit": "PCS", "approved_purchase_unit": "Pack", "approved_purchase_conversion": 10.0},
+        "333404": {"approved_base_unit": "PCS", "approved_purchase_unit": "Pack", "approved_purchase_conversion": 50.0},
+        "100503": {"approved_base_unit": "PACK", "content_qty": 100.0, "content_unit": "PCS", "note_only": "Base unit is already PACK; '100 Pcs' is content of 1 Pack, not a further purchase layer."}
+      }
+    },
+    "SHEET_VS_PCS": {
+      "source_answer": "baking powder 1 pack 500 sheet",
+      "resolution": "SHEET and PCS are the same countable unit (identity). Purchase unit Pack = 500 Sheet/Pcs (matches legacy's 500 exactly).",
+      "skus": {
+        "333211": {"approved_base_unit": "PCS", "approved_purchase_unit": "Pack", "approved_purchase_conversion": 500.0}
+      }
+    },
+    "ROLL_VS_PCS": {
+      "source_answer": "Strech film Betul 1 roll = 1 pcs. 1 ctn = 6 roll",
+      "resolution": "ROLL and PCS are the same countable unit (identity). Purchase unit Ctn = 6 Roll/Pcs.",
+      "skus": {
+        "444803": {"approved_base_unit": "PCS", "approved_purchase_unit": "Ctn", "approved_purchase_conversion": 6.0}
+      }
+    },
+    "SET_VS_PCS": {
+      "source_answer": "Mika chiffon 1 set = 1 pcs . Per pack 250 pcs",
+      "resolution": "SET and PCS are the same countable unit (identity). Purchase unit Pack = 250 Set/Pcs (matches legacy's 250 exactly).",
+      "skus": {
+        "666105": {"approved_base_unit": "SET", "approved_purchase_unit": "Pack", "approved_purchase_conversion": 250.0}
+      }
+    }
+  },
+
+  "unique_case_answers": {
+    "333502": {
+      "item_name": "Sticker Bolu Amor Oval @43Pcs",
+      "source_answer": "Yang sticker bolu amor oval sekarang 1 lembarnya @50 pcs ya bu",
+      "resolution": "Owner gives an UPDATED authoritative count (50), superseding both the name-parsed value (43) and legacy's trivial default (1). 1 Lembar (sheet) = 50 Pcs.",
+      "approved_base_unit": "PCS",
+      "approved_purchase_unit": "Lembar",
+      "approved_purchase_conversion": 50.0
+    },
+    "555911": {
+      "item_name": "Dus General @250 Pcs",
+      "source_answer": "dus general 1 pack 250 pcs",
+      "resolution": "Confirms the name-derived count (250) over legacy's trivial default (1).",
+      "approved_base_unit": "PCS",
+      "approved_purchase_unit": "Pack",
+      "approved_purchase_conversion": 250.0
+    },
+    "666201": {
+      "item_name": "Papper Cup Kecil @25Pcs",
+      "source_answer": "paper cup kecil 1 pack 25 pcs",
+      "resolution": "Confirms the name-derived count (25) over legacy's trivial default (1).",
+      "approved_base_unit": "PCS",
+      "approved_purchase_unit": "Pack",
+      "approved_purchase_conversion": 25.0
+    },
+    "100201": {
+      "item_name": "CHEFMATE 3 IN 1 @500GRX20",
+      "source_answer": "Chefmate 1 ctn 10 kg kemasan yang 500 gr",
+      "resolution": "Confirms the CORRECTED parser's composite value (500gr x 20 = 10kg), not legacy's 20kg. 1 Ctn = 10 Kg for the 500gr-packaged Chefmate variant.",
+      "approved_base_unit": "KG",
+      "approved_purchase_unit": "Ctn",
+      "approved_purchase_conversion": 10.0
+    },
+    "140541": {
+      "item_name": "CREAMFILL CLASSIC BANANA",
+      "source_answer": "Creamfill classic banana 1 ctn isi 10 kg",
+      "resolution": "New authoritative value, overriding both legacy's trivial 1kg and the price-ratio-derived ~136x candidate. 1 Ctn = 10 Kg.",
+      "approved_base_unit": "KG",
+      "approved_purchase_unit": "Ctn",
+      "approved_purchase_conversion": 10.0
+    },
+    "400111": {
+      "item_name": "Delifruit Dark Cherry 50 @2,7 Kg",
+      "source_answer": "Delifruit dark chery 1 pcs = 2,7 kg",
+      "resolution": "Confirms the name evidence (2.7 kg content per piece) as correct; legacy's '2.7 Pcs' was a mislabeled unit (should have been Kg). This is a content-weight-per-piece fact, not a base-unit change -- base unit remains KG for inventory valuation.",
+      "approved_base_unit": "KG",
+      "content_qty": 2.7,
+      "content_unit": "KG",
+      "content_note": "1 PCS (piece) nets 2.7 KG."
+    },
+    "900501": {
+      "item_name": "Wilton Blackforest @1Liter",
+      "source_answer": "Wilton 1 pcs = 1 kg",
+      "resolution": "Confirms base unit is KG (matches legacy exactly, trivial factor 1); the name's 'Liter' mention is informal and not used as a real unit.",
+      "approved_base_unit": "KG"
+    }
+  }
+}
