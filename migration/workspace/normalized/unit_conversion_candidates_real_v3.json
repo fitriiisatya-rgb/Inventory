@@ -32068,21 +32068,28 @@
       "legacy_isi_dasar_normalization_status": "CONVERTED"
     },
     "evidence_count": 1,
-    "confidence": "LOW",
-    "issue_code": "LEGACY_CONVERSION_CANDIDATE,UNIT_LABEL_MISMATCH",
-    "issue_detail": "Normalization trace: LEGACY: raw=1.0KG -> normalized=1000.0GR (AGREEMENT). Price ratio 1000.0x on same unit (KG) between OPENING_GUDANG_BESAR and OPENING_KARANG_TENGAH is close to a 1000.0x scale constant — possible mislabeled unit, not a real conversion. Do not auto-correct.",
-    "review_status": "PENDING",
-    "approved_base_unit": null,
+    "confidence": "BUSINESS_CONFIRMED",
+    "issue_code": "LEGACY_CONVERSION_CANDIDATE,BUSINESS_CONFIRMED_OVERRIDE",
+    "issue_detail": "Normalization trace: LEGACY: raw=1.0KG -> normalized=1000.0GR (AGREEMENT). Price ratio 1000.0x on same unit (KG) between OPENING_GUDANG_BESAR and OPENING_KARANG_TENGAH is close to a 1000.0x scale constant — possible mislabeled unit, not a real conversion. Do not auto-correct. [BUSINESS_CONFIRMED override applied: Owner confirmed actual price Rp305.000/KG, equivalent Rp305/GR. The Karang Tengah opening-stock raw value of Rp305 was recorded under the KG label but is actually a per-GR figure -- a unit-price-basis mismatch (KG vs GR), NOT a 1000x packaging conversion. No purchase_conversion factor is derived from this case. Prior detector-only state: issue_code=LEGACY_CONVERSION_CANDIDATE,UNIT_LABEL_MISMATCH, confidence=LOW, review_status=PENDING -- legacy evidence retained below for audit, superseded by this business confirmation.]",
+    "review_status": "APPROVED",
+    "approved_base_unit": "KG",
     "approved_middle_unit": null,
     "approved_middle_conversion": null,
     "approved_purchase_unit": null,
     "approved_purchase_conversion": null,
-    "approved": null,
-    "correction_note": null,
+    "approved": "YES",
+    "correction_note": "Owner confirmed actual price Rp305.000/KG, equivalent Rp305/GR. The Karang Tengah opening-stock raw value of Rp305 was recorded under the KG label but is actually a per-GR figure -- a unit-price-basis mismatch (KG vs GR), NOT a 1000x packaging conversion. No purchase_conversion factor is derived from this case.",
     "warehouses_present": [
       "GUDANG_BESAR",
       "KARANG_TENGAH"
-    ]
+    ],
+    "prior_detector_issue_code": "LEGACY_CONVERSION_CANDIDATE,UNIT_LABEL_MISMATCH",
+    "prior_detector_confidence": "LOW",
+    "prior_detector_review_status": "PENDING",
+    "conversion_source": "BUSINESS_CONFIRMED",
+    "price_source": "BUSINESS_CONFIRMED",
+    "unit_cost_base_kg": 305000.0,
+    "unit_cost_base_gr_equivalent": 305.0
   },
   {
     "sku": "140540",
@@ -76890,21 +76897,25 @@
       "legacy_isi_dasar_normalization_status": "CONVERTED"
     },
     "evidence_count": 1,
-    "confidence": "LOW",
-    "issue_code": "LEGACY_CONVERSION_CANDIDATE,PRICE_RATIO_SUPPORTS_CONVERSION,CONVERSION_CONFLICT",
-    "issue_detail": "Normalization trace: PRICE_RATIO: raw=15KG -> normalized=15000.0GR (CONFLICT); LEGACY: raw=1.0KG -> normalized=1000.0GR (CONFLICT).",
-    "review_status": "PENDING",
-    "approved_base_unit": null,
+    "confidence": "BUSINESS_CONFIRMED",
+    "issue_code": "LEGACY_CONVERSION_CANDIDATE,BUSINESS_CONFIRMED_OVERRIDE",
+    "issue_detail": "Normalization trace: PRICE_RATIO: raw=15KG -> normalized=15000.0GR (CONFLICT); LEGACY: raw=1.0KG -> normalized=1000.0GR (CONFLICT). [BUSINESS_CONFIRMED override applied: Owner confirmed 1 PCS/kemasan = 15 KG. Prior detector-only state: issue_code=LEGACY_CONVERSION_CANDIDATE,PRICE_RATIO_SUPPORTS_CONVERSION,CONVERSION_CONFLICT, confidence=LOW, review_status=PENDING -- legacy evidence retained below for audit, superseded by this business confirmation.]",
+    "review_status": "APPROVED",
+    "approved_base_unit": "KG",
     "approved_middle_unit": null,
     "approved_middle_conversion": null,
-    "approved_purchase_unit": null,
-    "approved_purchase_conversion": null,
-    "approved": null,
-    "correction_note": null,
+    "approved_purchase_unit": "PCS",
+    "approved_purchase_conversion": 15.0,
+    "approved": "YES",
+    "correction_note": "Owner confirmed 1 PCS/kemasan = 15 KG.",
     "warehouses_present": [
       "GUDANG_BESAR",
       "KARANG_TENGAH"
-    ]
+    ],
+    "prior_detector_issue_code": "LEGACY_CONVERSION_CANDIDATE,PRICE_RATIO_SUPPORTS_CONVERSION,CONVERSION_CONFLICT",
+    "prior_detector_confidence": "LOW",
+    "prior_detector_review_status": "PENDING",
+    "conversion_source": "BUSINESS_CONFIRMED"
   },
   {
     "sku": "999209",
@@ -76982,21 +76993,25 @@
       "legacy_isi_dasar_normalization_status": "CONVERTED"
     },
     "evidence_count": 1,
-    "confidence": "LOW",
-    "issue_code": "LEGACY_CONVERSION_CANDIDATE,PRICE_RATIO_SUPPORTS_CONVERSION,CONVERSION_CONFLICT",
-    "issue_detail": "Normalization trace: PRICE_RATIO: raw=15KG -> normalized=15000.0GR (CONFLICT); LEGACY: raw=1.0KG -> normalized=1000.0GR (CONFLICT).",
-    "review_status": "PENDING",
-    "approved_base_unit": null,
+    "confidence": "BUSINESS_CONFIRMED",
+    "issue_code": "LEGACY_CONVERSION_CANDIDATE,BUSINESS_CONFIRMED_OVERRIDE",
+    "issue_detail": "Normalization trace: PRICE_RATIO: raw=15KG -> normalized=15000.0GR (CONFLICT); LEGACY: raw=1.0KG -> normalized=1000.0GR (CONFLICT). [BUSINESS_CONFIRMED override applied: Owner confirmed 1 PCS/kemasan = 15 KG. Prior detector-only state: issue_code=LEGACY_CONVERSION_CANDIDATE,PRICE_RATIO_SUPPORTS_CONVERSION,CONVERSION_CONFLICT, confidence=LOW, review_status=PENDING -- legacy evidence retained below for audit, superseded by this business confirmation.]",
+    "review_status": "APPROVED",
+    "approved_base_unit": "KG",
     "approved_middle_unit": null,
     "approved_middle_conversion": null,
-    "approved_purchase_unit": null,
-    "approved_purchase_conversion": null,
-    "approved": null,
-    "correction_note": null,
+    "approved_purchase_unit": "PCS",
+    "approved_purchase_conversion": 15.0,
+    "approved": "YES",
+    "correction_note": "Owner confirmed 1 PCS/kemasan = 15 KG.",
     "warehouses_present": [
       "GUDANG_BESAR",
       "KARANG_TENGAH"
-    ]
+    ],
+    "prior_detector_issue_code": "LEGACY_CONVERSION_CANDIDATE,PRICE_RATIO_SUPPORTS_CONVERSION,CONVERSION_CONFLICT",
+    "prior_detector_confidence": "LOW",
+    "prior_detector_review_status": "PENDING",
+    "conversion_source": "BUSINESS_CONFIRMED"
   },
   {
     "sku": "999210",

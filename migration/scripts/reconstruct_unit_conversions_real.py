@@ -53,7 +53,7 @@ UNIT_ALIASES = {
     "gr": "GR", "gram": "GR", "grams": "GR", "g": "GR",
     "kg": "KG", "kilogram": "KG", "kilo": "KG",
     "ml": "ML", "mililiter": "ML", "milliliter": "ML",
-    "ltr": "LTR", "liter": "LTR", "litre": "LTR", "l": "LTR",
+    "ltr": "LTR", "liter": "LTR", "litre": "LTR", "l": "LTR", "lt": "LTR",
     "pcs": "PCS", "piece": "PCS", "pieces": "PCS", "pc": "PCS", "buah": "PCS", "biji": "PCS", "unit": "PCS",
     "box": "BOX", "kotak": "BOX", "dus": "BOX",
     "karton": "KARTON", "carton": "KARTON", "ctn": "KARTON",
@@ -81,6 +81,34 @@ def normalize_unit(raw):
     if upper in CANONICAL_UNITS:
         return upper
     return upper  # unrecognized but preserved verbatim, uppercased, for review
+
+
+# Canonical PHYSICAL-QUANTITY conversions -- only the two dimensions the
+# business explicitly confirmed (Phase G-DATA 1B.1): weight (KG<->GR) and
+# volume (LTR<->ML). No other unit pair is auto-converted: a plain PCS,
+# PACK, SET, etc. is left as-is, never guessed into a weight/volume figure.
+CANONICAL_DIMENSION = {
+    "KG": ("WEIGHT", 1000.0, "GR"),
+    "GR": ("WEIGHT", 1.0, "GR"),
+    "LTR": ("VOLUME", 1000.0, "ML"),
+    "ML": ("VOLUME", 1.0, "ML"),
+}
+
+
+def normalize_physical_qty(qty, unit):
+    """Converts (qty, unit) to a canonical reference unit within its physical
+    dimension (GR for weight, ML for volume) so quantities expressed in
+    different-but-convertible units can be compared on their real magnitude,
+    not their raw numeric value. Returns (normalized_qty, normalized_unit,
+    normalization_status). Units outside the two known dimensions are
+    returned unchanged (status SAME_UNIT/UNKNOWN_UNIT) -- never guessed."""
+    if qty is None or unit is None:
+        return qty, unit, "UNKNOWN_UNIT"
+    if unit in CANONICAL_DIMENSION:
+        _, factor_to_ref, ref_unit = CANONICAL_DIMENSION[unit]
+        status = "SAME_UNIT" if unit == ref_unit else "CONVERTED"
+        return round(qty * factor_to_ref, 6), ref_unit, status
+    return qty, unit, "SAME_UNIT"
 
 
 def normalize_code(x):
@@ -271,18 +299,26 @@ for code in universe:
     names = {}
     units = {}
     prices = {}
+    categories = {}
+    statuses = {}
     if gb_row is not None:
         names["GUDANG_BESAR"] = str(gb_row["Nama Barang"])
         units["GUDANG_BESAR"] = normalize_unit(gb_row["Satuan Dasar"])
         prices["GUDANG_BESAR"] = float(gb_row["Harga per Satuan (Rp)"]) if pd.notna(gb_row["Harga per Satuan (Rp)"]) else None
+        categories["GUDANG_BESAR"] = gb_row.get("Kategori") if pd.notna(gb_row.get("Kategori")) else None
+        statuses["GUDANG_BESAR"] = gb_row.get("Status") if pd.notna(gb_row.get("Status")) else None
     if cb_row is not None:
         names["CIBADAK"] = str(cb_row["Nama Barang"])
         units["CIBADAK"] = normalize_unit(cb_row["Satuan Dasar"])
         prices["CIBADAK"] = float(cb_row["Harga per Satuan (Rp)"]) if pd.notna(cb_row["Harga per Satuan (Rp)"]) else None
+        categories["CIBADAK"] = cb_row.get("Kategori") if pd.notna(cb_row.get("Kategori")) else None
+        statuses["CIBADAK"] = cb_row.get("Status") if pd.notna(cb_row.get("Status")) else None
     if kt_row is not None:
         names["KARANG_TENGAH"] = str(kt_row["Nama Barang"])
         units["KARANG_TENGAH"] = normalize_unit(kt_row["Satuan Dasar"])
         prices["KARANG_TENGAH"] = float(kt_row["Harga per Satuan (Rp)"]) if pd.notna(kt_row["Harga per Satuan (Rp)"]) else None
+        categories["KARANG_TENGAH"] = kt_row.get("Kategori") if pd.notna(kt_row.get("Kategori")) else None
+        statuses["KARANG_TENGAH"] = kt_row.get("Status") if pd.notna(kt_row.get("Status")) else None
 
     if not names and code in opening_only_codes:
         # Stock-only, no master anywhere (e.g. 33515) — pull identity from whichever stock file has it.
@@ -292,18 +328,46 @@ for code in universe:
                 names[wh] = str(rows[0]["Nama Barang (referensi)"])
                 units[wh] = normalize_unit(rows[0]["Satuan Dasar (referensi)"])
 
-    item_name = names.get("GUDANG_BESAR") or next(iter(names.values()), None)
+    item_name_gb_authority = names.get("GUDANG_BESAR")
+    item_name = item_name_gb_authority or next(iter(names.values()), None)
 
     issues = []
     correction_notes = []
 
-    # ---- Identity conflict across warehouse masters ----
+    # ---- Identity: Gudang Besar / SCM is the authoritative Global Master
+    # identity (owner decision, Phase G-DATA 1B.1 item 5). When GB has a
+    # row, GB's Name/Category/Base Unit/Status win outright and any
+    # differing warehouse names become aliases kept for audit only -- this
+    # is no longer a BLOCKING conflict. BLOCKED is reserved for the case
+    # where no GB row exists to arbitrate between disagreeing transit
+    # warehouses (no authoritative source available).
     norm_names = {wh: normalize_name(n) for wh, n in names.items()}
     unique_norms = set(norm_names.values())
     identity_conflict = None
+    identity_aliases = {}
     if len(unique_norms) > 1:
-        identity_conflict = dict(names)
-        issues.append("IDENTITY_CONFLICT")
+        if item_name_gb_authority is not None:
+            gb_norm = norm_names["GUDANG_BESAR"]
+            identity_aliases = {wh: n for wh, n in names.items() if wh != "GUDANG_BESAR" and norm_names[wh] != gb_norm}
+            issues.append("IDENTITY_RESOLVED_VIA_GB_AUTHORITY")
+            correction_notes.append(
+                "Identity resolved: Gudang Besar name/category/base unit/status is authoritative. "
+                "Differing transit names kept as aliases: " +
+                "; ".join(f"{wh}=\"{n}\"" for wh, n in identity_aliases.items())
+            )
+        else:
+            identity_conflict = dict(names)
+            issues.append("IDENTITY_CONFLICT")
+
+    # ---- Category / Status candidate: GB-authoritative when GB present,
+    # else first available transit warehouse. Missing category is left
+    # explicitly NULL/NEEDS_CATEGORY -- never invented.
+    if item_name_gb_authority is not None:
+        category_candidate = categories.get("GUDANG_BESAR")
+        status_candidate = statuses.get("GUDANG_BESAR")
+    else:
+        category_candidate = next((categories[wh] for wh in ("CIBADAK", "KARANG_TENGAH") if categories.get(wh)), None)
+        status_candidate = next((statuses[wh] for wh in ("CIBADAK", "KARANG_TENGAH") if statuses.get(wh)), None)
 
     # ---- Base unit consistency ----
     unique_units = set(u for u in units.values() if u)
@@ -319,6 +383,8 @@ for code in universe:
     if is_global_master_candidate:
         if code in opening_only_codes or has_live_opening:
             issues.append("GLOBAL_MASTER_CANDIDATE")
+            if not category_candidate:
+                issues.append("NEEDS_CATEGORY")
         else:
             issues.append("KT_LOCAL_ONLY_INACTIVE")
 
@@ -334,6 +400,12 @@ for code in universe:
         issues.append("NAME_DERIVED_CANDIDATE")
         if name_evidence["ambiguous_structure"]:
             issues.append("PACKAGE_STRUCTURE_UNCLEAR")
+        norm_qty, norm_unit, norm_status = normalize_physical_qty(name_evidence["total_qty"], name_evidence["unit"])
+        name_evidence["raw_qty"] = name_evidence["total_qty"]
+        name_evidence["raw_unit"] = name_evidence["unit"]
+        name_evidence["normalized_qty"] = norm_qty
+        name_evidence["normalized_unit"] = norm_unit
+        name_evidence["normalization_status"] = norm_status
 
     # ---- Transaction evidence ----
     txn_evidence = {}
@@ -383,6 +455,19 @@ for code in universe:
             "legacy_satuan_dasar_hpp": legacy_row.get("Satuan Dasar HPP"),
         }
         issues.append("LEGACY_CONVERSION_CANDIDATE")
+        _legacy_isi_dasar = legacy_evidence.get("legacy_isi_dasar")
+        _legacy_unit_raw = normalize_unit(legacy_evidence.get("legacy_satuan_dasar_hpp"))
+        if _legacy_isi_dasar not in (None, "") and pd.notna(_legacy_isi_dasar):
+            try:
+                _lqty = float(_legacy_isi_dasar)
+                _lnorm_qty, _lnorm_unit, _lnorm_status = normalize_physical_qty(_lqty, _legacy_unit_raw)
+            except (TypeError, ValueError):
+                _lqty, _lnorm_qty, _lnorm_unit, _lnorm_status = None, None, None, "UNKNOWN_UNIT"
+            legacy_evidence["legacy_isi_dasar_raw_qty"] = _lqty
+            legacy_evidence["legacy_isi_dasar_raw_unit"] = _legacy_unit_raw
+            legacy_evidence["legacy_isi_dasar_normalized_qty"] = _lnorm_qty
+            legacy_evidence["legacy_isi_dasar_normalized_unit"] = _lnorm_unit
+            legacy_evidence["legacy_isi_dasar_normalization_status"] = _lnorm_status
 
     # ---- Price ratio (across GB/CB/KT master prices) ----
     price_records = [{"source": f"MASTER_{wh}", "unit": units.get(wh), "price": p} for wh, p in prices.items() if p]
@@ -401,6 +486,16 @@ for code in universe:
         issues.append("UNIT_LABEL_MISMATCH")
     elif price_evidence:
         issues.append("PRICE_RATIO_SUPPORTS_CONVERSION")
+        # candidate_factor means "1 unit_a = candidate_factor * unit_b" -- the
+        # physical unit the factor is denominated in is unit_b.
+        _pnorm_qty, _pnorm_unit, _pnorm_status = normalize_physical_qty(
+            float(price_evidence["candidate_factor"]), price_evidence.get("unit_b")
+        )
+        price_evidence["raw_qty"] = price_evidence["candidate_factor"]
+        price_evidence["raw_unit"] = price_evidence.get("unit_b")
+        price_evidence["normalized_qty"] = _pnorm_qty
+        price_evidence["normalized_unit"] = _pnorm_unit
+        price_evidence["normalization_status"] = _pnorm_status
 
     # ---- Movement reconciliation review ----
     if code in recon_flags:
@@ -414,39 +509,67 @@ for code in universe:
     # inflate confidence for SKUs that simply need no conversion at all.
     # Transaction evidence is still surfaced (scm/cibadak_transaction_evidence
     # columns) for a human to weigh, just not folded into this score.
+    #
+    # CRITICAL (Phase G-DATA 1B.1 fix): before comparing two candidate
+    # values, each is normalized to a common physical unit first (KG<->GR,
+    # LTR<->ML). Comparing RAW numeric values regardless of unit (the old
+    # behaviour) produced false conflicts whenever name evidence and legacy
+    # evidence agreed on the same real quantity but expressed it in
+    # different units (e.g. name "@1KG" vs legacy isi_dasar=1000 Gr are the
+    # SAME 1000 g, not a conflict). Two values can only be clustered
+    # together when their NORMALIZED units match.
     candidate_factors = []
     if name_evidence and not name_evidence["ambiguous_structure"]:
-        candidate_factors.append(("NAME_HEURISTIC", name_evidence["total_qty"]))
-    if price_evidence:
-        candidate_factors.append(("PRICE_RATIO", price_evidence["candidate_factor"]))
-    if legacy_evidence and legacy_evidence.get("legacy_isi_dasar") not in (None, ""):
-        try:
-            candidate_factors.append(("LEGACY", float(legacy_evidence["legacy_isi_dasar"])))
-        except (TypeError, ValueError):
-            pass
+        candidate_factors.append({
+            "source": "NAME_HEURISTIC",
+            "raw_qty": name_evidence["raw_qty"], "raw_unit": name_evidence["raw_unit"],
+            "normalized_qty": name_evidence["normalized_qty"], "normalized_unit": name_evidence["normalized_unit"],
+        })
+    if price_evidence and "normalized_qty" in price_evidence:
+        candidate_factors.append({
+            "source": "PRICE_RATIO",
+            "raw_qty": price_evidence["raw_qty"], "raw_unit": price_evidence["raw_unit"],
+            "normalized_qty": price_evidence["normalized_qty"], "normalized_unit": price_evidence["normalized_unit"],
+        })
+    if legacy_evidence and legacy_evidence.get("legacy_isi_dasar_normalized_qty") not in (None, ""):
+        candidate_factors.append({
+            "source": "LEGACY",
+            "raw_qty": legacy_evidence["legacy_isi_dasar_raw_qty"], "raw_unit": legacy_evidence["legacy_isi_dasar_raw_unit"],
+            "normalized_qty": legacy_evidence["legacy_isi_dasar_normalized_qty"], "normalized_unit": legacy_evidence["legacy_isi_dasar_normalized_unit"],
+        })
 
-    factor_values = [v for _, v in candidate_factors]
     evidence_count = 0
-    conflicting = False
-    if factor_values:
-        # Cluster values that mutually agree within tolerance; evidence_count
-        # is the size of the LARGEST agreeing cluster. More than one distinct
-        # cluster (values that don't fit together) => genuine conflict.
-        clusters = []
-        for v in factor_values:
+    normalization_trace = []
+    if candidate_factors:
+        # Cluster entries that mutually agree in NORMALIZED unit AND
+        # magnitude (within tolerance); evidence_count is the size of the
+        # LARGEST agreeing cluster. More than one distinct cluster (values
+        # that don't fit together even after unit normalization) => genuine
+        # conversion conflict.
+        clusters = []  # each cluster: list of candidate_factor dicts
+        for cf in candidate_factors:
             placed = False
+            v, u = cf["normalized_qty"], cf["normalized_unit"]
             for cluster in clusters:
-                if abs(v - cluster[0]) / cluster[0] <= RATIO_TOLERANCE:
-                    cluster.append(v)
+                ref = cluster[0]
+                same_unit = (u is not None and ref["normalized_unit"] is not None and u == ref["normalized_unit"])
+                if same_unit and ref["normalized_qty"] not in (None, 0) and abs(v - ref["normalized_qty"]) / abs(ref["normalized_qty"]) <= RATIO_TOLERANCE:
+                    cluster.append(cf)
                     placed = True
                     break
             if not placed:
-                clusters.append([v])
+                clusters.append([cf])
         clusters.sort(key=len, reverse=True)
         evidence_count = len(clusters[0])
+        verdict = "AGREEMENT" if len(clusters) == 1 else "CONFLICT"
         if len(clusters) > 1:
-            conflicting = True
             issues.append("CONVERSION_CONFLICT")
+        for cf in candidate_factors:
+            normalization_trace.append({
+                "source": cf["source"], "raw_qty": cf["raw_qty"], "raw_unit": cf["raw_unit"],
+                "normalized_qty": cf["normalized_qty"], "normalized_unit": cf["normalized_unit"],
+                "result": verdict,
+            })
 
     if identity_conflict is not None:
         confidence = None
@@ -468,7 +591,18 @@ for code in universe:
 
     issue_detail_parts = []
     if identity_conflict:
-        issue_detail_parts.append("Identity conflict: " + " vs ".join(f"{wh}=\"{n}\"" for wh, n in identity_conflict.items()) + " — BLOCKED until SKU identity is resolved.")
+        issue_detail_parts.append("Identity conflict: " + " vs ".join(f"{wh}=\"{n}\"" for wh, n in identity_conflict.items()) + " — BLOCKED until SKU identity is resolved (no Gudang Besar row present to arbitrate).")
+    if identity_aliases:
+        issue_detail_parts.append(
+            "Identity resolved via Gudang Besar authority (owner decision). Aliases retained for audit: " +
+            "; ".join(f"{wh}=\"{n}\"" for wh, n in identity_aliases.items())
+        )
+    if normalization_trace:
+        trace_str = "; ".join(
+            f"{t['source']}: raw={t['raw_qty']}{t['raw_unit']} -> normalized={t['normalized_qty']}{t['normalized_unit']} ({t['result']})"
+            for t in normalization_trace
+        )
+        issue_detail_parts.append(f"Normalization trace: {trace_str}.")
     if mismatch_evidence:
         issue_detail_parts.append(f"Price ratio {mismatch_evidence['ratio']}x on same unit ({mismatch_evidence['unit_a']}) between {mismatch_evidence['source_a']} and {mismatch_evidence['source_b']} is close to a {mismatch_evidence['suspected_scale']}x scale constant — possible mislabeled unit, not a real conversion. Do not auto-correct.")
     if "GLOBAL_MASTER_CANDIDATE" in issues:
@@ -484,11 +618,15 @@ for code in universe:
     results.append({
         "sku": code,
         "item_name": item_name,
+        "identity_aliases": identity_aliases or None,
+        "category_candidate": category_candidate,
+        "status_candidate": status_candidate,
         "gudang_besar_unit": units.get("GUDANG_BESAR"),
         "cibadak_unit": units.get("CIBADAK"),
         "karangtengah_unit": units.get("KARANG_TENGAH"),
         "legacy_base_unit": legacy_evidence.get("legacy_satuan_dasar_hpp") if legacy_evidence else None,
         "global_base_unit_candidate": next(iter(unique_units)) if len(unique_units) == 1 else None,
+        "normalization_trace": normalization_trace or None,
         "legacy_middle_unit": legacy_evidence.get("legacy_satuan_kemasan") if legacy_evidence else None,
         "legacy_middle_conversion": legacy_evidence.get("legacy_isi_kemasan") if legacy_evidence else None,
         "middle_unit_candidate": None,

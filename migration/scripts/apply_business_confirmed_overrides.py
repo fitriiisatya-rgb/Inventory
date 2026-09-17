@@ -11,14 +11,20 @@ owner/admin) explicitly confirmed in business_confirmed_overrides.json
 -- no generalization to other SKUs with a similar pattern.
 
 NO production posting happens here. Output is still staging/analysis
-only: unit_conversion_candidates_real_v2.json.
+only: unit_conversion_candidates_real_v3.json (Phase G-DATA 1B.1's
+normalization-engine fix regenerated the detector output, so this
+overrides layer is re-applied on top of the corrected v3 detector run;
+the v2 file from the pre-normalization-fix round is left as historical
+record and not overwritten).
 """
 import json
+import sys
 
 OUT_DIR = "/home/user/Inventory/migration/workspace/normalized"
 BASE_RESULTS_PATH = f"{OUT_DIR}/unit_conversion_candidates_real.json"
 OVERRIDES_PATH = "/home/user/Inventory/migration/scripts/business_confirmed_overrides.json"
-V2_RESULTS_PATH = f"{OUT_DIR}/unit_conversion_candidates_real_v2.json"
+VERSION_SUFFIX = sys.argv[1] if len(sys.argv) > 1 else "v3"
+V2_RESULTS_PATH = f"{OUT_DIR}/unit_conversion_candidates_real_{VERSION_SUFFIX}.json"
 
 results = json.load(open(BASE_RESULTS_PATH, encoding="utf-8"))
 overrides = json.load(open(OVERRIDES_PATH, encoding="utf-8"))

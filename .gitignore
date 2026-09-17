@@ -15,11 +15,15 @@ migration/workspace/reports/*
 !migration/workspace/normalized/unit_conversion_candidates.json
 !migration/workspace/normalized/unit_conversion_candidates_real.json
 !migration/workspace/normalized/unit_conversion_candidates_real_v2.json
+!migration/workspace/normalized/unit_conversion_candidates_real_v3.json
 !migration/workspace/normalized/warehouse_unit_comparison.csv
 !migration/workspace/normalized/warehouse_unit_comparison_v2.csv
+!migration/workspace/normalized/warehouse_unit_comparison_v3.csv
 !migration/workspace/normalized/unit_conversion_review_v2.xlsx
+!migration/workspace/normalized/unit_conversion_review_v3.xlsx
 !migration/workspace/reports/unit_conversion_summary.md
 !migration/workspace/reports/unit_conversion_summary_v2.md
+!migration/workspace/reports/unit_conversion_summary_v3.md
 vendor/
 __pycache__/
 *.pyc
