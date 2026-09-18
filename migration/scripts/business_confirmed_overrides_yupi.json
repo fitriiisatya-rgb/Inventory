@@ -1,0 +1,21 @@
+{
+  "_readme": "Business-confirmed override: ALL YUPI-branded items use GR (gram) as their canonical Global Base Unit. Scanned across the full 1,165-SKU Global Master v5 for item_name containing 'YUPI' (case-insensitive) -- exactly 2 matches, both listed below. Wherever the legacy/master data recorded PCS for these SKUs, that is treated as an old MISLABEL of the same GR-based item, not as a real PCS-to-GR packaging conversion -- no conversion factor is invented. Applies ONLY to these 2 SKUs; no other SKU (YUPI or otherwise) is affected.",
+  "140550": {
+    "item_name": "YUPI LOVE",
+    "override_type": "BASE_UNIT_RELABEL",
+    "conversion_source": "BUSINESS_CONFIRMED",
+    "review_status": "APPROVED",
+    "approved_base_unit": "GR",
+    "correction_note": "Admin confirmed all YUPI items use GR as base unit.",
+    "known_opening_karangtengah_gr": 34.0
+  },
+  "140551": {
+    "item_name": "YUPI ES KRIM",
+    "override_type": "BASE_UNIT_RELABEL",
+    "conversion_source": "BUSINESS_CONFIRMED",
+    "review_status": "APPROVED",
+    "approved_base_unit": "GR",
+    "correction_note": "Admin confirmed all YUPI items use GR as base unit.",
+    "known_opening_karangtengah_gr": 85.0
+  }
+}

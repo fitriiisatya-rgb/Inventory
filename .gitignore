@@ -18,6 +18,7 @@ migration/workspace/reports/*
 !migration/workspace/normalized/unit_conversion_candidates_real_v3.json
 !migration/workspace/normalized/unit_conversion_candidates_real_v4.json
 !migration/workspace/normalized/unit_conversion_candidates_real_v5.json
+!migration/workspace/normalized/unit_conversion_candidates_real_v6.json
 !migration/workspace/normalized/warehouse_unit_comparison.csv
 !migration/workspace/normalized/warehouse_unit_comparison_v2.csv
 !migration/workspace/normalized/warehouse_unit_comparison_v3.csv

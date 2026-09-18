@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 PHASE G-DATA 3 (partial) — HISTORICAL opening + IN - OUT reconciliation for
-SCM/Gudang Besar and Cibadak, validated/normalized against Global Master v5.
+SCM/Gudang Besar and Cibadak, validated/normalized against Global Master v6
+(v5 + the "all YUPI items use GR" business-confirmed base-unit override).
 Karang Tengah has no IN/OUT file yet, so it is validated/normalized but NOT
 reconstructed -- kept as WAITING_MOVEMENT_DATA.
 
@@ -9,8 +10,9 @@ This is validation/reconciliation ONLY:
 - NO production posting, NO FIFO batches, NO cutover.
 - The 3 stok_awal files are treated as authoritative HISTORICAL opening
   (1 Sept 2026), not a production opening import.
-- Business-confirmed conversions (999208, 999209, 140539) are used to
-  NORMALIZE quantities/costs to the Global Base Unit -- never modified.
+- Business-confirmed conversions (999208, 999209, 140539, 140550, 140551)
+  are used to NORMALIZE quantities/costs to the Global Base Unit -- never
+  modified.
 - Known theoretical-negative SKUs are flagged, never auto-corrected.
 
 Inputs:
@@ -18,7 +20,7 @@ Inputs:
     stok_awal_september_{gudang_besar,cibadak,karangtengah}.xlsx
     In Out SCM 01-15 Sept 2026.xlsx
     In Out Cibadak 01-15 Sept 2026.xlsx
-  migration/workspace/normalized/unit_conversion_candidates_real_v5.json (Global Master v5)
+  migration/workspace/normalized/unit_conversion_candidates_real_v6.json (Global Master v6)
 
 Output:
   migration/workspace/reports/reconciliation_01_15_sep_partial.xlsx
@@ -28,7 +30,7 @@ import json
 import pandas as pd
 
 BASE = "/home/user/Inventory/migration/workspace/raw/final_opening_round1_2026-09-17"
-V5_PATH = "/home/user/Inventory/migration/workspace/normalized/unit_conversion_candidates_real_v5.json"
+V5_PATH = "/home/user/Inventory/migration/workspace/normalized/unit_conversion_candidates_real_v6.json"
 OUT_PATH = "/home/user/Inventory/migration/workspace/reports/reconciliation_01_15_sep_partial.xlsx"
 
 UNIT_ALIASES = {
@@ -73,11 +75,11 @@ def normalize_code(x):
 
 
 # ---------------------------------------------------------------------
-# Global Master v5
+# Global Master v6
 # ---------------------------------------------------------------------
 v5 = json.load(open(V5_PATH, encoding="utf-8"))
 master = {r["sku"]: r for r in v5}
-print(f"Global Master v5: {len(master)} SKU")
+print(f"Global Master v6: {len(master)} SKU")
 
 # Known, verified business-confirmed conversions (do NOT modify) -- used
 # only for NORMALIZATION here, exactly as approved in Phase G-DATA 1B.1/1B.3.
@@ -159,7 +161,7 @@ def normalize_opening_row(sku, raw_unit_str, raw_qty, raw_price):
     """Returns (qty_base, cost_base, base_unit, normalization_note, needs_review)."""
     m = master.get(sku)
     if m is None:
-        return raw_qty, raw_price, normalize_unit(raw_unit_str), "UNKNOWN_SKU: not in Global Master v5 -- values NOT normalized", True
+        return raw_qty, raw_price, normalize_unit(raw_unit_str), "UNKNOWN_SKU: not in Global Master v6 -- values NOT normalized", True
 
     base_unit = m.get("approved_base_unit") or m.get("global_base_unit_candidate")
     raw_unit = normalize_unit(raw_unit_str)
@@ -304,7 +306,7 @@ def reconstruct(rows, inout_by_sku, warehouse_label):
             "Opening 1 Sep": r["opening_qty_base"], "IN 1-15": io["in"], "OUT 1-15": io["out"],
             "Calculated Ending 15 Sep": ending, "Unit Cost": r["unit_cost_base"], "Calculated Value": value,
             "Status": status, "Normalization Note": r["normalization_note"],
-            "In Global Master v5": r["in_master"], "Category": r["category"],
+            "In Global Master v6": r["in_master"], "Category": r["category"],
         })
     return out
 
@@ -337,7 +339,7 @@ for r in kt_rows:
         "Calculated Ending 15 Sep": None, "Unit Cost": r["unit_cost_base"],
         "Calculated Value": round(r["opening_qty_base"] * r["unit_cost_base"], 4) if r["opening_qty_base"] is not None else None,
         "Status": "WAITING_MOVEMENT_DATA",
-        "Normalization Note": r["normalization_note"], "In Global Master v5": r["in_master"], "Category": r["category"],
+        "Normalization Note": r["normalization_note"], "In Global Master v6": r["in_master"], "Category": r["category"],
     })
 
 # ---------------------------------------------------------------------
