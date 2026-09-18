@@ -24,6 +24,7 @@ require_once __DIR__ . '/../services/PriceAnomalyService.php';
 require_once __DIR__ . '/../services/IdempotencyService.php';
 require_once __DIR__ . '/../services/MigrationNegativeStockService.php';
 require_once __DIR__ . '/../services/StockPolicyService.php';
+require_once __DIR__ . '/../services/StockReportService.php';
 require_once __DIR__ . '/../services/SupplierService.php';
 require_once __DIR__ . '/../services/BakeryDestinationService.php';
 require_once __DIR__ . '/../services/InventoryService.php';
@@ -59,6 +60,7 @@ use App\Services\UnitConversionNotApprovedException;
 use App\Services\NegativeMigrationStockRequiresAdjustmentException;
 use App\Services\MigrationNegativeStockService;
 use App\Services\StockPolicyService;
+use App\Services\StockReportService;
 use App\Services\SupplierService;
 use App\Services\BakeryDestinationService;
 use App\Services\AuditService;
@@ -445,6 +447,64 @@ $routes = [
 
         $result = Database::transaction(fn (PDO $tx) => StockPolicyService::upsert($tx, $input));
         inv_ok($result, 'Stock policy saved');
+    },
+
+    // ---- PHASE V2: GET /reports/stock — "Laporan Stok" (Section 7 of the
+    // technical design). GET /items is intentionally left untouched; this
+    // is the paginated/filterable/sortable all-items report. ----
+    'GET /reports/stock' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+
+        if ($user['role_code'] === 'STOCK') {
+            // STOCK is always forced to their own warehouse — never a
+            // company-wide rollup, and never another warehouse even if
+            // explicitly requested.
+            if (empty($user['warehouse_id'])) {
+                inv_error(403, 'FORBIDDEN', 'STOCK user has no warehouse assignment');
+            }
+            if ($warehouseId !== null) {
+                inv_require_warehouse_scope($user, $warehouseId);
+            } else {
+                $warehouseId = (int) $user['warehouse_id'];
+            }
+        } elseif ($warehouseId !== null) {
+            inv_require_warehouse_scope($user, $warehouseId);
+        }
+
+        $params = [
+            'warehouse_id' => $warehouseId,
+            'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
+            'q' => $query['q'] ?? null,
+            'status' => $query['status'] ?? null,
+            'include_zero_stock' => !isset($query['include_zero_stock']) || $query['include_zero_stock'] !== '0',
+            'active_only' => !isset($query['active_only']) || $query['active_only'] !== '0',
+            'page' => (int) ($query['page'] ?? 1),
+            'per_page' => (int) ($query['per_page'] ?? 50),
+            'sort' => $query['sort'] ?? 'name',
+            'dir' => $query['dir'] ?? 'asc',
+        ];
+
+        if (($query['format'] ?? '') === 'csv') {
+            $rows = StockReportService::exportAll($pdo, $params);
+            header('Content-Type: text/csv; charset=utf-8');
+            header('Content-Disposition: attachment; filename="laporan-stok-' . date('Ymd_His') . '.csv"');
+            $out = fopen('php://output', 'w');
+            fputcsv($out, ['SKU', 'Nama Barang', 'Kategori', 'Satuan', 'Qty', 'Nilai', 'Rata-rata Biaya', 'Minimum', 'Buffer', 'Buffer Dikonfigurasi', 'Status', 'Terakhir Masuk', 'Terakhir Keluar', 'Terakhir Bergerak']);
+            foreach ($rows as $r) {
+                fputcsv($out, [
+                    $r['sku'], $r['name'], $r['category']['name'] ?? '', $r['unit']['code'],
+                    $r['qty_base'], $r['value'], $r['average_cost'], $r['minimum_stock'], $r['buffer_stock'],
+                    $r['buffer_configured'] ? 'Ya' : 'Tidak', $r['status'], $r['last_in'], $r['last_out'], $r['last_movement'],
+                ]);
+            }
+            fclose($out);
+            exit;
+        }
+
+        inv_ok(StockReportService::list($pdo, $params), 'OK');
     },
 
     // ---- InventoryService: single source of truth reads (Section 7) ----
