@@ -140,11 +140,22 @@ final class StockPolicyService
     }
 
     /**
-     * Section 10 of the technical design — evaluated in this exact order.
-     * migration_negative_review always wins: it must never be folded into
-     * SAFE/LOW/CRITICAL/OUT_OF_STOCK. When buffer is not configured, LOW
-     * never fires and the model degrades gracefully to a 3-state
-     * OUT_OF_STOCK/CRITICAL/SAFE.
+     * Phase 4 correction (owner's explicit, twice-stated spec — the
+     * original Phase 3 build used `qty < minimum + buffer`, treating
+     * buffer as a margin ADDED on top of minimum; the owner's approval
+     * message and this phase's verification requirement both state the
+     * formula as `qty < buffer` directly, i.e. buffer is an ABSOLUTE
+     * reorder-safety level a caller sets independently of minimum, not an
+     * offset from it. Evaluated in this exact order — migration_negative_review
+     * always wins: it must never be folded into SAFE/LOW/CRITICAL/OUT_OF_STOCK.
+     * When buffer is not configured, LOW never fires and the model degrades
+     * gracefully to a 3-state OUT_OF_STOCK/CRITICAL/SAFE.
+     *
+     *   REVIEW:        migration_negative_review
+     *   OUT_OF_STOCK:  qty <= 0
+     *   CRITICAL:      qty > 0 AND qty < minimum
+     *   LOW:           buffer configured AND qty >= minimum AND qty < buffer
+     *   SAFE:          qty >= minimum AND (buffer not configured OR qty >= buffer)
      */
     public static function stockStatus(float $qty, float $minimum, ?float $buffer, bool $migrationNegativeReview): string
     {
@@ -157,7 +168,7 @@ final class StockPolicyService
         if ($qty < $minimum) {
             return self::STATUS_CRITICAL;
         }
-        if ($buffer !== null && $qty < $minimum + $buffer) {
+        if ($buffer !== null && $qty < $buffer) {
             return self::STATUS_LOW;
         }
         return self::STATUS_SAFE;

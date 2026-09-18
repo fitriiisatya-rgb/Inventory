@@ -512,6 +512,16 @@ finding from the audit, not a hypothetical.
 
 ## 10. Stock-status calculation rules
 
+> **Phase 4 correction**: the `LOW` rule below as originally written used
+> `qty < minimum + buffer` (buffer as a margin added on top of minimum).
+> The owner's actual approval spec states the formula as `qty < buffer`
+> directly (buffer as an absolute threshold, independent of minimum,
+> checked only once `qty >= minimum`). The implementation and tests were
+> corrected to match — see `services/StockPolicyService.php::stockStatus()`
+> for the authoritative current formula. The rest of this section
+> (evaluation order, REVIEW-always-wins, the 3-state degrade when buffer
+> is unset) is unchanged and still accurate.
+
 Single function, one place (matches the project's "single source of
 truth" convention already used for `InventoryService`) — proposed home:
 `InventoryService::stockStatus(float $qty, float $minimum, ?float $buffer,

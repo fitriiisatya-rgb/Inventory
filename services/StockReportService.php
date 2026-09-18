@@ -194,11 +194,15 @@ final class StockReportService
             {$minimumExpr} AS minimum_stock,
             {$bufferExpr} AS buffer_stock,
             m.last_in, m.last_out, m.last_movement,
+            -- Phase 4 correction: buffer is an ABSOLUTE threshold (qty < buffer),
+            -- not a margin added on top of minimum — matches
+            -- StockPolicyService::stockStatus() exactly; see that method's
+            -- docblock for the full rationale.
             CASE
                 WHEN i.id IN ({$mnPlaceholder}) THEN 'MIGRATION_NEGATIVE_REVIEW'
                 WHEN COALESCE(b.qty_base, 0) <= 0 THEN 'OUT_OF_STOCK'
                 WHEN COALESCE(b.qty_base, 0) < {$minimumExpr} THEN 'CRITICAL'
-                WHEN {$bufferExpr} IS NOT NULL AND COALESCE(b.qty_base, 0) < {$minimumExpr} + {$bufferExpr} THEN 'LOW'
+                WHEN {$bufferExpr} IS NOT NULL AND COALESCE(b.qty_base, 0) < {$bufferExpr} THEN 'LOW'
                 ELSE 'SAFE'
             END AS status
         ";

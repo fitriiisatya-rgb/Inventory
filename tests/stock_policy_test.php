@@ -119,16 +119,19 @@ try {
 }
 
 echo "\n== G: stockStatus() — the 5-state calculation, evaluated in order ==\n";
-check('migration_negative_review always wins -> REVIEW, even with qty>minimum', StockPolicyService::stockStatus(100, 10, 5, true) === StockPolicyService::STATUS_REVIEW);
-check('qty <= 0 -> OUT_OF_STOCK', StockPolicyService::stockStatus(0, 10, 5, false) === StockPolicyService::STATUS_OUT_OF_STOCK);
-check('negative qty -> OUT_OF_STOCK', StockPolicyService::stockStatus(-5, 10, 5, false) === StockPolicyService::STATUS_OUT_OF_STOCK);
-check('0 < qty < minimum -> CRITICAL', StockPolicyService::stockStatus(5, 10, 5, false) === StockPolicyService::STATUS_CRITICAL);
+echo "   (Phase 4 correction: buffer is an ABSOLUTE threshold -- qty < buffer --\n";
+echo "   not a margin added on top of minimum. minimum=10, buffer=20 throughout.)\n";
+check('migration_negative_review always wins -> REVIEW, even with qty>minimum and qty>buffer', StockPolicyService::stockStatus(100, 10, 20, true) === StockPolicyService::STATUS_REVIEW);
+check('qty <= 0 -> OUT_OF_STOCK', StockPolicyService::stockStatus(0, 10, 20, false) === StockPolicyService::STATUS_OUT_OF_STOCK);
+check('negative qty -> OUT_OF_STOCK', StockPolicyService::stockStatus(-5, 10, 20, false) === StockPolicyService::STATUS_OUT_OF_STOCK);
+check('0 < qty < minimum -> CRITICAL', StockPolicyService::stockStatus(5, 10, 20, false) === StockPolicyService::STATUS_CRITICAL);
 check('qty >= minimum, buffer NOT configured -> SAFE (LOW never fires without buffer)', StockPolicyService::stockStatus(10, 10, null, false) === StockPolicyService::STATUS_SAFE);
-check('qty >= minimum, buffer configured, qty < minimum+buffer -> LOW', StockPolicyService::stockStatus(12, 10, 5, false) === StockPolicyService::STATUS_LOW);
-check('qty >= minimum+buffer -> SAFE', StockPolicyService::stockStatus(15, 10, 5, false) === StockPolicyService::STATUS_SAFE);
-check('boundary: qty exactly = minimum+buffer -> SAFE (not LOW)', StockPolicyService::stockStatus(15, 10, 5, false) === StockPolicyService::STATUS_SAFE);
-check('boundary: qty exactly = minimum, buffer configured -> LOW, not CRITICAL (still within the buffer zone)', StockPolicyService::stockStatus(10, 10, 5, false) === StockPolicyService::STATUS_LOW);
+check('qty >= minimum, buffer configured, qty < buffer -> LOW', StockPolicyService::stockStatus(15, 10, 20, false) === StockPolicyService::STATUS_LOW);
+check('qty >= buffer -> SAFE', StockPolicyService::stockStatus(25, 10, 20, false) === StockPolicyService::STATUS_SAFE);
+check('boundary: qty exactly = buffer -> SAFE (not LOW; condition is strictly qty < buffer)', StockPolicyService::stockStatus(20, 10, 20, false) === StockPolicyService::STATUS_SAFE);
+check('boundary: qty exactly = minimum, buffer configured and above minimum -> LOW, not CRITICAL', StockPolicyService::stockStatus(10, 10, 20, false) === StockPolicyService::STATUS_LOW);
 check('boundary: qty exactly = minimum, buffer NOT configured -> SAFE, not CRITICAL', StockPolicyService::stockStatus(10, 10, null, false) === StockPolicyService::STATUS_SAFE);
+check('CRITICAL still applies even when buffer is configured, if qty < minimum', StockPolicyService::stockStatus(5, 10, 20, false) === StockPolicyService::STATUS_CRITICAL);
 
 // ============================================================
 // H: HTTP-level warehouse-scope enforcement for GET/PUT /stock-policy
