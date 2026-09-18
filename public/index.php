@@ -25,6 +25,7 @@ require_once __DIR__ . '/../services/IdempotencyService.php';
 require_once __DIR__ . '/../services/MigrationNegativeStockService.php';
 require_once __DIR__ . '/../services/StockPolicyService.php';
 require_once __DIR__ . '/../services/StockReportService.php';
+require_once __DIR__ . '/../services/TransactionHistoryService.php';
 require_once __DIR__ . '/../services/SupplierService.php';
 require_once __DIR__ . '/../services/BakeryDestinationService.php';
 require_once __DIR__ . '/../services/InventoryService.php';
@@ -61,6 +62,7 @@ use App\Services\NegativeMigrationStockRequiresAdjustmentException;
 use App\Services\MigrationNegativeStockService;
 use App\Services\StockPolicyService;
 use App\Services\StockReportService;
+use App\Services\TransactionHistoryService;
 use App\Services\SupplierService;
 use App\Services\BakeryDestinationService;
 use App\Services\AuditService;
@@ -505,6 +507,69 @@ $routes = [
         }
 
         inv_ok(StockReportService::list($pdo, $params), 'OK');
+    },
+
+    // ---- PHASE V2: GET /reports/transactions — "History Transaksi"
+    // (Section 8 of the technical design). Same warehouse-scope pattern
+    // as /reports/stock: STOCK always forced to their own, others may
+    // filter by any warehouse or omit it for a company-wide view. ----
+    'GET /reports/transactions' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+
+        if ($user['role_code'] === 'STOCK') {
+            if (empty($user['warehouse_id'])) {
+                inv_error(403, 'FORBIDDEN', 'STOCK user has no warehouse assignment');
+            }
+            if ($warehouseId !== null) {
+                inv_require_warehouse_scope($user, $warehouseId);
+            } else {
+                $warehouseId = (int) $user['warehouse_id'];
+            }
+        } elseif ($warehouseId !== null) {
+            inv_require_warehouse_scope($user, $warehouseId);
+        }
+
+        $params = [
+            'warehouse_id' => $warehouseId,
+            'item_id' => isset($query['item_id']) && $query['item_id'] !== '' ? (int) $query['item_id'] : null,
+            'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
+            'transaction_type' => $query['transaction_type'] ?? null,
+            'date_from' => $query['date_from'] ?? null,
+            'date_to' => $query['date_to'] ?? null,
+            'supplier_id' => isset($query['supplier_id']) && $query['supplier_id'] !== '' ? (int) $query['supplier_id'] : null,
+            'bakery_destination_id' => isset($query['bakery_destination_id']) && $query['bakery_destination_id'] !== '' ? (int) $query['bakery_destination_id'] : null,
+            'q' => $query['q'] ?? null,
+            'page' => (int) ($query['page'] ?? 1),
+            'per_page' => (int) ($query['per_page'] ?? 50),
+            'sort' => $query['sort'] ?? 'date',
+            'dir' => $query['dir'] ?? 'desc',
+        ];
+
+        inv_ok(TransactionHistoryService::list($pdo, $params), 'OK');
+    },
+
+    'GET /reports/transactions/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $transactionId = (int) $params['id'];
+
+        // Re-derive the transaction's REAL warehouse from the DB — never
+        // trust anything from the request for this scope check.
+        $scope = $pdo->prepare('SELECT warehouse_id FROM inventory_transactions WHERE id = :id');
+        $scope->execute(['id' => $transactionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'transaction not found');
+        }
+        inv_require_warehouse_scope($user, (int) $warehouseId);
+
+        $includeAudit = AuthService::hasPermission($pdo, $user['role_code'], 'AUDIT_LOG_VIEW');
+
+        inv_ok(TransactionHistoryService::detail($pdo, $transactionId, $includeAudit), 'OK');
     },
 
     // ---- InventoryService: single source of truth reads (Section 7) ----
