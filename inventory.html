@@ -3838,8 +3838,22 @@
     }
     // Membekukan saldo pada cutoff sebuah periode menjadi Opening Resmi.
     // Dipanggil Tutup Buku SEBELUM transaksi lama dihapus, dan oleh tombol bangun-ulang Admin.
-    function tulisOpeningResmi(period, snap, source, by){
+    // Menggabungkan baris Stok Awal per GUDANG. Sebuah berkas yang hanya memuat satu gudang adalah
+    // pernyataan tentang gudang itu saja — bukan pernyataan bahwa gudang lain kosong. Sebelum ini
+    // setiap unggahan menimpa seluruh periode, sehingga mengunggah Cibadak lalu Karang Tengah
+    // menghapus Cibadak tanpa suara: dua gudang dikerjakan, satu yang tersisa.
+    function gabungBarisOpening(lamaRows, baruRows){
+        const gudangBaru = new Set((baruRows||[]).map(r=>r.gudang||DEFAULT_GUDANG));
+        const dipertahankan = (lamaRows||[]).filter(r=>!gudangBaru.has(r.gudang||DEFAULT_GUDANG));
+        return { rows: dipertahankan.concat(baruRows||[]), dipertahankan, gudangBaru:[...gudangBaru] };
+    }
+    function tulisOpeningResmi(period, snap, source, by, opts){
         const cutoff = periodeCutoff(period);
+        // gabungPerGudang: pertahankan gudang yang TIDAK disebut berkas ini.
+        if(opts && opts.gabungPerGudang && officialOpenings[period]){
+            const g = gabungBarisOpening(officialOpenings[period].rows, snap.rows);
+            snap = { rows: g.rows, totalValue: g.rows.reduce((a,r)=>a+(r.value!=null?r.value:(r.nilai||0)),0) };
+        }
         officialOpenings[period] = {
             period, cutoff,
             rows: JSON.parse(JSON.stringify(snap.rows||[])),
@@ -6029,7 +6043,13 @@
         const seka=getOpeningSnapshot(per);
         const per0={}; if(seka.ok) (seka.rows||[]).forEach(r=>{ per0[r.gudang]=(per0[r.gudang]||0)+r.value; });
         const gud=[...new Set([...Object.keys(per0), ...Object.keys(per1)])];
+        // Gudang mana saja yang benar-benar disebut berkas ini. Gudang di luar daftar ini TIDAK
+        // ikut diubah kecuali pengguna memilih sendiri untuk mengganti seluruh periode.
+        const gudangFile=[...new Set(rows.map(r=>r.gudang||DEFAULT_GUDANG))];
+        const adaLama = seka.ok && (seka.rows||[]).length>0;
+        const gudangLuar = Object.keys(per0).filter(g=>gudangFile.indexOf(g)<0);
         uoKandidat={ periode:per, rows, total, namaFile, jumlahBaris:rows.length,
+                     gudangFile, gudangLuar,
                      tolak:hasil.tolak||[], peringatan:hasil.peringatan||[] };
         st.innerHTML=`<div class="alert alert-info" style="margin:0 0 10px;">
             <strong>${rows.length.toLocaleString('id')} baris terbaca</strong> dari <span class="mono">${dvzEsc(namaFile)}</span> untuk periode <strong>${dvzEsc(labelPeriode(per))}</strong>.
@@ -6039,18 +6059,26 @@
         el.innerHTML=`
           <table style="width:100%; font-size:0.84rem; margin-bottom:12px; font-variant-numeric:tabular-nums;">
             <thead><tr><th style="text-align:left;">Area</th><th style="text-align:right;">Stok Awal sekarang</th>
-              <th style="text-align:right;">Dari file ini</th><th style="text-align:right;">Selisih</th></tr></thead>
+              <th style="text-align:right;">Dari file ini</th><th style="text-align:right;">Sesudah disimpan</th></tr></thead>
             <tbody>
-              ${gud.map(g=>{ const a=per0[g]||0, b2=per1[g]||0, d=b2-a;
-                return `<tr><td>${dvzEsc(gudangName(g))}</td>
+              ${gud.map(g=>{ const a=per0[g]||0, b2=per1[g]||0;
+                const diFile=gudangFile.indexOf(g)>-1;
+                const sesudah = diFile ? b2 : a;
+                return `<tr${diFile?'':' style="opacity:.6;"'}><td>${dvzEsc(gudangName(g))}${diFile?'':' <span style="font-size:.68rem; color:var(--text3);">(tidak ada di file — dipertahankan)</span>'}</td>
                   <td style="text-align:right;">${seka.ok?rp(a):'—'}</td>
-                  <td style="text-align:right; color:var(--green);">${rp(b2)}</td>
-                  <td style="text-align:right;${Math.abs(d)>0.5?' color:#b3261e; font-weight:700;':''}">${seka.ok?rp(d):'—'}</td></tr>`; }).join('')}
+                  <td style="text-align:right; color:var(--green);">${diFile?rp(b2):'—'}</td>
+                  <td style="text-align:right; font-weight:${diFile?'700':'400'};">${rp(sesudah)}</td></tr>`; }).join('')}
               <tr style="background:rgba(16,185,129,0.15); font-weight:800;">
                 <td>GRAND TOTAL</td><td style="text-align:right;">${seka.ok?rp(seka.totalValue):'—'}</td>
                 <td style="text-align:right;">${rp(total)}</td>
-                <td style="text-align:right;">${seka.ok?rp(total-seka.totalValue):'—'}</td></tr>
+                <td style="text-align:right;">${rp(gud.reduce((a2,g)=>a2+(gudangFile.indexOf(g)>-1?(per1[g]||0):(per0[g]||0)),0))}</td></tr>
             </tbody></table>
+          ${(adaLama && gudangLuar.length) ? `<div class="alert alert-info" style="margin:0 0 10px; text-align:left; font-size:0.82rem;">
+            <label style="display:flex; gap:8px; align-items:flex-start; cursor:pointer;">
+              <input type="checkbox" id="uoGabung" checked style="margin-top:3px;">
+              <span><strong>Pertahankan gudang yang tidak ada di file ini</strong> — ${dvzEsc(gudangLuar.map(gudangName).join(', '))}.<br>
+              <span style="font-size:0.76rem; color:var(--text2);">Berkas ini hanya memuat ${dvzEsc(gudangFile.map(gudangName).join(', '))}. Dengan pilihan ini, Stok Awal gudang lain yang sudah ditetapkan sebelumnya tidak ikut terhapus — jadi tiap gudang bisa diunggah bergantian.
+              Lepas centang hanya kalau berkas ini memang pernyataan lengkap untuk SELURUH perusahaan.</span></span></label></div>` : ''}
           ${hasil.tolak.length?`<div class="alert alert-warning" style="margin:0 0 10px; text-align:left;">
             <strong>${hasil.tolak.length} baris DITOLAK dan tidak ikut dihitung:</strong>
             <div style="font-size:0.76rem; margin-top:5px; max-height:140px; overflow:auto;">${hasil.tolak.slice(0,30).map(dvzEsc).join('<br>')}${hasil.tolak.length>30?'<br>... +'+(hasil.tolak.length-30)+' lagi':''}</div>
@@ -6081,16 +6109,30 @@
         const pin=prompt('PIN Admin untuk menetapkan Stok Awal '+k.periode+':');
         if(pin===null) return;
         if(pin!==soPins.admin){ notify('PIN Salah','','error'); return; }
+        const cb=document.getElementById('uoGabung');
+        const gabung = !!(cb && cb.checked);
+        // Nilai akhir dihitung persis seperti yang akan tersimpan, supaya angka di layar
+        // konfirmasi bukan janji yang berbeda dari hasilnya.
+        const rowsAkhir = (gabung && lama) ? gabungBarisOpening(lama.rows, k.rows).rows : k.rows;
+        const totalAkhir = rowsAkhir.reduce((a,r)=>a+(r.value!=null?r.value:(r.nilai||0)),0);
+        const luar = (k.gudangLuar||[]);
         if(!confirm(`Tetapkan Stok Awal ${labelPeriode(k.periode)}?\n\n`
+            + `Gudang dalam file : ${(k.gudangFile||[]).map(gudangName).join(', ')||'-'}\n`
+            + (luar.length ? (gabung
+                ? `Gudang lain      : ${luar.map(gudangName).join(', ')} — DIPERTAHANKAN\n`
+                : `Gudang lain      : ${luar.map(gudangName).join(', ')} — AKAN DIHAPUS jadi nol\n`) : '')
+            + `\n`
             + (lama?`SEBELUM : ${rp(lama.totalValue)}\n`:'SEBELUM : belum ditetapkan\n')
-            + `SESUDAH : ${rp(k.total)} (${k.jumlahBaris} baris)\n`
+            + `SESUDAH : ${rp(totalAkhir)} (${rowsAkhir.length} baris)\n`
             + (k.tolak.length?`\n${k.tolak.length} baris DITOLAK — barang itu akan dianggap stoknya NOL.\n`:'')
             + `\nAngka ini dibekukan dan tidak akan berubah oleh transaksi bulan berjalan.`
             + `\nTransaksi, batch, dan stok realtime tidak diubah sama sekali.`)) return;
         const cadangan = lama ? (lama.sebelumnya||[]).concat([{ rows:lama.rows, totalValue:lama.totalValue,
             createdAt:lama.createdAt, createdBy:lama.createdBy, source:lama.source, digantiPada:Date.now() }]) : [];
         const entri = tulisOpeningResmi(k.periode, { rows:k.rows, totalValue:k.total },
-            'Upload Stok Awal — '+k.namaFile, currentUsername||deviceOperator||'');
+            'Upload Stok Awal — '+k.namaFile
+              + ((k.gudangFile||[]).length ? ' ('+(k.gudangFile||[]).map(gudangName).join(', ')+')' : ''),
+            currentUsername||deviceOperator||'', { gabungPerGudang: gabung });
         entri.sebelumnya = cadangan;
         entri.barisDitolak = k.tolak.length;
         if(typeof auditLog!=='undefined') auditLog.unshift({ id:nextAuditId++, action:'edit', at:Date.now(),
