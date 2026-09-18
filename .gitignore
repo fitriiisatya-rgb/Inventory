@@ -5,6 +5,7 @@ storage/logs/*.log
 storage/imports/*
 !storage/imports/.gitkeep
 storage/v2_schema_precheck_snapshot.json
+storage/reports/category_distinct_values_*.csv
 migration/workspace/raw/*
 migration/workspace/normalized/*
 migration/workspace/approved/*
