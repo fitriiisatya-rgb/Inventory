@@ -328,8 +328,18 @@ CREATE TABLE stock_openings (
 CREATE TABLE stock_opening_lines (
     id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     stock_opening_id    INT UNSIGNED NOT NULL,
-    item_id             INT UNSIGNED NOT NULL,
-    warehouse_id        INT UNSIGNED NOT NULL,
+    -- Nullable: OpeningValidationService::validateRow() returns item_id/
+    -- warehouse_id = NULL for an unknown SKU / unknown warehouse_code ERROR
+    -- row (so it can still be staged and reported, per
+    -- OpeningReconciliationService's own unknown_sku/unknown_warehouse
+    -- checks, which already count "item_id IS NULL" / "warehouse_id IS
+    -- NULL") — a NOT NULL constraint here made staging such a row crash
+    -- with an uncaught FK/NOT-NULL violation instead of recording a clean
+    -- ERROR. commit() only ever processes VALID/WARNING rows, both of
+    -- which always have both ids resolved, so this can never let a
+    -- NULL-item/warehouse row reach FifoService.
+    item_id             INT UNSIGNED NULL,
+    warehouse_id        INT UNSIGNED NULL,
     qty_base            DECIMAL(20,6) NOT NULL,
     unit_cost_base      DECIMAL(20,4) NOT NULL,
     expiry_date         DATE NULL,

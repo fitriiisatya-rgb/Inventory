@@ -196,15 +196,24 @@ final class FifoService
         $available = round(array_sum(array_column($batches, 'qty_base')), self::QTY_SCALE);
 
         // POLICY CORRECTION: a whitelisted migration-negative item+warehouse
-        // whose balance is already <= 0 has its FIFO available quantity
-        // clamped to zero — OUT/TRANSFER_OUT/PRODUCTION_IN are blocked
-        // outright here, even if the caller set allow_negative_stock, and no
-        // further negative batch is ever created for it. The only way past
-        // this is a real Stock Opname/Stock Adjustment (posted through
-        // StockAdjustmentService, never through here) that brings the
+        // whose TRUE NET balance (every batch, including the negative
+        // layer — NOT $available above, which is deliberately only the
+        // positive/consumable batches) is still <= 0 has OUT/TRANSFER_OUT/
+        // PRODUCTION_IN blocked outright here, even if the caller set
+        // allow_negative_stock, and no further negative batch is ever
+        // created for it. Checking $available alone would wrongly let this
+        // through the moment ANY positive batch exists (e.g. a partial IN)
+        // even while the item is still net negative overall. The only way
+        // past this is a real Stock Opname/Stock Adjustment (posted through
+        // StockAdjustmentService, never through here) that brings the net
         // balance back above zero.
-        if ($available <= 0 && MigrationNegativeStockService::isWhitelisted($pdo, (int) $p['item_id'], (int) $p['warehouse_id'])) {
-            throw new NegativeMigrationStockRequiresAdjustmentException((int) $p['item_id'], (int) $p['warehouse_id'], $available);
+        if (MigrationNegativeStockService::isWhitelisted($pdo, (int) $p['item_id'], (int) $p['warehouse_id'])) {
+            $netBalanceStmt = $pdo->prepare('SELECT COALESCE(SUM(qty_base), 0) FROM inventory_batches WHERE item_id = :item_id AND warehouse_id = :wh');
+            $netBalanceStmt->execute(['item_id' => $p['item_id'], 'wh' => $p['warehouse_id']]);
+            $netBalance = round((float) $netBalanceStmt->fetchColumn(), self::QTY_SCALE);
+            if ($netBalance <= 0) {
+                throw new NegativeMigrationStockRequiresAdjustmentException((int) $p['item_id'], (int) $p['warehouse_id'], $netBalance);
+            }
         }
 
         $allowNegative = !empty($p['allow_negative_stock']);

@@ -143,6 +143,27 @@ check('Historical transaction flagged is_historical_import=1, inventory_effect=0
 $noBatchCreated = $pdo->prepare('SELECT COUNT(*) FROM inventory_batches WHERE source_transaction_line_id IN (SELECT id FROM inventory_transaction_lines WHERE transaction_id = :id)');
 $noBatchCreated->execute(['id' => $histTxRow['id']]);
 check('No inventory_batches row created for the historical line', ((int) $noBatchCreated->fetchColumn()) === 0);
+
+// POLICY CORRECTION Section 3: historical rows must remain visible in the
+// SKU ledger (they were previously invisible — the ledger query filtered
+// inventory_effect=1 only) while never moving the live balance_qty.
+$ledgerAfterHistorical = InventoryService::ledger($pdo, $openItemId, $importedWarehouseId);
+$histLedgerLine = null;
+foreach ($ledgerAfterHistorical as $line) {
+    if ($line['reference'] === 'REF-HIST-1') { $histLedgerLine = $line; break; }
+}
+check('Historical row IS visible in the SKU ledger', $histLedgerLine !== null, json_encode(array_column($ledgerAfterHistorical, 'reference')));
+check('Ledger line is tagged is_historical = true', $histLedgerLine !== null && $histLedgerLine['is_historical'] === true);
+// The historical row is dated 2026-09-05, chronologically BEFORE the
+// opening (cutoff 2026-09-30) — so at that point in the feed the correct
+// live balance_qty is 0 (no live stock existed yet), exactly the same as
+// it would be with the historical row absent entirely. That's the actual
+// invariant: a historical row never perturbs the live running total away
+// from what the live rows alone would produce.
+check('Historical row does NOT perturb the live balance_qty sequence (0 before the real opening exists)', $histLedgerLine !== null && approx((float) $histLedgerLine['balance_qty'], 0.0), (string) ($histLedgerLine['balance_qty'] ?? 'n/a'));
+check('historical_running_balance = -10 (OUT 10 in the historical feed)', $histLedgerLine !== null && approx((float) $histLedgerLine['historical_running_balance'], -10.0), (string) ($histLedgerLine['historical_running_balance'] ?? 'n/a'));
+$lastLedgerLine = end($ledgerAfterHistorical);
+check('Final ledger line balance_qty still = live stock (125)', approx((float) $lastLedgerLine['balance_qty'], $stockAfterHistorical['qty_base']), (string) $lastLedgerLine['balance_qty']);
 unlink($csv);
 
 $total = count($results);

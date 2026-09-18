@@ -124,36 +124,56 @@ final class InventoryService
     /**
      * Chronological IN/OUT/balance ledger for one item+warehouse — the
      * "why is stock 250kg" audit trail (Section 8 of the brief).
+     *
+     * POLICY CORRECTION Section 3: historical-import rows
+     * (is_historical_import=1, inventory_effect=0 — never real FIFO
+     * postings) are now included in this SAME chronological feed, tagged
+     * `is_historical`, with their own `historical_running_balance` that
+     * accumulates independently. `balance_qty` (the live/FIFO balance)
+     * is updated ONLY by inventory_effect=1 rows and carries forward
+     * unchanged across a historical row — a historical row can never move
+     * it, by construction, not just by convention.
      */
     public static function ledger(PDO $pdo, int $itemId, int $warehouseId): array
     {
         $stmt = $pdo->prepare(
             "SELECT l.id AS line_id, t.id AS transaction_id, t.transaction_type, t.transaction_date,
-                    t.reference_no, t.status, l.base_qty, l.unit_cost_base, l.subtotal, l.notes
+                    t.reference_no, t.status, t.inventory_effect, l.base_qty, l.unit_cost_base, l.subtotal, l.notes
              FROM inventory_transaction_lines l
              JOIN inventory_transactions t ON t.id = l.transaction_id
              WHERE l.item_id = :item_id AND l.warehouse_id = :wh
-               AND t.status = 'POSTED' AND t.inventory_effect = 1
+               AND t.status = 'POSTED'
              ORDER BY t.transaction_date ASC, t.id ASC, l.id ASC"
         );
         $stmt->execute(['item_id' => $itemId, 'wh' => $warehouseId]);
         $rows = $stmt->fetchAll();
 
         $balance = 0.0;
+        $historicalBalance = 0.0;
+        $historicalSeen = false;
         $ledger = [];
         foreach ($rows as $row) {
             $type = $row['transaction_type'];
             $signedQty = self::signedQty($type, (float) $row['base_qty']);
-            $balance = round($balance + $signedQty, 6);
+            $isHistorical = (int) $row['inventory_effect'] === 0;
+
+            if ($isHistorical) {
+                $historicalSeen = true;
+                $historicalBalance = round($historicalBalance + $signedQty, 6);
+            } else {
+                $balance = round($balance + $signedQty, 6);
+            }
 
             $ledger[] = [
                 'date' => $row['transaction_date'],
                 'reference' => $row['reference_no'],
                 'transaction_type' => $type,
                 'transaction_id' => (int) $row['transaction_id'],
+                'is_historical' => $isHistorical,
                 'in_qty' => $signedQty > 0 ? $signedQty : 0,
                 'out_qty' => $signedQty < 0 ? abs($signedQty) : 0,
                 'balance_qty' => $balance,
+                'historical_running_balance' => $historicalSeen ? $historicalBalance : null,
                 'unit_cost_base' => round((float) $row['unit_cost_base'], 4),
                 // Always the magnitude of this line's cost — direction is already conveyed by in_qty/out_qty above,
                 // so this stays comparable whether the underlying subtotal was stored signed (ADJUSTMENT) or not.

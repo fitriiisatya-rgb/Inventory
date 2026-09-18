@@ -201,8 +201,18 @@ final class ImportOpeningStockService
 
         $created = 0;
         foreach ($lines as $line) {
-            $baseUnitId = self::baseUnitId($pdo, (int) $line['item_id']);
             $qtyBase = (float) $line['qty_base'];
+
+            // OpeningValidationService flags qty=0 as WARNING ("row will not
+            // create a FIFO batch") — honor that here: FifoService::postIn
+            // requires a non-zero input_qty, so a zero-qty line is simply
+            // skipped, not posted as an empty batch. It still counts toward
+            // the staged control total (0 * cost contributes 0 either way).
+            if ($qtyBase === 0.0) {
+                continue;
+            }
+
+            $baseUnitId = self::baseUnitId($pdo, (int) $line['item_id']);
 
             $allowMigrationNegative = false;
             if ($qtyBase < 0) {

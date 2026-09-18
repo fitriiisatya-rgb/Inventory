@@ -57,6 +57,16 @@ final class UnitNormalizationService
         'pack' => 'PACK', 'pak' => 'PACK', 'bungkus' => 'PACK', 'packs' => 'PACK',
         // ROLL
         'roll' => 'ROLL', 'gulung' => 'ROLL', 'rolls' => 'ROLL',
+        // PAIL / JAR / SET / SHEET / METER / BATANG (schema.sql Section: PHASE
+        // G-DATA additions) — Indonesian synonyms found in the real catalog
+        // (e.g. "Lembar" as a purchase unit), same conservative same-unit-
+        // only rule as every alias above.
+        'pail' => 'PAIL',
+        'jar' => 'JAR', 'toples' => 'JAR',
+        'set' => 'SET',
+        'sheet' => 'SHEET', 'lembar' => 'SHEET', 'sheets' => 'SHEET',
+        'meter' => 'METER', 'mtr' => 'METER', 'm' => 'METER', 'meters' => 'METER',
+        'batang' => 'BATANG',
     ];
 
     /**

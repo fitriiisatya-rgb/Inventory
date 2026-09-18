@@ -212,6 +212,27 @@ try {
 }
 check('A normal IN transaction is NOT blocked for a migration-negative item', $inOk);
 
+echo "\n== D3: OUT stays blocked after a PARTIAL IN whose NET balance is still <= 0 ==\n";
+// Regression for a real bug caught by the staging smoke test: item D2 now
+// has one positive batch (+1, from the IN above) sitting alongside its
+// original negative layer (-1) -- net balance = 0, still not positive. The
+// guard must key off the TRUE NET balance (every batch), not the FIFO-
+// consumable-only "available" figure, which would misread this as
+// available=1 > 0 and wrongly let the OUT through.
+$stockD2 = InventoryService::currentStock($pdo, $itemD2, $whIdD2);
+check('Item D2 net balance is 0 after the partial IN (still <= 0)', approx($stockD2['qty_base'], 0.0), "got {$stockD2['qty_base']}");
+$blockedD3 = false;
+try {
+    Database::transaction(fn (PDO $tx) => FifoService::postOut($tx, [
+        'transaction_uuid' => uid('out-d3'), 'item_id' => $itemD2, 'warehouse_id' => $whIdD2,
+        'input_qty' => 0.5, 'input_unit_id' => $kgUnitId, 'transaction_type' => 'OUT',
+        'transaction_date' => '2026-09-17 00:00:00', 'created_by' => $userId,
+    ]));
+} catch (NegativeMigrationStockRequiresAdjustmentException $e) {
+    $blockedD3 = true;
+}
+check('OUT is still blocked even though a positive batch now exists (net balance still <= 0)', $blockedD3);
+
 // ============================================================
 echo "\n== E: Stock Adjustment resolves the deficit (audited, never a direct DB edit) ==\n";
 $before = InventoryService::currentStock($pdo, $itemA, $whIdA);

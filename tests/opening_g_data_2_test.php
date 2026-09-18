@@ -173,6 +173,37 @@ check('Post-commit control total still matches staged total (control_total_match
 check('GO_LIVE_READY true for a clean single-line import', $reconciliation['go_live_ready'] === true, json_encode($reconciliation));
 unlink($csv);
 
+echo "\n== J: zero-quantity opening row is skipped, not posted as an empty batch ==\n";
+$skuJ0 = uid('SKU-J0'); $skuJ1 = uid('SKU-J1');
+foreach ([$skuJ0, $skuJ1] as $sku) {
+    $pdo->prepare('INSERT INTO items (sku, name, base_unit_id) VALUES (:s,:n,:u)')->execute(['s' => $sku, 'n' => $sku, 'u' => $kgUnitId]);
+    $itemId = (int) $pdo->lastInsertId();
+    UnitConversionService::openNewVersion($pdo, $itemId, $kgUnitId, 1.0, '2020-01-01 00:00:00', null, 'base identity');
+    ${'item' . ($sku === $skuJ0 ? 'J0' : 'J1')} = $itemId;
+}
+$csvJ = tmpCsv(
+    "cutoff_date,warehouse_code,sku,opening_qty_base,unit_cost_base,expiry_date,batch_reference\n" .
+    "2026-09-30,{$whCode},{$skuJ0},0,0,,CT-J0\n" .
+    "2026-09-30,{$whCode},{$skuJ1},50,10000,,CT-J1\n"
+);
+$openingIdJ = ImportOpeningStockService::stage($pdo, $csvJ, 'opening_j.csv', $userId);
+$stagedJ = $pdo->query("SELECT row_status FROM stock_opening_lines WHERE stock_opening_id={$openingIdJ} ORDER BY id")->fetchAll();
+check('Zero-qty row stages as WARNING (never ERROR)', $stagedJ[0]['row_status'] === 'WARNING', json_encode($stagedJ));
+$commitJThrew = false;
+try {
+    Database::transaction(fn (PDO $tx) => ImportOpeningStockService::commit($tx, $openingIdJ, $userId));
+} catch (\Throwable $e) {
+    $commitJThrew = true;
+}
+check('commit() does NOT throw when the batch contains a zero-qty WARNING row', !$commitJThrew);
+$stockJ0 = InventoryService::currentStock($pdo, $itemJ0, $whIdMain);
+$stockJ1 = InventoryService::currentStock($pdo, $itemJ1, $whIdMain);
+check('Zero-qty SKU creates no stock/batch (qty stays 0)', approx_local($stockJ0['qty_base'], 0.0));
+check('Non-zero SKU in the SAME batch still commits normally (qty=50)', approx_local($stockJ1['qty_base'], 50.0), "got {$stockJ1['qty_base']}");
+$createdBatchJ0 = $pdo->query("SELECT created_batch_id FROM stock_opening_lines WHERE stock_opening_id={$openingIdJ} AND item_id={$itemJ0}")->fetchColumn();
+check('Zero-qty line has no created_batch_id', $createdBatchJ0 === null || $createdBatchJ0 === false);
+unlink($csvJ);
+
 function approx_local(float $a, float $b, float $eps = 0.001): bool { return abs($a - $b) < $eps; }
 
 echo "\n==============================\n";

@@ -63,6 +63,9 @@ final class ImportMasterItemService
     // PHASE G2.2: thresholds for WARNING-level anomaly flags. Deliberately
     // generous — these exist to prompt a human review, never to block a
     // commit or silently reject/rewrite a row (see G11: no silent fix).
+    // Deliberately far in the past — see createItem()'s comment on why a
+    // freshly-imported item's conversions must be backdated, not "now".
+    private const CONVERSION_VALID_FROM = '2000-01-01 00:00:00';
     private const MINIMUM_STOCK_WARNING_THRESHOLD = 1_000_000;
     private const CONVERSION_LOW_WARNING_THRESHOLD = 0.001;
     private const CONVERSION_HIGH_WARNING_THRESHOLD = 1_000_000;
@@ -257,7 +260,20 @@ final class ImportMasterItemService
         ]);
         $itemId = (int) $pdo->lastInsertId();
 
-        UnitConversionService::openNewVersion($pdo, $itemId, $baseUnitId, 1.0, $now, $createdBy, 'identity (base unit)');
+        // Backdated on purpose: this is an EXISTING business's catalog being
+        // imported "today", not a brand-new conversion invented today — the
+        // identity conversion (1 base unit = 1 base unit) is a tautology
+        // true for all time, and the purchase/middle conversions describe
+        // packaging facts that already existed before the import ran. Using
+        // $now here would make every conversion "not active yet" for any
+        // historical/opening transaction dated before the import — exactly
+        // the kind of date a real cutover backdates (opening stock, prior
+        // months' historical records). FifoService::postIn() intentionally
+        // never falls back to a guessed factor (UNIT_CONVERSION_NOT_APPROVED),
+        // so the fix belongs here, not a silent fallback there.
+        $conversionValidFrom = self::CONVERSION_VALID_FROM;
+
+        UnitConversionService::openNewVersion($pdo, $itemId, $baseUnitId, 1.0, $conversionValidFrom, $createdBy, 'identity (base unit)');
 
         if (!empty($row['purchase_unit']) && !empty($row['purchase_conversion'])) {
             $purchaseUnitId = UnitNormalizationService::resolveUnitId($pdo, $row['purchase_unit']);
@@ -265,7 +281,7 @@ final class ImportMasterItemService
                 throw new ImportValidationException(["purchase_unit is not a recognized unit: {$row['purchase_unit']}"]);
             }
             UnitConversionService::openNewVersion(
-                $pdo, $itemId, $purchaseUnitId, (float) $row['purchase_conversion'], $now, $createdBy,
+                $pdo, $itemId, $purchaseUnitId, (float) $row['purchase_conversion'], $conversionValidFrom, $createdBy,
                 'initial import', true
             );
         }
@@ -275,7 +291,7 @@ final class ImportMasterItemService
                 throw new ImportValidationException(["middle_unit is not a recognized unit: {$row['middle_unit']}"]);
             }
             UnitConversionService::openNewVersion(
-                $pdo, $itemId, $middleUnitId, (float) $row['middle_conversion'], $now, $createdBy, 'initial import'
+                $pdo, $itemId, $middleUnitId, (float) $row['middle_conversion'], $conversionValidFrom, $createdBy, 'initial import'
             );
         }
 

@@ -109,7 +109,7 @@ call to discover it.
 | GET | `/inventory/batches` | `item_id, warehouse_id` | array of live batch rows (FIFO order) |
 | GET | `/inventory/value` | — | `{on_hand_value, in_transit_value, total_value}` (company-wide) |
 | GET | `/inventory/in-transit` | — | `{in_transit_value}` |
-| GET | `/inventory/ledger` | `item_id, warehouse_id` | array of `{date, reference, transaction_type, transaction_id, in_qty, out_qty, balance_qty, unit_cost_base, value, notes}`, chronological |
+| GET | `/inventory/ledger` | `item_id, warehouse_id` | array of `{date, reference, transaction_type, transaction_id, is_historical, in_qty, out_qty, balance_qty, historical_running_balance, unit_cost_base, value, notes}`, chronological. POLICY CORRECTION: now includes historical-import rows (`is_historical_import=1`) inline (`is_historical=true`), each accumulating its own `historical_running_balance` — `balance_qty` (the live/FIFO balance) is updated only by real postings and never moves on a historical row. There is currently no separate warehouse-wide or daily-movement-report endpoint — only this per-item-per-warehouse ledger. |
 
 Errors: `NOT_FOUND` (`/inventory/current/{sku}` with unknown SKU).
 
