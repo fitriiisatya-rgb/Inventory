@@ -216,6 +216,7 @@
         </div>
         <div style="font-size:0.72rem; color:var(--text3); margin-top:6px;">Seluruh angka bulanan di bawah (Stok Awal, Pembelian, Barang Keluar, Penyusutan, Produksi, Area Bakery) mengikuti periode ini. Nilai Stok Saat Ini dan Stok Menipis selalu menampilkan kondisi terkini, bukan per periode.</div>
     </div>
+    <div id="dashSehat" style="display:none; margin-bottom:14px;"></div>
     <div class="grid-4">
         <div class="kpi-card" id="stokAwalCard"><div class="kpi-label">📆 Stok Awal Periode</div><div class="kpi-value" id="stokAwalValue">Rp0</div><div class="kpi-sub" id="stokAwalSub">Perkiraan</div>
             <div style="margin-top:6px; font-size:0.72rem; color:var(--accent);">Klik untuk rincian</div>
@@ -4516,7 +4517,7 @@
         // lewat getTotalInventoryValue() (dipakai di ringkasan per gudang) — supaya:
         //   Total Inventory = Stok Semua Gudang + In Transit   (tidak pernah "hilang" saat transfer pending)
         let curVal=0; masterSKU.forEach(i=>curVal+=getStock(i.sku).value);
-        document.getElementById('currentStockValue').innerHTML = `Rp ${curVal.toLocaleString()}`;
+        document.getElementById('currentStockValue').innerHTML = `Rp ${Math.round(curVal).toLocaleString('id')}`;
         let transit = getInTransit(); let transitQty=transit.qty, transitVal=transit.value;
         let csub=document.getElementById('currentStockSub');
         if(csub) csub.innerHTML = transitQty>0
@@ -4559,13 +4560,13 @@
         // tanpa disadari — inilah yang bikin muncul kebingungan "kok kirimannya nggak ada".
         renderPendingTransferKpi();
         initDashPeriode();
-        document.getElementById('pembelianPpnValue').innerHTML = `Rp ${getPembelianPPN().toLocaleString()}`;
+        document.getElementById('pembelianPpnValue').innerHTML = `Rp ${Math.round(getPembelianPPN()).toLocaleString('id')}`;
         // Grand Total = SUM(log.total) apa adanya; PPN sudah ada di dalamnya.
         document.getElementById('pembelianGrandValue').innerHTML = `Rp ${Math.round(getPembelian()).toLocaleString('id')}`;
         renderKpiBreakdown('pembelianBreakdown', getPembelianByVendor(), '(Tanpa Supplier)');
         let selDiv = document.getElementById('hppDivisiSelect').value;
         let hpp = getHpp(selDiv==='all'?null:parseInt(selDiv));
-        document.getElementById('hppValue').innerHTML = `Rp ${hpp.toLocaleString()}`;
+        document.getElementById('hppValue').innerHTML = `Rp ${Math.round(hpp).toLocaleString('id')}`;
         let transferData = getTransferByDestination();
         // Divisi yang sebenarnya menunjuk lokasi gudang (mis. "Produksi Karangtengah" = kiriman ke Gudang
         // Karang Tengah) dihitung sebagai PERPINDAHAN, bukan pemakaian. Ini dipakai untuk transaksi lama
@@ -4604,10 +4605,36 @@
         document.getElementById('expList').innerHTML = expg.length ? expg.slice(0,5).map(e=>`${e.expired?'🔴':'🟡'} ${e.name} (${qtyLbl(e.sku, e.qty)}, ${new Date(e.exp).toLocaleDateString('id')})`).join('<br>')+(expg.length>5?`<br>+${expg.length-5} lainnya`:'') : 'Tidak ada dalam 30 hari';
         let susut = getSusut();
         document.getElementById('susutValue').innerHTML = `Rp ${Math.round(susut.total).toLocaleString('id')}`;
-        document.getElementById('susutSub').innerHTML = susut.n ? `${susut.n} kejadian bulan ini` : 'rusak / expired / hilang';
+        // "Penyusutan" satu angka gelondongan terbaca sebagai kerugian usaha. Pada data nyata,
+        // 94% dari Rp49 miliar sebulan ternyata write-down Koreksi Stok — stok sistem yang terlalu
+        // tinggi diturunkan ke hitungan fisik. Itu koreksi pencatatan, bukan barang yang rusak.
+        // Angkanya tidak diubah dan tidak diklasifikasi ulang; hanya dipecah menurut asalnya,
+        // supaya yang membaca tahu mana kerugian sungguhan dan mana pembetulan data.
+        {
+            const ms2=getMonthStart().getTime(), me2=getMonthEnd().getTime();
+            const rp2=v=>'Rp '+Math.round(v).toLocaleString('id');
+            let dKoreksi=0, dTransfer=0, dLain=0, nLain=0;
+            (transactionLog||[]).forEach(l=>{
+                if(l.type==='in' || l.outType!=='susut' || l.resetAdjustment) return;
+                const t=effTs(l); if(t<ms2 || t>me2) return;
+                const ref=String(l.ref||'');
+                if(/^Koreksi Stok/i.test(ref)) dKoreksi+=l.total||0;
+                else if(/^Selisih transfer/i.test(ref)) dTransfer+=l.total||0;
+                else { dLain+=l.total||0; nLain++; }
+            });
+            const bag=[];
+            if(dKoreksi) bag.push(`koreksi pencatatan ${rp2(dKoreksi)}`);
+            if(dTransfer) bag.push(`selisih kiriman ${rp2(dTransfer)}`);
+            bag.push(`rusak/expired/hilang ${rp2(dLain)}`);
+            document.getElementById('susutSub').innerHTML =
+                (susut.n ? `${susut.n} kejadian bulan ini · ` : '') + bag.join(' · ')
+                + ((dKoreksi>0 && dKoreksi > dLain*2)
+                    ? `<br><span style="color:#f59e0b;">⚠ Sebagian besar angka ini bukan barang rusak, melainkan stok sistem yang diturunkan ke hitungan fisik.</span>` : '');
+        }
         let racik = getProduksiMasuk();
         document.getElementById('racikValue').innerHTML = `Rp ${Math.round(racik.total).toLocaleString('id')}`;
         document.getElementById('racikSub').innerHTML = racik.n ? `${racik.n} batch diracik bulan ini` : 'hasil olahan/semi jadi — bukan pembelian';
+        renderKesehatanDashboard();
         renderGudangStockSummary();
         if (typeof Chart === "undefined") return; // offline: lewati grafik, jangan hentikan render lain
         try {
@@ -4946,7 +4973,7 @@
         body.querySelectorAll('.delLogBtn').forEach(btn=>btn.addEventListener('click',()=>deleteLogEntry(parseInt(btn.dataset.id))));
         let totalVal=0; let batchHtml='';
         masterSKU.forEach(i=>{ let batches=stockBatches[i.sku]||[]; if(batches.length){ batchHtml+=`<div style="margin-bottom:8px;"><strong>${i.sku} - ${i.name}</strong>`; batches.forEach(b=>{ let expTxt=b.exp?` | ⏰ exp ${new Date(b.exp).toLocaleDateString('id')}${b.exp<Date.now()?' 🔴 EXPIRED':''}`:''; batchHtml+=`<div style="font-size:0.82rem; color:var(--text2);">${b.qty.toLocaleString('id')} ${i.baseUnit} @ Rp${b.price.toLocaleString('id')} (masuk ${new Date(b.dateIn).toLocaleDateString('id')}${expTxt})</div>`; totalVal+=b.qty*b.price; }); batchHtml+=`</div>`; } });
-        document.getElementById('stockSummary').innerHTML=`<div class="kpi-value">Rp ${totalVal.toLocaleString()}</div>`;
+        document.getElementById('stockSummary').innerHTML=`<div class="kpi-value">Rp ${Math.round(totalVal).toLocaleString('id')}</div>`;
         document.getElementById('batchDetail').innerHTML=batchHtml||'Tidak ada batch.';
     }
     // ========================= KONFIRMASI TERIMA TRANSFER (UI) =========================
@@ -10892,6 +10919,33 @@
             else if(a==='bersih'){ perbaikiAngkaRusak(); }
             else if(a==='dup'){ periksaDuplikatTransaksi(); }
         }));
+    }
+    // ===== PALANG KESEHATAN DASHBOARD =====
+    // Dashboard menampilkan dua angka dari DUA SUMBER berbeda tanpa pernah menyebutkannya:
+    // "Nilai Stok" dibaca dari batch FIFO, "Stok Awal" dibangun ulang dari transactionLog.
+    // Pada data nyata keduanya berselisih miliaran kali lipat — Rp10,79 miliar vs Rp23,5 kuintiliun —
+    // dan layar ini menyajikan keduanya berdampingan seolah sama-sama benar. Kalau dua pembukuan
+    // atas barang yang sama tidak sepakat, itu berita utama, bukan detail di panel Diagnostic.
+    function renderKesehatanDashboard(){
+        const el=document.getElementById('dashSehat'); if(!el) return;
+        let d; try{ d=runInventoryDiagnostics(); }catch(e){ el.style.display='none'; return; }
+        const rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+        const batch=d.totalBatchVal||0, log=d.totalLogVal||0;
+        const nQty=(d.mismatchQty||[]).length, nVal=(d.mismatchValue||[]).length;
+        const nNeg=(d.negBatches||[]).length, nYatim=(d.orphans||[]).length;
+        const beda = batch>0 ? Math.abs(log-batch)/batch : 0;
+        const poin=[];
+        if(beda>0.02) poin.push(`Buku batch <strong>${rp(batch)}</strong> vs hasil hitung ulang dari transaksi <strong>${rp(log)}</strong> — dua pembukuan atas barang yang sama tidak sepakat.`);
+        if(nQty) poin.push(`<strong>${nQty}</strong> baris barang×gudang jumlahnya berbeda antara batch dan riwayat transaksi.`);
+        if(nNeg) poin.push(`<strong>${nNeg}</strong> batch bersaldo minus.`);
+        if(nYatim) poin.push(`<strong>${nYatim}</strong> transaksi menunjuk barang yang tidak ada di Master.`);
+        if(!poin.length){ el.style.display='none'; el.innerHTML=''; return; }
+        el.style.display='';
+        el.innerHTML=`<div class="alert alert-warning" style="text-align:left;">
+            <div style="font-weight:800; margin-bottom:4px;">⚠️ Angka di layar ini belum bisa dipercaya sepenuhnya</div>
+            <ul style="margin:0 0 6px 18px; padding:0; font-size:0.8rem; line-height:1.6;">${poin.map(x=>'<li>'+x+'</li>').join('')}</ul>
+            <div style="font-size:0.76rem;">Bereskan lewat <strong>Panel Pemulihan Data</strong> di Diagnostic sebelum memakai angka-angka ini untuk keputusan.</div>
+        </div>`;
     }
     function renderOpeningResmi(){
         const el=document.getElementById('orIsi'); if(!el) return;
