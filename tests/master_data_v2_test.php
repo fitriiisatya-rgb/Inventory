@@ -220,6 +220,45 @@ try {
 
     $superCreatesCategory = httpCall('POST', "{$base}/categories", ['code' => uid('HTTPCAT2'), 'name' => 'Category via HTTP'], $superJar, $superCsrf);
     check('SUPERADMIN (inherits MASTER_CATEGORY_MANAGE) CAN POST /categories', ($superCreatesCategory['body']['data']['success'] ?? false) === true, json_encode($superCreatesCategory['body']));
+    $categoryId = $superCreatesCategory['body']['data']['category_id'] ?? null;
+
+    echo "\n== F: Category CRUD — positive path (create/list/duplicate-code/update/soft-delete) ==\n";
+
+    $dupeCategoryCode = uid('HTTPCAT-DUPE');
+    $firstCreate = httpCall('POST', "{$base}/categories", ['code' => $dupeCategoryCode, 'name' => 'Original Name'], $superJar, $superCsrf);
+    check('first create with a fresh code succeeds', ($firstCreate['body']['data']['success'] ?? false) === true, json_encode($firstCreate['body']));
+    $dupeCategoryId = $firstCreate['body']['data']['category_id'] ?? null;
+
+    $dupeCreate = httpCall('POST', "{$base}/categories", ['code' => $dupeCategoryCode, 'name' => 'Duplicate Attempt'], $superJar, $superCsrf);
+    check('duplicate category code rejected', $dupeCreate['status'] === 422 && ($dupeCreate['body']['success'] ?? true) === false, json_encode($dupeCreate['body']));
+
+    $listAfterCreate = httpCall('GET', "{$base}/categories", null, $superJar);
+    $listedCodes = array_column($listAfterCreate['body']['data'] ?? [], 'code');
+    check('GET /categories lists the newly created category', in_array($dupeCategoryCode, $listedCodes, true));
+
+    $updateResult = httpCall('PUT', "{$base}/categories/{$dupeCategoryId}", ['name' => 'Renamed Category'], $superJar, $superCsrf);
+    check('PUT /categories/{id} updates the name', ($updateResult['body']['data']['success'] ?? false) === true, json_encode($updateResult['body']));
+    $reread = httpCall('GET', "{$base}/categories", null, $superJar);
+    $rerereadRow = null;
+    foreach ($reread['body']['data'] ?? [] as $row) {
+        if ((int) $row['id'] === (int) $dupeCategoryId) { $rerereadRow = $row; }
+    }
+    check('renamed category persists on re-read', $rerereadRow !== null && $rerereadRow['name'] === 'Renamed Category', json_encode($rerereadRow));
+
+    $deactivateResult = httpCall('PUT', "{$base}/categories/{$dupeCategoryId}", ['is_active' => false], $superJar, $superCsrf);
+    check('PUT /categories/{id} soft-deletes (is_active=false)', ($deactivateResult['body']['data']['success'] ?? false) === true);
+    $afterDeactivate = httpCall('GET', "{$base}/categories", null, $superJar);
+    $deactivatedRow = null;
+    foreach ($afterDeactivate['body']['data'] ?? [] as $row) {
+        if ((int) $row['id'] === (int) $dupeCategoryId) { $deactivatedRow = $row; }
+    }
+    check('deactivated category still appears in GET /categories (never hard-deleted, matches suppliers/bakery-destinations convention)', $deactivatedRow !== null && (int) $deactivatedRow['is_active'] === 0, json_encode($deactivatedRow));
+
+    $updateMissing = httpCall('PUT', "{$base}/categories/999999", ['name' => 'Nope'], $superJar, $superCsrf);
+    check('PUT /categories/{id} on a non-existent id returns 404', $updateMissing['status'] === 404, json_encode($updateMissing['body']));
+
+    $blankCode = httpCall('POST', "{$base}/categories", ['code' => '', 'name' => 'No Code'], $superJar, $superCsrf);
+    check('POST /categories rejects a blank code', $blankCode['status'] === 422, json_encode($blankCode['body']));
 
     foreach ([$stockJar, $superJar] as $f) { @unlink($f); }
 } finally {
