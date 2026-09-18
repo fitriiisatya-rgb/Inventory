@@ -3,10 +3,72 @@
 Written 2026-09-18 because the prior Claude Code session was running low on
 context/tokens and the owner asked for continuity across an account switch.
 This file is the durable record — it lives in git, so it survives regardless
-of which Claude Code account or session opens this repo next.
+of which Claude Code account or session opens this repo next. **Updated
+same day, later, once Phase 2 was approved and Phase 3 (Implementation)
+started — see Section 0 immediately below for the current state; the rest
+of this file is the original Phase 1/2 handoff and is still accurate
+background, just no longer the "current status."**
+
+## 0. CURRENT STATUS (read this part first, it supersedes nothing below but is the freshest layer)
+
+- **Phase 1 Audit**: approved.
+- **Phase 2 Technical Design**: approved, with conditions — see
+  `docs/PHASE_V2_TECHNICAL_DESIGN.md` for the design itself and the commit
+  that added it (`b2b1a22`). The owner's approval conditions (verbatim
+  intent) are captured in full in the Phase 3 kickoff commit message and
+  restated in `docs/PHASE_V2_TECHNICAL_DESIGN.md` where they change the
+  design — the short version: keep `GET /items` untouched and use
+  `/reports/stock` instead; buffer_stock stays nullable with an explicit
+  `buffer_configured` flag and a "Buffer belum dikonfigurasi" UI label
+  (LOW status only applies once buffer is set); migration-negative rows
+  must always show `REVIEW`/`MIGRATION_NEGATIVE_REVIEW`, never folded into
+  SAFE/LOW/CRITICAL; evaluate (don't assume) whether a MariaDB CHECK
+  constraint can restrict `bakery_destination_id` to OUT-type transactions
+  before deciding between a DB constraint and service-layer-only
+  enforcement; no full item editor — Master Barang in V2 exposes only
+  list/search/detail/category/per-warehouse minimum+buffer, never
+  base_unit/conversion history/locked_at/FIFO-sensitive fields.
+- **Phase 3 Implementation**: IN PROGRESS. Explicit owner-mandated order:
+  (1) regression tests first, (2) migration files (never run against
+  production), (3) category master, (4) min/buffer stock policy, (5)
+  vendor/supplier, (6) bakery destination master, (7) `GET /reports/stock`,
+  (8) transaction history, (9) V2 UI/UX, (10) performance, (11) security,
+  (12) global UX polish. Full detailed requirements (sidebar IA, dashboard
+  KPIs, per-page specs, the 19-point completion report format required at
+  the end) are in the conversation that approved Phase 2 — if that context
+  is gone, ask the owner to re-paste their Phase 3 kickoff message, or
+  reconstruct intent from `docs/PHASE_V2_TECHNICAL_DESIGN.md` Section 14
+  (Implementation phases) which already encodes the same ordering.
+- **Task tracking**: this session's harness TaskCreate/TaskUpdate list has
+  tasks #69–#79, one per Phase 3 sub-step (3a regression tests → 3j
+  frontend pages → completion report). A new session's harness will show
+  its own fresh task list (task IDs are session-scoped, not stored in
+  git) — treat `docs/PHASE_V2_TECHNICAL_DESIGN.md` Section 14 as the
+  authoritative phase breakdown, not the task IDs themselves.
+- **Local dev DB gotcha discovered this phase**: the sandbox's
+  `/var/lib/mysql` had its `mysql` system schema (grant tables) missing
+  while the `inventory_test`/`inventory_staging_scm_cibadak` data
+  directories were still present (unclear cause — possibly an unclean
+  container restart between sessions). Fixed by running `mariadb-install-db
+  --datadir=/var/lib/mysql --user=mysql
+  --auth-root-authentication-method=normal` (safe — only creates the
+  missing `mysql`/`performance_schema` system tables, does not touch
+  existing user database directories), then `chown -R mysql:mysql
+  /var/lib/mysql` and starting via `mysqld_safe`. If a new session hits
+  the same "Can't open and lock privilege tables" error, this is the fix —
+  do not delete/recreate the datadir.
+- **As of this update**: mid-way through Phase 3a (writing
+  `tests/warehouse_isolation_regression_test.php`, following the existing
+  `tests/mysql_security_test.php` pattern — spawn `php -S`, real HTTP via
+  curl, fresh `database/schema.sql` per run via `tests/run_mysql_tests.sh`'s
+  `reset_db` pattern). Nothing from Phase 3 has been committed yet at the
+  time of this handoff update — check `git log` for anything past
+  `b2b1a22` to see what's actually landed since.
+
+---
 
 **Branch**: `claude/funny-ramanujan-wmrlig`
-**HEAD at time of writing**: `935394a` (local and `origin/claude/funny-ramanujan-wmrlig` are in sync — verify with `git fetch origin claude/funny-ramanujan-wmrlig && git log --oneline -5` before doing anything else, since the owner pushes to this branch directly outside of Claude Code turns too).
+**HEAD at time of writing (original Phase 1/2 handoff, now superseded by Section 0 above for current status)**: `935394a` (local and `origin/claude/funny-ramanujan-wmrlig` are in sync — verify with `git fetch origin claude/funny-ramanujan-wmrlig && git log --oneline -5` before doing anything else, since the owner pushes to this branch directly outside of Claude Code turns too).
 
 Commit chain (newest first) as of this writing:
 ```
