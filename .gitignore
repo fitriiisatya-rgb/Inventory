@@ -6,6 +6,8 @@ storage/imports/*
 !storage/imports/.gitkeep
 storage/v2_schema_precheck_snapshot.json
 storage/reports/category_distinct_values_*.csv
+storage/reports/control_totals_*.json
+storage/backups/*.sql.gz
 migration/workspace/raw/*
 migration/workspace/normalized/*
 migration/workspace/approved/*
