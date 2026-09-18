@@ -26,6 +26,7 @@ for i in $(seq 1 "$RUNS"); do
 
     FINAL=$(php -r '
         require __DIR__ . "/services/Database.php";
+        require __DIR__ . "/services/MigrationNegativeStockService.php";
         require __DIR__ . "/services/InventoryService.php";
         use App\Services\Database; use App\Services\InventoryService;
         $pdo = Database::connection();

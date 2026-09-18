@@ -45,7 +45,20 @@ final class FifoService
         // reviewed, explicitly-flagged zero-cost Opening Stock line (ImportOpeningStockService) —
         // never a silent default, and never available to a normal Transaksi Masuk.
         $priceFloor = !empty($p['allow_zero_price']) ? 0 : 0.0000001;
-        if (!($p['input_qty'] > 0) || $p['unit_price_input'] < $priceFloor) {
+        // POLICY CORRECTION: an explicitly-flagged, owner-approved migration-
+        // negative Opening line (ImportOpeningStockService, only ever set
+        // after OpeningValidationService + MigrationNegativeStockService both
+        // confirm this item+warehouse is on the whitelist) is the one place a
+        // negative input_qty is allowed to post — never for a normal
+        // Transaksi Masuk. The resulting batch is created as a real negative
+        // FIFO layer below, so FifoService::postOut's migration-negative
+        // guard picks it up on the very next consumption attempt.
+        $allowMigrationNegativeOpening = !empty($p['allow_migration_negative_opening']);
+        if ($allowMigrationNegativeOpening) {
+            if ($p['input_qty'] == 0 || $p['unit_price_input'] < $priceFloor) {
+                throw new ValidationException(['input_qty must not be zero, and unit_price_input must be >= floor']);
+            }
+        } elseif (!($p['input_qty'] > 0) || $p['unit_price_input'] < $priceFloor) {
             throw new ValidationException(['input_qty and unit_price_input must both be > 0']);
         }
 
@@ -112,10 +125,11 @@ final class FifoService
             'INSERT INTO inventory_batches
                 (item_id, warehouse_id, qty_base, original_qty_base, unit_cost_base, received_date, expiry_date,
                  supplier_id, source_transaction_line_id, is_negative_layer, created_at)
-             VALUES (:item_id, :wh, :qty, :qty2, :cost_base, :received_date, :expiry, :supplier, :line_id, 0, :created_at)'
+             VALUES (:item_id, :wh, :qty, :qty2, :cost_base, :received_date, :expiry, :supplier, :line_id, :is_negative, :created_at)'
         );
         $batchStmt->execute([
             'item_id' => $p['item_id'], 'wh' => $p['warehouse_id'], 'qty' => $baseQty, 'qty2' => $baseQty,
+            'is_negative' => $baseQty < 0 ? 1 : 0,
             'cost_base' => $unitCostBase, 'received_date' => $p['transaction_date'],
             'expiry' => $p['expiry_date'] ?? null, 'supplier' => $p['supplier_id'] ?? null,
             'line_id' => $lineId, 'created_at' => $now,
@@ -180,6 +194,18 @@ final class FifoService
 
         $batches = Database::lockFifoBatches($pdo, $p['item_id'], $p['warehouse_id']);
         $available = round(array_sum(array_column($batches, 'qty_base')), self::QTY_SCALE);
+
+        // POLICY CORRECTION: a whitelisted migration-negative item+warehouse
+        // whose balance is already <= 0 has its FIFO available quantity
+        // clamped to zero — OUT/TRANSFER_OUT/PRODUCTION_IN are blocked
+        // outright here, even if the caller set allow_negative_stock, and no
+        // further negative batch is ever created for it. The only way past
+        // this is a real Stock Opname/Stock Adjustment (posted through
+        // StockAdjustmentService, never through here) that brings the
+        // balance back above zero.
+        if ($available <= 0 && MigrationNegativeStockService::isWhitelisted($pdo, (int) $p['item_id'], (int) $p['warehouse_id'])) {
+            throw new NegativeMigrationStockRequiresAdjustmentException((int) $p['item_id'], (int) $p['warehouse_id'], $available);
+        }
 
         $allowNegative = !empty($p['allow_negative_stock']);
         if ($baseQtyRequested > $available && !$allowNegative) {

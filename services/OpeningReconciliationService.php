@@ -11,6 +11,12 @@ use PDO;
  * checks) before a batch may be committed to production. This is a
  * report/gate only — it never mutates data, and it never adjusts a row
  * to force a check to pass.
+ *
+ * POLICY CORRECTION: a negative opening row still BLOCKS go-live UNLESS
+ * its item+warehouse is on the owner-approved migration-negative
+ * whitelist (MigrationNegativeStockService) — those explicitly-approved
+ * rows are reported separately as ALLOW_WITH_WARNING via
+ * migration_negative_count/migration_negative_rows and never block.
  */
 final class OpeningReconciliationService
 {
@@ -27,7 +33,8 @@ final class OpeningReconciliationService
             "SELECT COUNT(*) FROM stock_opening_lines WHERE stock_opening_id = {$openingId} AND ({$condition})"
         )->fetchColumn();
 
-        $negativeQty = $countWhere('qty_base < 0');
+        [$negativeQty, $migrationNegativeRows] = self::splitNegativeRows($pdo, $openingId);
+        $migrationNegativeCount = count($migrationNegativeRows);
         $missingCost = $countWhere('qty_base > 0 AND unit_cost_base <= 0');
         $unknownSku = $countWhere('item_id IS NULL');
         $unknownWarehouse = $countWhere('warehouse_id IS NULL');
@@ -75,6 +82,9 @@ final class OpeningReconciliationService
         )->fetchColumn();
 
         $checks = [
+            // Only UNKNOWN/unapproved negative rows count here — a whitelisted
+            // migration-negative row is reported separately below and never
+            // blocks (POLICY CORRECTION).
             'negative_qty' => $negativeQty,
             'missing_cost' => $missingCost,
             'unknown_sku' => $unknownSku,
@@ -96,7 +106,42 @@ final class OpeningReconciliationService
             'stock_opening_id' => $openingId,
             'status' => $opening['status'],
             'checks' => $checks,
+            'migration_negative_count' => $migrationNegativeCount,
+            'migration_negative_rows' => $migrationNegativeRows,
             'go_live_ready' => $goLiveReady,
         ];
+    }
+
+    /**
+     * @return array{0: int, 1: array} [unknown/unapproved negative row count, whitelisted migration-negative rows]
+     */
+    private static function splitNegativeRows(PDO $pdo, int $openingId): array
+    {
+        $stmt = $pdo->prepare(
+            'SELECT sol.item_id, sol.warehouse_id, sol.qty_base, i.sku, i.name AS item_name, w.code AS warehouse_code
+             FROM stock_opening_lines sol
+             JOIN items i ON i.id = sol.item_id
+             JOIN warehouses w ON w.id = sol.warehouse_id
+             WHERE sol.stock_opening_id = :id AND sol.qty_base < 0'
+        );
+        $stmt->execute(['id' => $openingId]);
+
+        $unknownCount = 0;
+        $migrationNegativeRows = [];
+        foreach ($stmt->fetchAll() as $row) {
+            if (MigrationNegativeStockService::isWhitelisted($pdo, (int) $row['item_id'], (int) $row['warehouse_id'])) {
+                $migrationNegativeRows[] = [
+                    'sku' => $row['sku'],
+                    'item_name' => $row['item_name'],
+                    'warehouse_code' => $row['warehouse_code'],
+                    'qty_base' => round((float) $row['qty_base'], 6),
+                    'status' => 'MIGRATION_NEGATIVE_REVIEW',
+                    'needs_stock_opname' => true,
+                ];
+            } else {
+                $unknownCount++;
+            }
+        }
+        return [$unknownCount, $migrationNegativeRows];
     }
 }

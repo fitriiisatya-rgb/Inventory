@@ -202,12 +202,31 @@ final class ImportOpeningStockService
         $created = 0;
         foreach ($lines as $line) {
             $baseUnitId = self::baseUnitId($pdo, (int) $line['item_id']);
+            $qtyBase = (float) $line['qty_base'];
+
+            $allowMigrationNegative = false;
+            if ($qtyBase < 0) {
+                // POLICY CORRECTION: defense-in-depth — OpeningValidationService
+                // already refuses to stage a negative row as VALID/WARNING
+                // unless it's on the whitelist, but commit() re-checks against
+                // the live whitelist rather than trusting the staged status,
+                // the same "safety check before write" pattern used elsewhere
+                // in this project.
+                if (!MigrationNegativeStockService::isWhitelisted($pdo, (int) $line['item_id'], (int) $line['warehouse_id'])) {
+                    throw new ImportValidationException([
+                        "line {$line['id']}: negative opening quantity but item+warehouse is not on the migration-negative whitelist — refusing to commit",
+                    ]);
+                }
+                $allowMigrationNegative = true;
+            }
+
             $result = FifoService::postIn($pdo, [
                 'transaction_uuid' => 'OPENING-' . $openingId . '-' . $line['id'],
                 'item_id' => $line['item_id'], 'warehouse_id' => $line['warehouse_id'],
-                'input_qty' => $line['qty_base'], 'input_unit_id' => $baseUnitId,
+                'input_qty' => $qtyBase, 'input_unit_id' => $baseUnitId,
                 'unit_price_input' => (float) $line['unit_cost_base'],
                 'allow_zero_price' => true, // a zero-cost opening was already flagged WARNING at staging and reviewed before commit — not a fake default
+                'allow_migration_negative_opening' => $allowMigrationNegative,
                 'transaction_type' => 'OPENING',
                 'transaction_date' => $opening['cutoff_date'] . ' 00:00:00',
                 'reference_no' => "OPENING-{$openingId}",

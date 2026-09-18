@@ -165,6 +165,30 @@ final class UnitConversionNotApprovedException extends RuntimeException
     }
 }
 
+/**
+ * POLICY CORRECTION: this item+warehouse is on the owner-approved
+ * migration-negative whitelist (MigrationNegativeStockService) and its
+ * current balance is already <= 0 — FIFO available quantity is clamped to
+ * zero for consumption purposes, so OUT / TRANSFER_OUT / PRODUCTION_IN
+ * (raw-material consumption) are all blocked, and NO further negative FIFO
+ * batch is created, however Allow-Negative-Stock was set. The only way
+ * past this is a real, audited Stock Opname or Stock Adjustment that
+ * brings the balance back above zero. Error code:
+ * NEGATIVE_MIGRATION_STOCK_REQUIRES_ADJUSTMENT.
+ */
+final class NegativeMigrationStockRequiresAdjustmentException extends RuntimeException
+{
+    public function __construct(public readonly int $itemId, public readonly int $warehouseId, public readonly float $currentBalance)
+    {
+        parent::__construct(sprintf(
+            'NEGATIVE_MIGRATION_STOCK_REQUIRES_ADJUSTMENT: item %d at warehouse %d has a known migration-negative balance (%.6f) — resolve via Stock Opname or Stock Adjustment before posting OUT/TRANSFER_OUT/PRODUCTION_IN',
+            $itemId,
+            $warehouseId,
+            $currentBalance
+        ));
+    }
+}
+
 final class ValidationException extends RuntimeException
 {
     /** @param string[] $errors */

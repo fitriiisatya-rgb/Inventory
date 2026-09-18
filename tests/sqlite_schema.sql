@@ -56,6 +56,33 @@ CREATE TABLE units (
     name TEXT NOT NULL
 );
 
+-- Minimal mirror of database/schema.sql's movement_reconciliation_reviews —
+-- only the columns MigrationNegativeStockService actually reads/writes.
+-- FifoService::postOut consults this (via MigrationNegativeStockService)
+-- whenever available stock is <= 0, so it must exist even in this offline
+-- SQLite harness or that check fatals with "no such table".
+CREATE TABLE movement_reconciliation_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sku TEXT NOT NULL,
+    item_name TEXT NULL,
+    warehouse_code TEXT NOT NULL,
+    unit TEXT NULL,
+    historical_opening REAL NULL,
+    historical_in REAL NULL,
+    historical_out REAL NULL,
+    historical_calculated_ending REAL NULL,
+    verified_final_opening REAL NULL,
+    difference REAL NULL,
+    status TEXT NOT NULL DEFAULT 'PENDING_FINAL_STOCK',
+    reason TEXT NULL,
+    notes TEXT NULL,
+    source TEXT NULL,
+    is_migration_negative_approved INTEGER NOT NULL DEFAULT 0,
+    migration_negative_approved_by_name TEXT NULL,
+    migration_negative_note TEXT NULL,
+    UNIQUE (sku, warehouse_code)
+);
+
 CREATE TABLE items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sku TEXT NOT NULL UNIQUE,

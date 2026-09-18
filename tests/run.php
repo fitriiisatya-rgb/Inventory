@@ -18,6 +18,7 @@ require_once __DIR__ . '/../services/PriceAnomalyService.php';
 require_once __DIR__ . '/../services/IdempotencyService.php';
 require_once __DIR__ . '/../services/PeriodLockService.php';
 require_once __DIR__ . '/../services/WarehouseLockService.php';
+require_once __DIR__ . '/../services/MigrationNegativeStockService.php';
 require_once __DIR__ . '/../services/InventoryService.php';
 require_once __DIR__ . '/../services/FifoService.php';
 

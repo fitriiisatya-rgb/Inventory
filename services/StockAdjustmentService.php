@@ -73,18 +73,24 @@ final class StockAdjustmentService
         $adjStmt = $pdo->prepare(
             'INSERT INTO stock_adjustments
                 (item_id, warehouse_id, adjustment_type, qty_base_delta, before_qty_base, after_qty_base,
-                 unit_cost_base, transaction_id, reference_no, reason, requires_approval, approved_by, approved_at,
-                 created_by, created_at)
+                 unit_cost_base, transaction_id, reference_no, reason, migration_issue_reference,
+                 requires_approval, approved_by, approved_at, created_by, created_at)
              VALUES (:item_id, :wh, :type, :delta, :before_qty, :after_qty,
-                     :cost, :tx_id, :ref, :reason, :requires_approval, :approved_by, :approved_at,
-                     :created_by, :now)'
+                     :cost, :tx_id, :ref, :reason, :migration_ref,
+                     :requires_approval, :approved_by, :approved_at, :created_by, :now)'
         );
         $now = date('Y-m-d H:i:s');
         $adjStmt->execute([
             'item_id' => $p['item_id'], 'wh' => $p['warehouse_id'], 'type' => $p['adjustment_type'],
             'delta' => $delta, 'before_qty' => $beforeQty, 'after_qty' => $afterQty,
             'cost' => $unitCostBase, 'tx_id' => $transactionId, 'ref' => $p['reference_no'] ?? null,
-            'reason' => $p['reason'], 'requires_approval' => !empty($p['requires_approval']) ? 1 : 0,
+            'reason' => $p['reason'],
+            // POLICY CORRECTION: when this adjustment resolves a known
+            // migration-negative balance, the caller records which case
+            // (e.g. MigrationNegativeStockService::issueReference()) — never
+            // required, NULL for every ordinary adjustment.
+            'migration_ref' => $p['migration_issue_reference'] ?? null,
+            'requires_approval' => !empty($p['requires_approval']) ? 1 : 0,
             'approved_by' => $p['approved_by'] ?? null,
             'approved_at' => !empty($p['approved_by']) ? $now : null,
             'created_by' => $p['created_by'], 'now' => $now,

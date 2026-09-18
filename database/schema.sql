@@ -384,12 +384,23 @@ CREATE TABLE movement_reconciliation_reviews (
     reason                        VARCHAR(255) NULL,    -- e.g. timing, rounding, missing small movement
     notes                         VARCHAR(255) NULL,
     source                        VARCHAR(150) NULL,    -- which analysis round/file this evidence came from
+    -- POLICY CORRECTION (owner decision): a row the owner explicitly approved
+    -- to carry forward as a real, visible negative LIVE Opening balance
+    -- instead of being zeroed or provisionally adjusted. Approving here does
+    -- NOT change historical_* evidence above — it only flags this sku+warehouse
+    -- as allowed to post a negative opening line and enforces FIFO safety
+    -- (see MigrationNegativeStockService) until an admin resolves it via a
+    -- real, audited Stock Opname/Adjustment.
+    is_migration_negative_approved TINYINT(1) NOT NULL DEFAULT 0,
+    migration_negative_approved_by_name VARCHAR(150) NULL,
+    migration_negative_note        VARCHAR(255) NULL,
     created_at                    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at                    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uq_mrr_sku_warehouse (sku, warehouse_code),
-    INDEX idx_mrr_sku (sku)
+    INDEX idx_mrr_sku (sku),
+    INDEX idx_mrr_migration_negative (is_migration_negative_approved)
 ) ENGINE=InnoDB
-COMMENT='Phase G-DATA 2: historical movement-vs-final-stock evidence, informational only — never alters final opening.';
+COMMENT='Phase G-DATA 2: historical movement-vs-final-stock evidence, informational only — never alters final opening. Also doubles as the migration-negative-stock whitelist (POLICY CORRECTION) for the same sku+warehouse rows.';
 
 -- ============================================================================
 -- 5B. UNIT CONVERSION CANDIDATE REVIEW (PHASE G-DATA 1B)
@@ -519,6 +530,11 @@ CREATE TABLE stock_adjustments (
     transaction_id       BIGINT UNSIGNED NULL,             -- the ADJUSTMENT-type inventory_transactions row this posted as
     reference_no         VARCHAR(100) NULL,                -- e.g. opname session id, external doc number
     reason               VARCHAR(255) NOT NULL,
+    -- POLICY CORRECTION: when this adjustment resolves a known migration-negative
+    -- balance (movement_reconciliation_reviews.is_migration_negative_approved),
+    -- the admin records which case it resolves — e.g. "MIGRATION-100304-SCM".
+    -- NULL for every ordinary adjustment.
+    migration_issue_reference VARCHAR(100) NULL,
     requires_approval    TINYINT(1) NOT NULL DEFAULT 0,
     approved_by          INT UNSIGNED NULL,
     approved_at          DATETIME NULL,

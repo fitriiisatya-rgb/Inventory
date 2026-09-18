@@ -43,6 +43,7 @@ existing code's *meaning* never changes without a version bump to this file.
 | `PRICE_ANOMALY` | 422 | Unit cost is outside the configured reference-price band (Section 9) and wasn't explicitly approved. |
 | `COST_REQUIRED` | 422 | A stock-increasing adjustment has no reliable cost and none was supplied — never defaulted to a fake value. |
 | `UNIT_CONVERSION_NOT_APPROVED` | 422 | PHASE G-DATA 2: a transaction was posted in a unit with no active, approved `item_unit_conversions` row for that item as of the transaction date. Post in the item's base unit (`GET /items/{id}/units` lists only approved units) or get the conversion approved first — never guessed. Opening stock is unaffected: it always posts directly in the item's Global Base Unit and never needs a purchase-unit conversion to succeed. |
+| `NEGATIVE_MIGRATION_STOCK_REQUIRES_ADJUSTMENT` | 422 | POLICY CORRECTION: this item+warehouse is on the owner-approved migration-negative whitelist (`GET /migration-negative-review`) and current stock is already `<= 0`. OUT, TRANSFER_OUT, and PRODUCTION_IN (raw-material consumption) are all blocked — FIFO available quantity is clamped to zero, no further negative FIFO batch is created. IN, Stock Opname, and Stock Adjustment remain allowed; resolve via one of those. |
 | `OPNAME_ACTIVE` | 423 | The target warehouse has an active Stock Opname session (OPEN/FINALIZED) blocking movement. |
 | `TRANSFER_ALREADY_RECEIVED` | 409 | A **new** (non-retried) attempt to receive a transfer that's already RECEIVED. |
 | `TRANSFER_ALREADY_CANCELLED` | 409 | A **new** (non-retried) attempt to cancel a transfer that's already CANCELLED. |
@@ -167,7 +168,7 @@ transaction endpoint against that warehouse returns `OPNAME_ACTIVE`.
 
 | Method | Path | Permission | Request | Response `data` |
 |---|---|---|---|---|
-| POST | `/stock-adjustments` | `STOCK_ADJUSTMENT_CREATE` (+ warehouse scope) | `{transaction_uuid, item_id, warehouse_id, qty_base_delta, adjustment_type, reason, reference_no?, override_cost_base?, transaction_date?}` | `{adjustment_id, transaction_id, before_qty_base, after_qty_base, unit_cost_base}` |
+| POST | `/stock-adjustments` | `STOCK_ADJUSTMENT_CREATE` (+ warehouse scope) | `{transaction_uuid, item_id, warehouse_id, qty_base_delta, adjustment_type, reason, reference_no?, override_cost_base?, transaction_date?, migration_issue_reference?}` | `{adjustment_id, transaction_id, before_qty_base, after_qty_base, unit_cost_base}` |
 
 `adjustment_type` ∈ `OPNAME, CORRECTION, DAMAGE, EXPIRED, LOSS, OTHER,
 NEGATIVE_OVERRIDE`. `reason` is always required — there is no silent
@@ -242,8 +243,9 @@ on the server's disk) rather than a multipart upload — see
 | POST | `/import/{supplier\|division\|warehouse}/{id}/commit` | `IMPORT_MANAGE` | — | `{imported, skipped}` |
 | POST | `/import/opening-stock/stage` | `IMPORT_MANAGE` | `{file_path, file_name?}` | `{stock_opening_id}` — PHASE G-DATA 2: accepts `final_opening_stock_template.xlsx` directly (sniffed by `file_name` extension) as well as the original CSV format |
 | POST | `/import/opening-stock/{id}/commit` | `IMPORT_MANAGE` | — | `{imported}` — creates REAL batches, `inventory_effect=1` |
-| GET | `/import/opening-stock/{id}/reconciliation` | any authenticated | — | PHASE G-DATA 2 Section 12: the GO_LIVE_READY checklist (`negative_qty`, `missing_cost`, `unknown_sku`, `unknown_warehouse`, `base_unit_mismatch`, `duplicate_opening`, `error_rows`, `opening_control_total_match`, `current_stock_equals_opening`, `historical_inventory_effect_zero`, `go_live_ready`) — read-only, never mutates |
+| GET | `/import/opening-stock/{id}/reconciliation` | any authenticated | — | PHASE G-DATA 2 Section 12: the GO_LIVE_READY checklist (`negative_qty` — unknown/unapproved negative rows only, `missing_cost`, `unknown_sku`, `unknown_warehouse`, `base_unit_mismatch`, `duplicate_opening`, `error_rows`, `opening_control_total_match`, `current_stock_equals_opening`, `historical_inventory_effect_zero`, `go_live_ready`), plus `migration_negative_count`/`migration_negative_rows` (POLICY CORRECTION: owner-approved migration-negative rows — ALLOW_WITH_WARNING, never block `go_live_ready`) — read-only, never mutates |
 | GET | `/movement-reconciliation-reviews` | any authenticated | — | PHASE G-DATA 2 Section 11: the historical movement-vs-final-stock evidence rows — informational only, kept separate from unit-conversion and opening questions, never alters final opening |
+| GET | `/migration-negative-review` | any authenticated | — | POLICY CORRECTION: the owner-approved migration-negative whitelist (5 SKU+warehouse rows), each with live current balance, `status` (`MIGRATION_NEGATIVE_REVIEW`/`RESOLVED`), `needs_stock_opname`, `migration_issue_reference`, and the `historical_*` Opening+IN/OUT evidence to drill back into. Same flags (`migration_negative_review`, `needs_stock_opname`, `migration_issue_reference`) are also returned inline on every `GET .../stock` response (`InventoryService::currentStock`/`currentStockAllWarehouses`) so the dashboard, stock list, and SKU detail screens need no separate lookup |
 | POST | `/import/historical/stage` | `IMPORT_MANAGE` | `{file_path, file_name?}` | `{import_batch_id}` |
 | POST | `/import/historical/{id}/commit` | `IMPORT_MANAGE` | — | `{imported}` — `is_historical_import=1, inventory_effect=0`, never touches stock |
 

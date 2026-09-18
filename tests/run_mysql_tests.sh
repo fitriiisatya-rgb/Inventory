@@ -16,7 +16,7 @@ reset_db() {
 }
 
 FAILED=0
-for test in tests/mysql_smoke_test.php tests/mysql_integration_test.php tests/mysql_importer_test.php tests/mysql_void_test.php tests/mysql_security_test.php tests/opening_g_data_2_test.php; do
+for test in tests/mysql_smoke_test.php tests/mysql_integration_test.php tests/mysql_importer_test.php tests/mysql_void_test.php tests/mysql_security_test.php tests/opening_g_data_2_test.php tests/migration_negative_stock_test.php; do
     echo "=============================================================="
     echo "Resetting database and running ${test}"
     echo "=============================================================="

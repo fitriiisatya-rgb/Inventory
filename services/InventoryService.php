@@ -33,7 +33,12 @@ final class InventoryService
         );
         $stmt->execute(['item_id' => $itemId, 'wh' => $warehouseId]);
         $row = $stmt->fetch();
-        return ['qty_base' => round((float) $row['qty'], 6), 'value' => round((float) $row['value'], 4)];
+        $qty = round((float) $row['qty'], 6);
+        $result = ['qty_base' => $qty, 'value' => round((float) $row['value'], 4)];
+        // POLICY CORRECTION: surfaced here (the single source of truth for
+        // every stock figure) so it reaches the dashboard, stock list, and
+        // SKU detail screens without each of them needing its own lookup.
+        return $result + MigrationNegativeStockService::flagsFor($pdo, $itemId, $warehouseId, $qty);
     }
 
     /** Same figure, summed across every warehouse (dashboard-level "total stock of this SKU"). */
@@ -46,14 +51,22 @@ final class InventoryService
         $stmt->execute(['item_id' => $itemId]);
         $rows = $stmt->fetchAll();
         $total = ['qty_base' => 0.0, 'value' => 0.0];
+        $anyUnresolved = false;
         foreach ($rows as &$r) {
             $r['qty_base'] = round((float) $r['qty'], 6);
             $r['value'] = round((float) $r['value'], 4);
             unset($r['qty'], $r['value']);
+            $flags = MigrationNegativeStockService::flagsFor($pdo, $itemId, (int) $r['warehouse_id'], $r['qty_base']);
+            $r += $flags;
+            $anyUnresolved = $anyUnresolved || $flags['migration_negative_review'];
             $total['qty_base'] += (float) $r['qty_base'];
             $total['value'] += (float) $r['value'];
         }
-        return ['by_warehouse' => $rows, 'total' => ['qty_base' => round($total['qty_base'], 6), 'value' => round($total['value'], 4)]];
+        return [
+            'by_warehouse' => $rows,
+            'total' => ['qty_base' => round($total['qty_base'], 6), 'value' => round($total['value'], 4)],
+            'migration_negative_review' => $anyUnresolved,
+        ];
     }
 
     public static function batches(PDO $pdo, int $itemId, int $warehouseId): array
@@ -96,7 +109,16 @@ final class InventoryService
     {
         $onHand = self::companyOnHandValue($pdo);
         $inTransit = self::inTransitValue($pdo);
-        return ['on_hand_value' => $onHand, 'in_transit_value' => $inTransit, 'total_value' => round($onHand + $inTransit, 4)];
+        // POLICY CORRECTION: company totals include negative migration
+        // balances honestly (SUM() above already does — nothing is excluded
+        // or zeroed); this flag just marks the total as containing unresolved
+        // migration-negative stock so a report can label it, never hide it.
+        return [
+            'on_hand_value' => $onHand,
+            'in_transit_value' => $inTransit,
+            'total_value' => round($onHand + $inTransit, 4),
+            'contains_unresolved_migration_negative_stock' => MigrationNegativeStockService::hasUnresolved($pdo),
+        ];
     }
 
     /**

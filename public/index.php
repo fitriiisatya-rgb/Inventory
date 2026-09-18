@@ -22,6 +22,7 @@ require_once __DIR__ . '/../services/UnitConversionService.php';
 require_once __DIR__ . '/../services/UnitNormalizationService.php';
 require_once __DIR__ . '/../services/PriceAnomalyService.php';
 require_once __DIR__ . '/../services/IdempotencyService.php';
+require_once __DIR__ . '/../services/MigrationNegativeStockService.php';
 require_once __DIR__ . '/../services/InventoryService.php';
 require_once __DIR__ . '/../services/FifoService.php';
 require_once __DIR__ . '/../services/PeriodLockService.php';
@@ -52,6 +53,8 @@ use App\Services\PeriodLockedException;
 use App\Services\WarehouseLockedException;
 use App\Services\CostRequiredException;
 use App\Services\UnitConversionNotApprovedException;
+use App\Services\NegativeMigrationStockRequiresAdjustmentException;
+use App\Services\MigrationNegativeStockService;
 use App\Services\RateLimitedException;
 use App\Services\NotFoundException;
 use App\Services\TransferAlreadyReceivedException;
@@ -155,6 +158,7 @@ set_exception_handler(function (Throwable $e) use ($path) {
         WarehouseLockedException::class           => ['code' => 423, 'label' => 'OPNAME_ACTIVE'],
         CostRequiredException::class              => ['code' => 422, 'label' => 'COST_REQUIRED'],
         UnitConversionNotApprovedException::class => ['code' => 422, 'label' => 'UNIT_CONVERSION_NOT_APPROVED'],
+        NegativeMigrationStockRequiresAdjustmentException::class => ['code' => 422, 'label' => 'NEGATIVE_MIGRATION_STOCK_REQUIRES_ADJUSTMENT'],
         RateLimitedException::class               => ['code' => 429, 'label' => 'RATE_LIMITED'],
         NotFoundException::class                  => ['code' => 404, 'label' => 'NOT_FOUND'],
         TransferAlreadyReceivedException::class   => ['code' => 409, 'label' => 'TRANSFER_ALREADY_RECEIVED'],
@@ -666,6 +670,17 @@ $routes = [
     'GET /movement-reconciliation-reviews' => function () use ($pdo) {
         inv_require_auth();
         inv_ok(MovementReconciliationReviewService::list($pdo), 'OK');
+    },
+    // POLICY CORRECTION — the admin review list for the owner-approved
+    // migration-negative whitelist: current balance, MIGRATION_NEGATIVE_REVIEW/
+    // NEEDS_STOCK_OPNAME status (computed live from current stock), and the
+    // historical_* evidence to drill back into from the live negative
+    // opening. One endpoint, read by the dashboard, stock list, SKU detail,
+    // and reconciliation report alike (they can also all read the same
+    // flags directly off GET /items/{id}/stock via InventoryService).
+    'GET /migration-negative-review' => function () use ($pdo) {
+        inv_require_auth();
+        inv_ok(MigrationNegativeStockService::reviewList($pdo), 'OK');
     },
 
     'POST /import/historical/stage' => function () use ($pdo, $input) {

@@ -82,7 +82,16 @@ final class OpeningValidationService
         }
         $qty = (float) $qtyRaw;
         if ($qty < 0) {
-            return ['status' => 'ERROR', 'messages' => ['negative opening quantity is not allowed — final opening rejects negative stock, no exceptions'], 'item_id' => $itemId, 'warehouse_id' => $warehouseId];
+            // POLICY CORRECTION: a negative opening quantity is rejected for
+            // every item EXCEPT the owner-approved migration-negative
+            // whitelist (MigrationNegativeStockService) — those 5 known
+            // rows are allowed to carry their actual calculated balance
+            // forward as-is. Falls through to the remaining checks below
+            // (cost/expiry/etc.) rather than returning early.
+            if (!MigrationNegativeStockService::isWhitelisted($pdo, $itemId, $warehouseId)) {
+                return ['status' => 'ERROR', 'messages' => ['negative opening quantity is not allowed — final opening rejects negative stock, no exceptions'], 'item_id' => $itemId, 'warehouse_id' => $warehouseId];
+            }
+            $messages[] = 'MIGRATION_NEGATIVE_REVIEW: negative opening quantity accepted — this item+warehouse is on the owner-approved migration-negative whitelist; NEEDS_STOCK_OPNAME to resolve via an audited Stock Opname/Stock Adjustment';
         }
 
         // ---- Cost ----
