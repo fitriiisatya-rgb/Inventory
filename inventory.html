@@ -8612,7 +8612,14 @@
         // yang dipakai KPI Stok Awal, sehingga Closing bulan ini = Opening bulan berikutnya.
         const snapCutoff = getInventorySnapshotAt(cutoff);
         if(!snapCutoff.ok){ notify('Tidak bisa tutup buku', snapCutoff.warning, 'warning'); return; }
-        let valueAtCutoff = snapCutoff.totalValue;
+        // Stok Awal periode BERIKUTNYA yang sudah ditetapkan dari hitung fisik lebih berwenang
+        // daripada hasil menyusun ulang riwayat yang rusak. Sebelum ini Tutup Buku selalu menimpanya
+        // dengan angka hitung ulang — kerja hitung fisik satu gudang bisa lenyap tanpa suara,
+        // dan angka yang salah justru yang dibekukan permanen.
+        const perBerikut = periodeDari(cutoff);
+        const openingAda = ((typeof officialOpenings!=='undefined'&&officialOpenings)||{})[perBerikut] || null;
+        const pakaiOpeningAda = !!(openingAda && (openingAda.rows||[]).length);
+        let valueAtCutoff = pakaiOpeningAda ? (openingAda.totalValue||0) : snapCutoff.totalValue;
         // Tutup Buku tidak punya undo: angkanya dibekukan jadi Opening bulan berikutnya, lalu
         // transaksi lamanya DIHAPUS. Kalau angkanya rusak, buktinya ikut hilang bersamanya.
         // snapCutoff.ok hanya berarti datanya lengkap, bukan bahwa angkanya masuk akal.
@@ -8648,7 +8655,25 @@
                 `Masih ada ${pendingTf.length} kiriman antar gudang yang belum dikonfirmasi diterima (${[...new Set(pendingTf.map(t=>gudangName(t.toGudang)))].join(', ')}). Minta gudang tujuan mengonfirmasi dulu, atau batalkan kirimannya.`,'warning');
             return;
         }
-        if(!confirm(`Tutup buku ${period}?\n• ${toArchive.length} transaksi diarsip ke sheet "Arsip ${period}"\n• Periode terkunci PERMANEN (tanpa undo/edit)\n• Nilai stok akhir resmi: Rp ${Math.round(valueAtCutoff).toLocaleString('id')}\n• Nilai itu dibekukan jadi OPENING RESMI ${periodeDari(cutoff)} dan tidak akan berubah lagi`)) return;
+        let timpaOpening=false;
+        if(pakaiOpeningAda){
+            const rpC=v=>'Rp '+Math.round(v).toLocaleString('id');
+            const beda = Math.abs(snapCutoff.totalValue - openingAda.totalValue);
+            const pesanOp =
+                `Stok Awal ${labelPeriode(perBerikut)} SUDAH ditetapkan.\n\n`
+                + `Sudah ditetapkan : ${rpC(openingAda.totalValue)}  (${(openingAda.rows||[]).length} baris)\n`
+                + `  sumber         : ${openingAda.source||'-'}\n`
+                + `Hitung ulang log : ${rpC(snapCutoff.totalValue)}\n`
+                + (beda>1 ? `Selisih          : ${rpC(beda)}\n` : '')
+                + `\nOK    = PERTAHANKAN yang sudah ditetapkan (disarankan — itu dari hitung fisik).\n`
+                + `Cancel = timpa dengan hasil hitung ulang dari riwayat transaksi.`;
+            timpaOpening = !confirm(pesanOp);
+            if(timpaOpening) valueAtCutoff = snapCutoff.totalValue;
+        }
+        const sumberPenutup = (pakaiOpeningAda && !timpaOpening)
+            ? `Stok Awal yang sudah ditetapkan (${openingAda.source||'-'})`
+            : 'hitung ulang dari riwayat transaksi';
+        if(!confirm(`Tutup buku ${period}?\n• ${toArchive.length} transaksi diarsip ke sheet "Arsip ${period}"\n• Periode terkunci PERMANEN (tanpa undo/edit)\n• Nilai stok akhir resmi: Rp ${Math.round(valueAtCutoff).toLocaleString('id')}\n• Sumber angka: ${sumberPenutup}\n• Nilai itu jadi OPENING RESMI ${perBerikut} dan tidak akan berubah lagi`)) return;
         notify('Mengarsipkan...','Jangan tutup aplikasi sampai selesai','info');
         let id=String(Date.now())+Math.floor(Math.random()*1e6);
         // Dua kolom tanggal dipisah: yang menentukan periode (efektif) dan jejak kapan diketik (posting).
@@ -8676,12 +8701,24 @@
         // URUTAN INI PENTING: bekukan dulu Opening Resmi bulan berikutnya, BARU hapus transaksinya.
         // Closing September = Opening Oktober. Sesudah baris berikutnya, transaksi Agustus/September
         // tidak ada lagi di transactionLog, jadi saldo ini tidak akan pernah bisa dihitung ulang.
-        const periodeBerikut = periodeDari(cutoff);
-        tulisOpeningResmi(periodeBerikut, snapCutoff, 'Tutup Buku '+period, deviceOperator||currentUsername||'');
+        const periodeBerikut = perBerikut;
+        if(pakaiOpeningAda && !timpaOpening){
+            // Dibiarkan apa adanya. Yang ditetapkan dari hitung fisik tidak diganti angka hasil
+            // menyusun ulang riwayat — justru untuk itulah ia ditetapkan lebih dulu.
+        } else {
+            tulisOpeningResmi(periodeBerikut, snapCutoff, 'Tutup Buku '+period, deviceOperator||currentUsername||'');
+        }
         transactionLog=transactionLog.filter(l=>effTs(l)>=cutoff);
         lockBefore=Math.max(lockBefore, cutoff);
-        closings.push({ snapshotRows: snapCutoff.rows, snapshotEngineVersion: SNAP_ENGINE, period, closedAt:Date.now(), cutoff, txCount:toArchive.length, inTotal, hppTotal, susutTotal, valueAtCutoff, by:deviceOperator||'' });
-        if(typeof auditLog!=='undefined') auditLog.unshift({ id:(typeof nextAuditId!=='undefined'?nextAuditId++:Date.now()), at:Date.now(), by:deviceOperator||currentUsername||'', action:'opening-resmi', reason:`Opening Resmi ${periodeBerikut} dibekukan dari Tutup Buku ${period}: Rp ${Math.round(valueAtCutoff).toLocaleString('id')} (${snapCutoff.rows.length} baris)` });
+        closings.push({ snapshotRows: (pakaiOpeningAda && !timpaOpening) ? openingAda.rows : snapCutoff.rows,
+            snapshotEngineVersion: SNAP_ENGINE, period, closedAt:Date.now(), cutoff, txCount:toArchive.length,
+            inTotal, hppTotal, susutTotal, valueAtCutoff,
+            sumberNilai: (pakaiOpeningAda && !timpaOpening) ? (openingAda.source||'Stok Awal ditetapkan') : 'hitung ulang log',
+            nilaiHitungUlang: Math.round(snapCutoff.totalValue||0),
+            by:deviceOperator||'' });
+        if(typeof auditLog!=='undefined') auditLog.unshift({ id:(typeof nextAuditId!=='undefined'?nextAuditId++:Date.now()), at:Date.now(), by:deviceOperator||currentUsername||'', action:'opening-resmi', reason:(pakaiOpeningAda && !timpaOpening)
+                ? `Tutup Buku ${period}: Opening Resmi ${periodeBerikut} DIPERTAHANKAN dari ${openingAda.source||'penetapan sebelumnya'} — Rp ${Math.round(valueAtCutoff).toLocaleString('id')} (${(openingAda.rows||[]).length} baris). Hasil hitung ulang Rp ${Math.round(snapCutoff.totalValue).toLocaleString('id')} tidak dipakai.`
+                : `Opening Resmi ${periodeBerikut} dibekukan dari Tutup Buku ${period}: Rp ${Math.round(valueAtCutoff).toLocaleString('id')} (${snapCutoff.rows.length} baris)` });
         persist(); refreshUI();
         notify('Tutup Buku Selesai',`${period}: ${toArchive.length} transaksi diarsip & terkunci. Stok awal resmi bulan berikutnya: Rp ${Math.round(valueAtCutoff).toLocaleString('id')}.`,'success');
     });
