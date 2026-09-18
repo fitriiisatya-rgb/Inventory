@@ -28,6 +28,7 @@ const Transactions = (() => {
         const whOptions = Master.warehouses().map((w) => `<option value="${w.id}">${w.name}</option>`).join('');
         const supplierOptions = Master.suppliers().map((s) => `<option value="${s.id}">${s.name}</option>`).join('');
         const divisionOptions = Master.divisions().map((d) => `<option value="${d.id}">${d.name}</option>`).join('');
+        const bakeryDestinationOptions = Master.bakeryDestinations().map((b) => `<option value="${b.id}">${b.name}</option>`).join('');
 
         const card = UI.el('div', { class: 'card', id: `tx-${kind}-card` }, [
             UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, isIn ? '📥 Transaksi Masuk' : '📤 Transaksi Keluar')]),
@@ -38,7 +39,10 @@ const Transactions = (() => {
                 <div class="form-group"><label>Satuan</label><select id="tx-${kind}-unit"></select></div>
                 <div class="form-group"><label>Jumlah</label><input type="number" id="tx-${kind}-qty" min="0" step="any"></div>
                 ${isIn ? `<div class="form-group"><label>Harga Satuan (Rp)</label><input type="number" id="tx-${kind}-price" min="0" step="any"></div>` : ''}
-                ${isIn ? `<div class="form-group"><label>Supplier</label><select id="tx-${kind}-supplier"><option value="">-</option>${supplierOptions}</select></div>` : `<div class="form-group"><label>Divisi Tujuan</label><select id="tx-${kind}-division"><option value="">-</option>${divisionOptions}</select></div>`}
+                ${isIn
+                    ? `<div class="form-group"><label>Supplier</label><select id="tx-${kind}-supplier"><option value="">-</option>${supplierOptions}</select></div>`
+                    : `<div class="form-group"><label>Divisi Tujuan (opsional)</label><select id="tx-${kind}-division"><option value="">-</option>${divisionOptions}</select></div>
+                       <div class="form-group"><label>Bakery Tujuan (opsional)</label><select id="tx-${kind}-bakery-destination"><option value="">-</option>${bakeryDestinationOptions}</select></div>`}
                 <div class="form-group"><label>Tanggal Transaksi</label><input type="date" id="tx-${kind}-date" value="${new Date().toISOString().slice(0, 10)}"></div>
                 <div class="form-group"><label>Referensi (opsional)</label><input type="text" id="tx-${kind}-ref"></div>
             ` }),
@@ -137,6 +141,7 @@ const Transactions = (() => {
                 ...basePayload('out'),
                 transaction_uuid: outUuid,
                 division_id: document.getElementById('tx-out-division').value || null,
+                bakery_destination_id: document.getElementById('tx-out-bakery-destination').value || null,
                 ...(allowNegative ? { allow_negative_stock: true, negative_stock_reason: negReason } : {}),
                 ...extra,
             };
@@ -160,7 +165,12 @@ const Transactions = (() => {
             return;
         }
         if (err && err.code === 'PRICE_ANOMALY') {
-            const proceed = confirm(`${err.message}\n\nLanjutkan menyimpan dengan harga ini?`);
+            const proceed = await Modal.confirm({
+                title: 'Anomali Harga Terdeteksi',
+                message: `${err.message}\n\nLanjutkan menyimpan dengan harga ini?`,
+                confirmLabel: 'Lanjutkan',
+                danger: true,
+            });
             if (proceed) {
                 await retryFn({ ...extra, anomaly_approved_by: Auth.user().id });
                 return;

@@ -43,11 +43,14 @@
 
 <div id="app-shell" style="display:none;">
     <header class="app-header">
-        <div class="app-logo">
-            <div class="logo-icon">📦</div>
-            <div class="logo-text">
-                <h1>Inventory FIFO Pro</h1>
-                <span>MySQL Backend — Production</span>
+        <div style="display:flex; align-items:center; gap:10px;">
+            <button class="btn btn-secondary btn-sm sidebar-toggle" id="sidebar-toggle-btn" aria-label="Buka menu">☰</button>
+            <div class="app-logo">
+                <div class="logo-icon">📦</div>
+                <div class="logo-text">
+                    <h1>Inventory FIFO Pro</h1>
+                    <span>MySQL Backend — Production</span>
+                </div>
             </div>
         </div>
         <div class="header-right">
@@ -57,44 +60,90 @@
         </div>
     </header>
 
-    <div class="tabs-wrapper">
-        <div class="tabs">
-            <button class="tab-btn active" data-tab="dashboard">🏠 Dashboard</button>
-            <button class="tab-btn" data-tab="transaksi" data-require-permission="TRANSACTION_IN_CREATE,TRANSACTION_OUT_CREATE">📥 Transaksi</button>
-            <button class="tab-btn" data-tab="transfer" data-require-permission="WAREHOUSE_TRANSFER_MANAGE">🚚 Transfer</button>
-            <button class="tab-btn" data-tab="produksi" data-require-permission="PRODUCTION_MANAGE">🏭 Produksi</button>
-            <button class="tab-btn" data-tab="opname" data-require-permission="STOCK_OPNAME_MANAGE">📋 Stok Opname</button>
-            <button class="tab-btn" data-tab="laporan">📊 Laporan</button>
-            <button class="tab-btn" data-tab="master">🗂️ Master Data</button>
-            <button class="tab-btn" data-tab="import" data-require-role="ADMIN,SUPERADMIN">📤 Import</button>
-            <button class="tab-btn" data-tab="audit" data-require-permission="AUDIT_LOG_VIEW">📜 Audit Log</button>
-            <button class="tab-btn" data-tab="closing" data-require-role="ADMIN,SUPERADMIN">🔐 Tutup Buku</button>
+    <div class="app-shell-v2">
+        <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+        <nav class="sidebar" id="sidebar">
+            <div class="sidebar-group">
+                <div class="sidebar-group-label">Overview</div>
+                <a class="sidebar-link active" data-tab="dashboard"><span class="icon">🏠</span> Dashboard</a>
+            </div>
+            <div class="sidebar-group">
+                <div class="sidebar-group-label">Inventory</div>
+                <a class="sidebar-link" data-tab="stok-barang"><span class="icon">📦</span> Stok Barang</a>
+                <a class="sidebar-link" data-tab="laporan"><span class="icon">📇</span> Mutasi Stok / Ledger</a>
+            </div>
+            <div class="sidebar-group">
+                <div class="sidebar-group-label">Transactions</div>
+                <a class="sidebar-link" data-tab="transaksi" data-require-permission="TRANSACTION_IN_CREATE,TRANSACTION_OUT_CREATE"><span class="icon">📥</span> Stock IN / OUT</a>
+                <a class="sidebar-link" data-tab="history-transaksi"><span class="icon">🧾</span> History Transaksi</a>
+            </div>
+            <div class="sidebar-group">
+                <div class="sidebar-group-label">Transfers</div>
+                <a class="sidebar-link" data-tab="transfer" data-require-permission="WAREHOUSE_TRANSFER_MANAGE"><span class="icon">🚚</span> Transfer</a>
+            </div>
+            <div class="sidebar-group">
+                <div class="sidebar-group-label">Production</div>
+                <a class="sidebar-link" data-tab="produksi" data-require-permission="PRODUCTION_MANAGE"><span class="icon">🏭</span> Produksi</a>
+            </div>
+            <div class="sidebar-group">
+                <div class="sidebar-group-label">Stock Opname</div>
+                <a class="sidebar-link" data-tab="opname" data-require-permission="STOCK_OPNAME_MANAGE"><span class="icon">📋</span> Stock Opname</a>
+            </div>
+            <div class="sidebar-group">
+                <div class="sidebar-group-label">Master Data</div>
+                <a class="sidebar-link" data-tab="master"><span class="icon">🗂️</span> Barang / Gudang / Divisi</a>
+                <a class="sidebar-link" data-tab="master-vendor" data-require-permission="MASTER_SUPPLIER_MANAGE,INVENTORY_VIEW"><span class="icon">📇</span> Vendor / Supplier</a>
+                <a class="sidebar-link" data-tab="master-bakery" data-require-permission="MASTER_BAKERY_DESTINATION_MANAGE,INVENTORY_VIEW"><span class="icon">🥖</span> Bakery Tujuan</a>
+                <a class="sidebar-link" data-tab="master-category" data-require-permission="MASTER_CATEGORY_MANAGE,INVENTORY_VIEW"><span class="icon">🏷️</span> Kategori</a>
+                <a class="sidebar-link" data-tab="import" data-require-role="ADMIN,SUPERADMIN"><span class="icon">📤</span> Import</a>
+            </div>
+            <div class="sidebar-group">
+                <div class="sidebar-group-label">Audit &amp; Control</div>
+                <a class="sidebar-link" data-tab="audit" data-require-permission="AUDIT_LOG_VIEW"><span class="icon">📜</span> Audit Log</a>
+            </div>
+            <div class="sidebar-group">
+                <div class="sidebar-group-label">Settings</div>
+                <a class="sidebar-link" data-tab="closing" data-require-role="ADMIN,SUPERADMIN"><span class="icon">🔐</span> Tutup Buku</a>
+            </div>
+        </nav>
+
+        <div class="app-content-v2">
+            <main class="app-main-v2">
+                <div class="breadcrumb" id="breadcrumb"><span>Inventory FIFO Pro</span><span class="sep">/</span><span class="current" id="breadcrumb-current">Dashboard</span></div>
+                <div class="tab-content active" id="tab-dashboard"></div>
+                <div class="tab-content" id="tab-stok-barang"></div>
+                <div class="tab-content" id="tab-transaksi"></div>
+                <div class="tab-content" id="tab-history-transaksi"></div>
+                <div class="tab-content" id="tab-transfer"></div>
+                <div class="tab-content" id="tab-produksi"></div>
+                <div class="tab-content" id="tab-opname"></div>
+                <div class="tab-content" id="tab-laporan"></div>
+                <div class="tab-content" id="tab-master"></div>
+                <div class="tab-content" id="tab-master-vendor"></div>
+                <div class="tab-content" id="tab-master-bakery"></div>
+                <div class="tab-content" id="tab-master-category"></div>
+                <div class="tab-content" id="tab-import"></div>
+                <div class="tab-content" id="tab-audit"></div>
+                <div class="tab-content" id="tab-closing"></div>
+            </main>
+
+            <footer>Inventory FIFO Pro &mdash; PHP + MySQL backend. Environment Production.</footer>
         </div>
     </div>
-
-    <main class="app-main">
-        <div class="tab-content active" id="tab-dashboard"></div>
-        <div class="tab-content" id="tab-transaksi"></div>
-        <div class="tab-content" id="tab-transfer"></div>
-        <div class="tab-content" id="tab-produksi"></div>
-        <div class="tab-content" id="tab-opname"></div>
-        <div class="tab-content" id="tab-laporan"></div>
-        <div class="tab-content" id="tab-master"></div>
-        <div class="tab-content" id="tab-import"></div>
-        <div class="tab-content" id="tab-audit"></div>
-        <div class="tab-content" id="tab-closing"></div>
-    </main>
-
-    <footer>Inventory FIFO Pro &mdash; PHP + MySQL backend. Environment Production.</footer>
 </div>
 
 <script src="assets/js/api-client.js"></script>
 <script src="assets/js/ui.js"></script>
+<script src="assets/js/modal.js"></script>
+<script src="assets/js/drawer.js"></script>
+<script src="assets/js/data-table.js"></script>
 <script src="assets/js/auth.js"></script>
 <script src="assets/js/master.js"></script>
 <script src="assets/js/dashboard.js"></script>
+<script src="assets/js/stock-report.js"></script>
 <script src="assets/js/reports.js"></script>
 <script src="assets/js/transactions.js"></script>
+<script src="assets/js/transaction-history.js"></script>
 <script src="assets/js/transfers.js"></script>
 <script src="assets/js/production.js"></script>
 <script src="assets/js/stock-opname.js"></script>
@@ -102,6 +151,10 @@
 <script src="assets/js/closing.js"></script>
 <script src="assets/js/imports.js"></script>
 <script src="assets/js/audit.js"></script>
+<script src="assets/js/master-categories.js"></script>
+<script src="assets/js/master-vendors.js"></script>
+<script src="assets/js/master-bakery-destinations.js"></script>
+<script src="assets/js/sidebar.js"></script>
 <script src="assets/js/app.js"></script>
 </body>
 </html>

@@ -351,7 +351,13 @@ $routes = [
     // suppliers/bakery-destinations need both a list and a manage path).
     'GET /categories' => function () use ($pdo) {
         inv_require_auth();
-        inv_ok($pdo->query('SELECT * FROM categories WHERE is_active = 1 ORDER BY name')->fetchAll(), 'OK');
+        // Returns EVERY category, active or not — matching GET /suppliers
+        // and GET /bakery-destinations' convention (no is_active filter
+        // server-side). A deactivated category must stay visible here so
+        // the master-data admin page can reactivate it; callers building a
+        // dropdown for a transaction/filter form should filter is_active
+        // themselves, same as they already do for suppliers/warehouses.
+        inv_ok($pdo->query('SELECT * FROM categories ORDER BY name')->fetchAll(), 'OK');
     },
     'POST /categories' => function () use ($pdo, $input) {
         $user = inv_require_auth();

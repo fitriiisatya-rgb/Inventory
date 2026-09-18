@@ -112,6 +112,30 @@ const InvApi = (() => {
         listDivisions: () => request('GET', '/divisions'),
         itemUnits: (itemId) => request('GET', `/items/${itemId}/units`),
 
+        // ---- PHASE V2: category master ----
+        listCategories: () => request('GET', '/categories'),
+        createCategory: (payload) => request('POST', '/categories', payload),
+        updateCategory: (id, payload) => request('PUT', `/categories/${id}`, payload),
+
+        // ---- PHASE V2: vendor/supplier CRUD (GET /suppliers above stays read-only/full-list) ----
+        createSupplier: (payload) => request('POST', '/suppliers', payload),
+        updateSupplier: (id, payload) => request('PUT', `/suppliers/${id}`, payload),
+
+        // ---- PHASE V2: bakery destination master ----
+        listBakeryDestinations: () => request('GET', '/bakery-destinations'),
+        createBakeryDestination: (payload) => request('POST', '/bakery-destinations', payload),
+        updateBakeryDestination: (id, payload) => request('PUT', `/bakery-destinations/${id}`, payload),
+
+        // ---- PHASE V2: per-item-per-warehouse stock policy ----
+        getStockPolicy: (itemId, warehouseId) => request('GET', `/stock-policy?item_id=${itemId}&warehouse_id=${warehouseId}`),
+        saveStockPolicy: (payload) => request('PUT', '/stock-policy', payload),
+
+        // ---- PHASE V2: reports ----
+        stockReport: (params = {}) => request('GET', `/reports/stock?${new URLSearchParams(params).toString()}`),
+        stockReportCsvUrl: (params = {}) => `/api/reports/stock?${new URLSearchParams({ ...params, format: 'csv' }).toString()}`,
+        transactionReport: (params = {}) => request('GET', `/reports/transactions?${new URLSearchParams(params).toString()}`),
+        transactionDetail: (id) => request('GET', `/reports/transactions/${id}`),
+
         // ---- inventory (single source of truth) ----
         currentStock: (itemId, warehouseId) => request('GET', `/inventory/current?item_id=${itemId}&warehouse_id=${warehouseId}`),
         currentStockBySku: (sku, warehouseId) => request('GET', `/inventory/current/${encodeURIComponent(sku)}${warehouseId ? `?warehouse_id=${warehouseId}` : ''}`),

@@ -68,6 +68,25 @@ const UI = (() => {
         return map[String(status).toUpperCase()] || 'badge-pending';
     }
 
+    // PHASE V2 — stock-status pill (SAFE/LOW/CRITICAL/OUT_OF_STOCK/
+    // MIGRATION_NEGATIVE_REVIEW), Indonesian labels per the owner's spec.
+    // Never recomputes the status itself — always renders exactly what the
+    // API returned (StockPolicyService::stockStatus() is the one place
+    // status is decided).
+    const STOCK_STATUS_LABELS = {
+        SAFE: 'Aman', LOW: 'Warning', CRITICAL: 'Kritis',
+        OUT_OF_STOCK: 'Habis', MIGRATION_NEGATIVE_REVIEW: 'Review',
+    };
+    function stockStatusBadge(status) {
+        const cls = `badge-status-${String(status).toLowerCase()}`;
+        const label = STOCK_STATUS_LABELS[status] || status;
+        return el('span', { class: `badge ${cls}` }, label);
+    }
+    function bufferCell(bufferConfigured, bufferValue) {
+        if (bufferConfigured) return document.createTextNode(formatNumber(bufferValue));
+        return el('span', { class: 'buffer-unconfigured-note' }, 'Buffer belum dikonfigurasi');
+    }
+
     // Generic error → toast for any InvApi.ApiError/NetworkError thrown by a caller.
     function handleApiError(err) {
         if (err && err.code === 'NETWORK_ERROR') {
@@ -115,6 +134,7 @@ const UI = (() => {
     return {
         toast, showConnectionBanner, openModal, closeModal,
         formatMoney, formatNumber, formatDate, badgeClass,
-        handleApiError, el,
+        stockStatusBadge, bufferCell,
+        handleApiError, el, exportCsv,
     };
 })();

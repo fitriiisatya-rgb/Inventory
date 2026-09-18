@@ -95,8 +95,13 @@ const Reports = (() => {
     const voidUuids = new Map();
 
     async function voidTransaction(transactionId, btn) {
-        const reason = prompt(`Alasan pembatalan transaksi #${transactionId} (wajib):`);
-        if (!reason || !reason.trim()) return;
+        const reason = await Modal.prompt({
+            title: `Batalkan Transaksi #${transactionId}`,
+            label: 'Alasan pembatalan (wajib)',
+            required: true,
+            confirmLabel: 'Batalkan Transaksi',
+        });
+        if (!reason) return;
         if (!voidUuids.has(transactionId)) voidUuids.set(transactionId, InvApi.newRequestUuid());
         btn.disabled = true;
         try {
@@ -106,7 +111,12 @@ const Reports = (() => {
             loadReport();
         } catch (err) {
             if (err && err.code === 'PERIOD_LOCKED') {
-                const override = confirm(`${err.message}\n\nPeriode ini sudah TERKUNCI. Lanjutkan sebagai SUPERADMIN OVERRIDE (tercatat di audit log)?`);
+                const override = await Modal.confirm({
+                    title: 'Periode Terkunci',
+                    message: `${err.message}\n\nPeriode ini sudah TERKUNCI. Lanjutkan sebagai SUPERADMIN OVERRIDE (tercatat di audit log)?`,
+                    confirmLabel: 'Lanjutkan Override',
+                    danger: true,
+                });
                 if (override) {
                     try {
                         await InvApi.voidTransaction(transactionId, { request_uuid: voidUuids.get(transactionId), reason: reason.trim(), superadmin_override: true });

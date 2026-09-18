@@ -116,3 +116,117 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
     .kpi-value { font-size: 1.3rem; }
     th, td { padding: 8px; font-size: 0.78rem; }
 }
+
+/* ============================================================
+   PHASE V2 — sidebar layout, drawer, data-table extras, status
+   pills. Reuses the existing dark-navy tokens above (--bg/--bg2/
+   --bg3/--card/--accent/--accent2/--green/--orange/--red) rather
+   than introducing a new palette, so the V2 look is a structural
+   change (sidebar instead of a tab bar, drawers instead of full
+   page navigation) on the SAME visual system, not a new theme.
+   ============================================================ */
+
+.app-shell-v2 { display: flex; min-height: 100vh; }
+
+.sidebar {
+    width: 248px; flex-shrink: 0; background: var(--bg2); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; overflow-y: auto;
+    transition: transform 0.2s, width 0.2s;
+}
+.sidebar-brand { display: flex; align-items: center; gap: 10px; padding: 18px 16px; border-bottom: 1px solid var(--border); }
+.sidebar-group { padding: 14px 10px 4px; }
+.sidebar-group-label { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; color: var(--text3); padding: 0 10px 6px; letter-spacing: 0.04em; }
+.sidebar-link {
+    display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: var(--radius-sm);
+    color: var(--text2); font-weight: 600; font-size: 0.85rem; cursor: pointer; text-decoration: none;
+    white-space: nowrap; transition: 0.15s; border: 1px solid transparent;
+}
+.sidebar-link:hover { background: var(--bg3); color: var(--text); }
+.sidebar-link.active { background: linear-gradient(135deg, rgba(59,130,246,0.18), rgba(99,102,241,0.18)); color: var(--accent); border-color: rgba(59,130,246,0.3); }
+.sidebar-link .icon { width: 18px; text-align: center; flex-shrink: 0; }
+
+.sidebar-toggle { display: none; }
+.app-content-v2 { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.app-main-v2 { max-width: 1500px; width: 100%; margin: 0 auto; padding: 20px 20px 40px; flex: 1; }
+
+@media (max-width: 900px) {
+    .sidebar { position: fixed; left: 0; z-index: 900; transform: translateX(-100%); box-shadow: 0 0 40px rgba(0,0,0,0.5); }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar-toggle { display: inline-flex; }
+    .sidebar-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 890; }
+    .sidebar-backdrop.open { display: block; }
+}
+
+/* breadcrumb */
+.breadcrumb { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; color: var(--text3); margin-bottom: 14px; }
+.breadcrumb .sep { opacity: 0.5; }
+.breadcrumb .current { color: var(--text); font-weight: 600; }
+
+/* KPI "need attention" row + quick actions, shared by the dashboard */
+.attention-item { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg3); margin-bottom: 8px; font-size: 0.82rem; }
+.attention-item .count { font-weight: 800; color: var(--orange); }
+.quick-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* status pills — SAFE/LOW/CRITICAL/OUT_OF_STOCK/REVIEW, reusing .badge's shape */
+.badge-status-safe { background: rgba(16,185,129,0.15); color: var(--green); }
+.badge-status-low { background: rgba(245,158,11,0.15); color: var(--orange); }
+.badge-status-critical { background: rgba(239,68,68,0.15); color: var(--red); }
+.badge-status-out_of_stock { background: rgba(100,116,139,0.2); color: var(--text2); }
+.badge-status-migration_negative_review { background: rgba(168,85,247,0.15); color: #c084fc; }
+.buffer-unconfigured-note { font-size: 0.68rem; color: var(--text3); font-style: italic; margin-top: 2px; }
+
+/* data-table: sticky header, column-picker, toolbar */
+.dt-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.dt-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dt-filters input, .dt-filters select { width: auto; min-width: 140px; }
+.dt-wrapper { overflow: auto; max-height: 68vh; border-radius: var(--radius-sm); border: 1px solid var(--border); }
+.dt-wrapper table { width: 100%; }
+.dt-wrapper thead th { position: sticky; top: 0; z-index: 5; background: var(--bg3); }
+.dt-wrapper tbody tr { cursor: pointer; }
+.dt-wrapper tbody tr:hover { background: rgba(59,130,246,0.06); }
+.dt-sort-icon { opacity: 0.5; font-size: 0.7rem; margin-left: 4px; }
+.dt-pagination { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 12px; font-size: 0.8rem; color: var(--text2); }
+.dt-pagination .btn { padding: 6px 12px; }
+.dt-column-picker { position: relative; }
+.dt-column-picker-panel {
+    display: none; position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; min-width: 200px;
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px;
+    box-shadow: 0 12px 30px rgba(0,0,0,0.4); max-height: 320px; overflow-y: auto;
+}
+.dt-column-picker-panel.open { display: block; }
+.dt-column-picker-panel label { display: flex; align-items: center; gap: 8px; font-weight: 500; text-transform: none; font-size: 0.8rem; padding: 4px 0; color: var(--text2); }
+.dt-column-picker-panel input[type="checkbox"] { width: auto; }
+.dt-skeleton-row td { background: linear-gradient(90deg, var(--bg3) 25%, rgba(255,255,255,0.03) 37%, var(--bg3) 63%); background-size: 400% 100%; animation: dtSkeleton 1.4s ease infinite; height: 18px; }
+@keyframes dtSkeleton { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+.dt-empty, .dt-error { text-align: center; padding: 40px 20px; color: var(--text3); }
+
+/* drawer: slide-over detail panel */
+.drawer-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 1100; }
+.drawer-backdrop.open { display: block; }
+.drawer { position: fixed; top: 0; right: 0; height: 100vh; width: min(560px, 100vw); background: var(--card); border-left: 1px solid var(--border); z-index: 1101; transform: translateX(100%); transition: transform 0.25s ease; display: flex; flex-direction: column; }
+.drawer.open { transform: translateX(0); }
+.drawer-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.drawer-title { font-size: 1rem; font-weight: 800; }
+.drawer-close { background: transparent; border: none; color: var(--text3); font-size: 1.2rem; cursor: pointer; padding: 4px 8px; }
+.drawer-close:hover { color: var(--text); }
+.drawer-tabs { display: flex; gap: 4px; padding: 10px 16px 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
+.drawer-tab { background: transparent; border: none; padding: 8px 14px; color: var(--text3); font-weight: 600; font-size: 0.8rem; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
+.drawer-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.drawer-body { flex: 1; overflow-y: auto; padding: 16px 20px; }
+.drawer-section { margin-bottom: 18px; }
+.drawer-section-title { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; color: var(--text3); margin-bottom: 8px; }
+.drawer-kv { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+.drawer-kv .k { font-size: 0.72rem; color: var(--text3); }
+.drawer-kv .v { font-size: 0.9rem; font-weight: 600; }
+
+/* stepper (Stock IN/OUT) */
+.stepper { display: flex; align-items: center; gap: 6px; margin-bottom: 18px; flex-wrap: wrap; }
+.stepper-step { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 20px; background: var(--bg3); color: var(--text3); font-size: 0.78rem; font-weight: 700; }
+.stepper-step.active { background: rgba(59,130,246,0.18); color: var(--accent); }
+.stepper-step.done { background: rgba(16,185,129,0.15); color: var(--green); }
+.stepper-sep { color: var(--text3); font-size: 0.75rem; }
+
+@media (max-width: 640px) {
+    .drawer { width: 100vw; }
+    .app-main-v2 { padding: 14px 12px 30px; }
+}

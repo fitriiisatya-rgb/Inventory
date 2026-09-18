@@ -47,17 +47,37 @@
         activateTab(savedTab);
     }
 
+    const TAB_LABELS = {
+        dashboard: 'Dashboard', 'stok-barang': 'Stok Barang', master: 'Master Data',
+        'master-vendor': 'Vendor / Supplier', 'master-bakery': 'Bakery Tujuan', 'master-category': 'Kategori',
+        laporan: 'Mutasi Stok / Ledger', 'history-transaksi': 'History Transaksi', transaksi: 'Stock IN / OUT',
+        transfer: 'Transfer', produksi: 'Produksi', opname: 'Stock Opname', import: 'Import',
+        audit: 'Audit Log', closing: 'Tutup Buku',
+    };
+
     function activateTab(name) {
-        document.querySelectorAll('.tab-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === name));
+        document.querySelectorAll('.sidebar-link').forEach((link) => link.classList.toggle('active', link.dataset.tab === name));
         document.querySelectorAll('.tab-content').forEach((el) => el.classList.toggle('active', el.id === `tab-${name}`));
+        const breadcrumbCurrent = document.getElementById('breadcrumb-current');
+        if (breadcrumbCurrent) breadcrumbCurrent.textContent = TAB_LABELS[name] || name;
         try { sessionStorage.setItem('inv_active_tab', name); } catch (e) { /* ignore, cosmetic only */ }
 
         if (name === 'dashboard') {
             Dashboard.render(document.getElementById('tab-dashboard'));
+        } else if (name === 'stok-barang') {
+            StockReport.render(document.getElementById('tab-stok-barang'));
         } else if (name === 'master') {
             renderMasterTab(document.getElementById('tab-master'));
+        } else if (name === 'master-vendor') {
+            MasterVendors.render(document.getElementById('tab-master-vendor'));
+        } else if (name === 'master-bakery') {
+            MasterBakeryDestinations.render(document.getElementById('tab-master-bakery'));
+        } else if (name === 'master-category') {
+            MasterCategories.render(document.getElementById('tab-master-category'));
         } else if (name === 'laporan') {
             Reports.render(document.getElementById('tab-laporan'));
+        } else if (name === 'history-transaksi') {
+            TransactionHistory.render(document.getElementById('tab-history-transaksi'));
         } else if (name === 'transaksi') {
             const tabEl = document.getElementById('tab-transaksi');
             Transactions.render(tabEl);
@@ -97,8 +117,8 @@
         container.appendChild(section('Divisi', Master.divisions().map((d) => [d.code, d.name]), ['Kode', 'Nama']));
     }
 
-    document.querySelectorAll('.tab-btn').forEach((btn) => {
-        btn.addEventListener('click', () => activateTab(btn.dataset.tab));
+    document.querySelectorAll('.sidebar-link').forEach((link) => {
+        link.addEventListener('click', () => activateTab(link.dataset.tab));
     });
 
     document.getElementById('logout-btn').addEventListener('click', async () => {
