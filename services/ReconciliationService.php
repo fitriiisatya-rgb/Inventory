@@ -35,12 +35,34 @@ final class ReconciliationService
 
         $companyValue = InventoryService::companyTotalValue($pdo);
 
-        // ---- Negative stock: aggregate qty per item+warehouse must never be < 0 ----
+        // ---- Negative stock: unexpected negative balances are ERROR.
+        // Owner-approved migration-negative balances are tracked separately
+        // as WARNING until resolved by audited Stock Opname/Stock Adjustment.
         $negativeStock = $pdo->query(
-            'SELECT item_id, warehouse_id, SUM(qty_base) AS qty_base
-             FROM inventory_batches GROUP BY item_id, warehouse_id HAVING SUM(qty_base) < 0'
+            "SELECT n.item_id, n.warehouse_id, n.qty_base
+             FROM (
+                 SELECT item_id, warehouse_id, SUM(qty_base) AS qty_base
+                 FROM inventory_batches
+                 GROUP BY item_id, warehouse_id
+                 HAVING SUM(qty_base) < 0
+             ) n
+             WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM movement_reconciliation_reviews mrr
+                 JOIN items i ON i.sku = mrr.sku
+                 JOIN warehouses w ON w.code = mrr.warehouse_code
+                 WHERE mrr.is_migration_negative_approved = 1
+                   AND i.id = n.item_id
+                   AND w.id = n.warehouse_id
+             )"
         )->fetchAll();
         $checks['negative_stock'] = self::check($negativeStock, 'ERROR');
+
+        $migrationNegativeReview = array_values(array_filter(
+            MigrationNegativeStockService::reviewList($pdo),
+            static fn (array $row): bool => ($row['status'] ?? '') === 'MIGRATION_NEGATIVE_REVIEW'
+        ));
+        $checks['migration_negative_review'] = self::check($migrationNegativeReview, 'WARNING');
 
         // ---- Zero-cost batches still holding positive quantity ----
         $zeroCost = $pdo->query(
@@ -86,7 +108,9 @@ final class ReconciliationService
              FROM inventory_transaction_lines l
              JOIN inventory_transactions t ON t.id = l.transaction_id
              LEFT JOIN fifo_allocations fa ON fa.transaction_line_id = l.id
-             WHERE t.transaction_type IN ('OUT','TRANSFER_OUT','PRODUCTION_IN') AND t.status = 'POSTED'
+             WHERE t.transaction_type IN ('OUT','TRANSFER_OUT','PRODUCTION_IN')
+               AND t.status = 'POSTED'
+               AND t.inventory_effect <> 0
              GROUP BY l.id, l.transaction_id, l.base_qty
              HAVING ABS(ABS(l.base_qty) - COALESCE(SUM(fa.qty_allocated), 0)) > 0.0005"
         )->fetchAll();
@@ -101,13 +125,13 @@ final class ReconciliationService
         // touched those batches outside the opening import itself.
         $openingValueMismatch = $pdo->query(
             "SELECT so.id AS stock_opening_id, so.control_total_value AS expected,
-                    COALESCE(SUM(b.qty_base * b.unit_cost_base), 0) AS actual
+                    COALESCE(SUM(b.original_qty_base * b.unit_cost_base), 0) AS actual
              FROM stock_openings so
              JOIN stock_opening_lines sol ON sol.stock_opening_id = so.id AND sol.created_batch_id IS NOT NULL
              JOIN inventory_batches b ON b.id = sol.created_batch_id
              WHERE so.status = 'COMMITTED' AND so.control_total_value IS NOT NULL
              GROUP BY so.id, so.control_total_value
-             HAVING ABS(so.control_total_value - COALESCE(SUM(b.qty_base * b.unit_cost_base), 0)) > 1"
+             HAVING ABS(so.control_total_value - COALESCE(SUM(b.original_qty_base * b.unit_cost_base), 0)) > 1"
         )->fetchAll();
         $checks['opening_value_consistency'] = self::check($openingValueMismatch, 'ERROR');
 

@@ -53,7 +53,7 @@ final class OpeningReconciliationService
         $controlTotalMatch = 'PASS';
         if ($opening['status'] === 'COMMITTED') {
             $actual = $pdo->prepare(
-                'SELECT COALESCE(SUM(b.qty_base * b.unit_cost_base), 0)
+                'SELECT COALESCE(SUM(b.original_qty_base * b.unit_cost_base), 0)
                  FROM stock_opening_lines sol JOIN inventory_batches b ON b.id = sol.created_batch_id
                  WHERE sol.stock_opening_id = :id AND sol.created_batch_id IS NOT NULL'
             );
@@ -69,7 +69,19 @@ final class OpeningReconciliationService
                 'SELECT COUNT(*) FROM stock_opening_lines sol
                  JOIN inventory_batches b ON b.id = sol.created_batch_id
                  WHERE sol.stock_opening_id = :id
-                   AND (ABS(b.qty_base - sol.qty_base) > 0.000001 OR ABS(b.unit_cost_base - sol.unit_cost_base) > 0.0001)'
+                   AND (
+                       ABS(
+                           COALESCE(
+                               (SELECT SUM(cur.qty_base)
+                                FROM inventory_batches cur
+                                WHERE cur.item_id = sol.item_id
+                                  AND cur.warehouse_id = sol.warehouse_id),
+                               0
+                           ) - sol.qty_base
+                       ) > 0.000001
+                       OR ABS(b.original_qty_base - sol.qty_base) > 0.000001
+                       OR ABS(b.unit_cost_base - sol.unit_cost_base) > 0.0001
+                   )'
             );
             $mismatchStmt->execute(['id' => $openingId]);
             $currentStockEqualsOpening = ((int) $mismatchStmt->fetchColumn() === 0) ? 'PASS' : 'FAIL';
