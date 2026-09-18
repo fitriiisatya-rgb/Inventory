@@ -224,15 +224,24 @@ final class FifoService
         $now = date('Y-m-d H:i:s');
         $txType = $p['transaction_type'] ?? 'OUT';
 
+        // PHASE V2: bakery_destination_id is only ever persisted for a real
+        // OUT transaction (matches the DB-level chk_tx_bakery_destination_out_only
+        // CHECK constraint — see docs/PHASE_V2_SCHEMA_IMPACT.md Section 3).
+        // TRANSFER_OUT/PRODUCTION_IN also flow through this method but must
+        // never carry it, so this is enforced here at the service layer too,
+        // not left to rely on the DB constraint alone.
+        $bakeryDestinationId = $txType === 'OUT' ? ($p['bakery_destination_id'] ?? null) : null;
+
         $txStmt = $pdo->prepare(
             'INSERT INTO inventory_transactions
                 (transaction_uuid, transaction_type, transaction_date, posting_date, warehouse_id, supplier_id,
-                 division_id, reference_no, status, is_historical_import, inventory_effect, created_by, created_at)
-             VALUES (:uuid, :type, :tx_date, :post_date, :wh, NULL, :division, :ref, :status_posted, 0, 1, :created_by, :created_at)'
+                 division_id, bakery_destination_id, reference_no, status, is_historical_import, inventory_effect, created_by, created_at)
+             VALUES (:uuid, :type, :tx_date, :post_date, :wh, NULL, :division, :bakery_destination, :ref, :status_posted, 0, 1, :created_by, :created_at)'
         );
         $txStmt->execute([
             'uuid' => $p['transaction_uuid'], 'type' => $txType, 'tx_date' => $p['transaction_date'],
             'post_date' => $now, 'wh' => $p['warehouse_id'], 'division' => $p['division_id'] ?? null,
+            'bakery_destination' => $bakeryDestinationId,
             'ref' => $p['reference_no'] ?? null, 'status_posted' => 'POSTED',
             'created_by' => $p['created_by'], 'created_at' => $now,
         ]);

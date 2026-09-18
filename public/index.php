@@ -24,6 +24,8 @@ require_once __DIR__ . '/../services/PriceAnomalyService.php';
 require_once __DIR__ . '/../services/IdempotencyService.php';
 require_once __DIR__ . '/../services/MigrationNegativeStockService.php';
 require_once __DIR__ . '/../services/StockPolicyService.php';
+require_once __DIR__ . '/../services/SupplierService.php';
+require_once __DIR__ . '/../services/BakeryDestinationService.php';
 require_once __DIR__ . '/../services/InventoryService.php';
 require_once __DIR__ . '/../services/FifoService.php';
 require_once __DIR__ . '/../services/PeriodLockService.php';
@@ -57,6 +59,9 @@ use App\Services\UnitConversionNotApprovedException;
 use App\Services\NegativeMigrationStockRequiresAdjustmentException;
 use App\Services\MigrationNegativeStockService;
 use App\Services\StockPolicyService;
+use App\Services\SupplierService;
+use App\Services\BakeryDestinationService;
+use App\Services\AuditService;
 use App\Services\RateLimitedException;
 use App\Services\NotFoundException;
 use App\Services\TransferAlreadyReceivedException;
@@ -291,6 +296,99 @@ $routes = [
         inv_require_auth();
         inv_ok($pdo->query('SELECT * FROM suppliers ORDER BY name')->fetchAll(), 'OK');
     },
+    // PHASE V2: Master Vendor/Supplier CRUD (audited: suppliers already
+    // existed as an import-only table — this is the first write path).
+    // Soft-delete only via PUT .../{id} with is_active:false — never DELETE.
+    'POST /suppliers' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_SUPPLIER_MANAGE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => SupplierService::create($tx, $input));
+        inv_ok($result, 'Supplier created');
+    },
+    'PUT /suppliers/{id}' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_SUPPLIER_MANAGE');
+        $input['updated_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => SupplierService::update($tx, (int) $params['id'], $input));
+        inv_ok($result, 'Supplier updated');
+    },
+
+    // PHASE V2: Master Bakery Tujuan — a distribution endpoint for OUT
+    // transactions, deliberately separate from warehouses/divisions (see
+    // docs/PHASE_V2_TECHNICAL_DESIGN.md Section 5). GET is authenticated-
+    // only (no special permission) since every STOCK user posting an OUT
+    // needs this list; write is gated on MASTER_BAKERY_DESTINATION_MANAGE.
+    'GET /bakery-destinations' => function () use ($pdo) {
+        inv_require_auth();
+        inv_ok($pdo->query('SELECT * FROM bakery_destinations ORDER BY name')->fetchAll(), 'OK');
+    },
+    'POST /bakery-destinations' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_BAKERY_DESTINATION_MANAGE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => BakeryDestinationService::create($tx, $input));
+        inv_ok($result, 'Bakery destination created');
+    },
+    'PUT /bakery-destinations/{id}' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_BAKERY_DESTINATION_MANAGE');
+        $input['updated_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => BakeryDestinationService::update($tx, (int) $params['id'], $input));
+        inv_ok($result, 'Bakery destination updated');
+    },
+
+    // PHASE V2: category master (read-only route here; write is
+    // MASTER_CATEGORY_MANAGE-gated, added alongside for the same reason
+    // suppliers/bakery-destinations need both a list and a manage path).
+    'GET /categories' => function () use ($pdo) {
+        inv_require_auth();
+        inv_ok($pdo->query('SELECT * FROM categories WHERE is_active = 1 ORDER BY name')->fetchAll(), 'OK');
+    },
+    'POST /categories' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_CATEGORY_MANAGE');
+        $code = trim((string) ($input['code'] ?? ''));
+        $name = trim((string) ($input['name'] ?? ''));
+        if ($code === '' || $name === '') {
+            throw new ValidationException(['code and name cannot be blank']);
+        }
+        $existing = $pdo->prepare('SELECT id FROM categories WHERE code = :c');
+        $existing->execute(['c' => $code]);
+        if ($existing->fetchColumn() !== false) {
+            throw new ValidationException(["category code '{$code}' already exists"]);
+        }
+        $stmt = $pdo->prepare('INSERT INTO categories (code, name, is_active) VALUES (:c, :n, 1)');
+        $stmt->execute(['c' => $code, 'n' => $name]);
+        $categoryId = (int) $pdo->lastInsertId();
+        AuditService::log($pdo, $user['id'], $user['username'], 'CATEGORY_CREATE', 'categories', $categoryId, null, ['code' => $code, 'name' => $name], null);
+        inv_ok(['success' => true, 'category_id' => $categoryId], 'Category created');
+    },
+    'PUT /categories/{id}' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_CATEGORY_MANAGE');
+        $categoryId = (int) $params['id'];
+        $existing = $pdo->prepare('SELECT * FROM categories WHERE id = :id');
+        $existing->execute(['id' => $categoryId]);
+        $before = $existing->fetch();
+        if ($before === false) {
+            inv_error(404, 'NOT_FOUND', 'category not found');
+        }
+        $name = isset($input['name']) ? trim((string) $input['name']) : $before['name'];
+        if ($name === '') {
+            throw new ValidationException(['name cannot be blank']);
+        }
+        $isActive = array_key_exists('is_active', $input) ? (int) (bool) $input['is_active'] : (int) $before['is_active'];
+        $pdo->prepare('UPDATE categories SET name = :n, is_active = :a WHERE id = :id')
+            ->execute(['n' => $name, 'a' => $isActive, 'id' => $categoryId]);
+        AuditService::log($pdo, $user['id'], $user['username'], 'CATEGORY_UPDATE', 'categories', $categoryId, ['name' => $before['name'], 'is_active' => (int) $before['is_active']], ['name' => $name, 'is_active' => $isActive], null);
+        inv_ok(['success' => true, 'category_id' => $categoryId], 'Category updated');
+    },
+
     'GET /divisions' => function () use ($pdo) {
         inv_require_auth();
         inv_ok($pdo->query('SELECT * FROM divisions ORDER BY name')->fetchAll(), 'OK');
