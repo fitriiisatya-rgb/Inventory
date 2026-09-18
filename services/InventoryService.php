@@ -55,7 +55,7 @@ final class InventoryService
         foreach ($rows as &$r) {
             $r['qty_base'] = round((float) $r['qty'], 6);
             $r['value'] = round((float) $r['value'], 4);
-            unset($r['qty'], $r['value']);
+            unset($r['qty']);
             $flags = MigrationNegativeStockService::flagsFor($pdo, $itemId, (int) $r['warehouse_id'], $r['qty_base']);
             $r += $flags;
             $anyUnresolved = $anyUnresolved || $flags['migration_negative_review'];
@@ -103,6 +103,90 @@ final class InventoryService
              WHERE wt.status = 'PENDING'"
         )->fetchColumn();
         return round((float) $value, 4);
+    }
+
+    /**
+     * Dashboard summary for one warehouse-scoped STOCK user.
+     * Pending transfer value remains attributed to its source warehouse
+     * until the destination receives it.
+     */
+    public static function warehouseDashboardSummary(PDO $pdo, int $warehouseId): array
+    {
+        $warehouseStmt = $pdo->prepare(
+            'SELECT id, code, name
+             FROM warehouses
+             WHERE id = :wh
+             LIMIT 1'
+        );
+        $warehouseStmt->execute(['wh' => $warehouseId]);
+        $warehouse = $warehouseStmt->fetch();
+
+        if (!$warehouse) {
+            throw new NotFoundException('warehouse not found');
+        }
+
+        $onHandStmt = $pdo->prepare(
+            'SELECT COALESCE(SUM(qty_base * unit_cost_base), 0)
+             FROM inventory_batches
+             WHERE warehouse_id = :wh'
+        );
+        $onHandStmt->execute(['wh' => $warehouseId]);
+        $onHand = round((float) $onHandStmt->fetchColumn(), 4);
+
+        $transitStmt = $pdo->prepare(
+            "SELECT COALESCE(SUM(wtl.qty_base * wtl.unit_cost_base), 0)
+             FROM warehouse_transfer_lines wtl
+             JOIN warehouse_transfers wt
+               ON wt.id = wtl.transfer_id
+             WHERE wt.status = 'PENDING'
+               AND wt.from_warehouse_id = :wh"
+        );
+        $transitStmt->execute(['wh' => $warehouseId]);
+        $inTransit = round((float) $transitStmt->fetchColumn(), 4);
+
+        $skuStmt = $pdo->prepare(
+            'SELECT COUNT(*) FROM (
+                 SELECT item_id
+                 FROM inventory_batches
+                 WHERE warehouse_id = :wh
+                 GROUP BY item_id
+                 HAVING ABS(SUM(qty_base)) > 0.0000005
+             ) scoped_stock'
+        );
+        $skuStmt->execute(['wh' => $warehouseId]);
+        $skuWithStock = (int) $skuStmt->fetchColumn();
+
+        $totalSku = (int) $pdo->query(
+            'SELECT COUNT(*) FROM items'
+        )->fetchColumn();
+
+        $hasMigrationNegative = false;
+
+        foreach (MigrationNegativeStockService::reviewList($pdo) as $row) {
+            if (
+                (int) ($row['warehouse_id'] ?? 0) === $warehouseId
+                && ($row['status'] ?? '') === 'MIGRATION_NEGATIVE_REVIEW'
+            ) {
+                $hasMigrationNegative = true;
+                break;
+            }
+        }
+
+        return [
+            'on_hand_value' => $onHand,
+            'in_transit_value' => $inTransit,
+            'total_value' => round($onHand + $inTransit, 4),
+            'contains_unresolved_migration_negative_stock' => $hasMigrationNegative,
+            'scope_warehouse_id' => $warehouseId,
+            'total_sku' => $totalSku,
+            'sku_with_stock' => $skuWithStock,
+            'value_per_warehouse' => [[
+                'warehouse_id' => (int) $warehouse['id'],
+                'code' => $warehouse['code'],
+                'name' => $warehouse['name'],
+                'value' => $onHand,
+            ]],
+        ];
     }
 
     public static function companyTotalValue(PDO $pdo): array

@@ -7,25 +7,67 @@
  */
 const Transfers = (() => {
     let lineCount = 0;
+    let transferWarehouses = [];
+    let sourceWarehouseId = null;
+
     const receiveUuids = new Map();
     const cancelUuids = new Map();
 
-    function render(container) {
-        container.innerHTML = '';
-        container.appendChild(buildCreateForm());
-        container.appendChild(UI.el('div', { id: 'transfer-list-wrap' }));
-        loadList();
+    async function render(container) {
+        container.innerHTML =
+            '<div class="alert alert-info">Memuat modul transfer...</div>';
+
+        try {
+            const options = await InvApi.transferDestinations();
+
+            transferWarehouses = options.warehouses || [];
+            sourceWarehouseId = options.source_warehouse_id
+                ? Number(options.source_warehouse_id)
+                : null;
+
+            container.innerHTML = '';
+            container.appendChild(buildCreateForm());
+            container.appendChild(
+                UI.el('div', { id: 'transfer-list-wrap' })
+            );
+
+            loadList();
+        } catch (err) {
+            UI.handleApiError(err);
+            container.innerHTML =
+                `<div class="alert alert-error">Gagal memuat modul transfer: ${(err && err.message) || ''}</div>`;
+        }
     }
 
     function buildCreateForm() {
-        const whOptions = Master.warehouses().map((w) => `<option value="${w.id}">${w.name}</option>`).join('');
+        const allWarehouseOptions = transferWarehouses
+            .map((w) => `<option value="${w.id}">${w.name}</option>`)
+            .join('');
+
+        const fromWarehouseOptions = sourceWarehouseId !== null
+            ? transferWarehouses
+                .filter((w) => Number(w.id) === sourceWarehouseId)
+                .map((w) => `<option value="${w.id}">${w.name}</option>`)
+                .join('')
+            : allWarehouseOptions;
+
+        const toWarehouseOptions = sourceWarehouseId !== null
+            ? transferWarehouses
+                .filter((w) => Number(w.id) !== sourceWarehouseId)
+                .map((w) => `<option value="${w.id}">${w.name}</option>`)
+                .join('')
+            : allWarehouseOptions;
+
+        const sourceDisabled =
+            sourceWarehouseId !== null ? ' disabled' : '';
+
         lineCount = 0;
         const card = UI.el('div', { class: 'card' }, [
             UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '🚚 Buat Transfer Baru')]),
             UI.el('div', { id: 'transfer-create-alert' }),
             UI.el('div', { class: 'grid-3', html: `
-                <div class="form-group"><label>Gudang Asal</label><select id="transfer-from-wh">${whOptions}</select></div>
-                <div class="form-group"><label>Gudang Tujuan</label><select id="transfer-to-wh">${whOptions}</select></div>
+                <div class="form-group"><label>Gudang Asal</label><select id="transfer-from-wh"${sourceDisabled}>${fromWarehouseOptions}</select></div>
+                <div class="form-group"><label>Gudang Tujuan</label><select id="transfer-to-wh">${toWarehouseOptions}</select></div>
                 <div class="form-group"><label>Tanggal Kirim</label><input type="date" id="transfer-ship-date" value="${new Date().toISOString().slice(0, 10)}"></div>
             ` }),
             UI.el('div', { id: 'transfer-lines' }),
@@ -74,6 +116,17 @@ const Transfers = (() => {
         alertBox.innerHTML = '';
         const fromWh = document.getElementById('transfer-from-wh').value;
         const toWh = document.getElementById('transfer-to-wh').value;
+        if (!fromWh || !toWh) {
+            alertBox.appendChild(
+                UI.el(
+                    'div',
+                    { class: 'alert alert-error' },
+                    'Gudang asal dan tujuan wajib dipilih.'
+                )
+            );
+            return;
+        }
+
         if (fromWh === toWh) {
             alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Gudang asal dan tujuan harus berbeda.'));
             return;
@@ -141,7 +194,10 @@ const Transfers = (() => {
     }
 
     function whName(id) {
-        const wh = Master.warehouseById(id);
+        const wh = transferWarehouses.find(
+            (row) => Number(row.id) === Number(id)
+        ) || Master.warehouseById(id);
+
         return wh ? wh.name : `#${id}`;
     }
 
@@ -152,10 +208,7 @@ const Transfers = (() => {
             UI.el('td', {}, whName(t.to_warehouse_id)),
             UI.el('td', {}, UI.formatDate(t.ship_date)),
             UI.el('td', {}, UI.el('span', { class: `badge ${UI.badgeClass(t.status)}` }, t.status)),
-            UI.el('td', {}, t.status === 'PENDING' ? [
-                UI.el('button', { class: 'btn btn-success btn-sm transfer-receive-btn', 'data-id': String(t.id) }, 'Konfirmasi Terima'),
-                UI.el('button', { class: 'btn btn-danger btn-sm transfer-cancel-btn', 'data-id': String(t.id), style: 'margin-left:6px;' }, 'Batalkan'),
-            ] : '-'),
+            UI.el('td', {}, transferActions(t)),
         ]));
         return UI.el('div', { class: 'table-wrapper' }, [
             UI.el('table', {}, [
@@ -163,6 +216,49 @@ const Transfers = (() => {
                 UI.el('tbody', {}, body.length ? body : [UI.el('tr', {}, [UI.el('td', { colspan: '6' }, 'Belum ada transfer')])]),
             ]),
         ]);
+    }
+
+    function transferActions(t) {
+        if (t.status !== 'PENDING') {
+            return '-';
+        }
+
+        // ADMIN/SUPERADMIN: backend permission remains authoritative.
+        if (sourceWarehouseId === null) {
+            return [
+                UI.el('button', {
+                    class: 'btn btn-success btn-sm transfer-receive-btn',
+                    'data-id': String(t.id)
+                }, 'Konfirmasi Terima'),
+                UI.el('button', {
+                    class: 'btn btn-danger btn-sm transfer-cancel-btn',
+                    'data-id': String(t.id),
+                    style: 'margin-left:6px;'
+                }, 'Batalkan'),
+            ];
+        }
+
+        const actions = [];
+
+        if (Number(t.to_warehouse_id) === sourceWarehouseId) {
+            actions.push(
+                UI.el('button', {
+                    class: 'btn btn-success btn-sm transfer-receive-btn',
+                    'data-id': String(t.id)
+                }, 'Konfirmasi Terima')
+            );
+        }
+
+        if (Number(t.from_warehouse_id) === sourceWarehouseId) {
+            actions.push(
+                UI.el('button', {
+                    class: 'btn btn-danger btn-sm transfer-cancel-btn',
+                    'data-id': String(t.id)
+                }, 'Batalkan')
+            );
+        }
+
+        return actions.length ? actions : '-';
     }
 
     function wireRowActions() {

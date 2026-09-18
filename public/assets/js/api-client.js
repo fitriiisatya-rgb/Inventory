@@ -126,6 +126,7 @@ const InvApi = (() => {
         voidTransaction: (transactionId, payload) => request('POST', `/transactions/${transactionId}/void`, payload),
 
         // ---- transfers ----
+        transferDestinations: () => request('GET', '/transfer-destinations'),
         createTransfer: (payload) => request('POST', '/transfers', payload),
         receiveTransfer: (id, payload) => request('POST', `/transfers/${id}/receive`, payload),
         cancelTransfer: (id, payload) => request('POST', `/transfers/${id}/cancel`, payload),

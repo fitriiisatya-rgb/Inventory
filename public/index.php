@@ -270,8 +270,20 @@ $routes = [
         inv_ok($pdo->query('SELECT * FROM items ORDER BY name')->fetchAll(), 'OK');
     },
     'GET /warehouses' => function () use ($pdo) {
-        inv_require_auth();
-        inv_ok($pdo->query('SELECT * FROM warehouses ORDER BY name')->fetchAll(), 'OK');
+        $user = inv_require_auth();
+
+        if ($user['role_code'] === 'STOCK' && $user['warehouse_id'] !== null) {
+            $stmt = $pdo->prepare(
+                'SELECT * FROM warehouses WHERE id = :id AND is_active = 1 ORDER BY name'
+            );
+            $stmt->execute(['id' => (int) $user['warehouse_id']]);
+            inv_ok($stmt->fetchAll(), 'OK');
+        }
+
+        inv_ok(
+            $pdo->query('SELECT * FROM warehouses ORDER BY name')->fetchAll(),
+            'OK'
+        );
     },
     'GET /suppliers' => function () use ($pdo) {
         inv_require_auth();
@@ -298,37 +310,162 @@ $routes = [
 
     // ---- InventoryService: single source of truth reads (Section 7) ----
     'GET /inventory/current' => function () use ($pdo, $query) {
-        inv_require_auth();
-        inv_ok(InventoryService::currentStock($pdo, (int) $query['item_id'], (int) $query['warehouse_id']), 'OK');
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $warehouseId = (int) ($query['warehouse_id'] ?? 0);
+        if ($warehouseId <= 0) {
+            throw new ValidationException(['warehouse_id is required']);
+        }
+
+        inv_require_warehouse_scope($user, $warehouseId);
+
+        inv_ok(
+            InventoryService::currentStock(
+                $pdo,
+                (int) $query['item_id'],
+                $warehouseId
+            ),
+            'OK'
+        );
     },
+
     'GET /inventory/current/{sku}' => function (array $params) use ($pdo, $query) {
-        inv_require_auth();
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
         $item = $pdo->prepare('SELECT id FROM items WHERE sku = :sku');
         $item->execute(['sku' => $params['sku']]);
         $itemId = $item->fetchColumn();
+
         if ($itemId === false) {
             inv_error(404, 'NOT_FOUND', 'SKU not found');
         }
+
         if (isset($query['warehouse_id'])) {
-            inv_ok(InventoryService::currentStock($pdo, (int) $itemId, (int) $query['warehouse_id']), 'OK');
+            $warehouseId = (int) $query['warehouse_id'];
+            inv_require_warehouse_scope($user, $warehouseId);
+
+            inv_ok(
+                InventoryService::currentStock(
+                    $pdo,
+                    (int) $itemId,
+                    $warehouseId
+                ),
+                'OK'
+            );
         }
-        inv_ok(InventoryService::currentStockAllWarehouses($pdo, (int) $itemId), 'OK');
+
+        // STOCK user without warehouse_id must still remain inside
+        // their assigned warehouse.
+        if (
+            $user['role_code'] === 'STOCK'
+            && $user['warehouse_id'] !== null
+        ) {
+            inv_ok(
+                InventoryService::currentStock(
+                    $pdo,
+                    (int) $itemId,
+                    (int) $user['warehouse_id']
+                ),
+                'OK'
+            );
+        }
+
+        inv_ok(
+            InventoryService::currentStockAllWarehouses(
+                $pdo,
+                (int) $itemId
+            ),
+            'OK'
+        );
     },
+
     'GET /inventory/batches' => function () use ($pdo, $query) {
-        inv_require_auth();
-        inv_ok(InventoryService::batches($pdo, (int) $query['item_id'], (int) $query['warehouse_id']), 'OK');
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $warehouseId = (int) ($query['warehouse_id'] ?? 0);
+        if ($warehouseId <= 0) {
+            throw new ValidationException(['warehouse_id is required']);
+        }
+
+        inv_require_warehouse_scope($user, $warehouseId);
+
+        inv_ok(
+            InventoryService::batches(
+                $pdo,
+                (int) $query['item_id'],
+                $warehouseId
+            ),
+            'OK'
+        );
     },
+
     'GET /inventory/value' => function () use ($pdo) {
-        inv_require_auth();
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        if (
+            $user['role_code'] === 'STOCK'
+            && $user['warehouse_id'] !== null
+        ) {
+            inv_ok(
+                InventoryService::warehouseDashboardSummary(
+                    $pdo,
+                    (int) $user['warehouse_id']
+                ),
+                'OK'
+            );
+        }
+
         inv_ok(InventoryService::companyTotalValue($pdo), 'OK');
     },
+
     'GET /inventory/in-transit' => function () use ($pdo) {
-        inv_require_auth();
-        inv_ok(['in_transit_value' => InventoryService::inTransitValue($pdo)], 'OK');
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        if (
+            $user['role_code'] === 'STOCK'
+            && $user['warehouse_id'] !== null
+        ) {
+            $summary = InventoryService::warehouseDashboardSummary(
+                $pdo,
+                (int) $user['warehouse_id']
+            );
+
+            inv_ok(
+                ['in_transit_value' => $summary['in_transit_value']],
+                'OK'
+            );
+        }
+
+        inv_ok(
+            ['in_transit_value' => InventoryService::inTransitValue($pdo)],
+            'OK'
+        );
     },
+
     'GET /inventory/ledger' => function () use ($pdo, $query) {
-        inv_require_auth();
-        inv_ok(InventoryService::ledger($pdo, (int) $query['item_id'], (int) $query['warehouse_id']), 'OK');
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $warehouseId = (int) ($query['warehouse_id'] ?? 0);
+        if ($warehouseId <= 0) {
+            throw new ValidationException(['warehouse_id is required']);
+        }
+
+        inv_require_warehouse_scope($user, $warehouseId);
+
+        inv_ok(
+            InventoryService::ledger(
+                $pdo,
+                (int) $query['item_id'],
+                $warehouseId
+            ),
+            'OK'
+        );
     },
 
     'POST /transactions/in' => function () use ($pdo, $input) {
@@ -366,102 +503,391 @@ $routes = [
         inv_ok($result, 'Transaction voided');
     },
 
+    'GET /transfer-destinations' => function () use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_TRANSFER_MANAGE');
+
+        $stmt = $pdo->query(
+            'SELECT id, code, name
+             FROM warehouses
+             WHERE is_active = 1
+             ORDER BY name'
+        );
+
+        $warehouses = $stmt->fetchAll();
+
+        $sourceWarehouseId = null;
+
+        if ($user['role_code'] === 'STOCK') {
+            if (empty($user['warehouse_id'])) {
+                inv_error(
+                    403,
+                    'FORBIDDEN',
+                    'STOCK user has no warehouse assignment'
+                );
+            }
+
+            $sourceWarehouseId = (int) $user['warehouse_id'];
+        }
+
+        inv_ok([
+            'source_warehouse_id' => $sourceWarehouseId,
+            'warehouses' => $warehouses,
+        ], 'OK');
+    },
+
     // ---- Transfers (PHASE C2 Section 1) ----
     'POST /transfers' => function () use ($pdo, $input) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'WAREHOUSE_TRANSFER_MANAGE');
-        if (isset($input['from_warehouse_id'])) { inv_require_warehouse_scope($user, (int) $input['from_warehouse_id']); }
+
+        $fromWarehouseId = (int) ($input['from_warehouse_id'] ?? 0);
+        if ($fromWarehouseId <= 0) {
+            throw new ValidationException(['from_warehouse_id is required']);
+        }
+
+        // STOCK operator may only dispatch stock from their own warehouse.
+        inv_require_warehouse_scope($user, $fromWarehouseId);
+
         $input['created_by'] = $user['id'];
         $input['username'] = $user['username'];
-        $result = Database::transaction(fn (PDO $tx) => TransferService::create($tx, $input));
+
+        $result = Database::transaction(
+            fn (PDO $tx) => TransferService::create($tx, $input)
+        );
+
         inv_ok($result, 'Transfer created');
     },
+
     'POST /transfers/{id}/receive' => function (array $params) use ($pdo, $input) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'WAREHOUSE_TRANSFER_MANAGE');
+
+        $transferId = (int) $params['id'];
+        $transfer = TransferService::get($pdo, $transferId);
+
+        // Only the DESTINATION warehouse may receive.
+        inv_require_warehouse_scope(
+            $user,
+            (int) $transfer['to_warehouse_id']
+        );
+
         $input['created_by'] = $user['id'];
         $input['username'] = $user['username'];
-        $result = Database::transaction(fn (PDO $tx) => TransferService::receive($tx, (int) $params['id'], $input));
+
+        $result = Database::transaction(
+            fn (PDO $tx) => TransferService::receive(
+                $tx,
+                $transferId,
+                $input
+            )
+        );
+
         inv_ok($result, 'Transfer received');
     },
+
     'POST /transfers/{id}/cancel' => function (array $params) use ($pdo, $input) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'WAREHOUSE_TRANSFER_MANAGE');
+
+        $transferId = (int) $params['id'];
+        $transfer = TransferService::get($pdo, $transferId);
+
+        // Only the SOURCE warehouse may cancel.
+        inv_require_warehouse_scope(
+            $user,
+            (int) $transfer['from_warehouse_id']
+        );
+
         $input['created_by'] = $user['id'];
         $input['username'] = $user['username'];
-        $result = Database::transaction(fn (PDO $tx) => TransferService::cancel($tx, (int) $params['id'], $input));
+
+        $result = Database::transaction(
+            fn (PDO $tx) => TransferService::cancel(
+                $tx,
+                $transferId,
+                $input
+            )
+        );
+
         inv_ok($result, 'Transfer cancelled');
     },
+
     'GET /transfers' => function () use ($pdo) {
-        inv_require_auth();
-        inv_ok(TransferService::listAll($pdo), 'OK');
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_TRANSFER_MANAGE');
+
+        $scopeWarehouseId = null;
+
+        if ($user['role_code'] === 'STOCK') {
+            if (empty($user['warehouse_id'])) {
+                inv_error(
+                    403,
+                    'FORBIDDEN',
+                    'STOCK user has no warehouse assignment'
+                );
+            }
+
+            $scopeWarehouseId = (int) $user['warehouse_id'];
+        }
+
+        inv_ok(
+            TransferService::listAll($pdo, $scopeWarehouseId),
+            'OK'
+        );
     },
+
     'GET /transfers/pending' => function () use ($pdo) {
-        inv_require_auth();
-        inv_ok(TransferService::listPending($pdo), 'OK');
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_TRANSFER_MANAGE');
+
+        $scopeWarehouseId = null;
+
+        if ($user['role_code'] === 'STOCK') {
+            if (empty($user['warehouse_id'])) {
+                inv_error(
+                    403,
+                    'FORBIDDEN',
+                    'STOCK user has no warehouse assignment'
+                );
+            }
+
+            $scopeWarehouseId = (int) $user['warehouse_id'];
+        }
+
+        inv_ok(
+            TransferService::listPending($pdo, $scopeWarehouseId),
+            'OK'
+        );
     },
+
     'GET /transfers/{id}' => function (array $params) use ($pdo) {
-        inv_require_auth();
-        inv_ok(TransferService::get($pdo, (int) $params['id']), 'OK');
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_TRANSFER_MANAGE');
+
+        $transfer = TransferService::get(
+            $pdo,
+            (int) $params['id']
+        );
+
+        if ($user['role_code'] === 'STOCK') {
+            $ownWarehouseId = (int) ($user['warehouse_id'] ?? 0);
+
+            if ($ownWarehouseId <= 0) {
+                inv_error(
+                    403,
+                    'FORBIDDEN',
+                    'STOCK user has no warehouse assignment'
+                );
+            }
+
+            $fromWarehouseId =
+                (int) $transfer['from_warehouse_id'];
+            $toWarehouseId =
+                (int) $transfer['to_warehouse_id'];
+
+            if (
+                $ownWarehouseId !== $fromWarehouseId
+                && $ownWarehouseId !== $toWarehouseId
+            ) {
+                inv_error(
+                    403,
+                    'FORBIDDEN',
+                    'Transfer is outside your warehouse scope'
+                );
+            }
+        }
+
+        inv_ok($transfer, 'OK');
     },
 
     // ---- Stock Opname (PHASE C2 Section 2) ----
     'POST /stock-opname' => function () use ($pdo, $input) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
-        if (isset($input['warehouse_id'])) { inv_require_warehouse_scope($user, (int) $input['warehouse_id']); }
-        $sessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, (int) $input['warehouse_id'], $user['id'], $input['item_ids'] ?? null));
+
+        $warehouseId = (int) ($input['warehouse_id'] ?? 0);
+        if ($warehouseId <= 0) {
+            throw new ValidationException(['warehouse_id is required']);
+        }
+
+        inv_require_warehouse_scope($user, $warehouseId);
+
+        $sessionId = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::start(
+                $tx,
+                $warehouseId,
+                $user['id'],
+                $input['item_ids'] ?? null
+            )
+        );
+
         inv_ok(['session_id' => $sessionId], 'Opname session started');
     },
-    // List sessions (optionally filtered) so the UI can discover whether a
-    // warehouse already has an active opname session before starting a new
-    // one, and show the "STOCK OPNAME ACTIVE" banner without needing the
-    // session id memorized client-side.
+
     'GET /stock-opname' => function () use ($pdo, $query) {
-        inv_require_auth();
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
+
         $sql = 'SELECT * FROM stock_opname_sessions WHERE 1=1';
         $params = [];
-        if (isset($query['warehouse_id'])) {
+
+        if (
+            $user['role_code'] === 'STOCK'
+            && $user['warehouse_id'] !== null
+        ) {
+            $sql .= ' AND warehouse_id = :wh';
+            $params['wh'] = (int) $user['warehouse_id'];
+        } elseif (isset($query['warehouse_id'])) {
             $sql .= ' AND warehouse_id = :wh';
             $params['wh'] = (int) $query['warehouse_id'];
         }
+
         if (isset($query['status'])) {
             $sql .= ' AND status = :status';
             $params['status'] = $query['status'];
         }
+
         $sql .= ' ORDER BY created_at DESC';
+
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
+
         inv_ok($stmt->fetchAll(), 'OK');
     },
+
     'GET /stock-opname/{id}' => function (array $params) use ($pdo) {
-        inv_require_auth();
-        inv_ok(StockOpnameService::get($pdo, (int) $params['id']), 'OK');
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
+
+        $sessionId = (int) $params['id'];
+
+        $scope = $pdo->prepare(
+            'SELECT warehouse_id
+             FROM stock_opname_sessions
+             WHERE id = :id'
+        );
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+
+        inv_require_warehouse_scope($user, (int) $warehouseId);
+
+        inv_ok(
+            StockOpnameService::get($pdo, $sessionId),
+            'OK'
+        );
     },
+
     'POST /stock-opname/{id}/count' => function (array $params) use ($pdo, $input) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
+
+        $sessionId = (int) $params['id'];
+
+        $scope = $pdo->prepare(
+            'SELECT warehouse_id
+             FROM stock_opname_sessions
+             WHERE id = :id'
+        );
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+
+        inv_require_warehouse_scope($user, (int) $warehouseId);
+
         $counts = [];
         foreach ((array) ($input['counts'] ?? []) as $row) {
-            $counts[(int) $row['item_id']] = (float) $row['counted_qty_base'];
+            $counts[(int) $row['item_id']] =
+                (float) $row['counted_qty_base'];
         }
-        Database::transaction(fn (PDO $tx) => StockOpnameService::count($tx, (int) $params['id'], $counts, $user['id']));
-        inv_ok(StockOpnameService::get($pdo, (int) $params['id']), 'Counts recorded');
+
+        Database::transaction(
+            fn (PDO $tx) => StockOpnameService::count(
+                $tx,
+                $sessionId,
+                $counts,
+                $user['id']
+            )
+        );
+
+        inv_ok(
+            StockOpnameService::get($pdo, $sessionId),
+            'Counts recorded'
+        );
     },
+
     'POST /stock-opname/{id}/finalize' => function (array $params) use ($pdo) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
-        $result = Database::transaction(fn (PDO $tx) => StockOpnameService::finalize($tx, (int) $params['id'], $user['id']));
+
+        $sessionId = (int) $params['id'];
+
+        $scope = $pdo->prepare(
+            'SELECT warehouse_id
+             FROM stock_opname_sessions
+             WHERE id = :id'
+        );
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+
+        inv_require_warehouse_scope($user, (int) $warehouseId);
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::finalize(
+                $tx,
+                $sessionId,
+                $user['id']
+            )
+        );
+
         inv_ok($result, 'Opname finalized');
     },
+
     'POST /stock-opname/{id}/post' => function (array $params) use ($pdo, $input) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
+
+        $sessionId = (int) $params['id'];
+
+        $scope = $pdo->prepare(
+            'SELECT warehouse_id
+             FROM stock_opname_sessions
+             WHERE id = :id'
+        );
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+
+        inv_require_warehouse_scope($user, (int) $warehouseId);
+
         $overrides = [];
         foreach ((array) ($input['cost_overrides'] ?? []) as $itemId => $cost) {
             $overrides[(int) $itemId] = (float) $cost;
         }
-        $result = Database::transaction(fn (PDO $tx) => StockOpnameService::post($tx, (int) $params['id'], $user['id'], $overrides));
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::post(
+                $tx,
+                $sessionId,
+                $user['id'],
+                $overrides
+            )
+        );
+
         inv_ok($result, 'Opname posted');
     },
 

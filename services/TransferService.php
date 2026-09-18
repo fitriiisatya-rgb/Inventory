@@ -199,14 +199,63 @@ final class TransferService
         return $transfer;
     }
 
-    public static function listAll(PDO $pdo): array
+    public static function listAll(PDO $pdo, ?int $warehouseId = null): array
     {
-        return $pdo->query('SELECT * FROM warehouse_transfers ORDER BY created_at DESC')->fetchAll();
+        if ($warehouseId === null) {
+            return $pdo
+                ->query(
+                    'SELECT * FROM warehouse_transfers
+                     ORDER BY created_at DESC'
+                )
+                ->fetchAll();
+        }
+
+        $stmt = $pdo->prepare(
+            'SELECT *
+             FROM warehouse_transfers
+             WHERE from_warehouse_id = :from_wh
+                OR to_warehouse_id = :to_wh
+             ORDER BY created_at DESC'
+        );
+
+        $stmt->execute([
+            'from_wh' => $warehouseId,
+            'to_wh' => $warehouseId,
+        ]);
+
+        return $stmt->fetchAll();
     }
 
-    public static function listPending(PDO $pdo): array
+    public static function listPending(PDO $pdo, ?int $warehouseId = null): array
     {
-        return $pdo->query("SELECT * FROM warehouse_transfers WHERE status = 'PENDING' ORDER BY ship_date ASC")->fetchAll();
+        if ($warehouseId === null) {
+            return $pdo
+                ->query(
+                    "SELECT *
+                     FROM warehouse_transfers
+                     WHERE status = 'PENDING'
+                     ORDER BY ship_date ASC"
+                )
+                ->fetchAll();
+        }
+
+        $stmt = $pdo->prepare(
+            "SELECT *
+             FROM warehouse_transfers
+             WHERE status = 'PENDING'
+               AND (
+                    from_warehouse_id = :from_wh
+                    OR to_warehouse_id = :to_wh
+               )
+             ORDER BY ship_date ASC"
+        );
+
+        $stmt->execute([
+            'from_wh' => $warehouseId,
+            'to_wh' => $warehouseId,
+        ]);
+
+        return $stmt->fetchAll();
     }
 
     private static function find(PDO $pdo, int $transferId): array

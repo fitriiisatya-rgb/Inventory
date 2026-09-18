@@ -6,18 +6,33 @@
 const Dashboard = (() => {
     async function render(container) {
         container.innerHTML = '<div class="alert alert-info">Memuat dashboard...</div>';
+
         try {
+            const canViewReconciliation =
+                Auth.hasPermission('RECONCILIATION_VIEW');
+
             const [value, recon] = await Promise.all([
                 InvApi.companyValue(),
-                InvApi.reconciliation(),
+                canViewReconciliation
+                    ? InvApi.reconciliation()
+                    : Promise.resolve(null),
             ]);
+
+            const summary = recon || value;
+
             container.innerHTML = '';
-            container.appendChild(buildKpis(value, recon));
-            container.appendChild(buildWarehouseValueTable(recon));
-            container.appendChild(buildReconciliationSummary(recon));
+            container.appendChild(buildKpis(value, summary));
+            container.appendChild(buildWarehouseValueTable(summary));
+
+            if (recon) {
+                container.appendChild(
+                    buildReconciliationSummary(recon)
+                );
+            }
         } catch (err) {
             UI.handleApiError(err);
-            container.innerHTML = `<div class="alert alert-error">Gagal memuat dashboard: ${(err && err.message) || ''}</div>`;
+            container.innerHTML =
+                `<div class="alert alert-error">Gagal memuat dashboard: ${(err && err.message) || ''}</div>`;
         }
     }
 
