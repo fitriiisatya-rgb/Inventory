@@ -260,7 +260,6 @@
         <!-- Kartu Penyusutan sengaja disembunyikan (permintaan operasional).
              Elemennya TETAP ada supaya renderDashboard() yang mengisinya tidak error,
              dan angkanya tetap terhitung untuk laporan lain. Hapus style display:none untuk memunculkannya lagi. -->
-        <div class="kpi-card" id="susutKpiCard" style="display:none;"><div class="kpi-label">🗑️ Penyusutan</div><div class="kpi-value" id="susutValue">Rp0</div><div class="kpi-sub" id="susutSub">rusak / expired / hilang</div></div>
         <div class="kpi-card"><div class="kpi-label">🏭 Produksi Internal</div><div class="kpi-value" id="racikValue">Rp0</div><div class="kpi-sub" id="racikSub">hasil olahan/semi jadi — bukan pembelian</div></div>
     </div>
 
@@ -4604,33 +4603,9 @@
         document.getElementById('expCount').innerHTML = expg.length;
         document.getElementById('expList').innerHTML = expg.length ? expg.slice(0,5).map(e=>`${e.expired?'🔴':'🟡'} ${e.name} (${qtyLbl(e.sku, e.qty)}, ${new Date(e.exp).toLocaleDateString('id')})`).join('<br>')+(expg.length>5?`<br>+${expg.length-5} lainnya`:'') : 'Tidak ada dalam 30 hari';
         let susut = getSusut();
-        document.getElementById('susutValue').innerHTML = `Rp ${Math.round(susut.total).toLocaleString('id')}`;
-        // "Penyusutan" satu angka gelondongan terbaca sebagai kerugian usaha. Pada data nyata,
-        // 94% dari Rp49 miliar sebulan ternyata write-down Koreksi Stok — stok sistem yang terlalu
-        // tinggi diturunkan ke hitungan fisik. Itu koreksi pencatatan, bukan barang yang rusak.
-        // Angkanya tidak diubah dan tidak diklasifikasi ulang; hanya dipecah menurut asalnya,
-        // supaya yang membaca tahu mana kerugian sungguhan dan mana pembetulan data.
-        {
-            const ms2=getMonthStart().getTime(), me2=getMonthEnd().getTime();
-            const rp2=v=>'Rp '+Math.round(v).toLocaleString('id');
-            let dKoreksi=0, dTransfer=0, dLain=0, nLain=0;
-            (transactionLog||[]).forEach(l=>{
-                if(l.type==='in' || l.outType!=='susut' || l.resetAdjustment) return;
-                const t=effTs(l); if(t<ms2 || t>me2) return;
-                const ref=String(l.ref||'');
-                if(/^Koreksi Stok/i.test(ref)) dKoreksi+=l.total||0;
-                else if(/^Selisih transfer/i.test(ref)) dTransfer+=l.total||0;
-                else { dLain+=l.total||0; nLain++; }
-            });
-            const bag=[];
-            if(dKoreksi) bag.push(`koreksi pencatatan ${rp2(dKoreksi)}`);
-            if(dTransfer) bag.push(`selisih kiriman ${rp2(dTransfer)}`);
-            bag.push(`rusak/expired/hilang ${rp2(dLain)}`);
-            document.getElementById('susutSub').innerHTML =
-                (susut.n ? `${susut.n} kejadian bulan ini · ` : '') + bag.join(' · ')
-                + ((dKoreksi>0 && dKoreksi > dLain*2)
-                    ? `<br><span style="color:#f59e0b;">⚠ Sebagian besar angka ini bukan barang rusak, melainkan stok sistem yang diturunkan ke hitungan fisik.</span>` : '');
-        }
+        // Kartu Penyusutan ditiadakan dari Dashboard: angkanya didominasi write-down Koreksi
+        // Stok, bukan barang rusak, sehingga lebih menyesatkan daripada memberi tahu. Rinciannya
+        // tetap ada di Laporan Pengeluaran -> Ringkasan Penyusutan.
         let racik = getProduksiMasuk();
         document.getElementById('racikValue').innerHTML = `Rp ${Math.round(racik.total).toLocaleString('id')}`;
         document.getElementById('racikSub').innerHTML = racik.n ? `${racik.n} batch diracik bulan ini` : 'hasil olahan/semi jadi — bukan pembelian';
@@ -9640,8 +9615,33 @@
         if(!(qty>0)){ notify('Error','Jumlah harus lebih dari 0','error'); return; }
         let harga=0;
         if(simpleMode==='in'){
-            harga=parseFloat(document.getElementById('simpleHarga').value)||0;
+            // HARUS angkaID, sama dengan pratinjau Total dua puluh baris di bawah dan sama dengan
+            // baris Jumlah tepat di atas. Dulu di sini parseFloat: pengguna mengetik "12.500",
+            // kotak Total menampilkan Rp12.500, lalu yang tersimpan Rp12,5 — layarnya berbohong.
+            // parseFloat berhenti di koma dan membaca titik sebagai desimal; keduanya kebalikan
+            // dari cara orang Indonesia menulis angka.
+            harga=angkaID(document.getElementById('simpleHarga').value);
             if(!(harga>0)){ notify('Error','Harga beli harus diisi (lebih dari 0)','error'); return; }
+            // Penjaga satuan: harga per SATUAN DASAR, bukan per kemasan. Pintu unggahan sudah
+            // dijaga sejak lama; pintu yang paling sering dipakai justru belum, dan lewat sinilah
+            // 83 pembelian berharga per Kg masuk ke bahan ber-satuan Gram.
+            {
+                const wajar=(item.lastBuyPrice>0 && item.buyContent>0) ? item.lastBuyPrice/item.buyContent : 0;
+                if(wajar>0 && harga > wajar*20){
+                    const bagi = Math.round(harga/wajar);
+                    const rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+                    const ketik=prompt(
+                        `HARGA TAMPAK PER ${String(item.buyUnit||'KEMASAN').toUpperCase()}, BUKAN PER ${String(item.baseUnit||'').toUpperCase()}\n\n`
+                        + `Yang Anda isi : ${rp(harga)} per ${item.baseUnit}\n`
+                        + `Harga Master  : ${rp(wajar)} per ${item.baseUnit}  (${rp(item.lastBuyPrice)} per ${item.buyUnit||'kemasan'} isi ${item.buyContent})\n`
+                        + `Selisih       : ${bagi.toLocaleString('id')}x lipat\n\n`
+                        + `Kalau maksud Anda harga per ${item.buyUnit||'kemasan'}, isi ${String(Math.round(harga/item.buyContent*1000)/1000).replace('.',',')} di kolom Harga.\n\n`
+                        + `Kalau harganya memang setinggi itu, ketik: SAYA YAKIN`);
+                    if(String(ketik||'').trim().toUpperCase()!=='SAYA YAKIN'){
+                        notify('Dibatalkan','Baris tidak ditambahkan. Periksa lagi satuan harganya.','info'); return;
+                    }
+                }
+            }
         } else {
             // Stok tidak cukup TIDAK lagi memblokir — barang tetap boleh dikeluarkan/dikirim
             // walau stok tercatat 0 atau kurang. Stok gudang akan tercatat minus.
