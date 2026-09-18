@@ -3,17 +3,22 @@
 > **FINAL UPDATE (this is now the authoritative status — everything below
 > in this file is historical log, kept for context but superseded where
 > it conflicts with this line): Phase 3 (Implementation) is COMPLETE.**
-> All sub-phases 3a-3j landed and are pushed, HEAD is `5124546` on
-> `claude/funny-ramanujan-wmrlig`, plus one final report commit right
-> after it. **Read `docs/PHASE_3_COMPLETION_REPORT.md` — it is the full
-> 19-point completion report the owner required, covering commit hashes,
-> every file changed, the schema diff, every new API endpoint, every new
-> UI page, the admin-requirement completion matrix (all 10 done), full
+> All sub-phases 3a-3j landed and are pushed. HEAD is `a058559` on
+> `claude/funny-ramanujan-wmrlig` — that commit is the completion report
+> itself; `5124546` immediately before it is the last code commit (V2
+> frontend). Verify with `git fetch origin claude/funny-ramanujan-wmrlig
+> && git log --oneline -3 origin/claude/funny-ramanujan-wmrlig` before
+> trusting this line, since the owner pushes to this branch directly too.
+> **Read `docs/PHASE_3_COMPLETION_REPORT.md` — it is the full 19-point
+> completion report the owner required**, covering commit hashes, every
+> file changed, the schema diff, every new API endpoint, every new UI
+> page, the admin-requirement completion matrix (all 10 done), full
 > regression results (275/275), and a proposed-but-NOT-executed
-> production deployment + rollback procedure.** Next step is waiting for
-> the owner's review of that report before Phase 4/5 (deployment
-> planning — plan only, never execute) begin. Nothing has been deployed.
-> No production database has been touched by this session at any point.
+> production deployment + rollback procedure. As of this update, the
+> owner has not yet responded to that report — next step is waiting for
+> their review before Phase 4/5 (deployment planning — plan only, never
+> execute) begin. Nothing has been deployed. No production database has
+> been touched by this session at any point.
 
 Written 2026-09-18 because the prior Claude Code session was running low on
 context/tokens and the owner asked for continuity across an account switch.
