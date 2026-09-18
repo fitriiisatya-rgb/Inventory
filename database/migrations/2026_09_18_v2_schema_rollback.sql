@@ -20,6 +20,14 @@
 -- of original data.
 -- ============================================================================
 
+-- 7. new permission codes + their role grants
+DELETE rp FROM role_permissions rp
+JOIN permissions p ON p.id = rp.permission_id
+WHERE p.code IN ('MASTER_CATEGORY_MANAGE', 'MASTER_SUPPLIER_MANAGE', 'MASTER_BAKERY_DESTINATION_MANAGE', 'STOCK_POLICY_MANAGE');
+
+DELETE FROM permissions
+WHERE code IN ('MASTER_CATEGORY_MANAGE', 'MASTER_SUPPLIER_MANAGE', 'MASTER_BAKERY_DESTINATION_MANAGE', 'STOCK_POLICY_MANAGE');
+
 -- 6. suppliers — drop the two additive columns
 ALTER TABLE suppliers
     DROP COLUMN address,

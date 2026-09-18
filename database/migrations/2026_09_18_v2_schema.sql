@@ -127,3 +127,28 @@ ALTER TABLE inventory_transactions
 ALTER TABLE suppliers
     ADD COLUMN address VARCHAR(255) NULL AFTER contact_name,
     ADD COLUMN email    VARCHAR(150) NULL AFTER phone;
+
+-- ----------------------------------------------------------------------------
+-- 7. New permission codes (data-seed, additive/idempotent). ADMIN and
+--    SUPERADMIN inherit these automatically via the existing seed pattern
+--    in database/schema.sql (ADMIN = every permission NOT IN the exclusion
+--    list, which these are not added to) — no role_permissions row needs
+--    inserting by hand for those two roles. STOCK/DIVISION/VIEWER get none
+--    of these four; their reads of the new endpoints reuse INVENTORY_VIEW.
+-- ----------------------------------------------------------------------------
+INSERT INTO permissions (code, description) VALUES
+    ('MASTER_CATEGORY_MANAGE',           'Create/edit item categories'),
+    ('MASTER_SUPPLIER_MANAGE',           'Create/edit vendors/suppliers'),
+    ('MASTER_BAKERY_DESTINATION_MANAGE', 'Create/edit bakery distribution destinations'),
+    ('STOCK_POLICY_MANAGE',              'Set per-item-per-warehouse minimum/buffer stock policy')
+ON DUPLICATE KEY UPDATE description = VALUES(description);
+
+INSERT IGNORE INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r CROSS JOIN permissions p
+WHERE r.code = 'SUPERADMIN'
+  AND p.code IN ('MASTER_CATEGORY_MANAGE', 'MASTER_SUPPLIER_MANAGE', 'MASTER_BAKERY_DESTINATION_MANAGE', 'STOCK_POLICY_MANAGE');
+
+INSERT IGNORE INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r CROSS JOIN permissions p
+WHERE r.code = 'ADMIN'
+  AND p.code IN ('MASTER_CATEGORY_MANAGE', 'MASTER_SUPPLIER_MANAGE', 'MASTER_BAKERY_DESTINATION_MANAGE', 'STOCK_POLICY_MANAGE');

@@ -23,6 +23,7 @@ require_once __DIR__ . '/../services/UnitNormalizationService.php';
 require_once __DIR__ . '/../services/PriceAnomalyService.php';
 require_once __DIR__ . '/../services/IdempotencyService.php';
 require_once __DIR__ . '/../services/MigrationNegativeStockService.php';
+require_once __DIR__ . '/../services/StockPolicyService.php';
 require_once __DIR__ . '/../services/InventoryService.php';
 require_once __DIR__ . '/../services/FifoService.php';
 require_once __DIR__ . '/../services/PeriodLockService.php';
@@ -55,6 +56,7 @@ use App\Services\CostRequiredException;
 use App\Services\UnitConversionNotApprovedException;
 use App\Services\NegativeMigrationStockRequiresAdjustmentException;
 use App\Services\MigrationNegativeStockService;
+use App\Services\StockPolicyService;
 use App\Services\RateLimitedException;
 use App\Services\NotFoundException;
 use App\Services\TransferAlreadyReceivedException;
@@ -306,6 +308,45 @@ $routes = [
         );
         $stmt->execute(['item_id' => (int) $params['id']]);
         inv_ok($stmt->fetchAll(), 'OK');
+    },
+
+    // ---- PHASE V2: per-item-per-warehouse stock policy (min/buffer) ----
+    'GET /stock-policy' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $itemId = (int) ($query['item_id'] ?? 0);
+        $warehouseId = (int) ($query['warehouse_id'] ?? 0);
+        if ($itemId <= 0 || $warehouseId <= 0) {
+            throw new ValidationException(['item_id and warehouse_id are required']);
+        }
+
+        inv_require_warehouse_scope($user, $warehouseId);
+
+        inv_ok(StockPolicyService::resolve($pdo, $itemId, $warehouseId), 'OK');
+    },
+
+    'PUT /stock-policy' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_POLICY_MANAGE');
+
+        $warehouseId = (int) ($input['warehouse_id'] ?? 0);
+        if ($warehouseId <= 0) {
+            throw new ValidationException(['warehouse_id is required']);
+        }
+        // A STOCK-role user does not hold STOCK_POLICY_MANAGE by default (see
+        // database/schema.sql's role_permissions seed), but this scope check
+        // runs unconditionally for every role rather than special-casing
+        // STOCK — the same "never trust warehouse_id, always re-check scope"
+        // discipline applied uniformly regardless of who technically has the
+        // permission today.
+        inv_require_warehouse_scope($user, $warehouseId);
+
+        $input['updated_by'] = $user['id'];
+        $input['username'] = $user['username'];
+
+        $result = Database::transaction(fn (PDO $tx) => StockPolicyService::upsert($tx, $input));
+        inv_ok($result, 'Stock policy saved');
     },
 
     // ---- InventoryService: single source of truth reads (Section 7) ----

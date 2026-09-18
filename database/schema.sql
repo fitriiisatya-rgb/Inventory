@@ -877,7 +877,15 @@ INSERT INTO permissions (code, description) VALUES
     ('STOCK_ADJUSTMENT_CREATE',    'Post a manual stock adjustment'),
     ('STOCK_ADJUSTMENT_APPROVE',   'Approve a stock adjustment that requires approval'),
     ('RECONCILIATION_VIEW',        'View the pre-go-live reconciliation report'),
-    ('INVENTORY_VIEW',             'Read current stock, batches, value, ledger (VIEWER baseline)');
+    ('INVENTORY_VIEW',             'Read current stock, batches, value, ledger (VIEWER baseline)'),
+    -- PHASE V2: additive only — ADMIN/SUPERADMIN inherit these automatically via the
+    -- existing seed pattern below (ADMIN = every permission NOT IN the exclusion list,
+    -- which these are not added to). STOCK/DIVISION/VIEWER get none of these four;
+    -- their reads of the new stock-policy/report endpoints reuse INVENTORY_VIEW.
+    ('MASTER_CATEGORY_MANAGE',           'Create/edit item categories'),
+    ('MASTER_SUPPLIER_MANAGE',           'Create/edit vendors/suppliers'),
+    ('MASTER_BAKERY_DESTINATION_MANAGE', 'Create/edit bakery distribution destinations'),
+    ('STOCK_POLICY_MANAGE',              'Set per-item-per-warehouse minimum/buffer stock policy');
 
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r CROSS JOIN permissions p WHERE r.code = 'SUPERADMIN';
