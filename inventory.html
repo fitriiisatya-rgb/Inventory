@@ -685,6 +685,23 @@
             </div>
         </div>
         <hr style="border-color:var(--border); margin:14px 0;">
+        <div style="margin-bottom:10px;">
+            <label style="font-size:0.75rem; color:var(--text2); text-transform:uppercase; font-weight:600;">Koreksi Harga Satu Barang</label>
+            <div style="font-size:0.76rem; color:var(--text3); margin:4px 0 8px;">Dipakai kalau harga barang yang diterima tidak sesuai — mis. harga per karton terlanjur tercatat sebagai harga per Gram. Mengubah <strong>nilai</strong> stok di gudang ini; jumlahnya tidak disentuh.</div>
+            <input type="text" id="khSearchInput" placeholder="Ketik nama / kode barang..." autocomplete="off">
+            <div id="khSearchResults" class="simpleSearchBox" style="display:none;"></div>
+            <div id="khPicked" style="display:none; margin-top:8px;">
+                <div id="khInfo" style="font-size:0.82rem; margin-bottom:6px; line-height:1.6;"></div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
+                    <div class="form-group" style="flex:1; min-width:170px; margin-bottom:0;"><label>Harga Benar per <span id="khSatuan">satuan</span></label><input type="text" id="khHargaInput" inputmode="decimal" placeholder="0"></div>
+                    <button id="khPakaiMaster" class="btn btn-secondary" type="button">📋 Pakai Harga Master</button>
+                    <button id="khSaveBtn" class="btn btn-success">✅ Simpan Koreksi Harga</button>
+                    <button id="khCancelBtn" class="btn btn-secondary">Batal</button>
+                </div>
+                <div id="khPratinjau" style="font-size:0.8rem; margin-top:8px;"></div>
+            </div>
+        </div>
+        <hr style="border-color:var(--border); margin:14px 0;">
         <div>
             <label style="font-size:0.75rem; color:var(--text2); text-transform:uppercase; font-weight:600;">Reset Seluruh Stok Gudang</label>
             <div style="font-size:0.78rem; color:#f87171; margin:6px 0 10px;">⚠️ Mengosongkan SEMUA stok di gudang ini menjadi 0. Dipakai kalau mau mengisi ulang stok awal dari nol. Riwayat transaksi lama tetap tersimpan.</div>
@@ -4095,6 +4112,93 @@
         let g = myGudang() || (currentReportGudang!=='all' ? currentReportGudang : null);
         return g || DEFAULT_GUDANG;
     }
+    // ===== KOREKSI HARGA PER GUDANG =====
+    // Gudang penerima sering menemukan harga yang tidak masuk akal pada barang yang baru masuk —
+    // harga per karton yang terlanjur tercatat sebagai harga per Gram. Sebelum ini tidak ada
+    // jalan membetulkannya kecuali lewat Admin, jadi angkanya dibiarkan dan ikut mengalir ke HPP.
+    //
+    // Yang diubah: harga pada batch DI GUDANG INI, dan harga pada log MASUK yang melahirkan batch
+    // itu. Keduanya diubah bersama-sama — kalau hanya batch yang disentuh, buku batch dan hasil
+    // hitung ulang dari transaksi akan berselisih, dan itu justru penyakit yang sedang dibereskan.
+    let khSku=null;
+    function khHargaSekarang(sku, gudang){
+        const st=getStock(sku, gudang);
+        return st.qty>0 ? st.value/st.qty : 0;
+    }
+    function khHargaMaster(it){
+        return (it && it.lastBuyPrice>0 && it.buyContent>0) ? it.lastBuyPrice/it.buyContent : 0;
+    }
+    function khRenderInfo(){
+        const el=document.getElementById('khInfo'); if(!el || !khSku) return;
+        const g=koreksiTargetGudang(), it=itemBySku(khSku)||{};
+        const st=getStock(khSku,g), kini=khHargaSekarang(khSku,g), mst=khHargaMaster(it);
+        const rp=v=>'Rp '+(Math.round(v*1000)/1000).toLocaleString('id');
+        const sat=it.baseUnit||'';
+        document.getElementById('khSatuan').innerText=sat||'satuan';
+        el.innerHTML=`Dipilih: <strong>${dvzEsc(it.name||khSku)}</strong> <span class="mono">${dvzEsc(khSku)}</span><br>
+            Stok di ${dvzEsc(gudangName(g))}: <strong>${(Math.round(st.qty*1000)/1000).toLocaleString('id')} ${dvzEsc(sat)}</strong>
+            · nilai <strong>${rp(st.value)}</strong><br>
+            Harga tercatat sekarang: <strong>${rp(kini)}/${dvzEsc(sat)}</strong>
+            ${mst>0?` · harga Master: <strong>${rp(mst)}/${dvzEsc(sat)}</strong>${kini>0&&mst>0?` <span style="color:${(kini/mst>=20||kini/mst<=0.05)?'#ef4444':'var(--text3)'};">(${(kini/mst).toFixed(2)}x)</span>`:''}`:' · Master belum punya harga beli'}`;
+        khRenderPratinjau();
+    }
+    function khRenderPratinjau(){
+        const el=document.getElementById('khPratinjau'); if(!el || !khSku) return;
+        const g=koreksiTargetGudang(), st=getStock(khSku,g);
+        const baru=angkaID((document.getElementById('khHargaInput')||{}).value||'');
+        if(!(baru>0)){ el.innerHTML=''; return; }
+        const rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+        const nilaiBaru=st.qty*baru, selisih=nilaiBaru-st.value;
+        el.innerHTML=`Nilai stok: <strong>${rp(st.value)}</strong> → <strong style="color:${selisih>0?'#f59e0b':'#10b981'};">${rp(nilaiBaru)}</strong>
+            &nbsp;(${selisih>=0?'+':'−'}${rp(Math.abs(selisih))})<br>
+            <span style="color:var(--text3); font-size:0.76rem;">Jumlah stok tidak berubah: ${(Math.round(st.qty*1000)/1000).toLocaleString('id')}</span>`;
+    }
+    function khRenderSearch(){
+        const box=document.getElementById('khSearchResults'); if(!box) return;
+        const q=((document.getElementById('khSearchInput')||{}).value||'').trim().toLowerCase();
+        if(!q){ box.style.display='none'; return; }
+        const g=koreksiTargetGudang();
+        const pool=masterSKU.filter(i=>{
+            if(i.status!=='Aktif') return false;
+            if(typeof isTransitItemAllowed==='function' && !isTransitItemAllowed(i,g)) return false;
+            return (i.name||'').toLowerCase().includes(q) || (i.sku||'').toLowerCase().includes(q);
+        }).slice(0,12);
+        if(!pool.length){ box.innerHTML='<div style="padding:8px; color:var(--text3);">Tidak ada yang cocok.</div>'; box.style.display='block'; return; }
+        const rp=v=>'Rp '+(Math.round(v*100)/100).toLocaleString('id');
+        box.innerHTML=pool.map(i=>{ const st=getStock(i.sku,g), h=st.qty>0?st.value/st.qty:0;
+            return `<div class="simpleSearchItem khPilih" data-sku="${dvzEsc(i.sku)}" style="padding:7px 9px; cursor:pointer; border-bottom:1px solid var(--border);">
+                <strong>${dvzEsc(i.name||i.sku)}</strong> <span class="mono" style="font-size:0.72rem; color:var(--text3);">${dvzEsc(i.sku)}</span><br>
+                <span style="font-size:0.74rem; color:var(--text3);">${(Math.round(st.qty*1000)/1000).toLocaleString('id')} ${dvzEsc(i.baseUnit||'')} · ${rp(h)}/${dvzEsc(i.baseUnit||'')}</span></div>`; }).join('');
+        box.style.display='block';
+        box.querySelectorAll('.khPilih').forEach(d=>d.addEventListener('click',()=>{
+            khSku=d.dataset.sku; box.style.display='none';
+            document.getElementById('khSearchInput').value='';
+            document.getElementById('khPicked').style.display='';
+            const it=itemBySku(khSku)||{}; const m=khHargaMaster(it);
+            document.getElementById('khHargaInput').value = m>0 ? String(Math.round(m*1000)/1000).replace('.',',') : '';
+            khRenderInfo();
+        }));
+    }
+    function khTerapkan(sku, gudang, hargaBaru){
+        const batches=(stockBatches[sku]||[]).filter(b=>(b.gudang||DEFAULT_GUDANG)===gudang);
+        let nBatch=0, nLog=0;
+        const idBatch=new Set();
+        batches.forEach(b=>{ b.price=hargaBaru; nBatch++; idBatch.add(b.id); });
+        // Log MASUK yang melahirkan batch-batch itu ikut dibetulkan, supaya buku batch dan hasil
+        // hitung ulang dari transaksi tetap sepakat.
+        (transactionLog||[]).forEach(l=>{
+            if(l.sku!==sku || l.type!=='in') return;
+            if((l.gudang||DEFAULT_GUDANG)!==gudang) return;
+            const dibuat=(Array.isArray(l.createdBatches)&&l.createdBatches.length)
+                ? l.createdBatches.map(c=>c.id) : (l.batchIds||[]);
+            if(!dibuat.some(id=>idBatch.has(id))) return;
+            l.price=hargaBaru; l.total=Math.round((l.qty*hargaBaru)*100)/100;
+            if(Array.isArray(l.costLayers)) l.costLayers.forEach(L=>{ if(L.price!=null) L.price=hargaBaru; });
+            l.hargaDikoreksiGudang={ pada:Date.now(), oleh:currentUsername||deviceOperator||'', gudang };
+            nLog++;
+        });
+        return { nBatch, nLog };
+    }
     function koreksiRenderSearch(){
         let box=document.getElementById('koreksiSearchResults'); if(!box) return;
         let q=(document.getElementById('koreksiSearchInput').value||'').trim().toLowerCase();
@@ -4128,6 +4232,57 @@
         koreksiPickedSku=null;
         document.getElementById('koreksiPicked').style.display='none';
         document.getElementById('koreksiSearchInput').value='';
+    });
+    document.getElementById('khSearchInput')?.addEventListener('input', khRenderSearch);
+    document.getElementById('khHargaInput')?.addEventListener('input', khRenderPratinjau);
+    document.getElementById('khCancelBtn')?.addEventListener('click', ()=>{
+        khSku=null; document.getElementById('khPicked').style.display='none';
+        document.getElementById('khHargaInput').value=''; document.getElementById('khPratinjau').innerHTML='';
+    });
+    document.getElementById('khPakaiMaster')?.addEventListener('click', ()=>{
+        if(!khSku) return;
+        const m=khHargaMaster(itemBySku(khSku)||{});
+        if(!(m>0)){ notify('Master belum punya harga','Isi dulu Harga Beli barang ini di Master Data.','warning'); return; }
+        document.getElementById('khHargaInput').value=String(Math.round(m*1000)/1000).replace('.',',');
+        khRenderPratinjau();
+    });
+    document.getElementById('khSaveBtn')?.addEventListener('click', ()=>{
+        if(!khSku){ notify('Error','Pilih barang dulu','error'); return; }
+        const g=koreksiTargetGudang(), it=itemBySku(khSku)||{};
+        const st=getStock(khSku,g);
+        if(!(Math.abs(st.qty)>1e-9)){ notify('Tidak ada stok','Barang ini tidak punya stok di '+gudangName(g)+', tidak ada harga yang perlu dikoreksi.','warning'); return; }
+        const baru=angkaID((document.getElementById('khHargaInput')||{}).value||'');
+        if(!(baru>0)){ notify('Error','Harga harus lebih dari 0','error'); return; }
+        const lama=khHargaSekarang(khSku,g);
+        if(Math.abs(baru-lama)<1e-9){ notify('Tidak ada perubahan','Harga sama dengan yang tercatat.','info'); return; }
+        const rp=v=>'Rp '+Math.round(v).toLocaleString('id');
+        const mst=khHargaMaster(it), selisih=st.qty*baru-st.value;
+        // Penjaga yang sama dengan pintu-pintu lain: harga yang meleset jauh dari Master ditahan.
+        if(mst>0 && (baru/mst>=20 || baru/mst<=0.05)){
+            const ketik=prompt(
+                `HARGA BARU JAUH DARI HARGA MASTER\n\n`
+                + `Anda isi     : ${rp(baru)} per ${it.baseUnit}\n`
+                + `Harga Master : ${rp(mst)} per ${it.baseUnit}  (${(baru/mst).toFixed(2)}x)\n\n`
+                + `Kalau memang benar, ketik: SAYA YAKIN`);
+            if(String(ketik||'').trim().toUpperCase()!=='SAYA YAKIN'){
+                notify('Dibatalkan','Harga tidak jadi diubah.','info'); return; }
+        }
+        const alasan=prompt('Alasan koreksi harga (wajib, tercatat di Riwayat Edit & Hapus):','harga terima tidak sesuai');
+        if(alasan===null) return;
+        if(!String(alasan).trim()){ notify('Alasan Wajib','','warning'); return; }
+        if(!confirm(`Koreksi harga ${it.name||khSku} di ${gudangName(g)}?\n\n`
+            + `HARGA  : ${rp(lama)} → ${rp(baru)} per ${it.baseUnit}\n`
+            + `JUMLAH : ${(Math.round(st.qty*1000)/1000).toLocaleString('id')} ${it.baseUnit} (tidak diubah)\n`
+            + `NILAI  : ${rp(st.value)} → ${rp(st.qty*baru)}  (${selisih>=0?'+':'−'}${rp(Math.abs(selisih))})\n\n`
+            + `Hanya gudang ini yang terpengaruh.`)) return;
+        const hasil=khTerapkan(khSku, g, baru);
+        if(typeof auditLog!=='undefined') auditLog.unshift({ id:nextAuditId++, action:'edit', at:Date.now(),
+            by:currentUsername||deviceOperator||'', reason:`Koreksi harga ${gudangName(g)}: ${rp(lama)} -> ${rp(baru)} per ${it.baseUnit} · ${hasil.nBatch} batch, ${hasil.nLog} log masuk · nilai ${rp(st.value)} -> ${rp(st.qty*baru)} · ${String(alasan).trim()}`,
+            sku:khSku, itemName:it.name||khSku, type:'edit',
+            before:{ price:lama, value:Math.round(st.value) }, after:{ price:baru, value:Math.round(st.qty*baru) } });
+        dataVersi++; persist(); refreshUI();
+        khRenderInfo();
+        notify('Harga Dikoreksi', `${hasil.nBatch} batch & ${hasil.nLog} log masuk disesuaikan di ${gudangName(g)}.`, 'success');
     });
     document.getElementById('koreksiSaveBtn')?.addEventListener('click', async ()=>{
         if(!koreksiPickedSku){ notify('Error','Pilih barang dulu','error'); return; }
