@@ -1,8 +1,94 @@
 # Session Handoff — Inventory FIFO Pro V2 (read this first, in any new session/account)
 
-> **FINAL UPDATE (this is now the authoritative status — everything below
-> in this file is historical log, kept for context but superseded where
-> it conflicts with this line): Phase 3 (Implementation) is COMPLETE.**
+> **UPDATE 2026-09-18, LATEST (supersedes the "FINAL UPDATE" banner below,
+> which is now itself historical): Phase 4 (verification) is APPROVED and
+> COMPLETE. Phase 5 (deployment PLAN, not execution) is COMPLETE. Nothing
+> has been deployed. Production is still untouched by this session at
+> every point.**
+>
+> Current HEAD on `claude/funny-ramanujan-wmrlig`: `7a04c29`. Verify with
+> `git fetch origin claude/funny-ramanujan-wmrlig && git log --oneline -3
+> origin/claude/funny-ramanujan-wmrlig` before trusting this — the owner
+> pushes to this branch directly too.
+>
+> **What happened, in order, since the "FINAL UPDATE" banner below was
+> written:**
+> 1. Owner sent "Phase 3 Implementation is CONDITIONALLY APPROVED" with a
+>    9-section (A-I) Phase 4 verification requirement, plus an explicit
+>    "PRODUCTION REMAINS FROZEN" constraint list. All 9 sections (Tasks
+>    A-I) were completed — see `docs/PHASE_4_TASK_I_FINAL_REPORT.md` for
+>    the consolidated final report (commit hashes, files changed, diff
+>    stat, test totals, known issues, deployment/rollback plan references).
+>    Along the way: a real Phase 3 formula bug was found and fixed (buffer
+>    was implemented as `qty < minimum + buffer`, a margin; the owner's
+>    actual spec is `qty < buffer`, an absolute threshold — fixed in
+>    `services/StockPolicyService.php` and `services/StockReportService.php`,
+>    commit `bb38b02`, tests rewritten); the Stock IN/OUT stepper UI was
+>    built and browser-verified with Playwright (`scratchpad/smoke/stepper.js`
+>    — NOT committed, it's a throwaway scratchpad script, rebuild it from
+>    `docs/PHASE_4_TASK_A`-referenced description if needed in a future
+>    session); a genuine test-coverage gap (Master Kategori had zero
+>    positive-path CRUD tests) was found and closed.
+> 2. Owner replied "Phase 4 is APPROVED. Proceed to Phase 5 — Deployment
+>    Plan / Release Candidate Finalization ONLY" with explicit
+>    DO-NOT-deploy/migrate/modify-cPanel/write-SQL/activate-Karang-Tengah
+>    constraints, plus two documentation corrections to make first:
+>    (a) the "309 vs 285" test-count figures from the Task G report were
+>    ambiguous — fixed by adding an explicit §0 to
+>    `docs/PHASE_4_TASK_G_FULL_VERIFICATION.md` stating exactly what each
+>    number is (285 = backend regression suite alone; 24 = Playwright
+>    browser checks; 309 = those two added together; the two 28/28
+>    migration-postcheck dry runs are reported separately, not folded in);
+>    (b) Task F (18 items) and Task G (20 items)'s admin-requirements/
+>    verification-category lists had been *reconstructed* from a
+>    compacted-context paraphrase rather than quoted verbatim — the owner
+>    sent the exact original lists, which were used to rewrite both docs
+>    (Task G's list turned out to already be an exact match; Task F's
+>    substance was already correct, only the wording/format changed).
+>    The buffer-formula fix from step 1 was also re-confirmed consistent
+>    across every layer (PHP service, SQL report query, API, UI badges) —
+>    see `docs/PHASE_V2_DEPLOYMENT_PLAN.md` §3 for the line-by-line proof.
+> 3. Produced `docs/PHASE_V2_DEPLOYMENT_PLAN.md` — the Phase 5 deliverable:
+>    a full release/cutover plan for owner review (pre-flight checklist,
+>    backup procedure, production control-totals capture, category/
+>    stock-policy preparation kept OFF the blocking deploy path pending
+>    owner approval of a real mapping, migration execution sequence,
+>    smoke-test plan that explicitly does NOT post real business
+>    transactions against production, post-deployment verification,
+>    4-case rollback decision tree, GO/NO-GO checklist). Also added
+>    `scripts/v2_production_control_totals.php`, a new read-only script
+>    that snapshots all the before/after metrics the plan needs (item/
+>    warehouse/transaction/batch/allocation counts, SCM/Cibadak/company/
+>    in-transit values) as timestamped JSON — verified against a local
+>    test DB before being cited in the plan.
+>
+> **Current state**: this session STOPPED per the owner's explicit
+> instruction after producing and committing the Phase 5 plan. **Waiting
+> for explicit owner approval before any actual production cutover step
+> is executed.** Read `docs/PHASE_V2_DEPLOYMENT_PLAN.md` in full before
+> executing anything from it — it is a plan, not a completed action, and
+> its own GO/NO-GO checklist (§14) must be walked through for real before
+> any step runs against production.
+>
+> **Test totals as of this update** (all against local disposable/test
+> databases only, never production — see
+> `docs/PHASE_4_TASK_G_FULL_VERIFICATION.md` §0 for the full scope
+> breakdown of every number below):
+> - Backend regression suite (`bash tests/run_mysql_tests.sh`): **285/285
+>   PASS, 0 FAIL, 0 SKIP**
+> - Browser/Playwright smoke test (Stock IN/OUT steppers,
+>   `scratchpad/smoke/stepper.js`, non-production dev server): **24/24
+>   PASS, 0 FAIL, 0 SKIP**
+> - Migration/postcheck dry runs (Tasks C and H, disposable DBs, dropped
+>   after use): **28/28 PASS each run, 0 FAIL, 0 SKIP**
+>
+> **Production status, unchanged**: LIVE for SCM/Gudang Besar and
+> Cibadak. Karang Tengah remains PENDING_CUTOVER. No SSH/cPanel access,
+> no production SQL, and no production source modification occurred at
+> any point across Phases 3, 4, or 5.
+
+> **FINAL UPDATE (historical — superseded by the banner above, kept for
+> context): Phase 3 (Implementation) is COMPLETE.**
 > All sub-phases 3a-3j landed and are pushed. HEAD is `a058559` on
 > `claude/funny-ramanujan-wmrlig` — that commit is the completion report
 > itself; `5124546` immediately before it is the last code commit (V2
