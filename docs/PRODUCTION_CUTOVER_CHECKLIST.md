@@ -6,6 +6,13 @@ production.** Every command below is written to be copy-pasted by a human
 operator, in order, with a real go/no-go decision at each checkpoint —
 never run as one unattended script.
 
+**For the granular, step-by-step version of this checklist** — every
+action broken into Purpose/Command/Expected output/STOP condition/Verify/
+Rollback, individually copy-paste tested end-to-end — use
+`docs/PRODUCTION_CUTOVER_RUNBOOK.md` instead. This page remains the
+higher-level conceptual overview; the runbook is what an operator should
+actually follow command-by-command.
+
 Prerequisite reading: `docs/PHASE_G_DATA_FINAL_DRY_RUN_SCM_CIBADAK.md` (the
 dry run this checklist is the production twin of — same import services,
 same input files, proven end-to-end in staging) and
