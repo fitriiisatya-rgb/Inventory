@@ -1,0 +1,273 @@
+# Session Handoff — Inventory FIFO Pro V2 (read this first, in any new session/account)
+
+Written 2026-09-18 because the prior Claude Code session was running low on
+context/tokens and the owner asked for continuity across an account switch.
+This file is the durable record — it lives in git, so it survives regardless
+of which Claude Code account or session opens this repo next.
+
+**Branch**: `claude/funny-ramanujan-wmrlig`
+**HEAD at time of writing**: `935394a` (local and `origin/claude/funny-ramanujan-wmrlig` are in sync — verify with `git fetch origin claude/funny-ramanujan-wmrlig && git log --oneline -5` before doing anything else, since the owner pushes to this branch directly outside of Claude Code turns too).
+
+Commit chain (newest first) as of this writing:
+```
+935394a Correct Phase 1 V2 audit against two hardening commits already on GitHub
+4baef1f Phase 1 audit for Inventory FIFO Pro V2 (UI/UX + feature enhancement)
+30c5368 harden warehouse isolation and transfer permissions          <- owner's own commit
+3c5e457 fix production reconciliation and frontend routing            <- owner's own commit
+510215a Add detailed copy-paste production cutover runbook for SCM+CIBADAK
+```
+
+## 1. Production status (do not violate these constraints)
+
+- **SCM and CIBADAK warehouses**: owner has stated the system is already
+  production / live for these two. This session has **no access to any real
+  production database or server** — never fabricate a "cutover succeeded"
+  claim; everything tested here was against a local throwaway MariaDB
+  (`inventory_test`) started manually inside the sandbox.
+- **Karang Tengah warehouse**: must stay `PENDING_CUTOVER`. Never create it,
+  never import its opening/IN/OUT data, never make it live, until the owner
+  explicitly says so and provides its own IN/OUT 01–15 Sept 2026 file (not
+  yet supplied as of this writing).
+- **5 whitelisted migration-negative balances** — must NEVER be zeroed,
+  hidden, or provisionally adjusted away. They carry forward into LIVE
+  Opening exactly as calculated, tagged `MIGRATION_NEGATIVE_REVIEW` +
+  `NEEDS_STOCK_OPNAME`:
+  - SCM: SKU `100304` = -0.5 KG
+  - SCM: SKU `777419` = -0.5 KG
+  - CIBADAK: SKU `400201` = -466.5 KG
+  - CIBADAK: SKU `555410` = -250 PCS
+  - CIBADAK: SKU `800401` = -162 LTR
+  - Enforcement lives in `services/MigrationNegativeStockService.php`,
+    `services/FifoService.php::postOut()` (blocks OUT for these via
+    `NEGATIVE_MIGRATION_STOCK_REQUIRES_ADJUSTMENT`), and is surfaced through
+    `InventoryService::currentStock()`/`currentStockAllWarehouses()`.
+- **Never**: reset the DB, re-import opening, delete historical transactions,
+  change FIFO to average costing, bypass warehouse permission checks,
+  hard-delete referenced master data, `DROP`/`TRUNCATE` production tables,
+  or deploy anything without explicit owner approval.
+- **Production cutover runbook** (`docs/PRODUCTION_CUTOVER_RUNBOOK.md` +
+  `docs/PRODUCTION_CUTOVER_CHECKLIST.md`) was fully prepared and every
+  command was actually executed end-to-end against a local test DB to
+  verify it works — but as far as this session can observe, the owner has
+  **not yet confirmed executing it against real production** (though two
+  commits landed on GitHub mid-session, `3c5e457` and `30c5368`, authored
+  directly by the owner as `fitriiisatya-rgb`, suggesting real production
+  work is happening in parallel outside Claude Code sessions). Check with
+  the owner directly for current real-world status before assuming either way.
+
+## 2. Current active task: Inventory FIFO Pro V2 (UI/UX + feature enhancement)
+
+The owner sent a long Indonesian specification (twice, identical) for a
+dark-navy sidebar-based enterprise ERP/WMS redesign plus 6 mandatory backend
+features. It ended with an explicit instruction that must be honored by
+whichever session continues this:
+
+> **"Mulai dengan Phase 1 — Audit saja. Jangan coding terlebih dahulu sampai
+> audit dan technical design disetujui."**
+> (Start with Phase 1 — Audit only. Do not code until audit and technical
+> design are approved.)
+
+The full spec used 3 mockup screenshots (dark navy Dashboard, Stok Barang
+with detail drawer, Stock Opname) with production-matching figures (1,007
+SKU, ~Rp 2,33M, Rp 2.330.669.085,78 SCM / Rp 307.378.082,14 Cibadak). **These
+image files and the original prompt markdown only existed in the previous
+session's ephemeral upload paths (`/root/.claude/uploads/...` and a scratch
+images directory) — they were never copied into this repo, and are almost
+certainly NOT accessible in a new session/account.** If the owner needs the
+V2 spec re-referenced in detail beyond the summary below, ask them to
+re-paste it or re-upload the mockups — do not assume they're recoverable.
+
+### 2.1 Six mandatory requirements (summarized from the spec)
+
+1. **Full "Laporan Stok"** — ALL items incl. zero-stock, with
+   category/unit/qty/value/min/buffer/status/last-movement columns; search,
+   filter, sort, pagination, column-picker, export, row-click drawer;
+   warehouse-scoped for STOCK role. **Currently missing** — no endpoint
+   lists "all items × current stock" for one warehouse today.
+2. **Category + search filters, server-side** (not client-side) for 1000+
+   rows.
+3. **Minimum/buffer stock per-item-per-warehouse** with
+   SAFE/LOW/CRITICAL/OUT_OF_STOCK (or AMAN/TIDAK AMAN) status. Migration-negative
+   rows must stay a separate REVIEW state, never folded into "normal".
+   **Currently**: `items.minimum_stock` is ONE global value, written but
+   never read back for any status calculation. No per-warehouse policy table
+   exists.
+4. **Full IN/OUT transaction history** with detail drawer (vendor for IN /
+   bakery destination for OUT / FIFO allocation / audit). **Currently
+   missing** — only a per-item `ledger()` lookup exists
+   (`services/InventoryService.php::ledger()`), no list-all-transactions
+   endpoint.
+5. **Master Vendor** — audit existing `suppliers` table first (it exists),
+   don't duplicate; add `address`, `PIC`, `phone`, `email`, `notes`,
+   `is_active` if missing.
+6. **Master Bakery Tujuan** — new `bakery_destinations` table for OUT
+   distribution destinations. **Must NOT be conflated with**:
+   - `warehouse_id` (internal stock location — different concept)
+   - `division_id` (existing field — internal production cost-center,
+     different concept)
+
+Plus: full sidebar IA (Overview/Inventory/Transactions/Transfers/Stock
+Opname/Reports/Master Data, menus hidden not disabled per permission);
+per-page specs for Dashboard/Stock IN (4-step stepper)/Stock OUT (4-step
+stepper w/ FIFO preview)/Transfer/Stock Opname; global UX rules (**no
+`prompt()`/`confirm()`** — see 2.3 below for where these currently violate
+this; loading skeletons; empty/error states; confirmation modals; Rupiah/qty
+formatting; tooltips; keyboard-friendly; prevent double-submit; idempotency
+preserved; sticky headers; server-side pagination; responsive tablet;
+accessibility); security requirement restating STOCK warehouse scoping must
+be backend-enforced, never trust frontend `warehouse_id`; explicit
+**"JANGAN eksekusi migration ke production"** — migrations/rollback/precheck/postcheck
+must be produced as **files only**, never run; suggested API routes;
+performance requirements (server-side pagination, indexed filters, no
+N+1, search debounce); acceptance criteria per feature; required automated
+tests (STOCK cross-warehouse isolation, report scoping, min/buffer calc,
+vendor/bakery filters, bakery destination persistence, transfer/opname
+scope, migration-negative behavior unchanged, FIFO unchanged, company
+reconciliation unchanged, plus run the existing regression suite).
+
+Explicit 5-phase gated structure: **Phase 1 Audit → Phase 2 Technical
+Design → Phase 3 Implementation → Phase 4 Verification → Phase 5 Deployment
+Plan (plan-only, never deploy without explicit approval)** — each phase
+gated on owner approval before the next begins.
+
+### 2.2 Phase 1 — Audit: COMPLETE (see `docs/PHASE_V2_AUDIT.md`)
+
+Already written, corrected, committed, and pushed
+(`4baef1f` then corrected in `935394a`). Read that file directly for full
+detail — key findings:
+
+- **Schema gaps**: no `categories` table (`items.category` is free-text
+  VARCHAR(100)); no `bakery_destinations` table; no per-warehouse stock
+  policy table (`items.minimum_stock` is one global value).
+- **Missing endpoints**: no "all items × current stock for one warehouse"
+  report list; no transaction-history LIST endpoint (only per-item ledger).
+- **Frontend is the largest gap**: no sidebar/drawer/dark-navy theme, no
+  global search/column-picker, **no master-data CRUD UI exists at all**
+  (master data is import-CSV-only today), 2 `prompt()`/`confirm()`
+  violations (both in `public/assets/js/reports.js`, lines 98 and 109 — see
+  2.3).
+- **7 risks identified**, most important: `GET /items` is unpaginated
+  today, which is a **real present-day performance issue at 1000+ SKUs**,
+  not hypothetical; `division_id`/`bakery_destination_id` confusion risk;
+  frontend rewrite touches every existing JS module's `render()` entry
+  point.
+- **5 candidate migrations** (list-only, no SQL written yet, per the "don't
+  code yet" instruction): `item_warehouse_stock_policy` table,
+  `bakery_destinations` table, `inventory_transactions.bakery_destination_id`
+  nullable column, `suppliers.address` + `suppliers.email` columns,
+  category-normalization (shape TBD).
+- **Section 0.1** (added in the correction commit) documents that the
+  audit's first draft WRONGLY claimed STOCK-role warehouse scoping was
+  already checked server-side on every mutating route — this was false for
+  several transfer/opname routes before the owner's own `30c5368` commit
+  fixed it directly. The corrected audit now credits that fix accurately
+  instead of leaving the stale claim in place.
+
+### 2.3 Two `prompt()`/`confirm()` violations to fix in Phase 3
+
+`public/assets/js/reports.js`:
+- Line 98: `const reason = prompt(...)` — asks for a void reason.
+- Line 109: `const override = confirm(...)` — asks to proceed as superadmin
+  override when a period is locked.
+
+Both must be replaced with proper modals per the V2 global UX rule, while
+preserving the exact same server calls (`InvApi.voidTransaction(...)` with
+`request_uuid`, `reason`, optional `superadmin_override: true`).
+
+### 2.4 Open questions blocking Phase 2 (owner has NOT yet answered these)
+
+From `docs/PHASE_V2_AUDIT.md` Section 7 — **ask the owner these before
+starting Phase 2 Technical Design**:
+
+1. Category normalization approach: keep free-text + filter, or build a
+   full `categories` table + backfill real production category values
+   (which this session cannot see)?
+2. Minimum/buffer migration approach: backfill the existing global
+   `minimum_stock` value into every warehouse row, or start blank and let
+   the owner set them per-warehouse manually?
+3. Frontend approach confirmation: stay strictly dependency-free vanilla JS
+   (the project's long-standing deliberate constraint — no npm/Composer),
+   or allow a lightweight bundler specifically for the V2 rewrite given its
+   mockup complexity (sidebar, drawers, column-picker)?
+4. Should writing regression tests for the warehouse-isolation fixes
+   (the ones in the owner's `30c5368` commit) be prioritized as an early
+   Phase 2/3 item, since no dedicated automated test currently covers them?
+
+### 2.5 What NOT to do until the owner answers
+
+- Do not write Phase 2 Technical Design until at minimum question 3
+  (frontend approach) is answered — it changes the shape of everything
+  else in the design.
+- Do not write migration SQL files yet (Phase 2 deliverable, not Phase 1).
+- Do not touch production. Never run a migration against anything but a
+  local/test DB, ever, without the owner explicitly saying "execute this
+  against production."
+
+## 3. Key architectural facts a new session needs (condensed)
+
+- PHP 8.1+/8.4 + MySQL/MariaDB, vanilla JS frontend, **no framework, no
+  npm/Composer dependencies** by deliberate design
+  (`docs/DEPLOYMENT.md`). Single-file front controller `public/index.php`.
+- Frozen API error-shape contract (`docs/API_CONTRACT.md`): success
+  `{"success":true,"data":{...},"message":"..."}`, error
+  `{"success":false,"error":{"code":"...","message":"..."}}` — frontend
+  branches on `error.code`, never `error.message`.
+- FIFO batch costing: `inventory_batches` (`qty_base` decays with sales,
+  `original_qty_base` stays fixed at opening — these are DIFFERENT and
+  conflating them was a real bug fixed this session, see git history around
+  `services/OpeningReconciliationService.php`).
+  `Database::lockFifoBatches()` only sums `qty_base > 0` (FIFO-consumable)
+  — different from an item's TRUE NET balance (sum of ALL batches incl.
+  negative layers). Conflating these was also a real bug (fixed in
+  `FifoService::postOut()`'s migration-negative guard).
+- `inv_require_warehouse_scope($user, $warehouseId)` in `public/index.php`
+  must always be called with the RESOURCE's actual warehouse_id re-derived
+  from the DB, never trusted from the request body/query. Several routes
+  violated this before the owner's own `30c5368` hardening commit.
+- Migration-negative whitelist: `movement_reconciliation_reviews` table +
+  `services/MigrationNegativeStockService.php`. Status is always computed
+  LIVE from current net balance ≤ 0, never stored as a flag.
+- CSRF token via `X-CSRF-Token` header on mutating requests.
+  `must_change_password` enforced server-side on every endpoint, not just
+  a frontend nag.
+- Every real HTTP route wraps mutations in
+  `Database::transaction(fn (PDO $tx) => ...)`.
+- `services/InventoryService.php` is "single source of truth" for every
+  stock figure — no other service should compute current stock with its
+  own SQL. It already has `warehouseDashboardSummary()` (added by the
+  owner's `30c5368` commit) used by the hardened `GET /inventory/value`.
+- Layered-override pattern used throughout migration tooling: never edit a
+  detector/generator script's output in place; produce a new versioned
+  artifact + a small JSON overrides file + a dedicated apply script with a
+  pre-write safety check.
+- Global Base Unit resolution vs. alternate/purchase-unit conversion
+  approval are DISTINCT concepts (owner correction, important not to
+  re-conflate): of the 1,007 SCM+CIBADAK opening SKUs, all 1,007 have a
+  resolved Global Base Unit (0 unresolved conflicts); only 29 have an
+  approved alternate/purchase-unit (e.g. CTN) conversion — this is NOT a
+  go-live blocker, missing CTN conversion only means CTN-unit transactions
+  get `UNIT_CONVERSION_NOT_APPROVED` while base-unit transactions work fine.
+
+## 4. Git workflow reminders for the new session
+
+- Branch `claude/funny-ramanujan-wmrlig`. The owner pushes to this branch
+  directly outside of Claude Code turns — **always `git fetch` and check
+  `git log` for divergence before assuming local state matches remote**;
+  rebase (not merge) if the owner has pushed commits with no file overlap,
+  to keep linear history.
+- This session has no production DB/server access — `.env` only ever
+  points to a local throwaway test instance. Never claim a production
+  action succeeded without the owner directly confirming it.
+- Commit message attribution footer is whatever the CURRENT session's
+  system reminder specifies (it changes per session — don't copy this
+  file's own footer blindly, use your own session's instructed footer).
+
+## 5. Immediate next step for whoever picks this up
+
+Ask the owner the 4 open questions in Section 2.4 above (or re-confirm
+them if already answered outside this file's knowledge), then start Phase
+2 — Technical Design: schema (5 candidate migrations with exact SQL now),
+API routes, permission matrix, UI page/component structure, status
+definitions, migration+rollback plan. Do not write implementation code
+until Phase 2 is presented and the owner approves it, per their explicit
+instruction repeated twice.
