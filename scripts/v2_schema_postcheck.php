@@ -71,9 +71,12 @@ foreach (['fk_items_category', 'fk_iwsp_item', 'fk_iwsp_warehouse', 'fk_tx_baker
     check("foreign key `{$fk}` exists", fkExists($pdo, $fk), $problems, $checks, $passed);
 }
 
-// 3. The bakery_destination_id CHECK constraint actually rejects a
-//    disallowed insert (proves it is enforced, not just parsed) — tested
-//    against a throwaway row in a transaction that is always rolled back.
+// 3. The bakery_destination_id CHECK constraint actually enforces the full
+//    rule (proves it is enforced, not just parsed), against every one of
+//    the 10 transaction_type values — not just a single TRANSFER_OUT
+//    sample. Each probe runs in its own transaction that is always rolled
+//    back, so no probe row is ever kept, and one probe's outcome cannot
+//    leave the connection's transaction state unusable for the next.
 $pdo->beginTransaction();
 try {
     // Never assume pre-existing rows (a fresh/empty DB has none) — the probe
@@ -94,26 +97,59 @@ try {
     $bdStmt = $pdo->prepare("INSERT INTO bakery_destinations (code, name) VALUES (:c, 'Postcheck Probe')");
     $bdStmt->execute(['c' => 'POSTCHECK-PROBE-' . bin2hex(random_bytes(4))]);
     $bdId = (int) $pdo->lastInsertId();
+    $pdo->commit();
 
-    $violated = false;
-    try {
-        $pdo->prepare(
-            "INSERT INTO inventory_transactions
-                (transaction_uuid, transaction_type, transaction_date, posting_date, warehouse_id,
-                 bakery_destination_id, status, is_historical_import, inventory_effect, created_by, created_at)
-             VALUES (:uuid, 'TRANSFER_OUT', NOW(), NOW(), :wh, :bd, 'POSTED', 0, 1, :u, NOW())"
-        )->execute(['uuid' => 'postcheck-probe-' . bin2hex(random_bytes(4)), 'wh' => $whId, 'bd' => $bdId, 'u' => $userId]);
-    } catch (PDOException $e) {
-        $violated = true;
+    // Each probe below opens/rolls back its OWN transaction (not the outer
+    // one, which is already committed above) so a rejected insert never
+    // blocks the next probe from running.
+    $probe = function (string $type, ?int $bd) use ($pdo, $whId, $userId): bool {
+        $pdo->beginTransaction();
+        $accepted = true;
+        try {
+            $pdo->prepare(
+                "INSERT INTO inventory_transactions
+                    (transaction_uuid, transaction_type, transaction_date, posting_date, warehouse_id,
+                     bakery_destination_id, status, is_historical_import, inventory_effect, created_by, created_at)
+                 VALUES (:uuid, :type, NOW(), NOW(), :wh, :bd, 'POSTED', 0, 1, :u, NOW())"
+            )->execute(['uuid' => 'postcheck-probe-' . bin2hex(random_bytes(4)), 'type' => $type, 'wh' => $whId, 'bd' => $bd, 'u' => $userId]);
+        } catch (PDOException $e) {
+            $accepted = false;
+        } finally {
+            $pdo->rollBack();
+        }
+        return $accepted;
+    };
+
+    // Positive cases: OUT must accept both a real bakery destination and NULL.
+    check('OUT + bakery_destination_id SET is accepted', $probe('OUT', $bdId), $problems, $checks, $passed);
+    check('OUT + bakery_destination_id NULL is accepted', $probe('OUT', null), $problems, $checks, $passed);
+
+    // Negative cases: every OTHER transaction_type must reject a set bakery_destination_id.
+    $nonOutTypes = ['IN', 'TRANSFER_OUT', 'TRANSFER_IN', 'ADJUSTMENT', 'OPNAME', 'PRODUCTION_IN', 'PRODUCTION_OUT', 'OPENING', 'REVERSAL'];
+    foreach ($nonOutTypes as $type) {
+        $accepted = $probe($type, $bdId);
+        check(
+            "CHECK constraint rejects bakery_destination_id on transaction_type={$type}",
+            !$accepted,
+            $problems, $checks, $passed,
+            $accepted ? 'insert unexpectedly succeeded — constraint is not enforced by this server version' : ''
+        );
     }
-    check(
-        'CHECK constraint rejects bakery_destination_id on a non-OUT transaction_type (TRANSFER_OUT probe)',
-        $violated,
-        $problems, $checks, $passed,
-        $violated ? '' : 'insert unexpectedly succeeded — constraint is not enforced by this server version'
-    );
 } finally {
-    $pdo->rollBack();
+    // If the setup insert block above failed before its commit(), the
+    // transaction is still open — roll it back so cleanup below (and the
+    // rest of this script) never runs against a half-open transaction.
+    if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+    }
+    // Cleans up the throwaway warehouse/role/user/bakery-destination rows
+    // created above (those were committed so probes could reference them by
+    // FK); every probe row itself was already rolled back individually.
+    $pdo->exec("DELETE FROM inventory_transactions WHERE transaction_uuid LIKE 'postcheck-probe-%'");
+    $pdo->exec("DELETE FROM users WHERE username = 'postcheck-probe-user'");
+    $pdo->exec("DELETE FROM warehouses WHERE code = 'POSTCHECK-PROBE-WH'");
+    $pdo->exec("DELETE FROM roles WHERE code = 'POSTCHECK_PROBE_ROLE'");
+    $pdo->exec("DELETE FROM bakery_destinations WHERE code LIKE 'POSTCHECK-PROBE-%'");
 }
 
 // 4. No pre-existing business data changed — compare against the precheck snapshot.
