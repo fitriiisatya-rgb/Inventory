@@ -98,12 +98,27 @@ CREATE TABLE suppliers (
     id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     code            VARCHAR(30)  NOT NULL UNIQUE,
     name            VARCHAR(150) NOT NULL,
-    contact_name    VARCHAR(100) NULL,
+    contact_name    VARCHAR(100) NULL,          -- doubles as "PIC" in the V2 UI — never duplicated as a separate column
+    address         VARCHAR(255) NULL,          -- PHASE V2: audited first (contact_name/phone/notes/is_active already existed) — only this and email were genuinely missing
     phone           VARCHAR(30)  NULL,
+    email           VARCHAR(150) NULL,          -- PHASE V2
     notes           VARCHAR(255) NULL,
     is_active       TINYINT(1)   NOT NULL DEFAULT 1,
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+-- PHASE V2: normalized item category master. items.category (free text,
+-- below) is preserved unchanged forever as historical provenance — this
+-- table is additive, never a replacement. See docs/PHASE_V2_SCHEMA_IMPACT.md
+-- for the backfill strategy (owner-reviewed mapping, never guessed).
+CREATE TABLE categories (
+    id          INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    code        VARCHAR(60)  NOT NULL UNIQUE,
+    name        VARCHAR(100) NOT NULL,
+    is_active   TINYINT(1)   NOT NULL DEFAULT 1,
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
 -- ============================================================================
@@ -126,7 +141,8 @@ CREATE TABLE items (
     sku             VARCHAR(40)  NOT NULL UNIQUE,
     barcode         VARCHAR(60)  NULL,
     name            VARCHAR(200) NOT NULL,
-    category        VARCHAR(100) NULL,
+    category        VARCHAR(100) NULL,          -- frozen historical text; see category_id below for the V2 normalized pointer
+    category_id     INT UNSIGNED NULL,           -- PHASE V2: nullable — an item may be "Tanpa Kategori", never guessed
     brand           VARCHAR(100) NULL,
     base_unit_id    INT UNSIGNED NOT NULL,
     minimum_stock   DECIMAL(20,6) NOT NULL DEFAULT 0,
@@ -141,8 +157,11 @@ CREATE TABLE items (
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_items_base_unit FOREIGN KEY (base_unit_id) REFERENCES units(id),
     CONSTRAINT fk_items_default_supplier FOREIGN KEY (default_supplier_id) REFERENCES suppliers(id),
+    CONSTRAINT fk_items_category FOREIGN KEY (category_id) REFERENCES categories(id),
     INDEX idx_items_status (status),
-    INDEX idx_items_barcode (barcode)
+    INDEX idx_items_barcode (barcode),
+    INDEX idx_items_category (category_id),
+    INDEX idx_items_name (name)
 ) ENGINE=InnoDB;
 
 CREATE TABLE item_unit_conversions (
@@ -189,6 +208,52 @@ CREATE TABLE item_price_history (
 COMMENT='Reference price series used by the anomaly-detection check (Section 9).';
 
 -- ============================================================================
+-- 3B. PHASE V2 MASTERS — stock policy and bakery distribution
+-- ============================================================================
+
+-- PHASE V2: per-item-per-warehouse minimum/buffer. A missing row means
+-- "use items.minimum_stock as fallback, buffer unset" — see
+-- StockPolicyService::resolve(). items.minimum_stock (above) is kept
+-- unchanged as that fallback source, never repurposed.
+CREATE TABLE item_warehouse_stock_policy (
+    id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    item_id             INT UNSIGNED NOT NULL,
+    warehouse_id        INT UNSIGNED NOT NULL,
+    minimum_stock_base  DECIMAL(20,6) NOT NULL DEFAULT 0,
+    buffer_stock_base   DECIMAL(20,6) NULL,     -- NULL = not configured; never invented
+    is_active           TINYINT(1) NOT NULL DEFAULT 1,
+    notes               VARCHAR(255) NULL,
+    created_by          INT UNSIGNED NULL,
+    updated_by          INT UNSIGNED NULL,
+    created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_iwsp_item FOREIGN KEY (item_id) REFERENCES items(id),
+    CONSTRAINT fk_iwsp_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
+    CONSTRAINT fk_iwsp_created_by FOREIGN KEY (created_by) REFERENCES users(id),
+    CONSTRAINT fk_iwsp_updated_by FOREIGN KEY (updated_by) REFERENCES users(id),
+    UNIQUE KEY uq_iwsp_item_wh (item_id, warehouse_id)
+) ENGINE=InnoDB;
+
+-- PHASE V2: external distribution endpoint for OUT transactions.
+-- Deliberately separate from warehouses (internal stock location) and
+-- divisions (internal cost center) — see
+-- docs/PHASE_V2_TECHNICAL_DESIGN.md Section 5.
+CREATE TABLE bakery_destinations (
+    id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    code            VARCHAR(30)  NOT NULL UNIQUE,
+    name            VARCHAR(150) NOT NULL,
+    address         VARCHAR(255) NULL,
+    city_area       VARCHAR(100) NULL,
+    pic_name        VARCHAR(100) NULL,
+    phone           VARCHAR(30)  NULL,
+    route_cluster   VARCHAR(100) NULL,
+    notes           VARCHAR(255) NULL,
+    is_active       TINYINT(1)   NOT NULL DEFAULT 1,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+-- ============================================================================
 -- 4. INVENTORY BATCHES (FIFO layers) & TRANSACTIONS
 -- ============================================================================
 
@@ -228,6 +293,15 @@ CREATE TABLE inventory_transactions (
     warehouse_id        INT UNSIGNED NOT NULL,
     supplier_id         INT UNSIGNED NULL,
     division_id         INT UNSIGNED NULL,
+    -- PHASE V2: external distribution endpoint, set only on transaction_type='OUT'.
+    -- Distinct from warehouse_id (internal stock location) and division_id
+    -- (internal cost center) — see docs/PHASE_V2_TECHNICAL_DESIGN.md Section 5.
+    -- The CHECK below is safe/backward-compatible because the column is new
+    -- and nullable (every pre-V2 row already satisfies it) and because
+    -- VoidService's REVERSAL insert never copies this column, so it is
+    -- always NULL on a REVERSAL row — see docs/PHASE_V2_SCHEMA_IMPACT.md
+    -- Section 3 for the full investigation this constraint is based on.
+    bakery_destination_id INT UNSIGNED NULL,
     reference_no        VARCHAR(100) NULL,
     status              ENUM('POSTED','VOID','REVERSED') NOT NULL DEFAULT 'POSTED',
     void_reason         VARCHAR(255) NULL,
@@ -244,9 +318,13 @@ CREATE TABLE inventory_transactions (
     CONSTRAINT fk_tx_division FOREIGN KEY (division_id) REFERENCES divisions(id),
     CONSTRAINT fk_tx_reversal FOREIGN KEY (reversal_of_id) REFERENCES inventory_transactions(id),
     CONSTRAINT fk_tx_user FOREIGN KEY (created_by) REFERENCES users(id),
+    CONSTRAINT fk_tx_bakery_destination FOREIGN KEY (bakery_destination_id) REFERENCES bakery_destinations(id),
+    CONSTRAINT chk_tx_bakery_destination_out_only
+        CHECK (bakery_destination_id IS NULL OR transaction_type = 'OUT'),
     INDEX idx_tx_date (transaction_date),
     INDEX idx_tx_type_status (transaction_type, status),
-    INDEX idx_tx_warehouse (warehouse_id)
+    INDEX idx_tx_warehouse (warehouse_id),
+    INDEX idx_tx_bakery_destination (bakery_destination_id)
 ) ENGINE=InnoDB
 COMMENT='Header only. Never DELETEd — mistakes are VOIDed or reversed (Section 19).';
 
