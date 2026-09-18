@@ -28,7 +28,12 @@ background, just no longer the "current status."**
   enforcement; no full item editor — Master Barang in V2 exposes only
   list/search/detail/category/per-warehouse minimum+buffer, never
   base_unit/conversion history/locked_at/FIFO-sensitive fields.
-- **Phase 3 Implementation**: IN PROGRESS. Explicit owner-mandated order:
+- **Phase 3 Implementation**: IN PROGRESS — backend sub-phases 3a-3g are
+  DONE (see Section "As of THIS update" below for the full list); 3h
+  (regression re-run, effectively continuous already), 3i/3j (the actual
+  V2 frontend — sidebar, dark-navy theme, data-table/drawer/modal
+  components, new pages) and the final completion report are NOT started.
+  Explicit owner-mandated order:
   (1) regression tests first, (2) migration files (never run against
   production), (3) category master, (4) min/buffer stock policy, (5)
   vendor/supplier, (6) bakery destination master, (7) `GET /reports/stock`,
@@ -57,56 +62,76 @@ background, just no longer the "current status."**
   /var/lib/mysql` and starting via `mysqld_safe`. If a new session hits
   the same "Can't open and lock privilege tables" error, this is the fix —
   do not delete/recreate the datadir.
-- **As of THIS update (second Phase 3 update, after Phase 3d landed)**:
-  commits `172343d` (3a), `3b72ee9` (3b), `4d32619` (3c), `c85ca7b` (3d)
-  are pushed. Phase 3e (vendor/suppliers CRUD + bakery_destinations CRUD +
-  wiring `bakery_destination_id` into `POST /transactions/out`) is the
-  next unstarted step — task #73 in this session's tracker. Concretely
-  done so far:
+- **As of THIS update (third Phase 3 update, after Phase 3g landed)**:
+  commits `172343d`(3a) `3b72ee9`(3b) `4d32619`(3c) `c85ca7b`(3d)
+  `87a7397`(3e) `45b4d90`(3f) `f719587`(3g) are pushed. **Backend is now
+  functionally complete for all 6 mandatory admin requirements.** Next
+  unstarted step is **Phase 3h: full regression re-run** (already
+  continuously re-run after every sub-phase, so this is mostly a formality
+  — see the running total below), then **3i/3j: the actual V2 frontend**
+  (sidebar/dark-navy UI, data-table/drawer/modal components, new pages) —
+  **zero frontend work has been done yet**, everything so far is backend
+  only. Task #76 (3h) in this session's tracker is next.
+
+  Concretely done so far, in order:
   - **3a**: `tests/warehouse_isolation_regression_test.php` (28
     assertions) — SCM/Cibadak inventory/ledger/batches isolation, SKU
-    lookup scoping, opname/transfer cross-warehouse blocks. Wired into
-    `tests/run_mysql_tests.sh`.
+    lookup scoping, opname/transfer cross-warehouse blocks.
   - **3b**: `database/migrations/2026_09_18_v2_schema.sql` +
     `_rollback.sql` + `scripts/v2_schema_{precheck,postcheck}.php` +
     `docs/PHASE_V2_SCHEMA_IMPACT.md`. The same DDL is ALSO folded directly
     into `database/schema.sql` (matching this project's established
-    convention — every prior phase edited schema.sql directly as the dev/
-    test source of truth) — so a fresh `mysql < database/schema.sql` load
-    already has every V2 table/column. The standalone migration file
-    remains the artifact for applying this to an already-running
-    production database later. The `bakery_destination_id` CHECK
-    constraint (owner asked this be investigated, not assumed) was
-    verified empirically enforced (MariaDB error 4025 on a violating
-    insert), full writeup in the schema-impact doc.
-  - **3c**: `scripts/report_category_distinct_values.php` (read-only,
-    safe against production anytime) + `scripts/backfill_item_categories.php`
-    (idempotent, mapping-file-driven, refuses incomplete mappings unless
-    `--allow-partial`). Proven against synthetic data only — real
-    production category values are not accessible from this session; the
-    owner must run the report themselves and return an approved mapping.
+    convention) — a fresh `mysql < database/schema.sql` load already has
+    every V2 table/column. The `bakery_destination_id` CHECK constraint
+    was verified empirically enforced (MariaDB error 4025 on a violating
+    insert).
+  - **3c**: `scripts/report_category_distinct_values.php` (read-only) +
+    `scripts/backfill_item_categories.php` (idempotent, mapping-file-
+    driven). Proven against synthetic data only — real production
+    category values are not accessible from this session; the owner must
+    run the report themselves and return an approved mapping.
   - **3d**: `services/StockPolicyService.php` (`resolve()`/`upsert()`/
-    `stockStatus()` — the exact 5-state calc the owner specified: REVIEW
-    always wins, then OUT_OF_STOCK/CRITICAL/LOW-only-if-buffer-configured/
-    SAFE), new `GET`/`PUT /stock-policy` routes (warehouse-scope enforced
-    for every role uniformly, `PUT` gated on new `STOCK_POLICY_MANAGE`
-    permission), `scripts/backfill_stock_policy_scm_cibadak.php`
-    (SCM+Cibadak only, hard-refuses any other warehouse code, verified
-    zero rows land on Karang Tengah). Added 4 new permission codes now
-    (`MASTER_CATEGORY_MANAGE`, `MASTER_SUPPLIER_MANAGE`,
-    `MASTER_BAKERY_DESTINATION_MANAGE`, `STOCK_POLICY_MANAGE`) since
-    they're all part of the same schema/permission pass.
-  - **Bug pattern caught twice, worth knowing if you write more
-    INSERT statements against this schema**: PDO's native MySQL prepares
-    reject a named placeholder used twice in the same statement (e.g.
-    `VALUES (..., :by, :by)` for both `created_by` and `updated_by`) with
-    `SQLSTATE[HY093]: Invalid parameter number` — always use two distinct
-    placeholder names even when binding the same value twice. Hit this in
-    both `StockPolicyService::upsert()` and
-    `backfill_stock_policy_scm_cibadak.php`, fixed in the same commit.
-  - Full regression suite (existing + 3a + 3d's new
-    `tests/stock_policy_test.php`, 33 assertions) is **199/199 passing**
-    as of `c85ca7b`.
+    `stockStatus()` — REVIEW always wins, then
+    OUT_OF_STOCK/CRITICAL/LOW-only-if-buffer-configured/SAFE), `GET`/`PUT
+    /stock-policy`, `scripts/backfill_stock_policy_scm_cibadak.php`
+    (SCM+Cibadak only, verified zero rows land on Karang Tengah). Added
+    permission codes `MASTER_CATEGORY_MANAGE`, `MASTER_SUPPLIER_MANAGE`,
+    `MASTER_BAKERY_DESTINATION_MANAGE`, `STOCK_POLICY_MANAGE`.
+  - **3e**: `services/SupplierService.php` + `services/BakeryDestinationService.php`
+    (create/update, soft-delete only via `is_active`, duplicate-code
+    rejection), `POST`/`PUT /suppliers`, `GET`/`POST`/`PUT /bakery-destinations`,
+    `GET`/`POST`/`PUT /categories`. Wired `bakery_destination_id` into
+    `FifoService::postOut()` — only ever persisted for `transaction_type
+    === 'OUT'`, service-layer guard on top of the DB CHECK.
+  - **3f**: `services/StockReportService.php` — `GET /reports/stock`, the
+    full "Laporan Stok". One aggregate query (never per-item), SQL status
+    CASE deliberately mirrors `StockPolicyService::stockStatus()` (cross-
+    checked by test), `?format=csv` export. `GET /items` is untouched.
+  - **3g**: `services/TransactionHistoryService.php` — `GET
+    /reports/transactions` (+`/{id}` detail with FIFO allocations + gated
+    audit trail) — "History Transaksi". All 32 test assertions passed on
+    the very first run (no bugs found writing this one).
+  - **Bug pattern caught FOUR times across 3d/3e/3f — memorize this**:
+    PDO's native MySQL prepares reject a named placeholder used twice in
+    the same statement (e.g. `VALUES (..., :by, :by)`, or `WHERE x LIKE
+    :q OR y LIKE :q`) with `SQLSTATE[HY093]: Invalid parameter number` —
+    always use two distinct placeholder names even when binding the same
+    value twice, or matching the same search term against two columns.
+  - Two other real bugs worth knowing about if you touch these files:
+    `StockReportService`'s `COUNT(*)` subquery originally selected only
+    `i.id` but its `HAVING` clause referenced computed aliases
+    (`qty_base`/`status`) that only exist in the full `$select` list — the
+    count subquery must always select the same full column list as the
+    main query when `HAVING` is used. And the company-wide (no
+    `warehouse_id`) mode of the same query referenced
+    `item_warehouse_stock_policy` columns from a table it deliberately
+    doesn't join in that mode — the `$select` string itself must branch on
+    `$warehouseId !== null`, not just the joins.
+  - Full regression suite (existing 138 + all new V2 suites) is
+    **275/275 passing** as of `f719587`. Every phase reset the DB fresh
+    from `database/schema.sql` and re-ran the WHOLE suite, not just the
+    new file, each time — this has been a continuous regression gate, not
+    a one-time end check.
   - Local test DB note: the sandbox's MariaDB had to be restarted this
     session too (see the gotcha above) — if you're a new session hitting
     connection refused on `127.0.0.1:3306`, check whether `mysqld_safe` is
