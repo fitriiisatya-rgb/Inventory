@@ -18,6 +18,76 @@ exact repo's code un-forked. If your live server has since diverged from
 this branch in any way, that's a gap this audit can't see — worth a quick
 `git log -1` check on the server before Phase 2 is finalized.
 
+### 0.1 Correction — two commits landed on this branch after the first draft
+
+After this audit's first draft, two commits appeared on
+`origin/claude/funny-ramanujan-wmrlig` that I hadn't authored (pushed
+directly as `fitriiisatya-rgb`): **`fix production reconciliation and
+frontend routing`** and **`harden warehouse isolation and transfer
+permissions`**. I rebased this doc on top of them and reviewed both in
+full before finalizing. They change facts stated in the first draft —
+corrected in place below, and called out here directly rather than
+silently:
+
+- **My original claim "STOCK-role warehouse scoping is checked server-side
+  on every mutating route" was wrong for several by-id routes.** Before
+  the hardening commit, `POST /transfers/{id}/receive`, `POST /transfers/{id}/cancel`,
+  `GET /transfers/{id}`, `GET /stock-opname/{id}`, `POST /stock-opname/{id}/count`,
+  `POST /stock-opname/{id}/finalize`, and `POST /stock-opname/{id}/post`
+  only checked the general `WAREHOUSE_TRANSFER_MANAGE`/`STOCK_OPNAME_MANAGE`
+  permission — never the *specific* transfer's or session's actual
+  `warehouse_id` against the requester's own assignment. A SCM-scoped
+  `STOCK` user who knew or guessed a Cibadak transfer/opname session id
+  could have received, cancelled, viewed, counted, finalized, or posted
+  it. `GET /transfers` and `GET /transfers/pending` also returned every
+  warehouse's transfers to any authenticated user, and the dashboard's
+  reconciliation view exposed the full company-wide reconciliation
+  report regardless of role. **All of this is now fixed** by the
+  hardening commit — every one of those routes now re-derives the
+  transfer's/session's real warehouse from the database and calls
+  `inv_require_warehouse_scope()` against it, `GET /transfers*` take an
+  optional scope filter, and the dashboard now gates the reconciliation
+  view behind a `RECONCILIATION_VIEW` permission check, falling back to a
+  new warehouse-scoped `InventoryService::warehouseDashboardSummary()`
+  for `STOCK` users. Section 3/4 below are corrected to reflect the
+  current (fixed) state, not the state at first draft.
+- **`GET /warehouses`, `GET /inventory/current`, `GET /inventory/current/{sku}`,
+  `GET /inventory/batches`, `GET /inventory/value`, `GET /inventory/in-transit`,
+  `GET /inventory/ledger`** now also require `INVENTORY_VIEW` and are
+  warehouse-scoped for `STOCK` users (previously several of these had no
+  permission check at all, only `inv_require_auth()`).
+- **New `GET /transfer-destinations` endpoint** already ships the
+  "Gudang Tujuan dari endpoint metadata khusus" behavior the V2 spec
+  asks for, and `transfers.js` already locks "Gudang Asal" to the
+  logged-in `STOCK` user's own warehouse. This is a real head start on
+  V2's Transfer page (Section E) — Phase 2 should build on it, not
+  re-design it from scratch.
+- **A real reconciliation bug from earlier in this engagement was fixed**:
+  `OpeningReconciliationService`'s `opening_control_total_match` and
+  `current_stock_equals_opening` checks compared against
+  `inventory_batches.qty_base` (the *current remaining* quantity, which
+  legitimately drops as stock sells) instead of `original_qty_base` (the
+  quantity *as of opening*) — meaning those checks would have started
+  failing the moment any real sale happened after go-live. Now compares
+  against `original_qty_base` and the item's live net balance separately.
+- **A gap in my own earlier POLICY CORRECTION work was fixed**: I added
+  the migration-negative-approved exclusion to `OpeningReconciliationService`
+  this session, but never to the separate `ReconciliationService`
+  (`GET /reconciliation`) — so its `negative_stock` check would have kept
+  flagging the 5 owner-approved migration-negative SKUs as `ERROR`
+  forever. Now excludes them the same way, and adds a `migration_negative_review`
+  `WARNING`-level check alongside it.
+- **The stale `"MySQL Backend — Dummy Data Mode"` copy flagged in the
+  first draft's open questions is already fixed** — `index.html` now
+  reads "MySQL Backend — Production" / "Environment Production." Removed
+  from Section 7's open questions below.
+
+None of this changes the *shape* of the V2 gap analysis (Sections 4-6
+below still hold) — it corrects specific factual claims about what
+already exists, and it's good news: real security gaps that predated
+this V2 request have already been closed, and part of the Transfer page
+groundwork is already done.
+
 ---
 
 ## 1. Existing files/modules related to this request
@@ -60,9 +130,8 @@ styled or IA'd beyond "one tab per feature." It is the mockup's opposite
 in every structural sense: horizontal tabs vs. sidebar, one flat page per
 tab vs. list+detail-drawer, no dark-navy theme (plain `app.css`, not
 audited line-by-line in this pass but confirmed via `index.html`'s
-absence of the mockup's visual language), and the header still hardcodes
-`"MySQL Backend — Dummy Data Mode"` — **stale copy now that the system is
-supposedly live**, flagged as a Phase 3 fix.
+absence of the mockup's visual language). The header copy has already
+been corrected to "MySQL Backend — Production" (see Section 0.1).
 
 **Relevant docs:** `docs/API_CONTRACT.md` (frozen error-shape contract —
 must stay compatible), `docs/DEPLOYMENT.md`, this session's
@@ -152,14 +221,23 @@ differ from Cibadak's for the same SKU).
 the current 2,098-line JS shell resembles the target IA. This is by far
 the largest single piece of V2.
 
-**Security requirements already met today (verified, not assumed):**
-STOCK-role warehouse scoping on every mutating endpoint; server-side
-permission checks (`inv_require_permission`) independent of frontend menu
-visibility (though today the frontend *does* already hide tabs it
-shouldn't show — `data-require-permission`/`data-require-role` attributes
-on the tab buttons, `Auth.applyRoleVisibility()` — so the V2 "sembunyikan
-menu, jangan hanya disabled" requirement is **already satisfied** by the
-existing pattern and should be carried forward, not reinvented).
+**Security requirements met as of the current HEAD** (corrected per
+Section 0.1 — the first draft overstated this before reviewing the
+hardening commit): STOCK-role warehouse scoping is now checked
+server-side on every mutating route AND on every by-id read/mutate route,
+re-derived from the actual resource's warehouse rather than trusted from
+the request; `GET /transfers*` and the dashboard's company-wide view are
+now scoped/gated too. Server-side permission checks
+(`inv_require_permission`) remain independent of frontend menu visibility
+(the frontend *does* already hide tabs it shouldn't show —
+`data-require-permission`/`data-require-role` attributes on the tab
+buttons, `Auth.applyRoleVisibility()` — so the V2 "sembunyikan menu,
+jangan hanya disabled" requirement is **already satisfied** by the
+existing pattern and should be carried forward, not reinvented). Phase 2
+should still write the explicit regression tests the V2 spec asks for
+(STOCK SCM cannot read Cibadak, etc.) — the fix is live, but Section 1
+found no dedicated automated test for it yet; confirming that is a Phase
+2/3 action item, not assumed done.
 
 ---
 
@@ -245,10 +323,14 @@ Phase 2/3 deliverables once the shape above is confirmed.
    "no Packagist/npm dependency" principle intact), or is a lightweight
    bundled approach (still no backend framework change) acceptable for
    the frontend specifically, given the mockup's complexity?
-4. Should the stale `"MySQL Backend — Dummy Data Mode"` header text and
-   any other now-inaccurate "dummy data" copy be corrected as part of
-   this same phase, or tracked separately? (Flagging it either way —
-   listed here so it isn't silently forgotten.)
+4. **New in this revision**: now that the warehouse-isolation hardening
+   (Section 0.1) has landed directly on GitHub outside of a reviewed
+   Claude Code turn, should Phase 2 include writing the automated
+   regression tests for it (STOCK SCM ↛ Cibadak reads, transfer/opname
+   by-id scope, etc. — the V2 spec's own "TESTING WAJIB" list already
+   asks for these) as an explicit, prioritized early item, so this class
+   of gap has test coverage going forward rather than relying on manual
+   review each time?
 
 ---
 
