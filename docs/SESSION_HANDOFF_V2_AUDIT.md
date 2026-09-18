@@ -57,13 +57,61 @@ background, just no longer the "current status."**
   /var/lib/mysql` and starting via `mysqld_safe`. If a new session hits
   the same "Can't open and lock privilege tables" error, this is the fix —
   do not delete/recreate the datadir.
-- **As of this update**: mid-way through Phase 3a (writing
-  `tests/warehouse_isolation_regression_test.php`, following the existing
-  `tests/mysql_security_test.php` pattern — spawn `php -S`, real HTTP via
-  curl, fresh `database/schema.sql` per run via `tests/run_mysql_tests.sh`'s
-  `reset_db` pattern). Nothing from Phase 3 has been committed yet at the
-  time of this handoff update — check `git log` for anything past
-  `b2b1a22` to see what's actually landed since.
+- **As of THIS update (second Phase 3 update, after Phase 3d landed)**:
+  commits `172343d` (3a), `3b72ee9` (3b), `4d32619` (3c), `c85ca7b` (3d)
+  are pushed. Phase 3e (vendor/suppliers CRUD + bakery_destinations CRUD +
+  wiring `bakery_destination_id` into `POST /transactions/out`) is the
+  next unstarted step — task #73 in this session's tracker. Concretely
+  done so far:
+  - **3a**: `tests/warehouse_isolation_regression_test.php` (28
+    assertions) — SCM/Cibadak inventory/ledger/batches isolation, SKU
+    lookup scoping, opname/transfer cross-warehouse blocks. Wired into
+    `tests/run_mysql_tests.sh`.
+  - **3b**: `database/migrations/2026_09_18_v2_schema.sql` +
+    `_rollback.sql` + `scripts/v2_schema_{precheck,postcheck}.php` +
+    `docs/PHASE_V2_SCHEMA_IMPACT.md`. The same DDL is ALSO folded directly
+    into `database/schema.sql` (matching this project's established
+    convention — every prior phase edited schema.sql directly as the dev/
+    test source of truth) — so a fresh `mysql < database/schema.sql` load
+    already has every V2 table/column. The standalone migration file
+    remains the artifact for applying this to an already-running
+    production database later. The `bakery_destination_id` CHECK
+    constraint (owner asked this be investigated, not assumed) was
+    verified empirically enforced (MariaDB error 4025 on a violating
+    insert), full writeup in the schema-impact doc.
+  - **3c**: `scripts/report_category_distinct_values.php` (read-only,
+    safe against production anytime) + `scripts/backfill_item_categories.php`
+    (idempotent, mapping-file-driven, refuses incomplete mappings unless
+    `--allow-partial`). Proven against synthetic data only — real
+    production category values are not accessible from this session; the
+    owner must run the report themselves and return an approved mapping.
+  - **3d**: `services/StockPolicyService.php` (`resolve()`/`upsert()`/
+    `stockStatus()` — the exact 5-state calc the owner specified: REVIEW
+    always wins, then OUT_OF_STOCK/CRITICAL/LOW-only-if-buffer-configured/
+    SAFE), new `GET`/`PUT /stock-policy` routes (warehouse-scope enforced
+    for every role uniformly, `PUT` gated on new `STOCK_POLICY_MANAGE`
+    permission), `scripts/backfill_stock_policy_scm_cibadak.php`
+    (SCM+Cibadak only, hard-refuses any other warehouse code, verified
+    zero rows land on Karang Tengah). Added 4 new permission codes now
+    (`MASTER_CATEGORY_MANAGE`, `MASTER_SUPPLIER_MANAGE`,
+    `MASTER_BAKERY_DESTINATION_MANAGE`, `STOCK_POLICY_MANAGE`) since
+    they're all part of the same schema/permission pass.
+  - **Bug pattern caught twice, worth knowing if you write more
+    INSERT statements against this schema**: PDO's native MySQL prepares
+    reject a named placeholder used twice in the same statement (e.g.
+    `VALUES (..., :by, :by)` for both `created_by` and `updated_by`) with
+    `SQLSTATE[HY093]: Invalid parameter number` — always use two distinct
+    placeholder names even when binding the same value twice. Hit this in
+    both `StockPolicyService::upsert()` and
+    `backfill_stock_policy_scm_cibadak.php`, fixed in the same commit.
+  - Full regression suite (existing + 3a + 3d's new
+    `tests/stock_policy_test.php`, 33 assertions) is **199/199 passing**
+    as of `c85ca7b`.
+  - Local test DB note: the sandbox's MariaDB had to be restarted this
+    session too (see the gotcha above) — if you're a new session hitting
+    connection refused on `127.0.0.1:3306`, check whether `mysqld_safe` is
+    even running (`mysqladmin ping`) before assuming the gotcha above
+    applies; it may simply not be started yet in a fresh container.
 
 ---
 
