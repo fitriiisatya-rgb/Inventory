@@ -16,9 +16,25 @@ use PDO;
  * source of truth for it): IN/OPENING/TRANSFER_IN/PRODUCTION_OUT are
  * +ABS(subtotal); OUT/TRANSFER_OUT/PRODUCTION_IN are -ABS(subtotal);
  * ADJUSTMENT/REVERSAL are already signed at post time and used as-is.
- * Only POSTED, inventory_effect=1 lines ever count (historical-import
- * rows are explicitly excluded from every total here — they never moved
- * real stock).
+ * Only inventory_effect=1 lines ever count (historical-import rows are
+ * explicitly excluded from every total here — they never moved real
+ * stock).
+ *
+ * Status filter (opening/ending/movement totals — everything EXCEPT the
+ * OUT-side FIFO HPP totals): `status IN ('POSTED','VOID')`, never
+ * `status = 'POSTED'` alone. A voided transaction still really happened
+ * at its own transaction_date — VoidService never deletes or backdates
+ * anything, it posts a SEPARATE `REVERSAL` transaction (status=POSTED,
+ * dated at the real moment it was voided) whose line carries the exact
+ * opposite signed value. Counting only the original OR only the reversal
+ * leaves a phantom residue; counting BOTH (each on its own real date) is
+ * what makes Ending/Opening correctly net back to the true current state
+ * (proven against InventoryService::currentStock() in
+ * tests/inventory_hpp_costing_audit_test.php, Case F). The OUT-side FIFO
+ * HPP total is the deliberate exception: it stays `status = 'POSTED'`
+ * only, because a voided OUT means those goods never actually left, so
+ * excluding it (and never counting the REVERSAL, which is not itself
+ * type OUT) is exactly correct — no matching broadening needed there.
  *
  * Core formulas (spec section — see docs/PHASE_V2_3_HPP_REPORT.md):
  *   Opening Value  = SUM(signed value) WHERE transaction_date <  start
@@ -92,6 +108,7 @@ final class InventoryHppReportService
                 'transfer_out' => $current['transfer_out'],
                 'transfer_net' => round($current['transfer_in'] + $current['transfer_out'], 4),
                 'opening_mid_period' => $current['opening_mid_period'],
+                'voided_out_net' => $current['voided_out_net'],
                 'historical_import_note' => 'Historical import rows (inventory_effect=0) never affect stock and are excluded from every total above.',
             ],
         ];
@@ -220,11 +237,82 @@ final class InventoryHppReportService
         ];
     }
 
+    /**
+     * The exact bridge behind the Variance figure — "clicking Variance"
+     * data. Algebraic identity (derived from the same signed-value formula
+     * every other total here uses, proven in
+     * tests/inventory_hpp_costing_audit_test.php across cases A-H):
+     *
+     *   Variance = -(Adjustment_net + Reversal_net + Production_net
+     *                + Opening_mid_period + Transfer_net + Voided_out_net)
+     *
+     * where Adjustment_net is split here into its Opname-tagged slice and
+     * everything else, so "Opname Loss/Gain" is never buried inside a
+     * generic "Adjustment" line. Each component is the NEGATIVE of the
+     * bucket's own signed contribution to Ending Value — i.e. it is
+     * literally "how much of the Reconciliation-vs-FIFO gap this bucket
+     * explains," not the bucket's raw signed value.
+     *
+     * Voided_out_net exists because of an asymmetry the costing audit
+     * (Case F2) found between how a voided IN and a voided OUT settle:
+     * IN is itself one of Reconciliation's own variables (Purchase), so a
+     * voided IN's original entry is already absorbed there and cancels
+     * cleanly against its REVERSAL. OUT is NOT one of Reconciliation's
+     * variables — it only enters through Ending (via the broadened
+     * `status IN ('POSTED','VOID')` filter, so a voided OUT's original
+     * negative contribution still counts there) and through FIFO HPP
+     * (which deliberately excludes it — see fifoHppTotal()'s docblock,
+     * since those goods never actually left). Nothing else in this bucket
+     * list captures that gap, so without this term a voided OUT would
+     * leave a real, non-zero residue in `unexplained` even though the
+     * underlying numbers are all individually correct.
+     *
+     * `unexplained` = variance - SUM(components) and is mathematically
+     * guaranteed to be exactly 0 given the transaction types this method
+     * (and periodTotals()) accounts for — OPNAME never posts as its own
+     * transaction_type (see stock_adjustments.adjustment_type='OPNAME'
+     * instead), so there is no unaccounted-for type today. It is computed
+     * and returned anyway, never assumed to be zero, so a future
+     * transaction_type (or a currently-unmodeled combination) added
+     * without updating this bucket list would surface here as a nonzero
+     * "Unexplained" — the UI shows a warning rather than silently forcing
+     * it to zero, per the spec.
+     */
+    public static function varianceBridge(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId): array
+    {
+        $t = self::periodTotals($pdo, $startDate, $endDate, $warehouseId, null, null);
+
+        $adjustmentNonOpname = round($t['adjustment_net'] - $t['opname_net'], 4);
+        $components = [
+            ['label' => 'Adjustment (Non-Opname)', 'raw_value' => $adjustmentNonOpname, 'explains' => round(-$adjustmentNonOpname, 4)],
+            ['label' => 'Opname (Gain/Loss)', 'raw_value' => $t['opname_net'], 'explains' => round(-$t['opname_net'], 4)],
+            ['label' => 'Reversal', 'raw_value' => $t['reversal_net'], 'explains' => round(-$t['reversal_net'], 4)],
+            ['label' => 'Production (net)', 'raw_value' => $t['production_net'], 'explains' => round(-$t['production_net'], 4)],
+            ['label' => 'Opening (mid-periode)', 'raw_value' => $t['opening_mid_period'], 'explains' => round(-$t['opening_mid_period'], 4)],
+            ['label' => 'Transfer (net, harus ~0 di level perusahaan)', 'raw_value' => round($t['transfer_in'] + $t['transfer_out'], 4), 'explains' => round(-($t['transfer_in'] + $t['transfer_out']), 4)],
+            ['label' => 'OUT Dibatalkan (Voided, entri asli dipulihkan)', 'raw_value' => $t['voided_out_net'], 'explains' => round(-$t['voided_out_net'], 4)],
+        ];
+
+        $explainedTotal = round(array_sum(array_column($components, 'explains')), 4);
+        $unexplained = round($t['variance'] - $explainedTotal, 4);
+
+        return [
+            'period' => ['start_date' => $startDate, 'end_date' => $endDate, 'warehouse_id' => $warehouseId],
+            'hpp_reconciliation' => $t['reconciliation'],
+            'fifo_hpp' => $t['fifo_hpp'],
+            'variance' => $t['variance'],
+            'components' => $components,
+            'explained_total' => $explainedTotal,
+            'unexplained' => $unexplained,
+            'is_fully_explained' => abs($unexplained) < 0.01,
+        ];
+    }
+
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------
 
-    /** @return array{opening:float,purchase:float,fifo_hpp:float,ending:float,reconciliation:float,variance:float,adjustment_net:float,opname_net:float,reversal_net:float,production_net:float,transfer_in:float,transfer_out:float,opening_mid_period:float} */
+    /** @return array{opening:float,purchase:float,fifo_hpp:float,ending:float,reconciliation:float,variance:float,adjustment_net:float,opname_net:float,reversal_net:float,production_net:float,transfer_in:float,transfer_out:float,opening_mid_period:float,voided_out_net:float} */
     private static function periodTotals(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, ?int $categoryId, ?string $q): array
     {
         [$itemJoin, $itemWhere, $itemBind] = self::itemFilterClauses($categoryId, $q);
@@ -232,7 +320,7 @@ final class InventoryHppReportService
         $opening = self::signedValueBefore($pdo, $startDate, $warehouseId, $itemJoin, $itemWhere, $itemBind);
         $ending = self::signedValueBefore($pdo, date('Y-m-d', strtotime($endDate . ' +1 day')), $warehouseId, $itemJoin, $itemWhere, $itemBind);
 
-        $movWhere = ["t.status = 'POSTED'", 't.inventory_effect = 1', 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
+        $movWhere = ["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
         $movBind = array_merge(['start' => $startDate . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'], $itemBind);
         if ($warehouseId !== null) {
             $movWhere[] = 'l.warehouse_id = :wh';
@@ -249,7 +337,8 @@ final class InventoryHppReportService
                 SUM(CASE WHEN t.transaction_type = 'ADJUSTMENT' THEN l.subtotal ELSE 0 END) AS adjustment_net,
                 SUM(CASE WHEN t.transaction_type = 'REVERSAL' THEN l.subtotal ELSE 0 END) AS reversal_net,
                 SUM(CASE WHEN t.transaction_type = 'PRODUCTION_OUT' THEN ABS(l.subtotal) WHEN t.transaction_type = 'PRODUCTION_IN' THEN -ABS(l.subtotal) ELSE 0 END) AS production_net,
-                SUM(CASE WHEN t.transaction_type = 'OPENING' THEN ABS(l.subtotal) ELSE 0 END) AS opening_mid_period
+                SUM(CASE WHEN t.transaction_type = 'OPENING' THEN ABS(l.subtotal) ELSE 0 END) AS opening_mid_period,
+                SUM(CASE WHEN t.transaction_type = 'OUT' AND t.status = 'VOID' THEN -ABS(l.subtotal) ELSE 0 END) AS voided_out_net
              FROM inventory_transaction_lines l
              JOIN inventory_transactions t ON t.id = l.transaction_id
              {$itemJoin}
@@ -280,12 +369,13 @@ final class InventoryHppReportService
             'transfer_in' => round((float) ($mov['transfer_in'] ?? 0), 4),
             'transfer_out' => round((float) ($mov['transfer_out'] ?? 0), 4),
             'opening_mid_period' => round((float) ($mov['opening_mid_period'] ?? 0), 4),
+            'voided_out_net' => round((float) ($mov['voided_out_net'] ?? 0), 4),
         ];
     }
 
     private static function signedValueBefore(PDO $pdo, string $beforeDate, ?int $warehouseId, string $itemJoin, array $itemWhere, array $itemBind): float
     {
-        $where = ["t.status = 'POSTED'", 't.inventory_effect = 1', 't.transaction_date < :before'];
+        $where = ["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', 't.transaction_date < :before'];
         $bind = array_merge(['before' => $beforeDate . ' 00:00:00'], $itemBind);
         if ($warehouseId !== null) {
             $where[] = 'l.warehouse_id = :wh';
@@ -307,7 +397,12 @@ final class InventoryHppReportService
 
     private static function fifoHppTotal(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, string $itemJoin, array $itemWhere, array $itemBind): float
     {
-        $where = ["t.status = 'POSTED'", "t.transaction_type = 'OUT'", 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
+        // inventory_effect=1 is redundant today (historical-import rows never
+        // get FIFO allocations at all — ImportHistoricalTransactionService
+        // never calls FifoService) but kept explicit rather than relying on
+        // that incidental absence, per the costing audit's requirement that
+        // historical rows are provably excluded, not just accidentally so.
+        $where = ["t.status = 'POSTED'", 't.inventory_effect = 1', "t.transaction_type = 'OUT'", 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
         $bind = array_merge(['start' => $startDate . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'], $itemBind);
         if ($warehouseId !== null) {
             $where[] = 'l.warehouse_id = :wh';
@@ -337,7 +432,7 @@ final class InventoryHppReportService
      */
     private static function opnameNet(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId): float
     {
-        $where = ["t.status = 'POSTED'", "sa.adjustment_type = 'OPNAME'", 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
+        $where = ["t.status IN ('POSTED','VOID')", "sa.adjustment_type = 'OPNAME'", 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
         $bind = ['start' => $startDate . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'];
         if ($warehouseId !== null) {
             $where[] = 'l.warehouse_id = :wh';
@@ -391,7 +486,7 @@ final class InventoryHppReportService
 
         $opening = self::signedValueBefore($pdo, $startDate, $warehouseId, $itemJoin, $itemWhere, $itemBind);
 
-        $movWhere = ["t.status = 'POSTED'", 't.inventory_effect = 1', 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
+        $movWhere = ["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
         $bind = array_merge(['start' => $startDate . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'], $itemBind);
         if ($warehouseId !== null) {
             $movWhere[] = 'l.warehouse_id = :wh';
@@ -518,6 +613,7 @@ final class InventoryHppReportService
                 ['Transfer IN', $summary['non_hpp_movements']['transfer_in']],
                 ['Transfer OUT', $summary['non_hpp_movements']['transfer_out']],
                 ['Transfer net (harus ~0 di level perusahaan)', $summary['non_hpp_movements']['transfer_net']],
+                ['OUT Dibatalkan (Voided, net)', $summary['non_hpp_movements']['voided_out_net']],
             ],
         ];
 
@@ -587,8 +683,10 @@ final class InventoryHppReportService
     private static function exportNonHppSheet(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId): array
     {
         $where = [
-            "t.status = 'POSTED'", 't.inventory_effect = 1',
-            "t.transaction_type IN ('ADJUSTMENT','REVERSAL','PRODUCTION_IN','PRODUCTION_OUT','OPENING')",
+            "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1',
+            // A voided OUT (status=VOID) belongs here too — its POSTED counterpart never
+            // does, that one is already disclosed in the "Detail Transaksi FIFO" sheet.
+            "(t.transaction_type IN ('ADJUSTMENT','REVERSAL','PRODUCTION_IN','PRODUCTION_OUT','OPENING') OR (t.transaction_type = 'OUT' AND t.status = 'VOID'))",
             't.transaction_date >= :start', 't.transaction_date < :end_excl',
         ];
         $bind = ['start' => $startDate . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'];

@@ -235,13 +235,14 @@ $receiveResult = Database::transaction(fn (PDO $tx) => TransferService::receive(
 ]));
 $transferTraceAfterReceive = TraceService::transferTrace($pdo, $transferId);
 check('transfer trace after receive shows the destination batch created', $transferTraceAfterReceive['lines'][0]['destination_batch'] !== null);
-// NOTE: TransferService::receive()'s FifoService::postIn call does not pass
-// a transaction_type override, so the receiving-side transaction posts as
-// plain 'IN' (default), not 'TRANSFER_IN' — a pre-existing characteristic
-// of TransferService, not something transferTrace() controls. Its
-// reference_no is still 'TRANSFER-{id}', which is what the cross-reference
-// keys off, so both legs are still found either way.
-check('transfer trace after receive cross-references both legs by reference_no (source OUT + received-side IN)', count($transferTraceAfterReceive['transactions']) === 2 && in_array('TRANSFER_OUT', array_column($transferTraceAfterReceive['transactions'], 'transaction_type'), true));
+// PHASE V2.3B fix: TransferService::receive() now explicitly passes
+// transaction_type='TRANSFER_IN' to FifoService::postIn() (previously it
+// omitted the override and silently defaulted to 'IN', which the costing
+// audit found was making every received transfer count as an External
+// Purchase in the HPP report). Its reference_no is still 'TRANSFER-{id}',
+// which is what the cross-reference keys off, so both legs are still
+// found either way.
+check('transfer trace after receive cross-references both legs by reference_no (TRANSFER_OUT + TRANSFER_IN)', count($transferTraceAfterReceive['transactions']) === 2 && in_array('TRANSFER_OUT', array_column($transferTraceAfterReceive['transactions'], 'transaction_type'), true) && in_array('TRANSFER_IN', array_column($transferTraceAfterReceive['transactions'], 'transaction_type'), true));
 
 try {
     TraceService::transferTrace($pdo, 999999999);

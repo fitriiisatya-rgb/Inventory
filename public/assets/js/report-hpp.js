@@ -177,9 +177,9 @@ const ReportHpp = (() => {
             host.innerHTML = '';
             host.appendChild(kpiCard('📥', 'Nilai Stok Awal', summary.opening_value, summary.deltas_vs_previous_period.opening_value_pct));
             host.appendChild(kpiCard('🛒', 'Pembelian Eksternal', summary.external_purchase, summary.deltas_vs_previous_period.external_purchase_pct));
-            host.appendChild(kpiCard('📦', 'Barang Keluar FIFO / HPP', summary.fifo_hpp, summary.deltas_vs_previous_period.fifo_hpp_pct));
+            host.appendChild(kpiCard('📦', 'Barang Keluar FIFO / HPP Aktual', summary.fifo_hpp, summary.deltas_vs_previous_period.fifo_hpp_pct, 'Biaya aktual dari FIFO allocation — angka HPP yang sesungguhnya.'));
             host.appendChild(kpiCard('📤', 'Nilai Stok Akhir', summary.ending_value, summary.deltas_vs_previous_period.ending_value_pct));
-            host.appendChild(kpiCard('🧮', 'HPP Rekonsiliasi', summary.hpp_reconciliation, summary.deltas_vs_previous_period.hpp_reconciliation_pct));
+            host.appendChild(kpiCard('🧮', 'HPP Rekonsiliasi (Nilai Kontrol)', summary.hpp_reconciliation, summary.deltas_vs_previous_period.hpp_reconciliation_pct, 'Formula kontrol (Stok Awal + Pembelian − Stok Akhir) — BUKAN otomatis sama dengan HPP FIFO aktual.'));
             host.appendChild(varianceCard(summary));
 
             formulaHost.innerHTML = '';
@@ -190,7 +190,7 @@ const ReportHpp = (() => {
         }
     }
 
-    function kpiCard(icon, label, value, deltaPct) {
+    function kpiCard(icon, label, value, deltaPct, note) {
         const deltaEl = deltaPct === null || deltaPct === undefined
             ? UI.el('span', { class: 'hpp-kpi-delta neutral' }, '—')
             : UI.el('span', { class: `hpp-kpi-delta ${deltaPct >= 0 ? 'up' : 'down'}` }, `${deltaPct >= 0 ? '↑' : '↓'} ${Math.abs(deltaPct)}%`);
@@ -200,20 +200,26 @@ const ReportHpp = (() => {
                 UI.el('div', { class: 'hpp-kpi-label' }, label),
                 UI.el('div', { class: 'hpp-kpi-value' }, UI.formatMoney(value)),
                 UI.el('div', {}, [deltaEl, UI.el('span', { class: 'hpp-kpi-delta-note' }, ' vs periode lalu')]),
+                note ? UI.el('div', { class: 'hpp-kpi-subnote' }, note) : null,
             ]),
         ]);
     }
 
+    // Clicking Variance opens the exact bridge (spec section 8) — never a
+    // silent "trust me it balances." A nonzero `unexplained` is shown as a
+    // visible warning, not hidden or rounded away.
     function varianceCard(summary) {
         const balanced = Math.abs(summary.variance) < 0.5;
-        return UI.el('div', { class: `card hpp-kpi-card ${balanced ? 'hpp-variance-ok' : 'hpp-variance-warn'}` }, [
+        const card = UI.el('div', { class: `card hpp-kpi-card hpp-kpi-clickable ${balanced ? 'hpp-variance-ok' : 'hpp-variance-warn'}` }, [
             UI.el('div', { class: 'hpp-kpi-icon' }, balanced ? '✅' : '⚠️'),
             UI.el('div', {}, [
-                UI.el('div', { class: 'hpp-kpi-label' }, 'Variance'),
+                UI.el('div', { class: 'hpp-kpi-label' }, 'Variance FIFO vs Rekonsiliasi'),
                 UI.el('div', { class: 'hpp-kpi-value' }, UI.formatMoney(summary.variance)),
-                UI.el('div', { class: 'hpp-kpi-delta-note' }, balanced ? '0.00% — Seimbang' : 'Lihat Pergerakan Non-HPP di bawah'),
+                UI.el('div', { class: 'hpp-kpi-delta-note' }, balanced ? '0.00% — Seimbang' : 'Klik untuk lihat rincian penjelas ↓'),
             ]),
         ]);
+        card.addEventListener('click', openVarianceBridge);
+        return card;
     }
 
     function buildFormulaStrip(summary) {
@@ -226,9 +232,47 @@ const ReportHpp = (() => {
             UI.el('div', { class: 'hpp-formula-op' }, '−'),
             UI.el('div', { class: 'hpp-formula-chip' }, [UI.el('div', { class: 'hpp-formula-chip-label' }, 'Stok Akhir Total'), UI.el('div', { class: 'hpp-formula-chip-value' }, UI.formatMoney(summary.ending_value))]),
             UI.el('div', { class: 'hpp-formula-op' }, '='),
-            UI.el('div', { class: 'hpp-formula-chip hpp-formula-result' }, [UI.el('div', { class: 'hpp-formula-chip-label' }, 'HPP Rekonsiliasi'), UI.el('div', { class: 'hpp-formula-chip-value' }, UI.formatMoney(summary.hpp_reconciliation))]),
-            UI.el('div', { class: 'hpp-formula-note' }, 'ℹ️ Transfer antar gudang tidak dihitung sebagai pembelian perusahaan.'),
+            UI.el('div', { class: 'hpp-formula-chip hpp-formula-result' }, [UI.el('div', { class: 'hpp-formula-chip-label' }, 'HPP Rekonsiliasi (Nilai Kontrol)'), UI.el('div', { class: 'hpp-formula-chip-value' }, UI.formatMoney(summary.hpp_reconciliation))]),
+            UI.el('div', { class: 'hpp-formula-note' }, 'ℹ️ Nilai kontrol, BUKAN otomatis sama dengan HPP FIFO aktual. Transfer antar gudang tidak dihitung sebagai pembelian perusahaan.'),
         ]);
+    }
+
+    async function openVarianceBridge() {
+        Drawer.open({ title: 'Variance FIFO vs Rekonsiliasi', render: (body) => { body.innerHTML = '<div class="alert alert-info">Memuat rincian...</div>'; } });
+        try {
+            const b = await InvApi.hppVarianceBridge({ start_date: state.startDate, end_date: state.endDate, warehouse_id: state.warehouseId || undefined });
+            const componentRows = b.components.filter((c) => Math.abs(c.explains) >= 0.5);
+            Drawer.open({
+                title: 'Variance FIFO vs Rekonsiliasi',
+                render: (body) => {
+                    body.appendChild(UI.el('p', { style: 'color:var(--text3); font-size:0.78rem; margin-bottom:14px;' },
+                        'HPP Rekonsiliasi adalah nilai KONTROL (Stok Awal + Pembelian − Stok Akhir), bukan otomatis sama dengan HPP FIFO aktual. Selisihnya (Variance) dijelaskan oleh pergerakan non-HPP di bawah — tidak pernah dipaksa menjadi nol.'));
+                    body.appendChild(UI.el('div', { class: 'hpp-bridge-table' }, [
+                        UI.el('div', { class: 'hpp-bridge-row' }, [UI.el('span', {}, 'HPP Rekonsiliasi (Nilai Kontrol)'), UI.el('span', { class: 'mono' }, UI.formatMoney(b.hpp_reconciliation))]),
+                        UI.el('div', { class: 'hpp-bridge-row' }, [UI.el('span', {}, 'FIFO HPP (Aktual)'), UI.el('span', { class: 'mono' }, UI.formatMoney(b.fifo_hpp))]),
+                        UI.el('div', { class: 'hpp-bridge-divider' }),
+                        UI.el('div', { class: 'hpp-bridge-row hpp-bridge-total' }, [UI.el('span', {}, 'Variance'), UI.el('span', { class: 'mono' }, UI.formatMoney(b.variance))]),
+                    ]));
+                    body.appendChild(UI.el('div', { class: 'hpp-trace-section-label', style: 'margin-top:16px;' }, 'Dijelaskan oleh:'));
+                    body.appendChild(UI.el('div', { class: 'hpp-bridge-table' }, componentRows.length ? componentRows.map((c) => UI.el('div', { class: 'hpp-bridge-row' }, [
+                        UI.el('span', {}, c.label),
+                        UI.el('span', { class: 'mono' }, UI.formatMoney(c.explains)),
+                    ])) : [UI.el('div', { class: 'hpp-bridge-row' }, [UI.el('span', {}, '(tidak ada pergerakan non-HPP pada periode ini)'), UI.el('span', {}, '')])]));
+                    body.appendChild(UI.el('div', { class: 'hpp-bridge-divider' }));
+                    body.appendChild(UI.el('div', { class: `hpp-bridge-row hpp-bridge-total ${b.is_fully_explained ? '' : 'hpp-bridge-warn'}` }, [
+                        UI.el('span', {}, 'Unexplained'),
+                        UI.el('span', { class: 'mono' }, UI.formatMoney(b.unexplained)),
+                    ]));
+                    if (!b.is_fully_explained) {
+                        body.appendChild(UI.el('div', { class: 'alert alert-error', style: 'margin-top:12px;' },
+                            '⚠️ Ada selisih yang belum terjelaskan. Variance TIDAK dipaksa menjadi nol — periksa pergerakan non-HPP lain (mis. jenis transaksi baru) sebelum melaporkan angka ini.'));
+                    }
+                },
+            });
+        } catch (err) {
+            UI.handleApiError(err);
+            Drawer.open({ title: 'Variance FIFO vs Rekonsiliasi', render: (body) => { body.innerHTML = `<div class="alert alert-error">Gagal memuat rincian: ${(err && err.message) || ''}</div>`; } });
+        }
     }
 
     async function loadWarehousePanels() {

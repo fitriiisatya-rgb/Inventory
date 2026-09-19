@@ -538,3 +538,15 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 .hpp-trace-breakdown-value { color: var(--text3); white-space: nowrap; font-size: 0.68rem; }
 .hpp-trace-detail-table table { font-size: 0.72rem; }
 .hpp-trace-detail-row:hover { background: var(--bg3); }
+
+/* PHASE V2.3B — costing audit sign-off: clickable Variance card + bridge */
+.hpp-kpi-subnote { color: var(--text3); font-size: 0.66rem; margin-top: 4px; line-height: 1.4; }
+.hpp-kpi-clickable { cursor: pointer; transition: border-color 0.15s; }
+.hpp-kpi-clickable:hover { border-color: var(--accent); }
+.hpp-bridge-table { display: flex; flex-direction: column; gap: 8px; }
+.hpp-bridge-row { display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; color: var(--text2); }
+.hpp-bridge-row .mono { color: var(--text); }
+.hpp-bridge-divider { border-top: 1px solid var(--border); margin: 4px 0; }
+.hpp-bridge-total { font-weight: 700; color: var(--text); font-size: 0.95rem; }
+.hpp-bridge-total .mono { font-weight: 700; }
+.hpp-bridge-warn, .hpp-bridge-warn .mono { color: var(--orange); }

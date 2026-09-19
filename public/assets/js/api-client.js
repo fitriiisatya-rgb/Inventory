@@ -174,6 +174,7 @@ const InvApi = (() => {
         hppWarehouses: (params) => request('GET', `/reports/inventory-hpp/warehouses${qs(params)}`),
         hppDaily: (params) => request('GET', `/reports/inventory-hpp/daily${qs(params)}`),
         hppDayDetail: (params) => request('GET', `/reports/inventory-hpp/day-detail${qs(params)}`),
+        hppVarianceBridge: (params) => request('GET', `/reports/inventory-hpp/variance-bridge${qs(params)}`),
         hppExportUrl: (params) => `/api/reports/inventory-hpp/export${qs(params)}`,
 
         // ---- PHASE V2: per-item-per-warehouse stock policy ----

@@ -912,6 +912,23 @@ $routes = [
         inv_ok(InventoryHppReportService::dayDetail($pdo, $date, $warehouseId), 'OK');
     },
 
+    // The exact bridge behind the Variance KPI — "clicking Variance" data.
+    // Never forces the reconciliation to balance: `unexplained` is returned
+    // as computed, and the frontend shows a warning if it isn't ~0.
+    'GET /reports/inventory-hpp/variance-bridge' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $start = (string) ($query['start_date'] ?? '');
+        $end = (string) ($query['end_date'] ?? '');
+        if ($start === '' || $end === '' || strtotime($start) === false || strtotime($end) === false || strtotime($start) > strtotime($end)) {
+            inv_error(422, 'VALIDATION_ERROR', 'start_date and end_date are required and start_date must not be after end_date');
+        }
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+
+        inv_ok(InventoryHppReportService::varianceBridge($pdo, $start, $end, $warehouseId), 'OK');
+    },
+
     'GET /reports/inventory-hpp/export' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');

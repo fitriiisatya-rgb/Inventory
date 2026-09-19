@@ -122,6 +122,7 @@ final class TransferService
                 'input_qty' => $line['qty_base'],
                 'input_unit_id' => $baseUnitId, // base unit, factor 1 — preserves the exact layer cost, no re-averaging
                 'unit_price_input' => $line['unit_cost_base'],
+                'transaction_type' => 'TRANSFER_IN',
                 'transaction_date' => $transfer['ship_date'], // Section 1: batch date = ship date, not receipt click time
                 'reference_no' => "TRANSFER-{$transferId}",
                 'created_by' => $p['created_by'],
