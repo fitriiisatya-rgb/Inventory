@@ -35,8 +35,22 @@
         <div>BISNIS LEBIH MAJU</div>
     </div>
 
-    <div class="login-main">
-        <div class="login-card">
+    <div class="login-main" id="login-main">
+        <!-- PHASE V2.2 (revision) — the owner's approved mockup composited
+             everything (topbar, blueprint, mascot pose, trust cards, footer)
+             as one piece of art; CSS alone could only approximate it. Above
+             a width where the card stays legible, this exact image is used
+             as-is (object-fit: contain, never stretched/cropped) with only
+             the real, functional inputs positioned on top at the image's
+             own measured coordinates (see .login-image-mode rules in
+             app.css). Below that width the hand-built .login-card below
+             (same #login-form, same ids) is shown instead — the image's
+             fixed 1672:941 composition doesn't stay legible or tappable
+             once scaled down to phone width. -->
+        <div class="login-image-frame" aria-hidden="true">
+            <img src="assets/images/login-bg.png?v=20260919" class="login-bg-image" alt="">
+        </div>
+        <div class="login-card" id="login-card">
             <div class="login-card-logo">📦</div>
             <h1 class="login-card-title">Inventory Pro</h1>
             <p class="login-card-tagline">Kelola stok dengan lebih mudah, cepat, dan efisien.</p>
