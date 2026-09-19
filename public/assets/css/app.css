@@ -200,6 +200,20 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 @keyframes dtSkeleton { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
 .dt-empty, .dt-error { text-align: center; padding: 40px 20px; color: var(--text3); }
 
+/* PHASE V2.1: master-data actions menu (⋮) — reuses the dt-column-picker
+   dropdown shell, swaps checkbox rows for clickable action buttons. */
+.master-actions-menu { display: inline-block; }
+.master-actions-menu .dt-column-picker-panel { min-width: 170px; padding: 6px; }
+.master-action-item {
+    display: block; width: 100%; text-align: left; padding: 8px 10px; background: none; border: none;
+    color: var(--text1); font-size: 0.82rem; border-radius: 6px; cursor: pointer;
+}
+.master-action-item:hover { background: rgba(59,130,246,0.12); }
+.master-action-item.danger { color: #f87171; }
+.master-action-item.danger:hover { background: rgba(248,113,113,0.12); }
+.master-action-item:disabled { opacity: 0.4; cursor: not-allowed; }
+.master-action-item:disabled:hover { background: none; }
+
 /* drawer: slide-over detail panel */
 .drawer-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 1100; }
 .drawer-backdrop.open { display: block; }

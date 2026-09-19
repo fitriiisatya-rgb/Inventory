@@ -5,17 +5,70 @@
  */
 const MasterVendors = (() => {
     let editingId = null;
+    let filters = { q: '', active: '', sort: 'name' };
+    let tableHost = null;
 
     async function render(container) {
         container.innerHTML = '<div class="alert alert-info">Memuat vendor...</div>';
         try {
-            const suppliers = await InvApi.listSuppliers();
             container.innerHTML = '';
             container.appendChild(buildForm());
-            container.appendChild(buildTable(suppliers));
+            container.appendChild(buildToolbar());
+            tableHost = UI.el('div');
+            container.appendChild(tableHost);
+            await reload();
         } catch (err) {
             UI.handleApiError(err);
             container.innerHTML = `<div class="alert alert-error">Gagal memuat vendor: ${(err && err.message) || ''}</div>`;
+        }
+    }
+
+    function buildToolbar() {
+        const qInput = UI.el('input', { type: 'text', placeholder: 'Cari nama / kode / kontak / email' });
+        qInput.value = filters.q;
+        let debounce;
+        qInput.addEventListener('input', () => {
+            clearTimeout(debounce);
+            debounce = setTimeout(() => { filters.q = qInput.value.trim(); reload(); }, 300);
+        });
+        const activeSelect = UI.el('select', { html: `
+            <option value="">Semua Status</option>
+            <option value="ACTIVE">Aktif</option>
+            <option value="INACTIVE">Tidak Aktif</option>
+        ` });
+        activeSelect.value = filters.active;
+        activeSelect.addEventListener('change', () => { filters.active = activeSelect.value; reload(); });
+        const sortSelect = UI.el('select', { html: `
+            <option value="name">Nama A-Z</option>
+            <option value="name_desc">Nama Z-A</option>
+            <option value="newest">Terbaru</option>
+            <option value="oldest">Terlama</option>
+            <option value="linked_items">Jumlah Item Terkait</option>
+        ` });
+        sortSelect.value = filters.sort;
+        sortSelect.addEventListener('change', () => { filters.sort = sortSelect.value; reload(); });
+        const resetBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Reset Filter');
+        resetBtn.addEventListener('click', () => {
+            filters = { q: '', active: '', sort: 'name' };
+            qInput.value = ''; activeSelect.value = ''; sortSelect.value = 'name';
+            reload();
+        });
+        return UI.el('div', { class: 'dt-toolbar' }, [
+            UI.el('div', { class: 'dt-filters' }, [qInput, activeSelect, sortSelect, resetBtn]),
+        ]);
+    }
+
+    async function reload() {
+        if (!tableHost) return;
+        try {
+            const dir = filters.sort === 'name_desc' ? 'desc' : 'asc';
+            const sort = filters.sort === 'name_desc' ? 'name' : filters.sort;
+            const suppliers = await InvApi.listSuppliers({ search: filters.q, active: filters.active, sort, dir });
+            tableHost.innerHTML = '';
+            tableHost.appendChild(buildTable(suppliers));
+        } catch (err) {
+            UI.handleApiError(err);
+            tableHost.innerHTML = `<div class="alert alert-error">Gagal memuat vendor: ${(err && err.message) || ''}</div>`;
         }
     }
 
@@ -95,8 +148,8 @@ const MasterVendors = (() => {
                 UI.toast('Vendor berhasil ditambahkan.', 'success');
             }
             editingId = null;
-            const tab = document.getElementById('tab-master-vendor');
-            if (tab) render(tab);
+            resetForm();
+            await reload();
         } catch (err) {
             alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal menyimpan vendor.'));
         }
@@ -110,42 +163,49 @@ const MasterVendors = (() => {
             UI.el('td', {}, v.contact_name || '—'),
             UI.el('td', {}, v.phone || '—'),
             UI.el('td', {}, v.email || '—'),
-            UI.el('td', {}, UI.el('span', { class: `badge ${v.is_active ? 'badge-received' : 'badge-cancelled'}` }, v.is_active ? 'Aktif' : 'Nonaktif')),
-            UI.el('td', {}, canManage ? [
-                actionBtn('Edit', () => { editingId = v.id; fillForm(v); document.getElementById('vendor-form-card').scrollIntoView({ behavior: 'smooth' }); }),
-                actionBtn(v.is_active ? 'Nonaktifkan' : 'Aktifkan', () => toggleActive(v)),
-            ] : '—'),
+            UI.el('td', {}, UI.formatNumber(v.linked_item_count ?? 0, 0)),
+            UI.el('td', {}, MasterCommon.statusBadge(!!v.is_active)),
+            UI.el('td', {}, canManage ? MasterCommon.actionsMenu([
+                { label: 'Edit', onClick: () => { editingId = v.id; fillForm(v); document.getElementById('vendor-form-card').scrollIntoView({ behavior: 'smooth' }); } },
+                { label: v.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(v) },
+                { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(v) },
+            ]) : '—'),
         ]));
         return UI.el('div', { class: 'card' }, [
             UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, `📇 Daftar Vendor (${suppliers.length})`)]),
             UI.el('div', { class: 'table-wrapper' }, [
                 UI.el('table', {}, [
-                    UI.el('thead', {}, [UI.el('tr', {}, ['Kode', 'Nama', 'PIC', 'Telepon', 'Email', 'Status', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
-                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '7' }, 'Belum ada vendor')])]),
+                    UI.el('thead', {}, [UI.el('tr', {}, ['Kode', 'Nama', 'PIC', 'Telepon', 'Email', 'Item Terkait', 'Status', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
+                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '8' }, 'Belum ada vendor')])]),
                 ]),
             ]),
         ]);
     }
 
-    function actionBtn(label, onClick) {
-        const btn = UI.el('button', { class: 'btn btn-secondary btn-sm', style: 'margin-right:6px;' }, label);
-        btn.addEventListener('click', onClick);
-        return btn;
-    }
-
     async function toggleActive(v) {
-        const confirmed = await Modal.confirm({
-            title: v.is_active ? 'Nonaktifkan Vendor' : 'Aktifkan Vendor',
-            message: `${v.is_active ? 'Nonaktifkan' : 'Aktifkan'} vendor "${v.name}"? Data vendor tidak akan dihapus.`,
-        });
+        const confirmed = v.is_active
+            ? await MasterCommon.confirmDeactivate(`vendor "${v.name}"`)
+            : await MasterCommon.confirmActivate(`vendor "${v.name}"`);
         if (!confirmed) return;
         try {
             await InvApi.updateSupplier(v.id, { is_active: !v.is_active });
             UI.toast('Status vendor diperbarui.', 'success');
-            const tab = document.getElementById('tab-master-vendor');
-            if (tab) render(tab);
+            await reload();
         } catch (err) {
             UI.handleApiError(err);
+        }
+    }
+
+    async function doDelete(v) {
+        const confirmed = await MasterCommon.confirmDeletePermanent(`vendor "${v.name}"`);
+        if (!confirmed) return;
+        try {
+            await InvApi.deleteSupplier(v.id);
+            UI.toast('Vendor berhasil dihapus permanen.', 'success');
+            await reload();
+        } catch (err) {
+            const handled = await MasterCommon.handleDeleteError(err);
+            if (!handled) UI.handleApiError(err);
         }
     }
 

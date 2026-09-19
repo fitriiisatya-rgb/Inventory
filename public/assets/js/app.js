@@ -48,7 +48,8 @@
     }
 
     const TAB_LABELS = {
-        dashboard: 'Dashboard', 'stok-barang': 'Stok Barang', master: 'Master Data',
+        dashboard: 'Dashboard', 'stok-barang': 'Stok Barang',
+        'master-item': 'Master Barang', 'master-warehouse': 'Master Gudang', 'master-division': 'Master Divisi',
         'master-vendor': 'Vendor / Supplier', 'master-bakery': 'Bakery Tujuan', 'master-category': 'Kategori',
         laporan: 'Mutasi Stok / Ledger', 'history-transaksi': 'History Transaksi', transaksi: 'Stock IN / OUT',
         transfer: 'Transfer', produksi: 'Produksi', opname: 'Stock Opname', import: 'Import',
@@ -66,8 +67,12 @@
             Dashboard.render(document.getElementById('tab-dashboard'));
         } else if (name === 'stok-barang') {
             StockReport.render(document.getElementById('tab-stok-barang'));
-        } else if (name === 'master') {
-            renderMasterTab(document.getElementById('tab-master'));
+        } else if (name === 'master-item') {
+            MasterItems.render(document.getElementById('tab-master-item'));
+        } else if (name === 'master-warehouse') {
+            MasterWarehouses.render(document.getElementById('tab-master-warehouse'));
+        } else if (name === 'master-division') {
+            MasterDivisions.render(document.getElementById('tab-master-division'));
         } else if (name === 'master-vendor') {
             MasterVendors.render(document.getElementById('tab-master-vendor'));
         } else if (name === 'master-bakery') {
@@ -95,26 +100,6 @@
         } else if (name === 'closing') {
             Closing.render(document.getElementById('tab-closing'));
         }
-    }
-
-    function renderMasterTab(container) {
-        const section = (title, rows, columns) => UI.el('div', { class: 'card' }, [
-            UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, title)]),
-            UI.el('div', { class: 'table-wrapper' }, [
-                UI.el('table', {}, [
-                    UI.el('thead', {}, [UI.el('tr', {}, columns.map((c) => UI.el('th', {}, c)))]),
-                    UI.el('tbody', {}, rows.length
-                        ? rows.map((r) => UI.el('tr', {}, columns.map((c, i) => UI.el('td', {}, String(r[i] ?? '-')))))
-                        : [UI.el('tr', {}, [UI.el('td', { colspan: String(columns.length) }, 'Belum ada data')])]),
-                ]),
-            ]),
-        ]);
-
-        container.innerHTML = '';
-        container.appendChild(section('Barang (Items)', Master.items().map((i) => [i.sku, i.name, i.category, i.status === 'ACTIVE' ? 'Aktif' : 'Nonaktif']), ['SKU', 'Nama', 'Kategori', 'Status']));
-        container.appendChild(section('Gudang (Warehouses)', Master.warehouses().map((w) => [w.code, w.name]), ['Kode', 'Nama']));
-        container.appendChild(section('Supplier', Master.suppliers().map((s) => [s.code, s.name]), ['Kode', 'Nama']));
-        container.appendChild(section('Divisi', Master.divisions().map((d) => [d.code, d.name]), ['Kode', 'Nama']));
     }
 
     document.querySelectorAll('.sidebar-link').forEach((link) => {

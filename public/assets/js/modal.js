@@ -72,5 +72,17 @@ const Modal = (() => {
         });
     }
 
-    return { confirm, prompt };
+    /** Single-button informational dialog (e.g. surfacing a server-side block reason verbatim). @returns {Promise<void>} */
+    function alert({ title = 'Informasi', message = '', okLabel = 'Mengerti' } = {}) {
+        return new Promise((resolve) => {
+            const body = UI.el('div', {}, [UI.el('p', { style: 'color:var(--text2); font-size:0.9rem; line-height:1.5; white-space:pre-line;' }, message)]);
+            let overlay;
+            const okBtn = UI.el('button', { class: 'btn btn-primary' }, okLabel);
+            okBtn.addEventListener('click', () => { close(overlay); resolve(); });
+            overlay = build(title, body, [okBtn]);
+            okBtn.focus();
+        });
+    }
+
+    return { confirm, prompt, alert };
 })();

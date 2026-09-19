@@ -24,12 +24,20 @@ use PDO;
  */
 final class StockReportService
 {
-    private const SORTABLE = ['name' => 'i.name', 'sku' => 'i.sku', 'qty' => 'qty_base', 'value' => 'value', 'status' => 'status'];
+    private const SORTABLE = ['name' => 'i.name', 'sku' => 'i.sku', 'qty' => 'qty_base', 'value' => 'value', 'status' => 'status', 'updated_at' => 'i.updated_at'];
 
     /**
      * @param array{warehouse_id: ?int, category_id: ?int, q: ?string, status: ?string,
      *              include_zero_stock: bool, active_only: bool, page: int, per_page: int,
-     *              sort: string, dir: string} $params
+     *              sort: string, dir: string, supplier_id: ?int, item_status: ?string} $params
+     *
+     * PHASE V2.1 additions (both optional, fully backward compatible — every
+     * existing caller that omits them gets byte-identical behavior to
+     * before): `supplier_id` filters to items whose default_supplier_id
+     * matches; `item_status` ('ACTIVE'|'INACTIVE') overrides `active_only`
+     * when provided, letting a caller ask for inactive items specifically
+     * (Master Barang's 3-way Semua/Aktif/Tidak Aktif filter) rather than
+     * only ever "active" vs "everything."
      */
     public static function list(PDO $pdo, array $params): array
     {
@@ -39,12 +47,15 @@ final class StockReportService
         $statusFilter = $params['status'] ?? null;
         $includeZeroStock = $params['include_zero_stock'] ?? true;
         $activeOnly = $params['active_only'] ?? true;
+        $supplierId = $params['supplier_id'] ?? null;
+        $itemStatus = $params['item_status'] ?? null;
+        $stockStatusComposite = $params['stock_status'] ?? null;
         $page = max(1, (int) ($params['page'] ?? 1));
         $perPage = min(200, max(1, (int) ($params['per_page'] ?? 50)));
         $sortKey = self::SORTABLE[$params['sort'] ?? 'name'] ?? 'i.name';
         $dir = strtoupper($params['dir'] ?? 'ASC') === 'DESC' ? 'DESC' : 'ASC';
 
-        [$select, $joins, $where, $having, $bind] = self::buildQuery($pdo, $warehouseId, $categoryId, $q, $activeOnly, $includeZeroStock, $statusFilter);
+        [$select, $joins, $where, $having, $bind] = self::buildQuery($pdo, $warehouseId, $categoryId, $q, $activeOnly, $includeZeroStock, $statusFilter, $supplierId, $itemStatus, $stockStatusComposite);
 
         // Must select the full aliased column list (not just i.id) when HAVING
         // references computed aliases like qty_base/status.
@@ -104,8 +115,11 @@ final class StockReportService
         $statusFilter = $params['status'] ?? null;
         $includeZeroStock = $params['include_zero_stock'] ?? true;
         $activeOnly = $params['active_only'] ?? true;
+        $supplierId = $params['supplier_id'] ?? null;
+        $itemStatus = $params['item_status'] ?? null;
+        $stockStatusComposite = $params['stock_status'] ?? null;
 
-        [$select, $joins, $where, $having, $bind] = self::buildQuery($pdo, $warehouseId, $categoryId, $q, $activeOnly, $includeZeroStock, $statusFilter);
+        [$select, $joins, $where, $having, $bind] = self::buildQuery($pdo, $warehouseId, $categoryId, $q, $activeOnly, $includeZeroStock, $statusFilter, $supplierId, $itemStatus, $stockStatusComposite);
         $sql = "SELECT {$select} {$joins} WHERE {$where} " . ($having !== '' ? "HAVING {$having}" : '') . ' ORDER BY i.name ASC';
         $stmt = $pdo->prepare($sql);
         $stmt->execute($bind);
@@ -114,7 +128,7 @@ final class StockReportService
     }
 
     /** @return array{0:string,1:string,2:string,3:string,4:array} [select, joins, where, having, bind] */
-    private static function buildQuery(PDO $pdo, ?int $warehouseId, ?int $categoryId, string $q, bool $activeOnly, bool $includeZeroStock, ?string $statusFilter): array
+    private static function buildQuery(PDO $pdo, ?int $warehouseId, ?int $categoryId, string $q, bool $activeOnly, bool $includeZeroStock, ?string $statusFilter, ?int $supplierId = null, ?string $itemStatus = null, ?string $stockStatusComposite = null): array
     {
         $bind = [];
 
@@ -173,6 +187,7 @@ final class StockReportService
             FROM items i
             JOIN units u ON u.id = i.base_unit_id
             LEFT JOIN categories c ON c.id = i.category_id
+            LEFT JOIN suppliers sup ON sup.id = i.default_supplier_id
             LEFT JOIN ({$batchJoinSql}) b ON b.item_id = i.id
             {$policyJoin}
             LEFT JOIN ({$movementJoinSql}) m ON m.item_id = i.id
@@ -186,8 +201,9 @@ final class StockReportService
         $bufferExpr = $warehouseId !== null ? 'p.buffer_stock_base' : 'NULL';
 
         $select = "
-            i.id AS item_id, i.sku, i.name, i.status AS item_status,
+            i.id AS item_id, i.sku, i.name, i.status AS item_status, i.updated_at,
             i.category_id, c.code AS category_code, c.name AS category_name,
+            sup.id AS supplier_id, sup.name AS supplier_name,
             u.id AS unit_id, u.code AS unit_code,
             COALESCE(b.qty_base, 0) AS qty_base,
             COALESCE(b.value, 0) AS value,
@@ -208,17 +224,32 @@ final class StockReportService
         ";
 
         $whereParts = ['1=1'];
-        if ($activeOnly) {
+        if ($itemStatus === 'ACTIVE' || $itemStatus === 'INACTIVE') {
+            // Explicit tri-state filter (Master Barang's Semua/Aktif/Tidak
+            // Aktif) takes priority over the legacy activeOnly boolean.
+            $whereParts[] = 'i.status = :item_status';
+            $bind['item_status'] = $itemStatus;
+        } elseif ($activeOnly) {
             $whereParts[] = "i.status = 'ACTIVE'";
         }
         if ($categoryId !== null) {
             $whereParts[] = 'i.category_id = :category_id';
             $bind['category_id'] = $categoryId;
         }
+        if ($supplierId !== null) {
+            $whereParts[] = 'i.default_supplier_id = :supplier_id';
+            $bind['supplier_id'] = $supplierId;
+        }
         if ($q !== '') {
-            $whereParts[] = '(i.sku LIKE :q_sku OR i.name LIKE :q_name)';
+            // PHASE V2.1: Master Barang's search box is spec'd as SKU/name/
+            // barcode — extending here (rather than only in the new Master
+            // Barang endpoint) keeps "Stok Barang"'s search consistent too,
+            // and stays backward compatible since a barcode match is a
+            // strict OR-addition to what already matched.
+            $whereParts[] = '(i.sku LIKE :q_sku OR i.name LIKE :q_name OR i.barcode LIKE :q_barcode)';
             $bind['q_sku'] = '%' . $q . '%';
             $bind['q_name'] = '%' . $q . '%';
+            $bind['q_barcode'] = '%' . $q . '%';
         }
         $where = implode(' AND ', $whereParts);
 
@@ -229,6 +260,17 @@ final class StockReportService
         if ($statusFilter !== null && $statusFilter !== '') {
             $havingParts[] = 'status = :status_filter';
             $bind['status_filter'] = $statusFilter;
+        }
+        // PHASE V2.1 — Master Barang's composite "Stock status" dropdown
+        // (Ada Stok / Stok 0 / Need Attention) doesn't map to a single exact
+        // `status` value the way statusFilter above does, so it's a
+        // separate param evaluated here rather than overloading statusFilter.
+        if ($stockStatusComposite === 'HAS_STOCK') {
+            $havingParts[] = 'qty_base > 0';
+        } elseif ($stockStatusComposite === 'ZERO_STOCK') {
+            $havingParts[] = 'qty_base = 0';
+        } elseif ($stockStatusComposite === 'NEEDS_ATTENTION') {
+            $havingParts[] = "status <> 'SAFE'";
         }
         $having = implode(' AND ', $havingParts);
 
@@ -245,7 +287,9 @@ final class StockReportService
             'name' => $r['name'],
             'item_status' => $r['item_status'],
             'category' => $r['category_id'] !== null ? ['id' => (int) $r['category_id'], 'code' => $r['category_code'], 'name' => $r['category_name']] : null,
+            'supplier' => $r['supplier_id'] !== null ? ['id' => (int) $r['supplier_id'], 'name' => $r['supplier_name']] : null,
             'unit' => ['id' => (int) $r['unit_id'], 'code' => $r['unit_code']],
+            'updated_at' => $r['updated_at'] ?? null,
             'qty_base' => $qty,
             'value' => $value,
             'average_cost' => $qty > 0 ? round($value / $qty, 4) : null,

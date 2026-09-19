@@ -34,6 +34,18 @@ const InvApi = (() => {
         csrfToken = token || null;
     }
 
+    // Drops undefined/null/'' entries before building a query string, so an
+    // optional-params call site can pass a sparse object without every
+    // caller having to filter it first.
+    function qs(params) {
+        const clean = {};
+        Object.keys(params || {}).forEach((k) => {
+            if (params[k] !== undefined && params[k] !== null && params[k] !== '') clean[k] = params[k];
+        });
+        const s = new URLSearchParams(clean).toString();
+        return s ? `?${s}` : '';
+    }
+
     async function request(method, path, body, options = {}) {
         let res;
         try {
@@ -108,23 +120,38 @@ const InvApi = (() => {
         // ---- master ----
         listItems: () => request('GET', '/items'),
         listWarehouses: () => request('GET', '/warehouses'),
-        listSuppliers: () => request('GET', '/suppliers'),
-        listDivisions: () => request('GET', '/divisions'),
+        // PHASE V2.1: optional params (search/active/sort/dir) — omitted
+        // entirely, every call below stays byte-identical to before.
+        listSuppliers: (params = {}) => request('GET', `/suppliers${qs(params)}`),
+        listDivisions: (params = {}) => request('GET', `/divisions${qs(params)}`),
         itemUnits: (itemId) => request('GET', `/items/${itemId}/units`),
 
         // ---- PHASE V2: category master ----
-        listCategories: () => request('GET', '/categories'),
+        listCategories: (params = {}) => request('GET', `/categories${qs(params)}`),
         createCategory: (payload) => request('POST', '/categories', payload),
         updateCategory: (id, payload) => request('PUT', `/categories/${id}`, payload),
+        deleteCategory: (id) => request('DELETE', `/categories/${id}`),
 
         // ---- PHASE V2: vendor/supplier CRUD (GET /suppliers above stays read-only/full-list) ----
         createSupplier: (payload) => request('POST', '/suppliers', payload),
         updateSupplier: (id, payload) => request('PUT', `/suppliers/${id}`, payload),
+        deleteSupplier: (id) => request('DELETE', `/suppliers/${id}`),
 
         // ---- PHASE V2: bakery destination master ----
-        listBakeryDestinations: () => request('GET', '/bakery-destinations'),
+        listBakeryDestinations: (params = {}) => request('GET', `/bakery-destinations${qs(params)}`),
         createBakeryDestination: (payload) => request('POST', '/bakery-destinations', payload),
         updateBakeryDestination: (id, payload) => request('PUT', `/bakery-destinations/${id}`, payload),
+        deleteBakeryDestination: (id) => request('DELETE', `/bakery-destinations/${id}`),
+
+        // ---- PHASE V2.1: Master Barang / Gudang / Divisi enhanced list + safe edit/delete ----
+        itemsReport: (params = {}) => request('GET', `/items/report${qs(params)}`),
+        updateItem: (id, payload) => request('PUT', `/items/${id}`, payload),
+        deleteItem: (id) => request('DELETE', `/items/${id}`),
+        warehousesReport: (params = {}) => request('GET', `/warehouses/report${qs(params)}`),
+        updateWarehouse: (id, payload) => request('PUT', `/warehouses/${id}`, payload),
+        deleteWarehouse: (id) => request('DELETE', `/warehouses/${id}`),
+        updateDivision: (id, payload) => request('PUT', `/divisions/${id}`, payload),
+        deleteDivision: (id) => request('DELETE', `/divisions/${id}`),
 
         // ---- PHASE V2: per-item-per-warehouse stock policy ----
         getStockPolicy: (itemId, warehouseId) => request('GET', `/stock-policy?item_id=${itemId}&warehouse_id=${warehouseId}`),

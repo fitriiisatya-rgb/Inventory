@@ -5,17 +5,77 @@
  */
 const MasterBakeryDestinations = (() => {
     let editingId = null;
+    let filters = { q: '', city_area: '', route_cluster: '', active: '', sort: 'name' };
+    let tableHost = null;
 
     async function render(container) {
         container.innerHTML = '<div class="alert alert-info">Memuat bakery tujuan...</div>';
         try {
-            const destinations = await InvApi.listBakeryDestinations();
             container.innerHTML = '';
             container.appendChild(buildForm());
-            container.appendChild(buildTable(destinations));
+            container.appendChild(buildToolbar());
+            tableHost = UI.el('div');
+            container.appendChild(tableHost);
+            await reload();
         } catch (err) {
             UI.handleApiError(err);
             container.innerHTML = `<div class="alert alert-error">Gagal memuat bakery tujuan: ${(err && err.message) || ''}</div>`;
+        }
+    }
+
+    function buildToolbar() {
+        const qInput = UI.el('input', { type: 'text', placeholder: 'Cari kode / nama' });
+        qInput.value = filters.q;
+        const cityInput = UI.el('input', { type: 'text', placeholder: 'Kota / Area' });
+        cityInput.value = filters.city_area;
+        const routeInput = UI.el('input', { type: 'text', placeholder: 'Rute / Cluster' });
+        routeInput.value = filters.route_cluster;
+        let debounce;
+        const debouncedReload = () => { clearTimeout(debounce); debounce = setTimeout(reload, 300); };
+        qInput.addEventListener('input', () => { filters.q = qInput.value.trim(); debouncedReload(); });
+        cityInput.addEventListener('input', () => { filters.city_area = cityInput.value.trim(); debouncedReload(); });
+        routeInput.addEventListener('input', () => { filters.route_cluster = routeInput.value.trim(); debouncedReload(); });
+        const activeSelect = UI.el('select', { html: `
+            <option value="">Semua Status</option>
+            <option value="ACTIVE">Aktif</option>
+            <option value="INACTIVE">Tidak Aktif</option>
+        ` });
+        activeSelect.value = filters.active;
+        activeSelect.addEventListener('change', () => { filters.active = activeSelect.value; reload(); });
+        const sortSelect = UI.el('select', { html: `
+            <option value="name">Nama A-Z</option>
+            <option value="name_desc">Nama Z-A</option>
+            <option value="area">Area A-Z</option>
+            <option value="newest">Terbaru</option>
+            <option value="oldest">Terlama</option>
+        ` });
+        sortSelect.value = filters.sort;
+        sortSelect.addEventListener('change', () => { filters.sort = sortSelect.value; reload(); });
+        const resetBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Reset Filter');
+        resetBtn.addEventListener('click', () => {
+            filters = { q: '', city_area: '', route_cluster: '', active: '', sort: 'name' };
+            qInput.value = ''; cityInput.value = ''; routeInput.value = ''; activeSelect.value = ''; sortSelect.value = 'name';
+            reload();
+        });
+        return UI.el('div', { class: 'dt-toolbar' }, [
+            UI.el('div', { class: 'dt-filters' }, [qInput, cityInput, routeInput, activeSelect, sortSelect, resetBtn]),
+        ]);
+    }
+
+    async function reload() {
+        if (!tableHost) return;
+        try {
+            const dir = filters.sort === 'name_desc' ? 'desc' : 'asc';
+            const sort = filters.sort === 'name_desc' ? 'name' : filters.sort;
+            const destinations = await InvApi.listBakeryDestinations({
+                search: filters.q, city_area: filters.city_area, route_cluster: filters.route_cluster,
+                active: filters.active, sort, dir,
+            });
+            tableHost.innerHTML = '';
+            tableHost.appendChild(buildTable(destinations));
+        } catch (err) {
+            UI.handleApiError(err);
+            tableHost.innerHTML = `<div class="alert alert-error">Gagal memuat bakery tujuan: ${(err && err.message) || ''}</div>`;
         }
     }
 
@@ -98,8 +158,8 @@ const MasterBakeryDestinations = (() => {
                 UI.toast('Bakery tujuan berhasil ditambahkan.', 'success');
             }
             editingId = null;
-            const tab = document.getElementById('tab-master-bakery');
-            if (tab) render(tab);
+            resetForm();
+            await reload();
         } catch (err) {
             alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal menyimpan bakery tujuan.'));
         }
@@ -111,44 +171,51 @@ const MasterBakeryDestinations = (() => {
             UI.el('td', {}, b.code),
             UI.el('td', {}, b.name),
             UI.el('td', {}, b.city_area || '—'),
+            UI.el('td', {}, b.route_cluster || '—'),
             UI.el('td', {}, b.pic_name || '—'),
             UI.el('td', {}, b.phone || '—'),
-            UI.el('td', {}, UI.el('span', { class: `badge ${b.is_active ? 'badge-received' : 'badge-cancelled'}` }, b.is_active ? 'Aktif' : 'Nonaktif')),
-            UI.el('td', {}, canManage ? [
-                actionBtn('Edit', () => { editingId = b.id; fillForm(b); document.getElementById('bakery-form-card').scrollIntoView({ behavior: 'smooth' }); }),
-                actionBtn(b.is_active ? 'Nonaktifkan' : 'Aktifkan', () => toggleActive(b)),
-            ] : '—'),
+            UI.el('td', {}, MasterCommon.statusBadge(!!b.is_active)),
+            UI.el('td', {}, canManage ? MasterCommon.actionsMenu([
+                { label: 'Edit', onClick: () => { editingId = b.id; fillForm(b); document.getElementById('bakery-form-card').scrollIntoView({ behavior: 'smooth' }); } },
+                { label: b.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(b) },
+                { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(b) },
+            ]) : '—'),
         ]));
         return UI.el('div', { class: 'card' }, [
             UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, `🥖 Daftar Bakery Tujuan (${destinations.length})`)]),
             UI.el('div', { class: 'table-wrapper' }, [
                 UI.el('table', {}, [
-                    UI.el('thead', {}, [UI.el('tr', {}, ['Kode', 'Nama', 'Kota/Area', 'PIC', 'Telepon', 'Status', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
-                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '7' }, 'Belum ada bakery tujuan')])]),
+                    UI.el('thead', {}, [UI.el('tr', {}, ['Kode', 'Nama', 'Kota/Area', 'Rute/Cluster', 'PIC', 'Telepon', 'Status', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
+                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '8' }, 'Belum ada bakery tujuan')])]),
                 ]),
             ]),
         ]);
     }
 
-    function actionBtn(label, onClick) {
-        const btn = UI.el('button', { class: 'btn btn-secondary btn-sm', style: 'margin-right:6px;' }, label);
-        btn.addEventListener('click', onClick);
-        return btn;
-    }
-
     async function toggleActive(b) {
-        const confirmed = await Modal.confirm({
-            title: b.is_active ? 'Nonaktifkan Bakery Tujuan' : 'Aktifkan Bakery Tujuan',
-            message: `${b.is_active ? 'Nonaktifkan' : 'Aktifkan'} bakery tujuan "${b.name}"? Data tidak akan dihapus.`,
-        });
+        const confirmed = b.is_active
+            ? await MasterCommon.confirmDeactivate(`bakery tujuan "${b.name}"`)
+            : await MasterCommon.confirmActivate(`bakery tujuan "${b.name}"`);
         if (!confirmed) return;
         try {
             await InvApi.updateBakeryDestination(b.id, { is_active: !b.is_active });
             UI.toast('Status bakery tujuan diperbarui.', 'success');
-            const tab = document.getElementById('tab-master-bakery');
-            if (tab) render(tab);
+            await reload();
         } catch (err) {
             UI.handleApiError(err);
+        }
+    }
+
+    async function doDelete(b) {
+        const confirmed = await MasterCommon.confirmDeletePermanent(`bakery tujuan "${b.name}"`);
+        if (!confirmed) return;
+        try {
+            await InvApi.deleteBakeryDestination(b.id);
+            UI.toast('Bakery tujuan berhasil dihapus permanen.', 'success');
+            await reload();
+        } catch (err) {
+            const handled = await MasterCommon.handleDeleteError(err);
+            if (!handled) UI.handleApiError(err);
         }
     }
 

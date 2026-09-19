@@ -885,7 +885,12 @@ INSERT INTO permissions (code, description) VALUES
     ('MASTER_CATEGORY_MANAGE',           'Create/edit item categories'),
     ('MASTER_SUPPLIER_MANAGE',           'Create/edit vendors/suppliers'),
     ('MASTER_BAKERY_DESTINATION_MANAGE', 'Create/edit bakery distribution destinations'),
-    ('STOCK_POLICY_MANAGE',              'Set per-item-per-warehouse minimum/buffer stock policy');
+    ('STOCK_POLICY_MANAGE',              'Set per-item-per-warehouse minimum/buffer stock policy'),
+    -- PHASE V2.1: same additive convention as the PHASE V2 block above —
+    -- ADMIN/SUPERADMIN inherit these automatically (not in ADMIN's
+    -- exclusion list below); STOCK/DIVISION/VIEWER get neither.
+    ('MASTER_WAREHOUSE_MANAGE', 'Create/edit/deactivate/delete warehouse master data'),
+    ('MASTER_DIVISION_MANAGE',  'Create/edit/deactivate/delete division master data');
 
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r CROSS JOIN permissions p WHERE r.code = 'SUPERADMIN';

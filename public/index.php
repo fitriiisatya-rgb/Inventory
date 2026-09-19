@@ -28,6 +28,8 @@ require_once __DIR__ . '/../services/StockReportService.php';
 require_once __DIR__ . '/../services/TransactionHistoryService.php';
 require_once __DIR__ . '/../services/SupplierService.php';
 require_once __DIR__ . '/../services/BakeryDestinationService.php';
+require_once __DIR__ . '/../services/MasterDataSafetyService.php';
+require_once __DIR__ . '/../services/WarehouseReportService.php';
 require_once __DIR__ . '/../services/InventoryService.php';
 require_once __DIR__ . '/../services/FifoService.php';
 require_once __DIR__ . '/../services/PeriodLockService.php';
@@ -65,6 +67,8 @@ use App\Services\StockReportService;
 use App\Services\TransactionHistoryService;
 use App\Services\SupplierService;
 use App\Services\BakeryDestinationService;
+use App\Services\MasterDataSafetyService;
+use App\Services\WarehouseReportService;
 use App\Services\AuditService;
 use App\Services\RateLimitedException;
 use App\Services\NotFoundException;
@@ -296,9 +300,41 @@ $routes = [
             'OK'
         );
     },
-    'GET /suppliers' => function () use ($pdo) {
+    // PHASE V2.1: extended with optional search/active/sort/linked_item_count —
+    // every existing caller passing no query params gets the exact same
+    // unfiltered, name-ascending, full-column list as before.
+    'GET /suppliers' => function () use ($pdo, $query) {
         inv_require_auth();
-        inv_ok($pdo->query('SELECT * FROM suppliers ORDER BY name')->fetchAll(), 'OK');
+        $where = ['1=1'];
+        $bind = [];
+        $q = trim((string) ($query['search'] ?? $query['q'] ?? ''));
+        if ($q !== '') {
+            $where[] = '(s.name LIKE :q_n OR s.code LIKE :q_c OR s.contact_name LIKE :q_ct OR s.address LIKE :q_a OR s.email LIKE :q_e)';
+            $bind['q_n'] = $bind['q_c'] = $bind['q_ct'] = $bind['q_a'] = $bind['q_e'] = '%' . $q . '%';
+        }
+        $active = strtoupper((string) ($query['active'] ?? ''));
+        if ($active === 'ACTIVE') {
+            $where[] = 's.is_active = 1';
+        } elseif ($active === 'INACTIVE') {
+            $where[] = 's.is_active = 0';
+        }
+        $sortMap = ['name' => 's.name', 'newest' => 's.created_at', 'oldest' => 's.created_at', 'linked_items' => 'linked_item_count'];
+        $sortKey = $sortMap[$query['sort'] ?? 'name'] ?? 's.name';
+        $dir = strtolower((string) ($query['dir'] ?? 'asc')) === 'desc' || ($query['sort'] ?? '') === 'oldest' ? 'DESC' : 'ASC';
+        if (($query['sort'] ?? '') === 'newest') {
+            $dir = 'DESC';
+        }
+        $sql = "
+            SELECT s.*, COALESCE(li.cnt, 0) AS linked_item_count
+            FROM suppliers s
+            LEFT JOIN (SELECT default_supplier_id, COUNT(*) AS cnt FROM items WHERE default_supplier_id IS NOT NULL GROUP BY default_supplier_id) li
+                ON li.default_supplier_id = s.id
+            WHERE " . implode(' AND ', $where) . "
+            ORDER BY {$sortKey} {$dir}
+        ";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($bind);
+        inv_ok($stmt->fetchAll(), 'OK');
     },
     // PHASE V2: Master Vendor/Supplier CRUD (audited: suppliers already
     // existed as an import-only table — this is the first write path).
@@ -319,15 +355,69 @@ $routes = [
         $result = Database::transaction(fn (PDO $tx) => SupplierService::update($tx, (int) $params['id'], $input));
         inv_ok($result, 'Supplier updated');
     },
+    'DELETE /suppliers/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_SUPPLIER_MANAGE');
+        $supplierId = (int) $params['id'];
+
+        $existing = $pdo->prepare('SELECT * FROM suppliers WHERE id = :id');
+        $existing->execute(['id' => $supplierId]);
+        $supplier = $existing->fetch();
+        if ($supplier === false) {
+            inv_error(404, 'NOT_FOUND', 'supplier not found');
+        }
+
+        $refs = MasterDataSafetyService::checkSupplierReferences($pdo, $supplierId);
+        if ($refs['blocked']) {
+            AuditService::log($pdo, $user['id'], $user['username'], 'SUPPLIER_DELETE_ATTEMPT', 'suppliers', $supplierId, null, ['blocked_reasons' => $refs['reasons']], 'referenced by items/transaction data');
+            inv_error(422, 'DELETE_BLOCKED_HAS_REFERENCES', "Vendor '{$supplier['name']}' memiliki referensi barang/transaksi dan tidak dapat dihapus. Nonaktifkan sebagai gantinya. (" . implode('; ', $refs['reasons']) . ')');
+        }
+
+        $pdo->prepare('DELETE FROM suppliers WHERE id = :id')->execute(['id' => $supplierId]);
+        AuditService::log($pdo, $user['id'], $user['username'], 'SUPPLIER_DELETE_SUCCESS', 'suppliers', $supplierId, ['name' => $supplier['name']], null, null);
+        inv_ok(['success' => true], 'Supplier permanently deleted');
+    },
 
     // PHASE V2: Master Bakery Tujuan — a distribution endpoint for OUT
     // transactions, deliberately separate from warehouses/divisions (see
     // docs/PHASE_V2_TECHNICAL_DESIGN.md Section 5). GET is authenticated-
     // only (no special permission) since every STOCK user posting an OUT
     // needs this list; write is gated on MASTER_BAKERY_DESTINATION_MANAGE.
-    'GET /bakery-destinations' => function () use ($pdo) {
+    // PHASE V2.1: extended with optional search/city/route/active/sort —
+    // every existing caller passing no query params gets the exact same
+    // unfiltered, name-ascending, full-column list as before.
+    'GET /bakery-destinations' => function () use ($pdo, $query) {
         inv_require_auth();
-        inv_ok($pdo->query('SELECT * FROM bakery_destinations ORDER BY name')->fetchAll(), 'OK');
+        $where = ['1=1'];
+        $bind = [];
+        $q = trim((string) ($query['search'] ?? $query['q'] ?? ''));
+        if ($q !== '') {
+            $where[] = '(code LIKE :q_c OR name LIKE :q_n)';
+            $bind['q_c'] = $bind['q_n'] = '%' . $q . '%';
+        }
+        $city = trim((string) ($query['city_area'] ?? ''));
+        if ($city !== '') {
+            $where[] = 'city_area LIKE :city';
+            $bind['city'] = '%' . $city . '%';
+        }
+        $route = trim((string) ($query['route_cluster'] ?? ''));
+        if ($route !== '') {
+            $where[] = 'route_cluster LIKE :route';
+            $bind['route'] = '%' . $route . '%';
+        }
+        $active = strtoupper((string) ($query['active'] ?? ''));
+        if ($active === 'ACTIVE') {
+            $where[] = 'is_active = 1';
+        } elseif ($active === 'INACTIVE') {
+            $where[] = 'is_active = 0';
+        }
+        $sortMap = ['name' => 'name', 'area' => 'city_area', 'newest' => 'created_at', 'oldest' => 'created_at'];
+        $sortKey = $sortMap[$query['sort'] ?? 'name'] ?? 'name';
+        $dir = ($query['sort'] ?? '') === 'oldest' ? 'ASC' : (($query['sort'] ?? '') === 'newest' ? 'DESC' : (strtolower((string) ($query['dir'] ?? 'asc')) === 'desc' ? 'DESC' : 'ASC'));
+        $sql = 'SELECT * FROM bakery_destinations WHERE ' . implode(' AND ', $where) . " ORDER BY {$sortKey} {$dir}";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($bind);
+        inv_ok($stmt->fetchAll(), 'OK');
     },
     'POST /bakery-destinations' => function () use ($pdo, $input) {
         $user = inv_require_auth();
@@ -345,19 +435,65 @@ $routes = [
         $result = Database::transaction(fn (PDO $tx) => BakeryDestinationService::update($tx, (int) $params['id'], $input));
         inv_ok($result, 'Bakery destination updated');
     },
+    'DELETE /bakery-destinations/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_BAKERY_DESTINATION_MANAGE');
+        $bdId = (int) $params['id'];
+
+        $existing = $pdo->prepare('SELECT * FROM bakery_destinations WHERE id = :id');
+        $existing->execute(['id' => $bdId]);
+        $bd = $existing->fetch();
+        if ($bd === false) {
+            inv_error(404, 'NOT_FOUND', 'bakery destination not found');
+        }
+
+        $refs = MasterDataSafetyService::checkBakeryDestinationReferences($pdo, $bdId);
+        if ($refs['blocked']) {
+            AuditService::log($pdo, $user['id'], $user['username'], 'BAKERY_DESTINATION_DELETE_ATTEMPT', 'bakery_destinations', $bdId, null, ['blocked_reasons' => $refs['reasons']], 'referenced by OUT transactions');
+            inv_error(422, 'DELETE_BLOCKED_HAS_REFERENCES', "Bakery Tujuan '{$bd['name']}' sudah direferensikan oleh transaksi OUT dan tidak dapat dihapus. Nonaktifkan sebagai gantinya. (" . implode('; ', $refs['reasons']) . ')');
+        }
+
+        $pdo->prepare('DELETE FROM bakery_destinations WHERE id = :id')->execute(['id' => $bdId]);
+        AuditService::log($pdo, $user['id'], $user['username'], 'BAKERY_DESTINATION_DELETE_SUCCESS', 'bakery_destinations', $bdId, ['name' => $bd['name']], null, null);
+        inv_ok(['success' => true], 'Bakery destination permanently deleted');
+    },
 
     // PHASE V2: category master (read-only route here; write is
     // MASTER_CATEGORY_MANAGE-gated, added alongside for the same reason
     // suppliers/bakery-destinations need both a list and a manage path).
-    'GET /categories' => function () use ($pdo) {
+    // PHASE V2.1: extended with optional search/active/sort/item_count —
+    // every existing caller passing no query params gets the exact same
+    // unfiltered, name-ascending, full-column list as before (still every
+    // category, active or not, by default).
+    'GET /categories' => function () use ($pdo, $query) {
         inv_require_auth();
-        // Returns EVERY category, active or not — matching GET /suppliers
-        // and GET /bakery-destinations' convention (no is_active filter
-        // server-side). A deactivated category must stay visible here so
-        // the master-data admin page can reactivate it; callers building a
-        // dropdown for a transaction/filter form should filter is_active
-        // themselves, same as they already do for suppliers/warehouses.
-        inv_ok($pdo->query('SELECT * FROM categories ORDER BY name')->fetchAll(), 'OK');
+        $where = ['1=1'];
+        $bind = [];
+        $q = trim((string) ($query['search'] ?? $query['q'] ?? ''));
+        if ($q !== '') {
+            $where[] = '(c.code LIKE :q_c OR c.name LIKE :q_n)';
+            $bind['q_c'] = $bind['q_n'] = '%' . $q . '%';
+        }
+        $active = strtoupper((string) ($query['active'] ?? ''));
+        if ($active === 'ACTIVE') {
+            $where[] = 'c.is_active = 1';
+        } elseif ($active === 'INACTIVE') {
+            $where[] = 'c.is_active = 0';
+        }
+        $sortMap = ['name' => 'c.name', 'item_count' => 'item_count'];
+        $sortKey = $sortMap[$query['sort'] ?? 'name'] ?? 'c.name';
+        $dir = strtolower((string) ($query['dir'] ?? 'asc')) === 'desc' ? 'DESC' : 'ASC';
+        $sql = "
+            SELECT c.*, COALESCE(ic.cnt, 0) AS item_count
+            FROM categories c
+            LEFT JOIN (SELECT category_id, COUNT(*) AS cnt FROM items WHERE category_id IS NOT NULL GROUP BY category_id) ic
+                ON ic.category_id = c.id
+            WHERE " . implode(' AND ', $where) . "
+            ORDER BY {$sortKey} {$dir}
+        ";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($bind);
+        inv_ok($stmt->fetchAll(), 'OK');
     },
     'POST /categories' => function () use ($pdo, $input) {
         $user = inv_require_auth();
@@ -398,10 +534,107 @@ $routes = [
         AuditService::log($pdo, $user['id'], $user['username'], 'CATEGORY_UPDATE', 'categories', $categoryId, ['name' => $before['name'], 'is_active' => (int) $before['is_active']], ['name' => $name, 'is_active' => $isActive], null);
         inv_ok(['success' => true, 'category_id' => $categoryId], 'Category updated');
     },
+    'DELETE /categories/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_CATEGORY_MANAGE');
+        $categoryId = (int) $params['id'];
 
-    'GET /divisions' => function () use ($pdo) {
+        $existing = $pdo->prepare('SELECT * FROM categories WHERE id = :id');
+        $existing->execute(['id' => $categoryId]);
+        $category = $existing->fetch();
+        if ($category === false) {
+            inv_error(404, 'NOT_FOUND', 'category not found');
+        }
+
+        $refs = MasterDataSafetyService::checkCategoryReferences($pdo, $categoryId);
+        if ($refs['blocked']) {
+            AuditService::log($pdo, $user['id'], $user['username'], 'CATEGORY_DELETE_ATTEMPT', 'categories', $categoryId, null, ['blocked_reasons' => $refs['reasons']], 'referenced by items');
+            inv_error(422, 'DELETE_BLOCKED_HAS_REFERENCES', "Kategori '{$category['name']}' memiliki barang terkait dan tidak dapat dihapus. Nonaktifkan sebagai gantinya. (" . implode('; ', $refs['reasons']) . ')');
+        }
+
+        $pdo->prepare('DELETE FROM categories WHERE id = :id')->execute(['id' => $categoryId]);
+        AuditService::log($pdo, $user['id'], $user['username'], 'CATEGORY_DELETE_SUCCESS', 'categories', $categoryId, ['code' => $category['code'], 'name' => $category['name']], null, null);
+        inv_ok(['success' => true], 'Category permanently deleted');
+    },
+
+    // PHASE V2.1: extended with optional search/active/sort query params —
+    // every existing caller that passes none of them (the original
+    // behavior) gets the exact same unfiltered, name-ascending list as
+    // before.
+    'GET /divisions' => function () use ($pdo, $query) {
         inv_require_auth();
-        inv_ok($pdo->query('SELECT * FROM divisions ORDER BY name')->fetchAll(), 'OK');
+        $where = ['1=1'];
+        $bind = [];
+        $q = trim((string) ($query['search'] ?? $query['q'] ?? ''));
+        if ($q !== '') {
+            $where[] = 'name LIKE :q';
+            $bind['q'] = '%' . $q . '%';
+        }
+        $active = strtoupper((string) ($query['active'] ?? ''));
+        if ($active === 'ACTIVE') {
+            $where[] = 'is_active = 1';
+        } elseif ($active === 'INACTIVE') {
+            $where[] = 'is_active = 0';
+        }
+        $dir = strtolower((string) ($query['dir'] ?? 'asc')) === 'desc' ? 'DESC' : 'ASC';
+        $sql = 'SELECT * FROM divisions WHERE ' . implode(' AND ', $where) . " ORDER BY name {$dir}";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($bind);
+        inv_ok($stmt->fetchAll(), 'OK');
+    },
+    'PUT /divisions/{id}' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_DIVISION_MANAGE');
+        $divId = (int) $params['id'];
+
+        $existing = $pdo->prepare('SELECT * FROM divisions WHERE id = :id');
+        $existing->execute(['id' => $divId]);
+        $before = $existing->fetch();
+        if ($before === false) {
+            inv_error(404, 'NOT_FOUND', 'division not found');
+        }
+
+        $name = array_key_exists('name', $input) ? trim((string) $input['name']) : $before['name'];
+        if ($name === '') {
+            throw new ValidationException(['name cannot be blank']);
+        }
+        $isActive = array_key_exists('is_active', $input) ? (int) (bool) $input['is_active'] : (int) $before['is_active'];
+
+        $pdo->prepare('UPDATE divisions SET name = :n, is_active = :a WHERE id = :id')
+            ->execute(['n' => $name, 'a' => $isActive, 'id' => $divId]);
+
+        AuditService::log(
+            $pdo, $user['id'], $user['username'],
+            (int) $before['is_active'] !== $isActive ? ($isActive === 0 ? 'DIVISION_DEACTIVATE' : 'DIVISION_ACTIVATE') : 'DIVISION_UPDATE',
+            'divisions', $divId,
+            ['name' => $before['name'], 'is_active' => (int) $before['is_active']],
+            ['name' => $name, 'is_active' => $isActive],
+            null
+        );
+
+        inv_ok(['success' => true, 'division_id' => $divId], 'Division updated');
+    },
+    'DELETE /divisions/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_DIVISION_MANAGE');
+        $divId = (int) $params['id'];
+
+        $existing = $pdo->prepare('SELECT * FROM divisions WHERE id = :id');
+        $existing->execute(['id' => $divId]);
+        $div = $existing->fetch();
+        if ($div === false) {
+            inv_error(404, 'NOT_FOUND', 'division not found');
+        }
+
+        $refs = MasterDataSafetyService::checkDivisionReferences($pdo, $divId);
+        if ($refs['blocked']) {
+            AuditService::log($pdo, $user['id'], $user['username'], 'DIVISION_DELETE_ATTEMPT', 'divisions', $divId, null, ['blocked_reasons' => $refs['reasons']], 'referenced by transaction/history data');
+            inv_error(422, 'DELETE_BLOCKED_HAS_REFERENCES', "Divisi '{$div['name']}' memiliki referensi transaksi/user dan tidak dapat dihapus. Nonaktifkan sebagai gantinya. (" . implode('; ', $refs['reasons']) . ')');
+        }
+
+        $pdo->prepare('DELETE FROM divisions WHERE id = :id')->execute(['id' => $divId]);
+        AuditService::log($pdo, $user['id'], $user['username'], 'DIVISION_DELETE_SUCCESS', 'divisions', $divId, ['name' => $div['name']], null, null);
+        inv_ok(['success' => true], 'Division permanently deleted');
     },
     // Units this item may be transacted in (its base unit plus any configured
     // purchase/middle conversions) — Transaction IN/OUT forms need this to
@@ -1390,6 +1623,228 @@ $routes = [
         inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
         $result = Database::transaction(fn (PDO $tx) => ImportHistoricalTransactionService::commit($tx, (int) $params['id'], $user['id']));
         inv_ok($result, 'Committed');
+    },
+
+    // ============================================================
+    // PHASE V2.1 — Master Barang enhanced list + safe edit/delete.
+    // GET /items/report is a NEW, additive endpoint — GET /items stays
+    // byte-for-byte untouched (docs/PHASE_4_TASK_B_GET_ITEMS_DEBT.md).
+    // Reuses StockReportService::list()/exportAll() — same single source
+    // of truth as "Stok Barang" — extended this phase with supplier_id,
+    // item_status (tri-state Semua/Aktif/Tidak Aktif), stock_status
+    // (Ada Stok/Stok 0/Need Attention), and an updated_at sort key. Sort
+    // keys are looked up in a fixed whitelist array (StockReportService::
+    // SORTABLE) — an unrecognized sort value silently falls back to name,
+    // never concatenated into SQL.
+    // ============================================================
+    'GET /items/report' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        if ($user['role_code'] === 'STOCK') {
+            if (empty($user['warehouse_id'])) {
+                inv_error(403, 'FORBIDDEN', 'STOCK user has no warehouse assignment');
+            }
+            if ($warehouseId !== null) {
+                inv_require_warehouse_scope($user, $warehouseId);
+            } else {
+                $warehouseId = (int) $user['warehouse_id'];
+            }
+        } elseif ($warehouseId !== null) {
+            inv_require_warehouse_scope($user, $warehouseId);
+        }
+
+        $itemStatus = strtoupper((string) ($query['active'] ?? ''));
+        $itemStatus = in_array($itemStatus, ['ACTIVE', 'INACTIVE'], true) ? $itemStatus : null;
+        $stockStatus = strtoupper((string) ($query['stock_status'] ?? ''));
+        $stockStatus = in_array($stockStatus, ['HAS_STOCK', 'ZERO_STOCK', 'NEEDS_ATTENTION'], true) ? $stockStatus : null;
+        $sort = $query['sort'] ?? 'name';
+        $validSorts = ['name', 'sku', 'qty', 'value', 'status', 'updated_at'];
+        $sort = in_array($sort, $validSorts, true) ? $sort : 'name';
+        $page = max(1, (int) ($query['page'] ?? 1));
+        $perPage = in_array((int) ($query['per_page'] ?? 25), [25, 50, 100], true) ? (int) ($query['per_page'] ?? 25) : 25;
+
+        $params = [
+            'warehouse_id' => $warehouseId,
+            'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
+            'supplier_id' => isset($query['supplier_id']) && $query['supplier_id'] !== '' ? (int) $query['supplier_id'] : null,
+            'q' => $query['search'] ?? $query['q'] ?? null,
+            'status' => in_array($query['status'] ?? '', ['SAFE', 'LOW', 'CRITICAL', 'OUT_OF_STOCK', 'MIGRATION_NEGATIVE_REVIEW'], true) ? $query['status'] : null,
+            'stock_status' => $stockStatus,
+            'item_status' => $itemStatus,
+            'active_only' => $itemStatus === null, // no tri-state override given -> default to active-only, same convention as GET /reports/stock
+            'include_zero_stock' => true,
+            'page' => $page,
+            'per_page' => $perPage,
+            'sort' => $sort,
+            'dir' => strtolower((string) ($query['dir'] ?? 'asc')) === 'desc' ? 'desc' : 'asc',
+        ];
+
+        inv_ok(StockReportService::list($pdo, $params), 'OK');
+    },
+
+    // Controlled master-data fields only — name/category/supplier/barcode/
+    // notes/status. base_unit_id and minimum_stock (FIFO-sensitive /
+    // stock-policy-owned) are deliberately never accepted here; minimum/
+    // buffer stay on the existing PUT /stock-policy workflow.
+    'PUT /items/{id}' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_ITEM_MANAGE');
+        $itemId = (int) $params['id'];
+
+        $existing = $pdo->prepare('SELECT * FROM items WHERE id = :id');
+        $existing->execute(['id' => $itemId]);
+        $before = $existing->fetch();
+        if ($before === false) {
+            inv_error(404, 'NOT_FOUND', 'item not found');
+        }
+
+        $name = array_key_exists('name', $input) ? trim((string) $input['name']) : $before['name'];
+        if ($name === '') {
+            throw new ValidationException(['name cannot be blank']);
+        }
+        $categoryId = array_key_exists('category_id', $input) ? ($input['category_id'] !== null ? (int) $input['category_id'] : null) : $before['category_id'];
+        $supplierId = array_key_exists('default_supplier_id', $input) ? ($input['default_supplier_id'] !== null ? (int) $input['default_supplier_id'] : null) : $before['default_supplier_id'];
+        $barcode = array_key_exists('barcode', $input) ? (($input['barcode'] === null || trim((string) $input['barcode']) === '') ? null : trim((string) $input['barcode'])) : $before['barcode'];
+        $notes = array_key_exists('notes', $input) ? (($input['notes'] === null) ? null : trim((string) $input['notes'])) : $before['notes'];
+        $status = array_key_exists('status', $input) ? strtoupper((string) $input['status']) : $before['status'];
+        if (!in_array($status, ['ACTIVE', 'INACTIVE'], true)) {
+            throw new ValidationException(["status must be ACTIVE or INACTIVE, got '{$status}'"]);
+        }
+
+        $pdo->prepare('UPDATE items SET name = :n, category_id = :c, default_supplier_id = :s, barcode = :b, notes = :notes, status = :status WHERE id = :id')
+            ->execute(['n' => $name, 'c' => $categoryId, 's' => $supplierId, 'b' => $barcode, 'notes' => $notes, 'status' => $status, 'id' => $itemId]);
+
+        AuditService::log(
+            $pdo, $user['id'], $user['username'],
+            $before['status'] !== $status ? ($status === 'INACTIVE' ? 'ITEM_DEACTIVATE' : 'ITEM_ACTIVATE') : 'ITEM_UPDATE',
+            'items', $itemId,
+            ['name' => $before['name'], 'category_id' => $before['category_id'], 'default_supplier_id' => $before['default_supplier_id'], 'barcode' => $before['barcode'], 'status' => $before['status']],
+            ['name' => $name, 'category_id' => $categoryId, 'default_supplier_id' => $supplierId, 'barcode' => $barcode, 'status' => $status],
+            null
+        );
+
+        inv_ok(['success' => true, 'item_id' => $itemId], 'Item updated');
+    },
+
+    'DELETE /items/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_ITEM_MANAGE');
+        $itemId = (int) $params['id'];
+
+        $existing = $pdo->prepare('SELECT * FROM items WHERE id = :id');
+        $existing->execute(['id' => $itemId]);
+        $item = $existing->fetch();
+        if ($item === false) {
+            inv_error(404, 'NOT_FOUND', 'item not found');
+        }
+
+        $refs = MasterDataSafetyService::checkItemReferences($pdo, $itemId);
+        if ($refs['blocked']) {
+            AuditService::log($pdo, $user['id'], $user['username'], 'ITEM_DELETE_ATTEMPT', 'items', $itemId, null, ['blocked_reasons' => $refs['reasons']], 'referenced by transaction/history data');
+            inv_error(422, 'DELETE_BLOCKED_HAS_REFERENCES', "Barang '{$item['name']}' memiliki referensi transaksi/history dan tidak dapat dihapus. Nonaktifkan sebagai gantinya. (" . implode('; ', $refs['reasons']) . ')');
+        }
+
+        Database::transaction(function (PDO $tx) use ($itemId) {
+            // Owned structural setup data, not business history (see the
+            // comment on MasterDataSafetyService::checkItemReferences) —
+            // removed here, in the same transaction as the item itself,
+            // rather than relying on a DB-level cascade this schema does
+            // not define.
+            $tx->prepare('DELETE FROM item_unit_conversions WHERE item_id = :id')->execute(['id' => $itemId]);
+            $tx->prepare('DELETE FROM items WHERE id = :id')->execute(['id' => $itemId]);
+        });
+        AuditService::log($pdo, $user['id'], $user['username'], 'ITEM_DELETE_SUCCESS', 'items', $itemId, ['name' => $item['name'], 'sku' => $item['sku']], null, null);
+        inv_ok(['success' => true], 'Item permanently deleted');
+    },
+
+    // ============================================================
+    // PHASE V2.1 — Master Gudang enhanced list + safe edit/delete.
+    // Never creates or lists Karang Tengah unless it already exists as a
+    // real row — this endpoint just reads whatever warehouses table
+    // already has, the same as GET /warehouses always has.
+    // ============================================================
+    'GET /warehouses/report' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $singleWarehouseId = null;
+        if ($user['role_code'] === 'STOCK') {
+            if (empty($user['warehouse_id'])) {
+                inv_error(403, 'FORBIDDEN', 'STOCK user has no warehouse assignment');
+            }
+            $singleWarehouseId = (int) $user['warehouse_id'];
+        }
+
+        $active = strtoupper((string) ($query['active'] ?? ''));
+        $active = in_array($active, ['ACTIVE', 'INACTIVE'], true) ? $active : null;
+        $sort = in_array($query['sort'] ?? '', ['name', 'sku_count', 'qty', 'value'], true) ? $query['sort'] : 'name';
+
+        $rows = WarehouseReportService::list($pdo, [
+            'q' => $query['search'] ?? $query['q'] ?? null,
+            'active' => $active,
+            'sort' => $sort,
+            'dir' => strtolower((string) ($query['dir'] ?? 'asc')) === 'desc' ? 'desc' : 'asc',
+            'warehouse_id' => $singleWarehouseId,
+        ]);
+        inv_ok(['rows' => $rows, 'total' => count($rows)], 'OK');
+    },
+
+    'PUT /warehouses/{id}' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_WAREHOUSE_MANAGE');
+        $whId = (int) $params['id'];
+
+        $existing = $pdo->prepare('SELECT * FROM warehouses WHERE id = :id');
+        $existing->execute(['id' => $whId]);
+        $before = $existing->fetch();
+        if ($before === false) {
+            inv_error(404, 'NOT_FOUND', 'warehouse not found');
+        }
+
+        $name = array_key_exists('name', $input) ? trim((string) $input['name']) : $before['name'];
+        if ($name === '') {
+            throw new ValidationException(['name cannot be blank']);
+        }
+        $isActive = array_key_exists('is_active', $input) ? (int) (bool) $input['is_active'] : (int) $before['is_active'];
+
+        $pdo->prepare('UPDATE warehouses SET name = :n, is_active = :a WHERE id = :id')
+            ->execute(['n' => $name, 'a' => $isActive, 'id' => $whId]);
+
+        AuditService::log(
+            $pdo, $user['id'], $user['username'],
+            (int) $before['is_active'] !== $isActive ? ($isActive === 0 ? 'WAREHOUSE_DEACTIVATE' : 'WAREHOUSE_ACTIVATE') : 'WAREHOUSE_UPDATE',
+            'warehouses', $whId,
+            ['name' => $before['name'], 'is_active' => (int) $before['is_active']],
+            ['name' => $name, 'is_active' => $isActive],
+            null
+        );
+
+        inv_ok(['success' => true, 'warehouse_id' => $whId], 'Warehouse updated');
+    },
+
+    'DELETE /warehouses/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_WAREHOUSE_MANAGE');
+        $whId = (int) $params['id'];
+
+        $existing = $pdo->prepare('SELECT * FROM warehouses WHERE id = :id');
+        $existing->execute(['id' => $whId]);
+        $wh = $existing->fetch();
+        if ($wh === false) {
+            inv_error(404, 'NOT_FOUND', 'warehouse not found');
+        }
+
+        $refs = MasterDataSafetyService::checkWarehouseReferences($pdo, $whId);
+        if ($refs['blocked']) {
+            AuditService::log($pdo, $user['id'], $user['username'], 'WAREHOUSE_DELETE_ATTEMPT', 'warehouses', $whId, null, ['blocked_reasons' => $refs['reasons']], 'referenced by transaction/history data');
+            inv_error(422, 'DELETE_BLOCKED_HAS_REFERENCES', "Gudang '{$wh['name']}' memiliki stok/riwayat transaksi dan tidak dapat dihapus. Nonaktifkan sebagai gantinya. (" . implode('; ', $refs['reasons']) . ')');
+        }
+
+        $pdo->prepare('DELETE FROM warehouses WHERE id = :id')->execute(['id' => $whId]);
+        AuditService::log($pdo, $user['id'], $user['username'], 'WAREHOUSE_DELETE_SUCCESS', 'warehouses', $whId, ['code' => $wh['code'], 'name' => $wh['name']], null, null);
+        inv_ok(['success' => true], 'Warehouse permanently deleted');
     },
 ];
 
