@@ -96,7 +96,13 @@ covers all of them), FIFO Batch, FIFO Allocation, Inventory (item ×
 warehouse), Historical Import (surfaced via the transaction's own
 `is_historical_import` flag).
 
-Deferred (see the deliverable report's coverage matrix and known
+Deferred at the time (see the deliverable report's coverage matrix and known
 limitations): a dedicated Transfer-header trace view and Opname/Production
 -header trace views distinct from their underlying transactions; User/Role
 trace UI; warehouse-filterable Audit Events browsing.
+
+**Update — Phase V2.2B** closed the Transfer/Opname/Production/Opening/
+Import/User/Role gap above. See `docs/PHASE_V2_2B_TRACE_COMPLETION.md` for
+the full coverage matrix and what remains an honest (disclosed, not
+fabricated) gap. Warehouse-filterable Audit Events browsing remains
+deferred — unchanged from this document's original limitation.

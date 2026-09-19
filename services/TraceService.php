@@ -335,8 +335,451 @@ final class TraceService
                 $results[] = ['type' => 'user', 'id' => (int) $r['id'], 'code' => $r['username'], 'label' => $r['full_name'], 'status' => $r['is_active'] ? 'ACTIVE' : 'INACTIVE'];
             }
         }
+        // PHASE V2.2B — the 7 previously-dead-end entities from the coverage
+        // gap: opname, production, opening, import, role (transfer already
+        // existed above). Same whitelisted-lookup pattern, nothing generic.
+        if ($want('opname')) {
+            $s = $pdo->prepare('SELECT id, session_uuid, status FROM stock_opname_sessions WHERE session_uuid LIKE :q1 OR id = :qid ORDER BY id DESC LIMIT :lim');
+            $s->bindValue('q1', $like);
+            $s->bindValue('qid', ctype_digit($q) ? (int) $q : -1, PDO::PARAM_INT);
+            $s->bindValue('lim', $limit, PDO::PARAM_INT);
+            $s->execute();
+            foreach ($s->fetchAll() as $r) {
+                $results[] = ['type' => 'opname', 'id' => (int) $r['id'], 'code' => 'OPNAME-' . $r['id'], 'label' => 'Opname #' . $r['id'], 'status' => $r['status']];
+            }
+        }
+        if ($want('production')) {
+            $s = $pdo->prepare('SELECT id, production_uuid, status FROM production_headers WHERE production_uuid LIKE :q1 OR id = :qid ORDER BY id DESC LIMIT :lim');
+            $s->bindValue('q1', $like);
+            $s->bindValue('qid', ctype_digit($q) ? (int) $q : -1, PDO::PARAM_INT);
+            $s->bindValue('lim', $limit, PDO::PARAM_INT);
+            $s->execute();
+            foreach ($s->fetchAll() as $r) {
+                $results[] = ['type' => 'production', 'id' => (int) $r['id'], 'code' => 'PRODUCTION-' . $r['id'], 'label' => 'Produksi #' . $r['id'], 'status' => $r['status']];
+            }
+        }
+        if ($want('opening')) {
+            $s = $pdo->prepare('SELECT id, description, status, cutoff_date FROM stock_openings WHERE description LIKE :q1 OR id = :qid ORDER BY id DESC LIMIT :lim');
+            $s->bindValue('q1', $like);
+            $s->bindValue('qid', ctype_digit($q) ? (int) $q : -1, PDO::PARAM_INT);
+            $s->bindValue('lim', $limit, PDO::PARAM_INT);
+            $s->execute();
+            foreach ($s->fetchAll() as $r) {
+                $results[] = ['type' => 'opening', 'id' => (int) $r['id'], 'code' => 'OPENING-' . $r['id'], 'label' => ($r['description'] ?? ('Opening ' . $r['cutoff_date'])), 'status' => $r['status']];
+            }
+        }
+        if ($want('import')) {
+            $s = $pdo->prepare('SELECT id, file_name, import_type, status FROM import_batches WHERE file_name LIKE :q1 OR id = :qid ORDER BY id DESC LIMIT :lim');
+            $s->bindValue('q1', $like);
+            $s->bindValue('qid', ctype_digit($q) ? (int) $q : -1, PDO::PARAM_INT);
+            $s->bindValue('lim', $limit, PDO::PARAM_INT);
+            $s->execute();
+            foreach ($s->fetchAll() as $r) {
+                $results[] = ['type' => 'import', 'id' => (int) $r['id'], 'code' => $r['import_type'], 'label' => $r['file_name'], 'status' => $r['status']];
+            }
+        }
+        if ($want('role')) {
+            $s = $pdo->prepare('SELECT id, code, name FROM roles WHERE code LIKE :q1 OR name LIKE :q2 LIMIT :lim');
+            $s->bindValue('q1', $like); $s->bindValue('q2', $like);
+            $s->bindValue('lim', $limit, PDO::PARAM_INT);
+            $s->execute();
+            foreach ($s->fetchAll() as $r) {
+                $results[] = ['type' => 'role', 'id' => (int) $r['id'], 'code' => $r['code'], 'label' => $r['name'], 'status' => null];
+            }
+        }
 
         return $results;
+    }
+
+    /**
+     * Full bidirectional transfer chain: header (who created/received/
+     * cancelled and when), every line's FIFO consumption on the source
+     * warehouse (fifo_allocations -> source batches) and the batch it
+     * created on the destination warehouse once received, plus the
+     * TRANSFER_OUT/TRANSFER_IN transaction headers cross-referenced the
+     * same way transactionTrace() already does (reference_no = 'TRANSFER-{id}').
+     */
+    public static function transferTrace(PDO $pdo, int $transferId): array
+    {
+        $stmt = $pdo->prepare(
+            'SELECT t.*, fw.code AS from_warehouse_code, fw.name AS from_warehouse_name,
+                    tw.code AS to_warehouse_code, tw.name AS to_warehouse_name,
+                    cu.username AS created_by_username, ru.username AS received_by_username,
+                    xu.username AS cancelled_by_username
+             FROM warehouse_transfers t
+             JOIN warehouses fw ON fw.id = t.from_warehouse_id
+             JOIN warehouses tw ON tw.id = t.to_warehouse_id
+             LEFT JOIN users cu ON cu.id = t.created_by
+             LEFT JOIN users ru ON ru.id = t.received_by
+             LEFT JOIN users xu ON xu.id = t.cancelled_by
+             WHERE t.id = :id'
+        );
+        $stmt->execute(['id' => $transferId]);
+        $transfer = $stmt->fetch();
+        if ($transfer === false) {
+            throw new NotFoundException("transfer {$transferId}");
+        }
+
+        $lineStmt = $pdo->prepare(
+            'SELECT l.*, i.sku, i.name AS item_name
+             FROM warehouse_transfer_lines l JOIN items i ON i.id = l.item_id
+             WHERE l.transfer_id = :id ORDER BY l.id'
+        );
+        $lineStmt->execute(['id' => $transferId]);
+        $lines = $lineStmt->fetchAll();
+
+        $lineDetails = [];
+        foreach ($lines as $line) {
+            $outAllocations = [];
+            $inBatch = null;
+            if ($line['out_transaction_line_id'] !== null) {
+                $allocStmt = $pdo->prepare(
+                    'SELECT a.*, b.received_date, b.warehouse_id AS batch_warehouse_id
+                     FROM fifo_allocations a JOIN inventory_batches b ON b.id = a.batch_id
+                     WHERE a.transaction_line_id = :id ORDER BY a.id'
+                );
+                $allocStmt->execute(['id' => $line['out_transaction_line_id']]);
+                $outAllocations = $allocStmt->fetchAll();
+            }
+            if ($line['in_transaction_line_id'] !== null) {
+                $batchStmt = $pdo->prepare('SELECT * FROM inventory_batches WHERE source_transaction_line_id = :id');
+                $batchStmt->execute(['id' => $line['in_transaction_line_id']]);
+                $inBatch = $batchStmt->fetch() ?: null;
+            }
+            $lineDetails[] = ['line' => $line, 'out_fifo_allocations' => $outAllocations, 'destination_batch' => $inBatch];
+        }
+
+        $txStmt = $pdo->prepare(
+            'SELECT id, transaction_type, transaction_date, status, warehouse_id
+             FROM inventory_transactions WHERE reference_no = :ref ORDER BY id'
+        );
+        $txStmt->execute(['ref' => 'TRANSFER-' . $transferId]);
+
+        return [
+            'entity' => ['type' => 'transfer', 'id' => $transferId],
+            'transfer' => $transfer,
+            'lines' => $lineDetails,
+            'transactions' => $txStmt->fetchAll(),
+            'audit_events' => self::auditTimeline($pdo, 'warehouse_transfers', $transferId),
+        ];
+    }
+
+    /**
+     * Stock Opname chain: session header (counted/finalized/posted/cancelled
+     * by+when), every counted line (system vs physical qty, variance), and
+     * the resulting stock_adjustments row + its ADJUSTMENT transaction for
+     * any line whose variance was actually posted.
+     */
+    public static function opnameTrace(PDO $pdo, int $sessionId): array
+    {
+        $stmt = $pdo->prepare(
+            'SELECT s.*, w.code AS warehouse_code, w.name AS warehouse_name,
+                    cu.username AS created_by_username, fu.username AS finalized_by_username,
+                    pu.username AS posted_by_username, xu.username AS cancelled_by_username
+             FROM stock_opname_sessions s
+             JOIN warehouses w ON w.id = s.warehouse_id
+             LEFT JOIN users cu ON cu.id = s.created_by
+             LEFT JOIN users fu ON fu.id = s.finalized_by
+             LEFT JOIN users pu ON pu.id = s.posted_by
+             LEFT JOIN users xu ON xu.id = s.cancelled_by
+             WHERE s.id = :id'
+        );
+        $stmt->execute(['id' => $sessionId]);
+        $session = $stmt->fetch();
+        if ($session === false) {
+            throw new NotFoundException("opname session {$sessionId}");
+        }
+
+        $lineStmt = $pdo->prepare(
+            'SELECT l.*, i.sku, i.name AS item_name
+             FROM stock_opname_lines l JOIN items i ON i.id = l.item_id
+             WHERE l.session_id = :id ORDER BY l.id'
+        );
+        $lineStmt->execute(['id' => $sessionId]);
+        $lines = $lineStmt->fetchAll();
+
+        $lineDetails = [];
+        foreach ($lines as $line) {
+            $adjustment = null;
+            if ($line['adjustment_id'] !== null) {
+                $s = $pdo->prepare(
+                    'SELECT sa.*, t.transaction_uuid, t.status AS transaction_status
+                     FROM stock_adjustments sa LEFT JOIN inventory_transactions t ON t.id = sa.transaction_id
+                     WHERE sa.id = :id'
+                );
+                $s->execute(['id' => $line['adjustment_id']]);
+                $adjustment = $s->fetch() ?: null;
+            }
+            $lineDetails[] = ['line' => $line, 'resulting_adjustment' => $adjustment];
+        }
+
+        return [
+            'entity' => ['type' => 'opname', 'id' => $sessionId],
+            'session' => $session,
+            'lines' => $lineDetails,
+            'audit_events' => self::auditTimeline($pdo, 'stock_opname_sessions', $sessionId),
+        ];
+    }
+
+    /**
+     * Production chain both directions: raw-material inputs (their FIFO
+     * allocations -> source batches -> actual FIFO cost) and finished-goods
+     * outputs (the batch each output created).
+     */
+    public static function productionTrace(PDO $pdo, int $productionId): array
+    {
+        $stmt = $pdo->prepare(
+            'SELECT p.*, w.code AS warehouse_code, w.name AS warehouse_name,
+                    d.code AS division_code, d.name AS division_name,
+                    u.username AS created_by_username
+             FROM production_headers p
+             JOIN warehouses w ON w.id = p.warehouse_id
+             LEFT JOIN divisions d ON d.id = p.division_id
+             LEFT JOIN users u ON u.id = p.created_by
+             WHERE p.id = :id'
+        );
+        $stmt->execute(['id' => $productionId]);
+        $header = $stmt->fetch();
+        if ($header === false) {
+            throw new NotFoundException("production {$productionId}");
+        }
+
+        $inputStmt = $pdo->prepare(
+            'SELECT pi.*, i.sku, i.name AS item_name
+             FROM production_inputs pi JOIN items i ON i.id = pi.item_id
+             WHERE pi.production_id = :id ORDER BY pi.id'
+        );
+        $inputStmt->execute(['id' => $productionId]);
+        $inputDetails = [];
+        foreach ($inputStmt->fetchAll() as $input) {
+            $allocStmt = $pdo->prepare(
+                'SELECT a.*, b.received_date FROM fifo_allocations a JOIN inventory_batches b ON b.id = a.batch_id
+                 WHERE a.transaction_line_id = :id ORDER BY a.id'
+            );
+            $allocStmt->execute(['id' => $input['transaction_line_id']]);
+            $inputDetails[] = ['input' => $input, 'fifo_allocations' => $allocStmt->fetchAll()];
+        }
+
+        $outputStmt = $pdo->prepare(
+            'SELECT po.*, i.sku, i.name AS item_name
+             FROM production_outputs po JOIN items i ON i.id = po.item_id
+             WHERE po.production_id = :id ORDER BY po.id'
+        );
+        $outputStmt->execute(['id' => $productionId]);
+        $outputDetails = [];
+        foreach ($outputStmt->fetchAll() as $output) {
+            $batchStmt = $pdo->prepare('SELECT * FROM inventory_batches WHERE source_transaction_line_id = :id');
+            $batchStmt->execute(['id' => $output['transaction_line_id']]);
+            $outputDetails[] = ['output' => $output, 'created_batch' => $batchStmt->fetch() ?: null];
+        }
+
+        return [
+            'entity' => ['type' => 'production', 'id' => $productionId],
+            'production' => $header,
+            'inputs' => $inputDetails,
+            'outputs' => $outputDetails,
+            'audit_events' => self::auditTimeline($pdo, 'production_headers', $productionId),
+        ];
+    }
+
+    /**
+     * Opening Stock chain — deliberately keeps the historical STAGING record
+     * (stock_openings/stock_opening_lines: what was imported/reported, by
+     * whom, when) visually separate from the LIVE operational baseline it
+     * produced (inventory_batches / the OPENING-type inventory_transactions
+     * row FIFO still reads from today), per the spec's explicit "never
+     * change opening economics" instruction — this method only ever reads.
+     */
+    public static function openingTrace(PDO $pdo, int $openingId): array
+    {
+        $stmt = $pdo->prepare(
+            'SELECT so.*, cu.username AS created_by_username, xu.username AS committed_by_username
+             FROM stock_openings so
+             LEFT JOIN users cu ON cu.id = so.created_by
+             LEFT JOIN users xu ON xu.id = so.committed_by
+             WHERE so.id = :id'
+        );
+        $stmt->execute(['id' => $openingId]);
+        $opening = $stmt->fetch();
+        if ($opening === false) {
+            throw new NotFoundException("opening {$openingId}");
+        }
+
+        $lineStmt = $pdo->prepare(
+            'SELECT sol.*, i.sku, i.name AS item_name, w.code AS warehouse_code, w.name AS warehouse_name
+             FROM stock_opening_lines sol
+             LEFT JOIN items i ON i.id = sol.item_id
+             LEFT JOIN warehouses w ON w.id = sol.warehouse_id
+             WHERE sol.stock_opening_id = :id ORDER BY sol.id'
+        );
+        $lineStmt->execute(['id' => $openingId]);
+
+        $lineDetails = [];
+        foreach ($lineStmt->fetchAll() as $line) {
+            $liveBatch = null;
+            $liveTransaction = null;
+            if ($line['created_batch_id'] !== null) {
+                $bStmt = $pdo->prepare('SELECT * FROM inventory_batches WHERE id = :id');
+                $bStmt->execute(['id' => $line['created_batch_id']]);
+                $liveBatch = $bStmt->fetch() ?: null;
+                if ($liveBatch !== null && $liveBatch['source_transaction_line_id'] !== null) {
+                    $tStmt = $pdo->prepare(
+                        'SELECT t.id, t.transaction_uuid, t.transaction_type, t.transaction_date, t.status
+                         FROM inventory_transaction_lines l JOIN inventory_transactions t ON t.id = l.transaction_id
+                         WHERE l.id = :id'
+                    );
+                    $tStmt->execute(['id' => $liveBatch['source_transaction_line_id']]);
+                    $liveTransaction = $tStmt->fetch() ?: null;
+                }
+            }
+            $lineDetails[] = ['staging_line' => $line, 'live_fifo_batch' => $liveBatch, 'live_opening_transaction' => $liveTransaction];
+        }
+
+        return [
+            'entity' => ['type' => 'opening', 'id' => $openingId],
+            'opening' => $opening,
+            'lines' => $lineDetails,
+            'audit_events' => self::auditTimeline($pdo, 'stock_openings', $openingId),
+        ];
+    }
+
+    /**
+     * Import batch chain (MASTER_ITEM/SUPPLIER/DIVISION/WAREHOUSE/
+     * HISTORICAL_TRANSACTION — Opening Stock's own import has a dedicated,
+     * richer trace in openingTrace() instead of import_batches). Paginated
+     * row list carries each row's own validation status/messages and, for
+     * an accepted row, the id of the master/transaction record it created.
+     */
+    public static function importTrace(PDO $pdo, int $importBatchId, int $page = 1, int $perPage = 50): array
+    {
+        $stmt = $pdo->prepare(
+            'SELECT ib.*, uu.username AS uploaded_by_username, cu.username AS committed_by_username
+             FROM import_batches ib
+             LEFT JOIN users uu ON uu.id = ib.uploaded_by
+             LEFT JOIN users cu ON cu.id = ib.committed_by
+             WHERE ib.id = :id'
+        );
+        $stmt->execute(['id' => $importBatchId]);
+        $batch = $stmt->fetch();
+        if ($batch === false) {
+            throw new NotFoundException("import batch {$importBatchId}");
+        }
+
+        $totalStmt = $pdo->prepare('SELECT COUNT(*) FROM import_rows WHERE import_batch_id = :id');
+        $totalStmt->execute(['id' => $importBatchId]);
+        $total = (int) $totalStmt->fetchColumn();
+
+        $offset = max(0, ($page - 1) * $perPage);
+        $rowStmt = $pdo->prepare('SELECT * FROM import_rows WHERE import_batch_id = :id ORDER BY row_no ASC LIMIT :lim OFFSET :off');
+        $rowStmt->bindValue('id', $importBatchId, PDO::PARAM_INT);
+        $rowStmt->bindValue('lim', $perPage, PDO::PARAM_INT);
+        $rowStmt->bindValue('off', $offset, PDO::PARAM_INT);
+        $rowStmt->execute();
+        $rows = array_map(static fn ($r) => [
+            'id' => (int) $r['id'],
+            'row_no' => (int) $r['row_no'],
+            'raw_data' => json_decode((string) $r['raw_data'], true),
+            'row_status' => $r['row_status'],
+            'messages' => $r['messages'] !== null ? json_decode((string) $r['messages'], true) : null,
+            'created_entity_id' => $r['created_entity_id'] !== null ? (int) $r['created_entity_id'] : null,
+        ], $rowStmt->fetchAll());
+
+        return [
+            'entity' => ['type' => 'import', 'id' => $importBatchId],
+            'import_batch' => $batch,
+            'rows' => $rows,
+            'pagination' => ['page' => $page, 'per_page' => $perPage, 'total' => $total, 'total_pages' => (int) ceil($total / max(1, $perPage))],
+            'audit_events' => self::auditTimeline($pdo, 'import_batches', $importBatchId),
+        ];
+    }
+
+    /**
+     * User trace — SUPERADMIN/ADMIN only (enforced by the route, not here,
+     * matching this service's existing division of responsibility). Never
+     * returns password_hash or any session/credential-shaped field
+     * (stripSecrets()). login_attempts is a real, separate table (by
+     * username, not user_id) that predates this phase and is included as
+     * genuine login activity evidence.
+     *
+     * Honest gap: no code path in this app ever wrote an audit_logs row for
+     * user create/activate/deactivate/role-change/warehouse-reassignment
+     * before this phase (accounts are provisioned by a CLI script — see
+     * scripts/provision_user.php — which is now instrumented to log
+     * USER_PROVISION going forward). Older account history is therefore
+     * genuinely unavailable, not merely unqueried; this is surfaced to the
+     * caller as `historical_note` rather than silently showing an empty
+     * timeline with no explanation.
+     */
+    public static function userTrace(PDO $pdo, int $userId): array
+    {
+        $stmt = $pdo->prepare(
+            'SELECT u.*, r.code AS role_code, r.name AS role_name,
+                    d.code AS division_code, d.name AS division_name,
+                    w.code AS warehouse_code, w.name AS warehouse_name
+             FROM users u
+             JOIN roles r ON r.id = u.role_id
+             LEFT JOIN divisions d ON d.id = u.division_id
+             LEFT JOIN warehouses w ON w.id = u.warehouse_id
+             WHERE u.id = :id'
+        );
+        $stmt->execute(['id' => $userId]);
+        $user = $stmt->fetch();
+        if ($user === false) {
+            throw new NotFoundException("user {$userId}");
+        }
+
+        $loginStmt = $pdo->prepare(
+            'SELECT id, ip_address, success, created_at FROM login_attempts WHERE username = :u ORDER BY id DESC LIMIT 50'
+        );
+        $loginStmt->execute(['u' => $user['username']]);
+
+        $timeline = self::auditTimeline($pdo, 'users', $userId);
+
+        return [
+            'entity' => ['type' => 'user', 'id' => $userId],
+            'overview' => self::stripSecrets($user),
+            'login_history' => $loginStmt->fetchAll(),
+            'timeline' => $timeline,
+            'historical_data_limited' => $timeline === [],
+            'historical_note' => 'Perubahan akun (pembuatan/aktivasi/nonaktif/ubah role/ubah gudang) sebelum fase ini tidak tercatat di audit_logs — akun dibuat lewat skrip CLI, bukan lewat aplikasi. Event baru (mulai fase ini) tercatat penuh. Riwayat login (tabel login_attempts) tersedia sejak awal dan ditampilkan di atas.',
+        ];
+    }
+
+    /**
+     * Role/permission trace. role_permissions in this app is exclusively
+     * schema-seeded (database/schema.sql) — there is no code path anywhere
+     * in the application that ever changes a role's permission set at
+     * runtime, so "what permissions does this role have right now" is
+     * always exactly what a change-history would show anyway; there is no
+     * silent drift to hide.
+     */
+    public static function roleTrace(PDO $pdo, int $roleId): array
+    {
+        $stmt = $pdo->prepare('SELECT * FROM roles WHERE id = :id');
+        $stmt->execute(['id' => $roleId]);
+        $role = $stmt->fetch();
+        if ($role === false) {
+            throw new NotFoundException("role {$roleId}");
+        }
+
+        $permStmt = $pdo->prepare(
+            'SELECT p.id, p.code, p.description
+             FROM role_permissions rp JOIN permissions p ON p.id = rp.permission_id
+             WHERE rp.role_id = :id ORDER BY p.code'
+        );
+        $permStmt->execute(['id' => $roleId]);
+
+        $userCountStmt = $pdo->prepare('SELECT COUNT(*) FROM users WHERE role_id = :id');
+        $userCountStmt->execute(['id' => $roleId]);
+
+        return [
+            'entity' => ['type' => 'role', 'id' => $roleId],
+            'role' => $role,
+            'permissions' => $permStmt->fetchAll(),
+            'assigned_user_count' => (int) $userCountStmt->fetchColumn(),
+            'timeline' => self::auditTimeline($pdo, 'roles', $roleId),
+            'historical_note' => 'Penetapan permission per role di-seed lewat skema database, bukan lewat UI — tidak ada mekanisme aplikasi untuk mengubahnya saat runtime, sehingga tidak ada riwayat perubahan yang mungkin hilang. Daftar permission di atas adalah yang berlaku saat ini.',
+        ];
     }
 
     /**

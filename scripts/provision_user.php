@@ -26,8 +26,10 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/../services/Database.php';
+require_once __DIR__ . '/../services/AuditService.php';
 
 use App\Services\Database;
+use App\Services\AuditService;
 
 if ($argc < 4) {
     fwrite(STDERR, "Usage: php scripts/provision_user.php <username> \"<full name>\" <role_code> [division_code] [warehouse_code]\n");
@@ -107,6 +109,23 @@ $stmt->execute([
     'now' => $now, 'now2' => $now,
 ]);
 $userId = (int) $pdo->lastInsertId();
+
+// PHASE V2.2B — user lifecycle was previously never audit-logged (accounts
+// are only ever created here, via CLI, never through the app). Logged going
+// forward so User Trace has real events to show; the temp password itself
+// is never included (only the metadata AuditService already logs for every
+// other entity type).
+AuditService::log(
+    $pdo,
+    null,
+    'cli:provision_user.php',
+    'USER_PROVISION',
+    'users',
+    $userId,
+    null,
+    ['username' => $username, 'role_code' => strtoupper($roleCode), 'division_id' => $divisionId ?: null, 'warehouse_id' => $warehouseId ?: null],
+    null
+);
 
 fwrite(STDOUT, "Created user '{$username}' (id {$userId}, role " . strtoupper($roleCode) . ").\n");
 fwrite(STDOUT, "Temporary password (shown ONCE, not stored anywhere in plaintext): {$tempPassword}\n");

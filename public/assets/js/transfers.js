@@ -202,14 +202,22 @@ const Transfers = (() => {
     }
 
     function buildTable(rows) {
-        const body = rows.map((t) => UI.el('tr', {}, [
-            UI.el('td', {}, `#${t.id}`),
-            UI.el('td', {}, whName(t.from_warehouse_id)),
-            UI.el('td', {}, whName(t.to_warehouse_id)),
-            UI.el('td', {}, UI.formatDate(t.ship_date)),
-            UI.el('td', {}, UI.el('span', { class: `badge ${UI.badgeClass(t.status)}` }, t.status)),
-            UI.el('td', {}, transferActions(t)),
-        ]));
+        const canTrace = Auth.hasPermission('AUDIT_LOG_VIEW');
+        const body = rows.map((t) => {
+            const ta = transferActions(t);
+            const actionsCell = Array.isArray(ta) ? ta.slice() : (ta === '-' ? [] : [ta]);
+            if (canTrace) {
+                actionsCell.push(UI.el('button', { class: 'btn btn-secondary btn-sm transfer-trace-btn', 'data-id': String(t.id), style: 'margin-left:6px;' }, '🔍 Lihat Jejak'));
+            }
+            return UI.el('tr', {}, [
+                UI.el('td', {}, `#${t.id}`),
+                UI.el('td', {}, whName(t.from_warehouse_id)),
+                UI.el('td', {}, whName(t.to_warehouse_id)),
+                UI.el('td', {}, UI.formatDate(t.ship_date)),
+                UI.el('td', {}, UI.el('span', { class: `badge ${UI.badgeClass(t.status)}` }, t.status)),
+                UI.el('td', {}, actionsCell.length ? actionsCell : '-'),
+            ]);
+        });
         return UI.el('div', { class: 'table-wrapper' }, [
             UI.el('table', {}, [
                 UI.el('thead', {}, [UI.el('tr', {}, ['ID', 'Dari', 'Ke', 'Tgl Kirim', 'Status', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
@@ -264,6 +272,7 @@ const Transfers = (() => {
     function wireRowActions() {
         document.querySelectorAll('.transfer-receive-btn').forEach((btn) => btn.addEventListener('click', () => receiveTransfer(Number(btn.dataset.id), btn)));
         document.querySelectorAll('.transfer-cancel-btn').forEach((btn) => btn.addEventListener('click', () => cancelTransfer(Number(btn.dataset.id), btn)));
+        document.querySelectorAll('.transfer-trace-btn').forEach((btn) => btn.addEventListener('click', () => TraceDrawer.openTransfer(Number(btn.dataset.id))));
     }
 
     async function receiveTransfer(id, btn) {

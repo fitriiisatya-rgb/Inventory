@@ -16,6 +16,7 @@ const Imports = (() => {
             stage: (path, name) => InvApi.stageMasterItem(path, name),
             commit: (id) => InvApi.commitMasterItem(id),
             preview: (id) => InvApi.previewImportBatch(id),
+            traceOpener: (id) => TraceDrawer.openImport(id),
         }));
         ['SUPPLIER', 'DIVISION', 'WAREHOUSE'].forEach((type) => {
             const label = { SUPPLIER: 'Supplier', DIVISION: 'Divisi', WAREHOUSE: 'Gudang' }[type];
@@ -24,6 +25,7 @@ const Imports = (() => {
                 stage: (path, name) => InvApi.stageSimpleMaster(type, path, name),
                 commit: (id) => InvApi.commitSimpleMaster(type, id),
                 preview: (id) => InvApi.previewImportBatch(id),
+                traceOpener: (id) => TraceDrawer.openImport(id),
             }));
         });
         container.appendChild(buildBatchSection({
@@ -32,6 +34,7 @@ const Imports = (() => {
             commit: (id) => InvApi.commitOpeningStock(id),
             preview: (id) => InvApi.previewOpeningStockBatch(id).then((r) => ({ batch: r.opening, rows: r.lines.map((l) => ({ row_no: l.id, row_status: 'VALID', raw_data: JSON.stringify({ sku: l.sku, name: l.name, qty: l.qty_base, cost: l.unit_cost_base }) })) })),
             note: UI.el('div', { class: 'alert alert-info' }, 'Stok Awal SELALU mempengaruhi saldo stok (inventory_effect=1) — setiap baris akan membuat batch FIFO nyata.'),
+            traceOpener: (id) => TraceDrawer.openOpening(id),
         }));
         container.appendChild(buildBatchSection({
             key: 'historical', title: '📜 Import Transaksi Historis',
@@ -39,6 +42,7 @@ const Imports = (() => {
             commit: (id) => InvApi.commitHistorical(id),
             preview: (id) => InvApi.previewImportBatch(id),
             note: UI.el('div', { class: 'banner-historical' }, '⚠️ HISTORICAL IMPORT — tidak mempengaruhi saldo stok (inventory_effect=0). Data ini hanya untuk laporan/audit, TIDAK membuat batch FIFO dan TIDAK bisa diubah menjadi mempengaruhi stok.'),
+            traceOpener: (id) => TraceDrawer.openImport(id),
         }));
     }
 
@@ -147,7 +151,15 @@ const Imports = (() => {
         btn.disabled = true;
         try {
             const result = await cfg.commit(batchId);
-            alertBox.appendChild(UI.el('div', { class: 'alert alert-success' }, `Berhasil commit: ${result.imported ?? '-'} baris.`));
+            alertBox.appendChild(UI.el('div', { class: 'alert alert-success' }, [
+                `Berhasil commit: ${result.imported ?? '-'} baris.`,
+                cfg.traceOpener && Auth.hasPermission('AUDIT_LOG_VIEW') ? UI.el('div', { style: 'margin-top:8px;' }, [
+                    UI.el('button', { class: 'btn btn-secondary btn-sm', id: `import-${cfg.key}-trace-btn` }, '🔍 Lihat Jejak Import Ini'),
+                ]) : null,
+            ]));
+            if (cfg.traceOpener && Auth.hasPermission('AUDIT_LOG_VIEW')) {
+                document.getElementById(`import-${cfg.key}-trace-btn`).addEventListener('click', () => cfg.traceOpener(batchId));
+            }
         } catch (err) {
             UI.handleApiError(err);
             alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal commit import.'));

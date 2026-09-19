@@ -246,5 +246,367 @@ const TraceDrawer = (() => {
         }
     }
 
-    return { openEntity, openTransaction, openInventory, renderTimeline, renderKv };
+    // ============================================================
+    // PHASE V2.2B — the 7 previously dead-end / partial trace types.
+    // Same "Memuat..." placeholder -> tabs pattern as above.
+    // ============================================================
+
+    async function openTransfer(id) {
+        Drawer.open({ title: 'Memuat jejak transfer...', render: (body) => { body.innerHTML = '<div class="alert alert-info">Memuat...</div>'; } });
+        try {
+            const result = await InvApi.traceTransfer(id);
+            const t = result.transfer;
+            Drawer.open({
+                title: `Jejak Transfer #${id}`,
+                tabs: [
+                    {
+                        key: 'overview', label: 'Overview', render: (body) => {
+                            body.appendChild(Drawer.section('Ringkasan', Drawer.kv([
+                                ['Dari Gudang', `${t.from_warehouse_code} — ${t.from_warehouse_name}`],
+                                ['Ke Gudang', `${t.to_warehouse_code} — ${t.to_warehouse_name}`],
+                                ['Status', UI.el('span', { class: `badge ${UI.badgeClass(t.status)}` }, t.status)],
+                                ['Dibuat Oleh', t.created_by_username || '—'],
+                                ['Dibuat Pada', UI.formatDate(t.created_at)],
+                                ['Tanggal Kirim', UI.formatDate(t.ship_date)],
+                                ['Diterima Oleh', t.received_by_username || '—'],
+                                ['Diterima Pada', t.receive_date ? UI.formatDate(t.receive_date) : '—'],
+                                ['Dibatalkan Oleh', t.cancelled_by_username || '—'],
+                                ['Alasan Batal', t.cancel_reason || '—'],
+                                ['Referensi Transaksi', result.transactions.map((tx) => `#${tx.id} (${tx.transaction_type})`).join(', ') || '—'],
+                            ])));
+                        },
+                    },
+                    {
+                        key: 'lines', label: 'Lines & FIFO', render: (body) => {
+                            if (result.lines.length === 0) {
+                                body.appendChild(UI.el('div', { class: 'alert alert-info' }, 'Tidak ada baris.'));
+                                return;
+                            }
+                            result.lines.forEach((ld) => {
+                                const l = ld.line;
+                                body.appendChild(Drawer.section(`${l.sku} — ${l.item_name}`, UI.el('div', {}, [
+                                    Drawer.kv([['Qty', UI.formatNumber(l.qty_base)], ['Cost/Unit', UI.formatMoney(l.unit_cost_base)]]),
+                                    ld.out_fifo_allocations.length
+                                        ? UI.el('div', {}, [UI.el('div', { style: 'font-weight:600;margin-top:6px;' }, 'Batch Sumber (dikonsumsi):'),
+                                            ...ld.out_fifo_allocations.map((a) => UI.el('div', {}, `Batch #${a.batch_id} — ${UI.formatNumber(a.qty_allocated)} @ ${UI.formatMoney(a.unit_cost_base)}`))])
+                                        : UI.el('div', { class: 'alert alert-info' }, 'Belum ada alokasi FIFO (belum dikirim).'),
+                                    ld.destination_batch
+                                        ? UI.el('div', {}, `Batch Tujuan Dibuat: #${ld.destination_batch.id} — ${UI.formatNumber(ld.destination_batch.qty_base)} @ ${UI.formatMoney(ld.destination_batch.unit_cost_base)}`)
+                                        : UI.el('div', { class: 'alert alert-info' }, 'Belum diterima — belum ada batch tujuan.'),
+                                ])));
+                            });
+                        },
+                    },
+                    { key: 'audit', label: 'Audit', render: (body) => body.appendChild(renderTimeline(result.audit_events)) },
+                ],
+            });
+        } catch (err) {
+            UI.handleApiError(err);
+        }
+    }
+
+    async function openOpname(id) {
+        Drawer.open({ title: 'Memuat jejak opname...', render: (body) => { body.innerHTML = '<div class="alert alert-info">Memuat...</div>'; } });
+        try {
+            const result = await InvApi.traceOpname(id);
+            const s = result.session;
+            Drawer.open({
+                title: `Jejak Stock Opname #${id}`,
+                tabs: [
+                    {
+                        key: 'overview', label: 'Overview', render: (body) => {
+                            body.appendChild(Drawer.section('Ringkasan', Drawer.kv([
+                                ['Gudang', `${s.warehouse_code} — ${s.warehouse_name}`],
+                                ['Status', UI.el('span', { class: `badge ${UI.badgeClass(s.status)}` }, s.status)],
+                                ['Dibuat Oleh', s.created_by_username || '—'],
+                                ['Difinalisasi Oleh', s.finalized_by_username || '—'],
+                                ['Diposting Oleh', s.posted_by_username || '—'],
+                                ['Dibatalkan Oleh', s.cancelled_by_username || '—'],
+                            ])));
+                        },
+                    },
+                    {
+                        key: 'lines', label: 'Lines & Adjustment', render: (body) => {
+                            const rows = result.lines.map((ld) => UI.el('tr', {}, [
+                                UI.el('td', {}, `${ld.line.sku} — ${ld.line.item_name}`),
+                                UI.el('td', {}, UI.formatNumber(ld.line.system_qty_base)),
+                                UI.el('td', {}, ld.line.counted_qty_base !== null ? UI.formatNumber(ld.line.counted_qty_base) : '—'),
+                                UI.el('td', {}, ld.line.variance_qty_base !== null ? UI.formatNumber(ld.line.variance_qty_base) : '—'),
+                                UI.el('td', {}, ld.resulting_adjustment ? `Adj #${ld.resulting_adjustment.id} (${ld.resulting_adjustment.transaction_status})` : '—'),
+                            ]));
+                            body.appendChild(UI.el('div', { class: 'table-wrapper' }, [
+                                UI.el('table', {}, [
+                                    UI.el('thead', {}, [UI.el('tr', {}, ['Barang', 'Qty Sistem', 'Qty Fisik', 'Selisih', 'Adjustment'].map((h) => UI.el('th', {}, h)))]),
+                                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '5' }, 'Tidak ada baris')])]),
+                                ]),
+                            ]));
+                        },
+                    },
+                    { key: 'audit', label: 'Audit', render: (body) => body.appendChild(renderTimeline(result.audit_events)) },
+                ],
+            });
+        } catch (err) {
+            UI.handleApiError(err);
+        }
+    }
+
+    async function openProduction(id) {
+        Drawer.open({ title: 'Memuat jejak produksi...', render: (body) => { body.innerHTML = '<div class="alert alert-info">Memuat...</div>'; } });
+        try {
+            const result = await InvApi.traceProduction(id);
+            const p = result.production;
+            Drawer.open({
+                title: `Jejak Produksi #${id}`,
+                tabs: [
+                    {
+                        key: 'overview', label: 'Overview', render: (body) => {
+                            body.appendChild(Drawer.section('Ringkasan', Drawer.kv([
+                                ['Gudang', `${p.warehouse_code} — ${p.warehouse_name}`],
+                                ['Divisi', p.division_code ? `${p.division_code} — ${p.division_name}` : '—'],
+                                ['Tanggal', UI.formatDate(p.production_date)],
+                                ['Status', UI.el('span', { class: `badge ${UI.badgeClass(p.status)}` }, p.status)],
+                                ['Dibuat Oleh', p.created_by_username || '—'],
+                            ])));
+                        },
+                    },
+                    {
+                        key: 'consumption', label: 'Konsumsi (Bahan Baku)', render: (body) => {
+                            if (result.inputs.length === 0) {
+                                body.appendChild(UI.el('div', { class: 'alert alert-info' }, 'Tidak ada bahan baku.'));
+                                return;
+                            }
+                            result.inputs.forEach((idet) => {
+                                const i = idet.input;
+                                body.appendChild(Drawer.section(`${i.sku} — ${i.item_name}`, UI.el('div', {}, [
+                                    Drawer.kv([['Qty Dikonsumsi', UI.formatNumber(i.qty_base)], ['Cost/Unit (FIFO)', UI.formatMoney(i.unit_cost_base)]]),
+                                    idet.fifo_allocations.length
+                                        ? UI.el('div', {}, [UI.el('div', { style: 'font-weight:600;margin-top:6px;' }, 'Batch Sumber:'),
+                                            ...idet.fifo_allocations.map((a) => UI.el('div', {}, `Batch #${a.batch_id} — ${UI.formatNumber(a.qty_allocated)} @ ${UI.formatMoney(a.unit_cost_base)}`))])
+                                        : null,
+                                ])));
+                            });
+                        },
+                    },
+                    {
+                        key: 'output', label: 'Hasil (Finished Goods)', render: (body) => {
+                            if (result.outputs.length === 0) {
+                                body.appendChild(UI.el('div', { class: 'alert alert-info' }, 'Tidak ada hasil produksi.'));
+                                return;
+                            }
+                            result.outputs.forEach((odet) => {
+                                const o = odet.output;
+                                body.appendChild(Drawer.section(`${o.sku} — ${o.item_name}`, UI.el('div', {}, [
+                                    Drawer.kv([['Qty Dihasilkan', UI.formatNumber(o.qty_base)], ['Cost/Unit', UI.formatMoney(o.unit_cost_base)]]),
+                                    odet.created_batch
+                                        ? UI.el('div', {}, `Batch Dibuat: #${odet.created_batch.id} — ${UI.formatNumber(odet.created_batch.qty_base)} tersisa`)
+                                        : UI.el('div', { class: 'alert alert-info' }, 'Batch tidak ditemukan.'),
+                                ])));
+                            });
+                        },
+                    },
+                    { key: 'audit', label: 'Audit', render: (body) => body.appendChild(renderTimeline(result.audit_events)) },
+                ],
+            });
+        } catch (err) {
+            UI.handleApiError(err);
+        }
+    }
+
+    async function openOpening(id) {
+        Drawer.open({ title: 'Memuat jejak opening stock...', render: (body) => { body.innerHTML = '<div class="alert alert-info">Memuat...</div>'; } });
+        try {
+            const result = await InvApi.traceOpening(id);
+            const o = result.opening;
+            Drawer.open({
+                title: `Jejak Opening Stock #${id}`,
+                tabs: [
+                    {
+                        key: 'overview', label: 'Overview', render: (body) => {
+                            body.appendChild(Drawer.section('Ringkasan (Staging)', Drawer.kv([
+                                ['Cutoff Date', UI.formatDate(o.cutoff_date)],
+                                ['Deskripsi', o.description || '—'],
+                                ['Status', UI.el('span', { class: `badge ${UI.badgeClass(o.status)}` }, o.status)],
+                                ['Dibuat Oleh', o.created_by_username || '—'],
+                                ['Dikomit Oleh', o.committed_by_username || '—'],
+                                ['Total Nilai Kontrol', o.control_total_value !== null ? UI.formatMoney(o.control_total_value) : '—'],
+                            ])));
+                        },
+                    },
+                    {
+                        key: 'lines', label: 'Lines: Staging vs Live', render: (body) => {
+                            body.appendChild(UI.el('p', { style: 'color:var(--text3); font-size:0.78rem; margin-bottom:10px;' }, 'Kolom kiri = catatan staging/laporan (histori impor). Kolom kanan = baseline FIFO yang benar-benar berlaku hari ini. Tidak pernah mengubah ekonomi opening.'));
+                            if (result.lines.length === 0) {
+                                body.appendChild(UI.el('div', { class: 'alert alert-info' }, 'Tidak ada baris di gudang Anda.'));
+                                return;
+                            }
+                            result.lines.forEach((ld) => {
+                                const sl = ld.staging_line;
+                                body.appendChild(Drawer.section(`${sl.sku || '—'} — ${sl.item_name || '(item tidak dikenal)'}`, UI.el('div', {}, [
+                                    Drawer.kv([
+                                        ['Gudang', sl.warehouse_code ? `${sl.warehouse_code} — ${sl.warehouse_name}` : '—'],
+                                        ['Qty (Staging)', UI.formatNumber(sl.qty_base)],
+                                        ['Cost/Unit (Staging)', UI.formatMoney(sl.unit_cost_base)],
+                                        ['Sumber', sl.source || '—'],
+                                        ['Status Baris', sl.row_status],
+                                    ]),
+                                    ld.live_fifo_batch
+                                        ? UI.el('div', {}, `Batch FIFO Live: #${ld.live_fifo_batch.id} — ${UI.formatNumber(ld.live_fifo_batch.qty_base)} tersisa dari ${UI.formatNumber(ld.live_fifo_batch.original_qty_base)}`)
+                                        : UI.el('div', { class: 'alert alert-info' }, 'Belum ter-link ke batch live.'),
+                                    ld.live_opening_transaction
+                                        ? UI.el('div', {}, `Transaksi OPENING Live: #${ld.live_opening_transaction.id} (${ld.live_opening_transaction.status})`)
+                                        : null,
+                                ])));
+                            });
+                        },
+                    },
+                    { key: 'audit', label: 'Audit', render: (body) => body.appendChild(renderTimeline(result.audit_events)) },
+                ],
+            });
+        } catch (err) {
+            UI.handleApiError(err);
+        }
+    }
+
+    async function openImport(id) {
+        Drawer.open({ title: 'Memuat jejak import...', render: (body) => { body.innerHTML = '<div class="alert alert-info">Memuat...</div>'; } });
+        try {
+            const result = await InvApi.traceImport(id);
+            const b = result.import_batch;
+            Drawer.open({
+                title: `Jejak Import #${id} — ${b.file_name}`,
+                tabs: [
+                    {
+                        key: 'overview', label: 'Overview', render: (body) => {
+                            body.appendChild(Drawer.section('Ringkasan', Drawer.kv([
+                                ['Jenis Import', b.import_type],
+                                ['File', b.file_name],
+                                ['Status', UI.el('span', { class: `badge ${UI.badgeClass(b.status)}` }, b.status)],
+                                ['Total Baris', UI.formatNumber(b.total_rows)],
+                                ['Valid', UI.formatNumber(b.valid_rows)],
+                                ['Warning', UI.formatNumber(b.warning_rows)],
+                                ['Error', UI.formatNumber(b.error_rows)],
+                                ['Diunggah Oleh', b.uploaded_by_username || '—'],
+                                ['Diunggah Pada', UI.formatDate(b.uploaded_at)],
+                                ['Dikomit Oleh', b.committed_by_username || '—'],
+                            ])));
+                        },
+                    },
+                    {
+                        key: 'rows', label: `Baris (${result.pagination.total})`, render: (body) => {
+                            const rows = result.rows.map((r) => UI.el('tr', {}, [
+                                UI.el('td', {}, String(r.row_no)),
+                                UI.el('td', {}, UI.el('span', { class: `badge ${UI.badgeClass(r.row_status)}` }, r.row_status)),
+                                UI.el('td', {}, r.created_entity_id !== null ? `#${r.created_entity_id}` : '—'),
+                                UI.el('td', {}, r.messages ? JSON.stringify(r.messages) : '—'),
+                            ]));
+                            body.appendChild(UI.el('div', { class: 'table-wrapper' }, [
+                                UI.el('table', {}, [
+                                    UI.el('thead', {}, [UI.el('tr', {}, ['Baris #', 'Status', 'Entity Dibuat', 'Pesan'].map((h) => UI.el('th', {}, h)))]),
+                                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '4' }, 'Tidak ada baris')])]),
+                                ]),
+                            ]));
+                        },
+                    },
+                    { key: 'audit', label: 'Audit', render: (body) => body.appendChild(renderTimeline(result.audit_events)) },
+                ],
+            });
+        } catch (err) {
+            UI.handleApiError(err);
+        }
+    }
+
+    async function openUser(id) {
+        Drawer.open({ title: 'Memuat jejak user...', render: (body) => { body.innerHTML = '<div class="alert alert-info">Memuat...</div>'; } });
+        try {
+            const result = await InvApi.traceUser(id);
+            const u = result.overview;
+            Drawer.open({
+                title: `Jejak User — ${u.username}`,
+                tabs: [
+                    {
+                        key: 'overview', label: 'Overview', render: (body) => {
+                            body.appendChild(Drawer.section('Ringkasan', Drawer.kv([
+                                ['Username', u.username],
+                                ['Nama Lengkap', u.full_name],
+                                ['Role', `${u.role_code} — ${u.role_name}`],
+                                ['Divisi', u.division_code ? `${u.division_code} — ${u.division_name}` : '—'],
+                                ['Gudang', u.warehouse_code ? `${u.warehouse_code} — ${u.warehouse_name}` : 'Semua Gudang'],
+                                ['Status', MasterCommon.statusBadge(!!u.is_active)],
+                                ['Harus Ganti Password', u.must_change_password ? 'Ya' : 'Tidak'],
+                                ['Login Terakhir', u.last_login_at ? UI.formatDate(u.last_login_at) : '—'],
+                                ['Dibuat Pada', UI.formatDate(u.created_at)],
+                            ])));
+                            if (result.historical_data_limited) {
+                                body.appendChild(UI.el('div', { class: 'alert alert-info' }, result.historical_note));
+                            }
+                        },
+                    },
+                    {
+                        key: 'login', label: 'Riwayat Login', render: (body) => {
+                            const rows = result.login_history.map((l) => UI.el('tr', {}, [
+                                UI.el('td', {}, UI.formatDate(l.created_at)),
+                                UI.el('td', {}, l.ip_address || '—'),
+                                UI.el('td', {}, l.success ? UI.el('span', { class: 'badge badge-pass' }, 'Berhasil') : UI.el('span', { class: 'badge badge-error' }, 'Gagal')),
+                            ]));
+                            body.appendChild(UI.el('div', { class: 'table-wrapper' }, [
+                                UI.el('table', {}, [
+                                    UI.el('thead', {}, [UI.el('tr', {}, ['Waktu', 'IP', 'Hasil'].map((h) => UI.el('th', {}, h)))]),
+                                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '3' }, 'Belum ada riwayat login')])]),
+                                ]),
+                            ]));
+                        },
+                    },
+                    { key: 'timeline', label: 'Timeline Akun', render: (body) => body.appendChild(renderTimeline(result.timeline)) },
+                ],
+            });
+        } catch (err) {
+            UI.handleApiError(err);
+        }
+    }
+
+    async function openRole(id) {
+        Drawer.open({ title: 'Memuat jejak role...', render: (body) => { body.innerHTML = '<div class="alert alert-info">Memuat...</div>'; } });
+        try {
+            const result = await InvApi.traceRole(id);
+            const r = result.role;
+            Drawer.open({
+                title: `Jejak Role — ${r.name}`,
+                tabs: [
+                    {
+                        key: 'overview', label: 'Overview', render: (body) => {
+                            body.appendChild(Drawer.section('Ringkasan', Drawer.kv([
+                                ['Kode', r.code],
+                                ['Nama', r.name],
+                                ['Deskripsi', r.description || '—'],
+                                ['Jumlah User Terpasang', String(result.assigned_user_count)],
+                            ])));
+                            body.appendChild(UI.el('div', { class: 'alert alert-info' }, result.historical_note));
+                        },
+                    },
+                    {
+                        key: 'permissions', label: `Permissions (${result.permissions.length})`, render: (body) => {
+                            const rows = result.permissions.map((p) => UI.el('tr', {}, [
+                                UI.el('td', {}, p.code),
+                                UI.el('td', {}, p.description || '—'),
+                            ]));
+                            body.appendChild(UI.el('div', { class: 'table-wrapper' }, [
+                                UI.el('table', {}, [
+                                    UI.el('thead', {}, [UI.el('tr', {}, ['Kode Permission', 'Deskripsi'].map((h) => UI.el('th', {}, h)))]),
+                                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '2' }, 'Tidak ada permission')])]),
+                                ]),
+                            ]));
+                        },
+                    },
+                    { key: 'timeline', label: 'Timeline', render: (body) => body.appendChild(renderTimeline(result.timeline)) },
+                ],
+            });
+        } catch (err) {
+            UI.handleApiError(err);
+        }
+    }
+
+    return {
+        openEntity, openTransaction, openInventory, renderTimeline, renderKv,
+        openTransfer, openOpname, openProduction, openOpening, openImport, openUser, openRole,
+    };
 })();

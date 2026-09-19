@@ -13,7 +13,25 @@ const TraceCenter = (() => {
     const ENTITY_LABELS = {
         item: 'Barang', transaction: 'Transaksi', supplier: 'Vendor', bakery_destination: 'Bakery Tujuan',
         category: 'Kategori', warehouse: 'Gudang', transfer: 'Transfer', user: 'User',
+        // PHASE V2.2B — closes the coverage gap: no more dead-end entity types.
+        opname: 'Stock Opname', production: 'Produksi', opening: 'Opening Stock', import: 'Import', role: 'Role',
     };
+
+    /** Routes a search-result / audit-event entity type to its TraceDrawer opener. Single source of truth so Search and Audit Events never diverge on how a type is opened. */
+    function openByType(type, id) {
+        const openers = {
+            transaction: TraceDrawer.openTransaction,
+            transfer: TraceDrawer.openTransfer,
+            opname: TraceDrawer.openOpname,
+            production: TraceDrawer.openProduction,
+            opening: TraceDrawer.openOpening,
+            import: TraceDrawer.openImport,
+            user: TraceDrawer.openUser,
+            role: TraceDrawer.openRole,
+        };
+        if (openers[type]) return openers[type](id);
+        return TraceDrawer.openEntity(type, id);
+    }
 
     function render(container) {
         container.innerHTML = '';
@@ -54,7 +72,7 @@ const TraceCenter = (() => {
                         ]),
                         r.status ? UI.el('span', { class: `badge ${UI.badgeClass(r.status)}` }, r.status) : null,
                     ]);
-                    const open = () => (r.type === 'transaction' ? TraceDrawer.openTransaction(r.id) : (r.type === 'transfer' ? TraceCenter.openTransfer(r.id) : (r.type === 'user' ? null : TraceDrawer.openEntity(r.type, r.id))));
+                    const open = () => openByType(r.type, r.id);
                     row.addEventListener('click', open);
                     row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
                     resultsBox.appendChild(row);
@@ -74,7 +92,10 @@ const TraceCenter = (() => {
         eventsCard.appendChild(eventsHost);
         container.appendChild(eventsCard);
 
-        const entityTypeOptions = ['items', 'warehouses', 'divisions', 'suppliers', 'bakery_destinations', 'categories', 'item_warehouse_stock_policy', 'inventory_transactions'].map((t) => ({ value: t, label: t }));
+        const entityTypeOptions = [
+            'items', 'warehouses', 'divisions', 'suppliers', 'bakery_destinations', 'categories', 'item_warehouse_stock_policy', 'inventory_transactions',
+            'warehouse_transfers', 'stock_opname_sessions', 'production_headers', 'stock_openings', 'import_batches', 'users', 'roles',
+        ].map((t) => ({ value: t, label: t }));
 
         DataTable.render(eventsHost, {
             storageKey: 'dt-trace-events',
@@ -100,9 +121,9 @@ const TraceCenter = (() => {
                 return InvApi.traceEvents(params);
             },
             onRowClick: (row) => {
+                if (!row.entity_id) return;
                 const type = TraceCenter.entityTypeToTraceType(row.entity_type);
-                if (type && row.entity_id) TraceDrawer.openEntity(type, row.entity_id);
-                else if (row.entity_type === 'inventory_transactions' && row.entity_id) TraceDrawer.openTransaction(row.entity_id);
+                if (type) openByType(type, row.entity_id);
             },
             emptyMessage: 'Tidak ada audit event yang cocok dengan filter ini.',
         });
@@ -112,24 +133,13 @@ const TraceCenter = (() => {
         const map = {
             items: 'item', warehouses: 'warehouse', divisions: 'division', suppliers: 'supplier',
             bakery_destinations: 'bakery_destination', categories: 'category', item_warehouse_stock_policy: 'stock_policy',
+            inventory_transactions: 'transaction',
+            // PHASE V2.2B additions
+            warehouse_transfers: 'transfer', stock_opname_sessions: 'opname', production_headers: 'production',
+            stock_openings: 'opening', import_batches: 'import', users: 'user', roles: 'role',
         };
         return map[auditEntityType] || null;
     }
 
-    async function openTransfer(transferId) {
-        // No dedicated transfer-trace endpoint yet (see known limitations) —
-        // trace via its TRANSFER_OUT transaction instead of leaving the
-        // click a dead end. Looked up via the reference_no convention every
-        // TransferService transaction already carries.
-        try {
-            const results = await InvApi.transactionReport({ q: `TRANSFER-${transferId}`, per_page: 1 });
-            const row = (results.rows || [])[0];
-            if (row) TraceDrawer.openTransaction(row.transaction_id);
-            else UI.toast('Transaksi untuk transfer ini tidak ditemukan.', 'error');
-        } catch (err) {
-            UI.handleApiError(err);
-        }
-    }
-
-    return { render, entityTypeToTraceType, openTransfer };
+    return { render, entityTypeToTraceType };
 })();

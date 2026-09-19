@@ -160,6 +160,15 @@ const InvApi = (() => {
         traceTransaction: (id) => request('GET', `/trace/transaction/${id}`),
         traceInventory: (itemId, warehouseId, params = {}) => request('GET', `/trace/inventory${qs({ item_id: itemId, warehouse_id: warehouseId, ...params })}`),
 
+        // ---- PHASE V2.2B: coverage-completion trace endpoints (read-only) ----
+        traceTransfer: (id) => request('GET', `/trace/transfer/${id}`),
+        traceOpname: (id) => request('GET', `/trace/opname/${id}`),
+        traceProduction: (id) => request('GET', `/trace/production/${id}`),
+        traceOpening: (id) => request('GET', `/trace/opening/${id}`),
+        traceImport: (id, params = {}) => request('GET', `/trace/import/${id}${qs(params)}`),
+        traceUser: (id) => request('GET', `/trace/user/${id}`),
+        traceRole: (id) => request('GET', `/trace/role/${id}`),
+
         // ---- PHASE V2: per-item-per-warehouse stock policy ----
         getStockPolicy: (itemId, warehouseId) => request('GET', `/stock-policy?item_id=${itemId}&warehouse_id=${warehouseId}`),
         saveStockPolicy: (payload) => request('PUT', '/stock-policy', payload),

@@ -72,6 +72,13 @@ const StockOpname = (() => {
             body.innerHTML = '';
             body.appendChild(UI.el('div', { class: 'banner-lock' }, `🔒 STOCK OPNAME ACTIVE — Sesi #${session.id} (status: ${session.status}). Transaksi Masuk/Keluar di gudang ini ditolak oleh server selama opname berlangsung.`));
 
+            if (Auth.hasPermission('AUDIT_LOG_VIEW')) {
+                body.appendChild(UI.el('div', { style: 'margin-bottom:12px;' }, [
+                    UI.el('button', { class: 'btn btn-secondary btn-sm', id: 'opname-trace-btn' }, `🔍 Lihat Jejak Sesi #${session.id}`),
+                ]));
+                document.getElementById('opname-trace-btn').addEventListener('click', () => TraceDrawer.openOpname(session.id));
+            }
+
             if (session.status === 'OPEN') {
                 body.appendChild(buildCountForm(session));
                 document.getElementById('opname-save-count-btn').addEventListener('click', saveCounts);

@@ -119,7 +119,13 @@ const Production = (() => {
                 `Total Biaya Bahan: ${UI.formatMoney(result.total_input_cost)} — `,
                 `Jumlah Hasil: ${UI.formatNumber(result.output_qty_base)} — `,
                 `HPP per Unit Hasil: ${UI.formatMoney(result.output_unit_cost_base)}`,
+                Auth.hasPermission('AUDIT_LOG_VIEW') ? UI.el('div', { style: 'margin-top:8px;' }, [
+                    UI.el('button', { class: 'btn btn-secondary btn-sm', id: 'production-trace-btn' }, `🔍 Lihat Jejak Produksi #${result.production_id}`),
+                ]) : null,
             ]));
+            if (Auth.hasPermission('AUDIT_LOG_VIEW')) {
+                document.getElementById('production-trace-btn').addEventListener('click', () => TraceDrawer.openProduction(result.production_id));
+            }
             productionUuid = null;
             document.getElementById('production-inputs').innerHTML = '';
             inputCount = 0;

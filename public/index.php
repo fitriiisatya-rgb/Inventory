@@ -1494,7 +1494,7 @@ $routes = [
         if ($q === '') {
             inv_ok([], 'OK');
         }
-        $validTypes = ['item', 'transaction', 'supplier', 'bakery_destination', 'category', 'warehouse', 'transfer', 'user'];
+        $validTypes = ['item', 'transaction', 'supplier', 'bakery_destination', 'category', 'warehouse', 'transfer', 'user', 'opname', 'production', 'opening', 'import', 'role'];
         $type = in_array($query['type'] ?? '', $validTypes, true) ? $query['type'] : null;
         $limit = min(50, max(1, (int) ($query['limit'] ?? 20)));
         inv_ok(TraceService::search($pdo, $q, $type, $limit), 'OK');
@@ -1564,6 +1564,90 @@ $routes = [
         $page = max(1, (int) ($query['page'] ?? 1));
         $perPage = in_array((int) ($query['per_page'] ?? 50), [25, 50, 100], true) ? (int) ($query['per_page'] ?? 50) : 50;
         inv_ok(TraceService::inventoryTrace($pdo, $itemId, $warehouseId, $page, $perPage), 'OK');
+    },
+
+    // ============================================================
+    // PHASE V2.2B — closes the coverage gap the owner flagged after V2.2:
+    // Transfer/Opname/Production/Opening were PARTIAL (traceable only via
+    // their underlying transaction, not directly), Import/User/Role were
+    // dead ends. Same read-only, AUDIT_LOG_VIEW-gated pattern as the block
+    // above. User/Role additionally require SUPERADMIN/ADMIN — account and
+    // permission structure is more sensitive than inventory movement, so
+    // audit-view alone isn't enough for those two.
+    // ============================================================
+    'GET /trace/transfer/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        $result = TraceService::transferTrace($pdo, (int) $params['id']);
+        if ($user['role_code'] === 'STOCK') {
+            $wh = (int) ($user['warehouse_id'] ?? 0);
+            $inScope = $wh > 0 && ($wh === (int) $result['transfer']['from_warehouse_id'] || $wh === (int) $result['transfer']['to_warehouse_id']);
+            if (!$inScope) {
+                inv_error(403, 'FORBIDDEN', 'Transfer is outside your assigned warehouse');
+            }
+        }
+        inv_ok($result, 'OK');
+    },
+
+    'GET /trace/opname/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        $result = TraceService::opnameTrace($pdo, (int) $params['id']);
+        inv_require_warehouse_scope($user, (int) $result['session']['warehouse_id']);
+        inv_ok($result, 'OK');
+    },
+
+    'GET /trace/production/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        $result = TraceService::productionTrace($pdo, (int) $params['id']);
+        inv_require_warehouse_scope($user, (int) $result['production']['warehouse_id']);
+        inv_ok($result, 'OK');
+    },
+
+    'GET /trace/opening/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        $result = TraceService::openingTrace($pdo, (int) $params['id']);
+        // An opening batch can span multiple warehouses; a STOCK user only
+        // ever sees the lines for their own warehouse, never the others —
+        // same "silently scope, don't 403 the whole record" behavior as
+        // GET /items/report and GET /trace/inventory.
+        if ($user['role_code'] === 'STOCK') {
+            $wh = (int) ($user['warehouse_id'] ?? 0);
+            $result['lines'] = array_values(array_filter(
+                $result['lines'],
+                static fn ($l) => (int) ($l['staging_line']['warehouse_id'] ?? 0) === $wh
+            ));
+            if ($result['lines'] === []) {
+                inv_error(403, 'FORBIDDEN', 'This opening batch has no lines in your assigned warehouse');
+            }
+        }
+        inv_ok($result, 'OK');
+    },
+
+    'GET /trace/import/{id}' => function (array $params) use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        $page = max(1, (int) ($query['page'] ?? 1));
+        $perPage = in_array((int) ($query['per_page'] ?? 50), [25, 50, 100], true) ? (int) ($query['per_page'] ?? 50) : 50;
+        inv_ok(TraceService::importTrace($pdo, (int) $params['id'], $page, $perPage), 'OK');
+    },
+
+    'GET /trace/user/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        if (!in_array($user['role_code'], ['ADMIN', 'SUPERADMIN'], true)) {
+            inv_error(403, 'FORBIDDEN', 'User trace is restricted to ADMIN/SUPERADMIN');
+        }
+        inv_ok(TraceService::userTrace($pdo, (int) $params['id']), 'OK');
+    },
+
+    'GET /trace/role/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        if (!in_array($user['role_code'], ['ADMIN', 'SUPERADMIN'], true)) {
+            inv_error(403, 'FORBIDDEN', 'Role trace is restricted to ADMIN/SUPERADMIN');
+        }
+        inv_ok(TraceService::roleTrace($pdo, (int) $params['id']), 'OK');
     },
 
     // ---- Import module (PHASE E/E2). `file_path` must be a path already on
