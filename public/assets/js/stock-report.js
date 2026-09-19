@@ -4,7 +4,8 @@
  * item detail drawer (Overview/FIFO Layers/Movement tabs).
  */
 const StockReport = (() => {
-    function render(container) {
+    /** @param {object} [presetFilters] — e.g. from a Dashboard Need Attention drill-down: { status: 'CRITICAL' } */
+    function render(container, presetFilters) {
         container.innerHTML = '';
 
         const warehouseOptions = Master.warehouses().map((w) => ({ value: w.id, label: w.name }));
@@ -38,6 +39,7 @@ const StockReport = (() => {
         DataTable.render(tableHost, {
             storageKey: 'dt-stock-report',
             filters,
+            initialFilters: presetFilters,
             columns: [
                 { key: 'sku', label: 'SKU', sortable: true, render: (r) => r.sku },
                 { key: 'name', label: 'Nama Barang', sortable: true, render: (r) => r.name },
@@ -96,6 +98,7 @@ const StockReport = (() => {
                 { key: 'overview', label: 'Overview', render: (body) => renderOverviewTab(body, row) },
                 { key: 'fifo', label: 'FIFO Layers', render: (body) => renderFifoTab(body, row, warehouseId) },
                 { key: 'movement', label: 'Movement', render: (body) => renderMovementTab(body, row, warehouseId) },
+                { key: 'jejak', label: 'Lihat Jejak', render: (body) => renderJejakTab(body, row, warehouseId) },
             ],
         });
     }
@@ -163,6 +166,22 @@ const StockReport = (() => {
             UI.handleApiError(err);
             body.innerHTML = `<div class="alert alert-error">Gagal memuat pergerakan: ${(err && err.message) || ''}</div>`;
         }
+    }
+
+    // PHASE V2.2 — full read-only chain trace (movement timeline + FIFO
+    // batches, cross-referencing transfer/production/reversal) for this
+    // item in one specific warehouse. Requires a single warehouse — the
+    // company-wide "Semua Gudang" view has no one warehouse_id to trace.
+    function renderJejakTab(body, row, warehouseId) {
+        body.innerHTML = '';
+        if (!warehouseId) {
+            body.appendChild(UI.el('div', { class: 'alert alert-warning' }, 'Pilih tampilan per-gudang (bukan Semua Gudang) untuk melihat jejak lengkap item ini.'));
+            return;
+        }
+        body.appendChild(UI.el('p', { style: 'color:var(--text3); font-size:0.82rem; margin-bottom:12px;' }, 'Lihat jejak lengkap: timeline pergerakan, batch FIFO, dan relasi transaksi (transfer/produksi/reversal) untuk item ini di gudang ini.'));
+        const btn = UI.el('button', { class: 'btn btn-primary btn-sm' }, '🔍 Buka Jejak Lengkap');
+        btn.addEventListener('click', () => TraceDrawer.openInventory(row.item_id, warehouseId));
+        body.appendChild(btn);
     }
 
     return { render };

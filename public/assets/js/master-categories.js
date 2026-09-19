@@ -138,15 +138,17 @@ const MasterCategories = (() => {
 
     function buildTable(categories) {
         const canManage = Auth.hasPermission('MASTER_CATEGORY_MANAGE');
+        const canTrace = Auth.hasPermission('AUDIT_LOG_VIEW');
         const rows = categories.map((c) => UI.el('tr', {}, [
             UI.el('td', {}, c.code),
             UI.el('td', {}, c.name),
             UI.el('td', {}, UI.formatNumber(c.item_count ?? 0, 0)),
             UI.el('td', {}, MasterCommon.statusBadge(!!c.is_active)),
-            UI.el('td', {}, canManage ? MasterCommon.actionsMenu([
-                { label: 'Edit', onClick: () => { editingId = c.id; fillForm(c); document.getElementById('category-form-card').scrollIntoView({ behavior: 'smooth' }); } },
-                { label: c.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(c) },
-                { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(c) },
+            UI.el('td', {}, (canManage || canTrace) ? MasterCommon.actionsMenu([
+                canTrace ? { label: 'Lihat Jejak', onClick: () => TraceDrawer.openEntity('category', c.id) } : null,
+                canManage ? { label: 'Edit', onClick: () => { editingId = c.id; fillForm(c); document.getElementById('category-form-card').scrollIntoView({ behavior: 'smooth' }); } } : null,
+                canManage ? { label: c.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(c) } : null,
+                canManage ? { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(c) } : null,
             ]) : '—'),
         ]));
         return UI.el('div', { class: 'card' }, [

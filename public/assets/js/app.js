@@ -13,6 +13,7 @@
     const changePasswordForm = document.getElementById('change-password-form');
     const changePasswordAlert = document.getElementById('change-password-alert');
     const changePasswordSubmit = document.getElementById('change-password-submit');
+    let pendingStockReportFilters = null;
 
     function showLogin() {
         loginScreen.style.display = 'block';
@@ -27,14 +28,25 @@
     }
 
     async function showApp() {
-        if (Auth.user().must_change_password) {
+        // PHASE V2.2 hardening: Auth.user() can legitimately be null here if
+        // session resume raced or failed silently — never assume it's set.
+        // (Auth.login() itself now throws before this is reached if the
+        // session truly never got established; this guard covers the
+        // separate init()/tryResumeSession() path.)
+        const user = Auth.user();
+        if (!user) {
+            loginAlert.innerHTML = '';
+            loginAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Sesi login tidak berhasil dibuat. Silakan coba kembali.'));
+            showLogin();
+            return;
+        }
+        if (user.must_change_password) {
             showChangePassword();
             return;
         }
         loginScreen.style.display = 'none';
         changePasswordScreen.style.display = 'none';
         appShell.style.display = 'block';
-        const user = Auth.user();
         document.getElementById('username-chip').textContent = user.username;
         document.getElementById('role-badge').textContent = user.role_code;
         Auth.applyRoleVisibility();
@@ -51,6 +63,7 @@
         dashboard: 'Dashboard', 'stok-barang': 'Stok Barang',
         'master-item': 'Master Barang', 'master-warehouse': 'Master Gudang', 'master-division': 'Master Divisi',
         'master-vendor': 'Vendor / Supplier', 'master-bakery': 'Bakery Tujuan', 'master-category': 'Kategori',
+        'trace-center': 'Trace Center',
         laporan: 'Mutasi Stok / Ledger', 'history-transaksi': 'History Transaksi', transaksi: 'Stock IN / OUT',
         transfer: 'Transfer', produksi: 'Produksi', opname: 'Stock Opname', import: 'Import',
         audit: 'Audit Log', closing: 'Tutup Buku',
@@ -66,7 +79,8 @@
         if (name === 'dashboard') {
             Dashboard.render(document.getElementById('tab-dashboard'));
         } else if (name === 'stok-barang') {
-            StockReport.render(document.getElementById('tab-stok-barang'));
+            StockReport.render(document.getElementById('tab-stok-barang'), pendingStockReportFilters || undefined);
+            pendingStockReportFilters = null;
         } else if (name === 'master-item') {
             MasterItems.render(document.getElementById('tab-master-item'));
         } else if (name === 'master-warehouse') {
@@ -97,6 +111,8 @@
             Imports.render(document.getElementById('tab-import'));
         } else if (name === 'audit') {
             Audit.render(document.getElementById('tab-audit'));
+        } else if (name === 'trace-center') {
+            TraceCenter.render(document.getElementById('tab-trace-center'));
         } else if (name === 'closing') {
             Closing.render(document.getElementById('tab-closing'));
         }
@@ -106,10 +122,41 @@
         link.addEventListener('click', () => activateTab(link.dataset.tab));
     });
 
+    // PHASE V2.2 — used by Dashboard's clickable Need Attention cards to
+    // drill into Stok Barang pre-filtered exactly as the backend already
+    // computes status (never a frontend-recomputed guess), and by
+    // TraceDrawer's contextual navigation links (Full Ledger / History
+    // Transaksi / Detail Barang). Deliberately a small, explicit surface —
+    // not a general router — since only these two callers need it.
+    window.InvNav = {
+        goToStockReport(filters) {
+            pendingStockReportFilters = filters || null;
+            document.querySelector('[data-tab="stok-barang"]')?.click();
+        },
+        goToTab(tabName) {
+            document.querySelector(`[data-tab="${tabName}"]`)?.click();
+        },
+    };
+
     document.getElementById('logout-btn').addEventListener('click', async () => {
         await Auth.logout();
         showLogin();
     });
+
+    // PHASE V2.2 — never show a raw JS/PHP error to the user (e.g. "null is
+    // not an object", a stack trace, or a bare technical API message).
+    // Known cases get an exact friendly Indonesian message; anything else
+    // falls back to a generic one. Technical detail can still be logged to
+    // the console for support/debugging, just never rendered into the DOM.
+    function friendlyLoginError(err) {
+        const code = err && err.code;
+        if (code === 'UNAUTHENTICATED') return 'Username atau password tidak sesuai.';
+        if (code === 'SESSION_NOT_ESTABLISHED') return 'Sesi login tidak berhasil dibuat.\nSilakan coba kembali.';
+        if (code === 'NETWORK_ERROR') return 'Tidak dapat terhubung ke server.\nSilakan coba kembali.';
+        if (code === 'RATE_LIMITED' || code === 'TOO_MANY_ATTEMPTS') return 'Terlalu banyak percobaan login. Silakan coba lagi beberapa saat lagi.';
+        if (err && typeof err.message === 'string' && err.message.trim() !== '') return err.message;
+        return 'Login gagal. Silakan coba kembali.';
+    }
 
     loginForm.addEventListener('submit', async (evt) => {
         evt.preventDefault();
@@ -121,12 +168,27 @@
             await Auth.login(username, password);
             await showApp();
         } catch (err) {
+            if (err && err.code !== 'NETWORK_ERROR') console.error('Login failed:', err);
             loginAlert.innerHTML = '';
-            loginAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Login gagal'));
+            loginAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, friendlyLoginError(err)));
         } finally {
             loginSubmit.disabled = false;
         }
     });
+
+    // Show/hide password toggle on the redesigned login card.
+    const loginPasswordInput = document.getElementById('login-password');
+    const loginPasswordToggle = document.getElementById('login-password-toggle');
+    if (loginPasswordInput && loginPasswordToggle) {
+        loginPasswordToggle.addEventListener('click', () => {
+            const showing = loginPasswordInput.type === 'text';
+            loginPasswordInput.type = showing ? 'password' : 'text';
+            loginPasswordToggle.textContent = showing ? '👁' : '🙈';
+            loginPasswordToggle.setAttribute('aria-label', showing ? 'Tampilkan password' : 'Sembunyikan password');
+        });
+    }
+    const loginYearEl = document.getElementById('login-year');
+    if (loginYearEl) loginYearEl.textContent = String(new Date().getFullYear());
 
     changePasswordForm.addEventListener('submit', async (evt) => {
         evt.preventDefault();

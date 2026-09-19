@@ -157,6 +157,7 @@ const MasterVendors = (() => {
 
     function buildTable(suppliers) {
         const canManage = Auth.hasPermission('MASTER_SUPPLIER_MANAGE');
+        const canTrace = Auth.hasPermission('AUDIT_LOG_VIEW');
         const rows = suppliers.map((v) => UI.el('tr', {}, [
             UI.el('td', {}, v.code),
             UI.el('td', {}, v.name),
@@ -165,10 +166,11 @@ const MasterVendors = (() => {
             UI.el('td', {}, v.email || '—'),
             UI.el('td', {}, UI.formatNumber(v.linked_item_count ?? 0, 0)),
             UI.el('td', {}, MasterCommon.statusBadge(!!v.is_active)),
-            UI.el('td', {}, canManage ? MasterCommon.actionsMenu([
-                { label: 'Edit', onClick: () => { editingId = v.id; fillForm(v); document.getElementById('vendor-form-card').scrollIntoView({ behavior: 'smooth' }); } },
-                { label: v.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(v) },
-                { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(v) },
+            UI.el('td', {}, (canManage || canTrace) ? MasterCommon.actionsMenu([
+                canTrace ? { label: 'Lihat Jejak', onClick: () => TraceDrawer.openEntity('supplier', v.id) } : null,
+                canManage ? { label: 'Edit', onClick: () => { editingId = v.id; fillForm(v); document.getElementById('vendor-form-card').scrollIntoView({ behavior: 'smooth' }); } } : null,
+                canManage ? { label: v.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(v) } : null,
+                canManage ? { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(v) } : null,
             ]) : '—'),
         ]));
         return UI.el('div', { class: 'card' }, [

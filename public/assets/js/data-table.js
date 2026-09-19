@@ -49,7 +49,11 @@ const DataTable = (() => {
             perPage: opts.pageSize || 50,
             sort: opts.defaultSort || (opts.columns[0] && opts.columns[0].key) || '',
             dir: opts.defaultDir || 'asc',
-            filters: {},
+            // PHASE V2.2: an optional preset (e.g. a Dashboard "Need Attention"
+            // drill-down landing on Stok Barang pre-filtered to status=CRITICAL)
+            // seeds both the query state AND the visible control below, so the
+            // toolbar never lies about what's actually filtering the table.
+            filters: { ...(opts.initialFilters || {}) },
             visible: loadVisibility(opts.storageKey || 'dt-default', opts.columns),
             loading: false,
             debounceTimer: null,
@@ -72,6 +76,7 @@ const DataTable = (() => {
             } else {
                 input = UI.el('input', { type: 'text', placeholder: f.placeholder || f.label });
             }
+            if (state.filters[f.key] !== undefined) input.value = state.filters[f.key];
             input.addEventListener(f.type === 'select' ? 'change' : 'input', () => {
                 clearTimeout(state.debounceTimer);
                 state.debounceTimer = setTimeout(() => {

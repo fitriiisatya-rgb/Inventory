@@ -50,6 +50,18 @@ const Auth = (() => {
         }
     }
 
+    // PHASE V2.2 — a distinct error type so app.js's login handler can show
+    // a friendly message rather than letting callers fall through to
+    // Auth.user() being null (the exact "Auth.user().must_change_password"
+    // crash the owner flagged: POST /auth/login succeeding but the
+    // follow-up GET /auth/me failing to establish a session).
+    class SessionNotEstablishedError extends Error {
+        constructor() {
+            super('Sesi login tidak berhasil dibuat. Silakan coba kembali.');
+            this.code = 'SESSION_NOT_ESTABLISHED';
+        }
+    }
+
     async function login(username, password) {
         const data = await InvApi.login(username, password);
         // /auth/login only returns {username, role, csrf_token} — fetch the
@@ -57,6 +69,9 @@ const Auth = (() => {
         // rather than assuming its shape.
         InvApi.setCsrfToken(data.csrf_token);
         await tryResumeSession();
+        if (!currentUser) {
+            throw new SessionNotEstablishedError();
+        }
         return currentUser;
     }
 

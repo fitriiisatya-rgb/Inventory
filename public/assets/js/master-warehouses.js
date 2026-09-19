@@ -61,6 +61,7 @@ const MasterWarehouses = (() => {
     function buildActions(row, canManage) {
         return MasterCommon.actionsMenu([
             { label: 'Detail', onClick: () => openDetail(row) },
+            { label: 'Lihat Jejak', onClick: () => TraceDrawer.openEntity('warehouse', row.id) },
             canManage ? { label: 'Edit', onClick: () => openEdit(row) } : null,
             canManage ? { label: row.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(row) } : null,
             canManage ? { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(row) } : null,

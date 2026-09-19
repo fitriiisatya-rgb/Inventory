@@ -167,6 +167,7 @@ const MasterBakeryDestinations = (() => {
 
     function buildTable(destinations) {
         const canManage = Auth.hasPermission('MASTER_BAKERY_DESTINATION_MANAGE');
+        const canTrace = Auth.hasPermission('AUDIT_LOG_VIEW');
         const rows = destinations.map((b) => UI.el('tr', {}, [
             UI.el('td', {}, b.code),
             UI.el('td', {}, b.name),
@@ -175,10 +176,11 @@ const MasterBakeryDestinations = (() => {
             UI.el('td', {}, b.pic_name || '—'),
             UI.el('td', {}, b.phone || '—'),
             UI.el('td', {}, MasterCommon.statusBadge(!!b.is_active)),
-            UI.el('td', {}, canManage ? MasterCommon.actionsMenu([
-                { label: 'Edit', onClick: () => { editingId = b.id; fillForm(b); document.getElementById('bakery-form-card').scrollIntoView({ behavior: 'smooth' }); } },
-                { label: b.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(b) },
-                { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(b) },
+            UI.el('td', {}, (canManage || canTrace) ? MasterCommon.actionsMenu([
+                canTrace ? { label: 'Lihat Jejak', onClick: () => TraceDrawer.openEntity('bakery_destination', b.id) } : null,
+                canManage ? { label: 'Edit', onClick: () => { editingId = b.id; fillForm(b); document.getElementById('bakery-form-card').scrollIntoView({ behavior: 'smooth' }); } } : null,
+                canManage ? { label: b.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(b) } : null,
+                canManage ? { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(b) } : null,
             ]) : '—'),
         ]));
         return UI.el('div', { class: 'card' }, [

@@ -3,25 +3,77 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Inventory FIFO Pro</title>
-<link rel="stylesheet" href="assets/css/app.css">
+<title>Inventory Pro</title>
+<!-- PHASE V2.2: deterministic cache-busting — every CSS/JS tag below shares
+     this same ?v= value, bumped once per release (not per file). A new
+     deploy that bumps this forces a fresh fetch of every asset in the same
+     request wave, so Chrome/Safari never mix an old JS file with new CSS
+     (or vice versa) after a deployment; leaving it unchanged between
+     deploys still lets the browser cache normally. -->
+<link rel="stylesheet" href="assets/css/app.css?v=20260919">
 </head>
 <body>
 
-<div id="login-screen" class="card" style="max-width:380px; margin:80px auto;">
-    <div class="card-header"><div class="card-title">🔐 Inventory FIFO Pro — Login</div></div>
-    <div id="login-alert"></div>
-    <form id="login-form">
-        <div class="form-group">
-            <label>Username</label>
-            <input type="text" id="login-username" autocomplete="username" required>
+<div id="login-screen" class="login-page">
+    <div class="login-bg-blueprint" aria-hidden="true"></div>
+    <div class="login-topbar">
+        <div class="login-topbar-left">
+            <div class="login-topbar-icon">📦</div>
+            <div>
+                <div class="login-topbar-title">Inventory Pro</div>
+                <div class="login-topbar-sub">MySQL Backend — Production</div>
+            </div>
         </div>
-        <div class="form-group">
-            <label>Password</label>
-            <input type="password" id="login-password" autocomplete="current-password" required>
+        <div class="login-topbar-right">
+            <span class="badge-production">PRODUCTION</span>
+            <span class="login-topbar-tagline">Sistem Inventory &amp; Stok Barang</span>
         </div>
-        <button type="submit" class="btn btn-primary" id="login-submit" style="width:100%;">Masuk</button>
-    </form>
+    </div>
+
+    <div class="login-side-text" aria-hidden="true">
+        <div>STOK TERKENDALI</div>
+        <div>BISNIS LEBIH MAJU</div>
+    </div>
+
+    <div class="login-main">
+        <div class="login-card">
+            <div class="login-card-logo">📦</div>
+            <h1 class="login-card-title">Inventory Pro</h1>
+            <p class="login-card-tagline">Kelola stok dengan lebih mudah, cepat, dan efisien.</p>
+            <div id="login-alert"></div>
+            <form id="login-form">
+                <div class="form-group">
+                    <label>Username</label>
+                    <input type="text" id="login-username" autocomplete="username" required>
+                </div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <div class="login-password-wrap">
+                        <input type="password" id="login-password" autocomplete="current-password" required>
+                        <button type="button" class="login-password-toggle" id="login-password-toggle" aria-label="Tampilkan password">👁</button>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary login-submit-btn" id="login-submit">Masuk <span aria-hidden="true">→</span></button>
+            </form>
+            <div class="login-divider"><span>atau</span></div>
+            <div class="login-trust-row">
+                <div class="login-trust-card"><span class="login-trust-icon">🛡️</span><div><b>Secure Login</b><small>Data Anda Terlindungi</small></div></div>
+                <div class="login-trust-card"><span class="login-trust-icon">🖥️</span><div><b>Production Environment</b><small>Stabil &amp; Andal</small></div></div>
+            </div>
+        </div>
+        <div class="login-mascot-wrap">
+            <img src="assets/images/fa-mascot.png?v=20260919" class="login-mascot" alt="Maskot FA Inventory Pro" width="420" height="420">
+            <div class="login-speech-bubble">Halo!<br><small>Siap kelola Inventory hari ini?</small></div>
+        </div>
+    </div>
+
+    <div class="login-footer">
+        <div class="login-footer-left">
+            <div>Inventory Pro &copy; <span id="login-year"></span></div>
+            <small>Manajemen Stok yang Lebih Efisien</small>
+        </div>
+        <div class="login-footer-right">Akurat &bull; Terstruktur &bull; Bertumbuh</div>
+    </div>
 </div>
 
 <div id="change-password-screen" class="card" style="max-width:420px; margin:80px auto; display:none;">
@@ -48,7 +100,7 @@
             <div class="app-logo">
                 <div class="logo-icon">📦</div>
                 <div class="logo-text">
-                    <h1>Inventory FIFO Pro</h1>
+                    <h1>Inventory Pro</h1>
                     <span>MySQL Backend — Production</span>
                 </div>
             </div>
@@ -102,6 +154,7 @@
             <div class="sidebar-group">
                 <div class="sidebar-group-label">Audit &amp; Control</div>
                 <a class="sidebar-link" data-tab="audit" data-require-permission="AUDIT_LOG_VIEW"><span class="icon">📜</span> Audit Log</a>
+                <a class="sidebar-link" data-tab="trace-center" data-require-permission="AUDIT_LOG_VIEW"><span class="icon">🔍</span> Trace Center</a>
             </div>
             <div class="sidebar-group">
                 <div class="sidebar-group-label">Settings</div>
@@ -111,7 +164,7 @@
 
         <div class="app-content-v2">
             <main class="app-main-v2">
-                <div class="breadcrumb" id="breadcrumb"><span>Inventory FIFO Pro</span><span class="sep">/</span><span class="current" id="breadcrumb-current">Dashboard</span></div>
+                <div class="breadcrumb" id="breadcrumb"><span>Inventory Pro</span><span class="sep">/</span><span class="current" id="breadcrumb-current">Dashboard</span></div>
                 <div class="tab-content active" id="tab-dashboard"></div>
                 <div class="tab-content" id="tab-stok-barang"></div>
                 <div class="tab-content" id="tab-transaksi"></div>
@@ -128,41 +181,44 @@
                 <div class="tab-content" id="tab-master-category"></div>
                 <div class="tab-content" id="tab-import"></div>
                 <div class="tab-content" id="tab-audit"></div>
+                <div class="tab-content" id="tab-trace-center"></div>
                 <div class="tab-content" id="tab-closing"></div>
             </main>
 
-            <footer>Inventory FIFO Pro &mdash; PHP + MySQL backend. Environment Production.</footer>
+            <footer>Inventory Pro &mdash; PHP + MySQL backend. Environment Production.</footer>
         </div>
     </div>
 </div>
 
-<script src="assets/js/api-client.js"></script>
-<script src="assets/js/ui.js"></script>
-<script src="assets/js/modal.js"></script>
-<script src="assets/js/drawer.js"></script>
-<script src="assets/js/data-table.js"></script>
-<script src="assets/js/auth.js"></script>
-<script src="assets/js/master.js"></script>
-<script src="assets/js/dashboard.js"></script>
-<script src="assets/js/stock-report.js"></script>
-<script src="assets/js/reports.js"></script>
-<script src="assets/js/transactions.js"></script>
-<script src="assets/js/transaction-history.js"></script>
-<script src="assets/js/transfers.js"></script>
-<script src="assets/js/production.js"></script>
-<script src="assets/js/stock-opname.js"></script>
-<script src="assets/js/adjustments.js"></script>
-<script src="assets/js/closing.js"></script>
-<script src="assets/js/imports.js"></script>
-<script src="assets/js/audit.js"></script>
-<script src="assets/js/master-common.js"></script>
-<script src="assets/js/master-categories.js"></script>
-<script src="assets/js/master-vendors.js"></script>
-<script src="assets/js/master-bakery-destinations.js"></script>
-<script src="assets/js/master-items.js"></script>
-<script src="assets/js/master-warehouses.js"></script>
-<script src="assets/js/master-divisions.js"></script>
-<script src="assets/js/sidebar.js"></script>
-<script src="assets/js/app.js"></script>
+<script src="assets/js/api-client.js?v=20260919"></script>
+<script src="assets/js/ui.js?v=20260919"></script>
+<script src="assets/js/modal.js?v=20260919"></script>
+<script src="assets/js/drawer.js?v=20260919"></script>
+<script src="assets/js/data-table.js?v=20260919"></script>
+<script src="assets/js/auth.js?v=20260919"></script>
+<script src="assets/js/master.js?v=20260919"></script>
+<script src="assets/js/dashboard.js?v=20260919"></script>
+<script src="assets/js/stock-report.js?v=20260919"></script>
+<script src="assets/js/reports.js?v=20260919"></script>
+<script src="assets/js/transactions.js?v=20260919"></script>
+<script src="assets/js/transaction-history.js?v=20260919"></script>
+<script src="assets/js/transfers.js?v=20260919"></script>
+<script src="assets/js/production.js?v=20260919"></script>
+<script src="assets/js/stock-opname.js?v=20260919"></script>
+<script src="assets/js/adjustments.js?v=20260919"></script>
+<script src="assets/js/closing.js?v=20260919"></script>
+<script src="assets/js/imports.js?v=20260919"></script>
+<script src="assets/js/audit.js?v=20260919"></script>
+<script src="assets/js/master-common.js?v=20260919"></script>
+<script src="assets/js/master-categories.js?v=20260919"></script>
+<script src="assets/js/master-vendors.js?v=20260919"></script>
+<script src="assets/js/master-bakery-destinations.js?v=20260919"></script>
+<script src="assets/js/master-items.js?v=20260919"></script>
+<script src="assets/js/master-warehouses.js?v=20260919"></script>
+<script src="assets/js/master-divisions.js?v=20260919"></script>
+<script src="assets/js/trace-drawer.js?v=20260919"></script>
+<script src="assets/js/trace-center.js?v=20260919"></script>
+<script src="assets/js/sidebar.js?v=20260919"></script>
+<script src="assets/js/app.js?v=20260919"></script>
 </body>
 </html>

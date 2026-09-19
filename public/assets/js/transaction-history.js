@@ -81,6 +81,12 @@ const TransactionHistory = (() => {
                         ['Dibuat Oleh', d.created_by.username],
                     ])));
 
+                    if (Auth.hasPermission('AUDIT_LOG_VIEW')) {
+                        const jejakBtn = UI.el('button', { class: 'btn btn-secondary btn-sm', style: 'margin-bottom:14px;' }, '🔍 Lihat Jejak Lengkap');
+                        jejakBtn.addEventListener('click', () => TraceDrawer.openTransaction(transactionId));
+                        body.appendChild(jejakBtn);
+                    }
+
                     d.lines.forEach((line, idx) => {
                         const lineRows = [
                             ['Barang', `${line.item.sku} — ${line.item.name}`],

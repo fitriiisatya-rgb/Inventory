@@ -67,13 +67,18 @@ const Dashboard = (() => {
         ]);
     }
 
+    // PHASE V2.2 — every row drills into Stok Barang pre-filtered to the
+    // EXACT backend status value that produced its count (never a frontend
+    // recomputation of what "critical"/"low"/etc. means — StockReportService
+    // is the one place that's decided, same CASE expression the Master
+    // Barang/Stok Barang filters already use).
     function buildNeedAttention(stockSummary, pendingTransfers) {
         const items = [];
-        if (stockSummary.review_count > 0) items.push(['Migration Negative Review', stockSummary.review_count]);
-        if (stockSummary.out_of_stock_count > 0) items.push(['Stok Habis', stockSummary.out_of_stock_count]);
-        if (stockSummary.critical_count > 0) items.push(['Stok Kritis (di bawah minimum)', stockSummary.critical_count]);
-        if (stockSummary.low_count > 0) items.push(['Stok Warning (dalam zona buffer)', stockSummary.low_count]);
-        if ((pendingTransfers || []).length > 0) items.push(['Transfer Pending', pendingTransfers.length]);
+        if (stockSummary.review_count > 0) items.push(['Migration Negative Review', stockSummary.review_count, { status: 'MIGRATION_NEGATIVE_REVIEW' }]);
+        if (stockSummary.out_of_stock_count > 0) items.push(['Stok Habis', stockSummary.out_of_stock_count, { status: 'OUT_OF_STOCK' }]);
+        if (stockSummary.critical_count > 0) items.push(['Stok Kritis (di bawah minimum)', stockSummary.critical_count, { status: 'CRITICAL' }]);
+        if (stockSummary.low_count > 0) items.push(['Stok Warning (dalam zona buffer)', stockSummary.low_count, { status: 'LOW' }]);
+        if ((pendingTransfers || []).length > 0) items.push(['Transfer Pending', pendingTransfers.length, null]);
 
         if (items.length === 0) {
             return UI.el('div', { class: 'card' }, [
@@ -83,10 +88,24 @@ const Dashboard = (() => {
         }
         return UI.el('div', { class: 'card' }, [
             UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '⚠️ Need Attention')]),
-            UI.el('div', {}, items.map(([label, count]) => UI.el('div', { class: 'attention-item' }, [
-                UI.el('span', {}, label),
-                UI.el('span', { class: 'count' }, String(count)),
-            ]))),
+            UI.el('div', {}, items.map(([label, count, filters]) => {
+                const row = UI.el('div', {
+                    class: 'attention-item attention-item-clickable',
+                    role: 'button',
+                    tabindex: '0',
+                    'aria-label': `${label}: ${count}. Klik untuk lihat detail.`,
+                }, [
+                    UI.el('span', {}, label),
+                    UI.el('span', { style: 'display:flex; align-items:center; gap:8px;' }, [
+                        UI.el('span', { class: 'count' }, String(count)),
+                        UI.el('span', { class: 'attention-chevron' }, '›'),
+                    ]),
+                ]);
+                const go = () => (filters ? window.InvNav.goToStockReport(filters) : window.InvNav.goToTab('transfer'));
+                row.addEventListener('click', go);
+                row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+                return row;
+            })),
         ]);
     }
 

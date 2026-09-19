@@ -121,6 +121,7 @@ const MasterItems = (() => {
         const isActive = row.item_status === 'ACTIVE';
         return MasterCommon.actionsMenu([
             { label: 'Detail', onClick: () => openDetail(row) },
+            { label: 'Lihat Jejak', onClick: () => TraceDrawer.openEntity('item', row.item_id) },
             canManage ? { label: 'Edit', onClick: () => openEdit(row) } : null,
             canManage ? { label: isActive ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(row) } : null,
             canManage ? { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(row) } : null,

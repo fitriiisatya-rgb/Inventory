@@ -30,6 +30,7 @@ require_once __DIR__ . '/../services/SupplierService.php';
 require_once __DIR__ . '/../services/BakeryDestinationService.php';
 require_once __DIR__ . '/../services/MasterDataSafetyService.php';
 require_once __DIR__ . '/../services/WarehouseReportService.php';
+require_once __DIR__ . '/../services/TraceService.php';
 require_once __DIR__ . '/../services/InventoryService.php';
 require_once __DIR__ . '/../services/FifoService.php';
 require_once __DIR__ . '/../services/PeriodLockService.php';
@@ -69,6 +70,7 @@ use App\Services\SupplierService;
 use App\Services\BakeryDestinationService;
 use App\Services\MasterDataSafetyService;
 use App\Services\WarehouseReportService;
+use App\Services\TraceService;
 use App\Services\AuditService;
 use App\Services\RateLimitedException;
 use App\Services\NotFoundException;
@@ -1474,6 +1476,94 @@ $routes = [
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
         inv_ok($stmt->fetchAll(), 'OK');
+    },
+
+    // ============================================================
+    // PHASE V2.2 — Trace Center. Strictly read-only (GET only, TraceService
+    // only ever SELECTs — see its own docblock for the architecture
+    // decision: every correlation here is an existing FK, no new tables).
+    // Gated on the same AUDIT_LOG_VIEW permission GET /audit-logs already
+    // uses — this is audit/governance visibility, not a new access tier.
+    // A STOCK user's warehouse is always re-derived from their own account
+    // row, never trusted from the request.
+    // ============================================================
+    'GET /trace/search' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        $q = trim((string) ($query['q'] ?? ''));
+        if ($q === '') {
+            inv_ok([], 'OK');
+        }
+        $validTypes = ['item', 'transaction', 'supplier', 'bakery_destination', 'category', 'warehouse', 'transfer', 'user'];
+        $type = in_array($query['type'] ?? '', $validTypes, true) ? $query['type'] : null;
+        $limit = min(50, max(1, (int) ($query['limit'] ?? 20)));
+        inv_ok(TraceService::search($pdo, $q, $type, $limit), 'OK');
+    },
+
+    'GET /trace/events' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        $page = max(1, (int) ($query['page'] ?? 1));
+        $perPage = in_array((int) ($query['per_page'] ?? 25), [25, 50, 100], true) ? (int) ($query['per_page'] ?? 25) : 25;
+        inv_ok(TraceService::browseEvents($pdo, [
+            'entity_type' => $query['entity_type'] ?? null,
+            'action_code' => $query['action_code'] ?? null,
+            'username' => $query['username'] ?? null,
+            'date_from' => $query['date_from'] ?? null,
+            'date_to' => $query['date_to'] ?? null,
+            'dir' => $query['dir'] ?? 'desc',
+            'page' => $page,
+            'per_page' => $perPage,
+        ]), 'OK');
+    },
+
+    'GET /trace/entity' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        $type = (string) ($query['type'] ?? '');
+        $id = (int) ($query['id'] ?? 0);
+        if ($id <= 0) {
+            inv_error(422, 'VALIDATION_ERROR', 'id is required');
+        }
+        if ($type === 'warehouse') {
+            inv_require_warehouse_scope($user, $id);
+        }
+        $result = TraceService::entityTrace($pdo, $type, $id);
+        if ($type === 'stock_policy' && isset($result['overview']['warehouse_id'])) {
+            inv_require_warehouse_scope($user, (int) $result['overview']['warehouse_id']);
+        }
+        inv_ok($result, 'OK');
+    },
+
+    'GET /trace/transaction/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        $result = TraceService::transactionTrace($pdo, (int) $params['id']);
+        inv_require_warehouse_scope($user, (int) $result['transaction']['warehouse_id']);
+        inv_ok($result, 'OK');
+    },
+
+    'GET /trace/inventory' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        $itemId = (int) ($query['item_id'] ?? 0);
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        if ($itemId <= 0) {
+            inv_error(422, 'VALIDATION_ERROR', 'item_id is required');
+        }
+        if ($user['role_code'] === 'STOCK') {
+            if (empty($user['warehouse_id'])) {
+                inv_error(403, 'FORBIDDEN', 'STOCK user has no warehouse assignment');
+            }
+            $warehouseId = (int) $user['warehouse_id'];
+        } elseif ($warehouseId === null) {
+            inv_error(422, 'VALIDATION_ERROR', 'warehouse_id is required');
+        } else {
+            inv_require_warehouse_scope($user, $warehouseId);
+        }
+        $page = max(1, (int) ($query['page'] ?? 1));
+        $perPage = in_array((int) ($query['per_page'] ?? 50), [25, 50, 100], true) ? (int) ($query['per_page'] ?? 50) : 50;
+        inv_ok(TraceService::inventoryTrace($pdo, $itemId, $warehouseId, $page, $perPage), 'OK');
     },
 
     // ---- Import module (PHASE E/E2). `file_path` must be a path already on

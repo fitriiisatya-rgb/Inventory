@@ -153,6 +153,13 @@ const InvApi = (() => {
         updateDivision: (id, payload) => request('PUT', `/divisions/${id}`, payload),
         deleteDivision: (id) => request('DELETE', `/divisions/${id}`),
 
+        // ---- PHASE V2.2: Trace Center (read-only) ----
+        traceSearch: (q, type) => request('GET', `/trace/search${qs({ q, type })}`),
+        traceEvents: (params = {}) => request('GET', `/trace/events${qs(params)}`),
+        traceEntity: (type, id) => request('GET', `/trace/entity${qs({ type, id })}`),
+        traceTransaction: (id) => request('GET', `/trace/transaction/${id}`),
+        traceInventory: (itemId, warehouseId, params = {}) => request('GET', `/trace/inventory${qs({ item_id: itemId, warehouse_id: warehouseId, ...params })}`),
+
         // ---- PHASE V2: per-item-per-warehouse stock policy ----
         getStockPolicy: (itemId, warehouseId) => request('GET', `/stock-policy?item_id=${itemId}&warehouse_id=${warehouseId}`),
         saveStockPolicy: (payload) => request('PUT', '/stock-policy', payload),
