@@ -305,13 +305,13 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 
 .login-main {
     position: relative; z-index: 2; flex: 1; display: flex; align-items: center; justify-content: center;
-    gap: 56px; padding: 40px 24px; flex-wrap: wrap;
+    gap: 0; padding: 40px 24px; flex-wrap: wrap;
 }
 
 .login-card {
-    width: 100%; max-width: 400px; background: rgba(20,30,58,0.72); backdrop-filter: blur(10px);
-    border: 1px solid rgba(59,130,246,0.25); border-radius: var(--radius); padding: 34px 30px;
-    box-shadow: 0 0 60px rgba(59,130,246,0.12), 0 20px 50px rgba(0,0,0,0.4);
+    position: relative; z-index: 1; width: 100%; max-width: 400px; background: rgba(20,30,58,0.72);
+    backdrop-filter: blur(10px); border: 1px solid rgba(59,130,246,0.25); border-radius: var(--radius);
+    padding: 34px 30px; box-shadow: 0 0 60px rgba(59,130,246,0.12), 0 20px 50px rgba(0,0,0,0.4);
     text-align: center;
 }
 .login-card-logo {
@@ -348,12 +348,19 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 .login-trust-card b { display: block; font-size: 0.72rem; color: var(--text); }
 .login-trust-card small { font-size: 0.64rem; color: var(--text3); }
 
-.login-mascot-wrap { position: relative; display: flex; align-items: flex-end; justify-content: center; }
-.login-mascot { width: 100%; max-width: 340px; height: auto; object-fit: contain; filter: drop-shadow(0 0 30px rgba(59,130,246,0.4)); }
+/* The mascot overlaps the card's right edge (negative margin pulls it
+   behind/against the card, higher z-index keeps it drawn in front) so it
+   reads as "standing right next to / leaning on" the card, not as a
+   separate column with a gap — matches the approved mockup. */
+.login-mascot-wrap {
+    position: relative; z-index: 2; display: flex; align-items: flex-end; justify-content: center;
+    margin-left: -90px; pointer-events: none;
+}
+.login-mascot { width: 100%; max-width: 380px; height: auto; object-fit: contain; filter: drop-shadow(0 0 30px rgba(59,130,246,0.4)); }
 .login-speech-bubble {
-    position: absolute; top: 6%; right: -6%; background: rgba(20,30,58,0.92); border: 1px solid rgba(59,130,246,0.4);
+    position: absolute; top: 6%; right: -4%; background: rgba(20,30,58,0.92); border: 1px solid rgba(59,130,246,0.4);
     color: var(--text); border-radius: 14px; padding: 10px 14px; font-size: 0.8rem; font-weight: 700;
-    box-shadow: 0 0 20px rgba(59,130,246,0.3); max-width: 170px; line-height: 1.4;
+    box-shadow: 0 0 20px rgba(59,130,246,0.3); max-width: 170px; line-height: 1.4; pointer-events: auto;
 }
 .login-speech-bubble small { display: block; font-weight: 500; color: var(--text2); font-size: 0.7rem; margin-top: 2px; }
 
@@ -364,19 +371,21 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 .login-footer-left small { display: block; margin-top: 2px; }
 .login-footer-right { letter-spacing: 0.03em; }
 
-/* Tablet: shrink mascot, keep side-by-side while it still fits */
+/* Tablet: shrink mascot, keep it overlapping the card but by less */
 @media (max-width: 1024px) {
     .login-side-text { display: none; }
+    .login-mascot-wrap { margin-left: -50px; }
     .login-mascot { max-width: 240px; }
     .login-speech-bubble { font-size: 0.72rem; padding: 8px 10px; max-width: 140px; }
 }
 
-/* Mobile: stack — card first, smaller mascot below; no horizontal scroll */
+/* Mobile: stack — card first, smaller mascot below; no overlap, no horizontal scroll */
 @media (max-width: 640px) {
     .login-page { overflow-x: hidden; }
     .login-topbar { padding: 12px 16px; }
     .login-topbar-right { display: none; }
     .login-main { flex-direction: column-reverse; gap: 18px; padding: 20px 16px 30px; }
+    .login-mascot-wrap { margin-left: 0; }
     .login-card { padding: 26px 20px; max-width: 100%; }
     .login-mascot { max-width: 140px; }
     .login-mascot-wrap { width: 100%; }
