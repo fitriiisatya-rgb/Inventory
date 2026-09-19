@@ -60,8 +60,12 @@ foreach ([['items', 'category_id'], ['inventory_transactions', 'bakery_destinati
 }
 
 // 3. Baseline tables this migration depends on must exist (sanity check
-//    against running this against an empty/wrong database).
-foreach (['items', 'warehouses', 'suppliers', 'inventory_transactions', 'users'] as $table) {
+//    against running this against an empty/wrong database). Includes
+//    roles/permissions/role_permissions explicitly — the migration's
+//    permission-seed step (section 7 of the migration file) INSERTs into
+//    all three, and never assumes they exist merely because a normal
+//    production database usually has them.
+foreach (['items', 'warehouses', 'suppliers', 'inventory_transactions', 'users', 'roles', 'permissions', 'role_permissions'] as $table) {
     if (!tableExists($pdo, $table)) {
         $problems[] = "Baseline table `{$table}` does not exist — is this the right database? "
             . 'Run database/schema.sql first if this is meant to be a fresh install.';
