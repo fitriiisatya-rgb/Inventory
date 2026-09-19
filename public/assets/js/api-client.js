@@ -169,6 +169,13 @@ const InvApi = (() => {
         traceUser: (id) => request('GET', `/trace/user/${id}`),
         traceRole: (id) => request('GET', `/trace/role/${id}`),
 
+        // ---- PHASE V2.3: Laporan Nilai Stok & HPP (read-only) ----
+        hppSummary: (params) => request('GET', `/reports/inventory-hpp/summary${qs(params)}`),
+        hppWarehouses: (params) => request('GET', `/reports/inventory-hpp/warehouses${qs(params)}`),
+        hppDaily: (params) => request('GET', `/reports/inventory-hpp/daily${qs(params)}`),
+        hppDayDetail: (params) => request('GET', `/reports/inventory-hpp/day-detail${qs(params)}`),
+        hppExportUrl: (params) => `/api/reports/inventory-hpp/export${qs(params)}`,
+
         // ---- PHASE V2: per-item-per-warehouse stock policy ----
         getStockPolicy: (itemId, warehouseId) => request('GET', `/stock-policy?item_id=${itemId}&warehouse_id=${warehouseId}`),
         saveStockPolicy: (payload) => request('PUT', '/stock-policy', payload),

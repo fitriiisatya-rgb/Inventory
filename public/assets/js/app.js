@@ -66,7 +66,7 @@
         'trace-center': 'Trace Center',
         laporan: 'Mutasi Stok / Ledger', 'history-transaksi': 'History Transaksi', transaksi: 'Stock IN / OUT',
         transfer: 'Transfer', produksi: 'Produksi', opname: 'Stock Opname', import: 'Import',
-        audit: 'Audit Log', closing: 'Tutup Buku',
+        audit: 'Audit Log', closing: 'Tutup Buku', 'laporan-hpp': 'Laporan Nilai Stok & HPP',
     };
 
     function activateTab(name) {
@@ -115,6 +115,8 @@
             TraceCenter.render(document.getElementById('tab-trace-center'));
         } else if (name === 'closing') {
             Closing.render(document.getElementById('tab-closing'));
+        } else if (name === 'laporan-hpp') {
+            ReportHpp.render(document.getElementById('tab-laporan-hpp'));
         }
     }
 

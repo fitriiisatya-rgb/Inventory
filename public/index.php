@@ -51,6 +51,8 @@ require_once __DIR__ . '/../services/CostNormalizationService.php';
 require_once __DIR__ . '/../services/OpeningReconciliationService.php';
 require_once __DIR__ . '/../services/MovementReconciliationReviewService.php';
 require_once __DIR__ . '/../services/ImportHistoricalTransactionService.php';
+require_once __DIR__ . '/../services/InventoryHppReportService.php';
+require_once __DIR__ . '/../services/ExcelWriterService.php';
 
 use App\Services\AuthService;
 use App\Services\Database;
@@ -71,6 +73,8 @@ use App\Services\BakeryDestinationService;
 use App\Services\MasterDataSafetyService;
 use App\Services\WarehouseReportService;
 use App\Services\TraceService;
+use App\Services\InventoryHppReportService;
+use App\Services\ExcelWriterService;
 use App\Services\AuditService;
 use App\Services\RateLimitedException;
 use App\Services\NotFoundException;
@@ -244,6 +248,26 @@ function inv_require_division_scope(array $user, ?int $divisionId): void
     } catch (ValidationException $e) {
         inv_error(403, 'FORBIDDEN', $e->getMessage());
     }
+}
+
+/**
+ * Same "STOCK is always forced to their own warehouse, never a
+ * company-wide rollup" pattern as GET /reports/stock and GET
+ * /reports/transactions — centralized here since the HPP report has 5
+ * routes that all need it identically.
+ */
+function inv_hpp_resolve_warehouse_scope(array $user, ?int $requestedWarehouseId): ?int
+{
+    if ($user['role_code'] === 'STOCK') {
+        if (empty($user['warehouse_id'])) {
+            inv_error(403, 'FORBIDDEN', 'STOCK user has no warehouse assignment');
+        }
+        return (int) $user['warehouse_id'];
+    }
+    if ($requestedWarehouseId !== null) {
+        inv_require_warehouse_scope($user, $requestedWarehouseId);
+    }
+    return $requestedWarehouseId;
 }
 
 $pdo = Database::connection();
@@ -811,6 +835,108 @@ $routes = [
         $includeAudit = AuthService::hasPermission($pdo, $user['role_code'], 'AUDIT_LOG_VIEW');
 
         inv_ok(TransactionHistoryService::detail($pdo, $transactionId, $includeAudit), 'OK');
+    },
+
+    // ============================================================
+    // PHASE V2.3 — "Laporan Nilai Stok & HPP" (Inventory Value & HPP
+    // Reconciliation). Strictly read-only, same INVENTORY_VIEW gate as the
+    // other reports above, same STOCK-forced-to-own-warehouse pattern
+    // (inv_hpp_resolve_warehouse_scope). Every number in the response is
+    // computed by InventoryHppReportService straight from the existing
+    // ledger/FIFO tables — no new tables, no duplicated FIFO logic. Trace
+    // drill-down is deliberately NOT implemented here: every row carries
+    // real transaction_id/item_id/warehouse_id/batch_id so the frontend
+    // opens them through the EXISTING TraceDrawer/TraceService endpoints.
+    // ============================================================
+    'GET /reports/inventory-hpp/summary' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $start = (string) ($query['start_date'] ?? '');
+        $end = (string) ($query['end_date'] ?? '');
+        if ($start === '' || $end === '' || strtotime($start) === false || strtotime($end) === false || strtotime($start) > strtotime($end)) {
+            inv_error(422, 'VALIDATION_ERROR', 'start_date and end_date are required and start_date must not be after end_date');
+        }
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        $categoryId = isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null;
+        $q = isset($query['q']) && $query['q'] !== '' ? (string) $query['q'] : null;
+
+        inv_ok(InventoryHppReportService::summary($pdo, $start, $end, $warehouseId, $categoryId, $q), 'OK');
+    },
+
+    'GET /reports/inventory-hpp/warehouses' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $start = (string) ($query['start_date'] ?? '');
+        $end = (string) ($query['end_date'] ?? '');
+        if ($start === '' || $end === '' || strtotime($start) === false || strtotime($end) === false || strtotime($start) > strtotime($end)) {
+            inv_error(422, 'VALIDATION_ERROR', 'start_date and end_date are required and start_date must not be after end_date');
+        }
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+
+        inv_ok(['panels' => InventoryHppReportService::warehouseBreakdown($pdo, $start, $end, $warehouseId)], 'OK');
+    },
+
+    'GET /reports/inventory-hpp/daily' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $start = (string) ($query['start_date'] ?? '');
+        $end = (string) ($query['end_date'] ?? '');
+        if ($start === '' || $end === '' || strtotime($start) === false || strtotime($end) === false || strtotime($start) > strtotime($end)) {
+            inv_error(422, 'VALIDATION_ERROR', 'start_date and end_date are required and start_date must not be after end_date');
+        }
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        $categoryId = isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null;
+        $q = isset($query['q']) && $query['q'] !== '' ? (string) $query['q'] : null;
+        $page = max(1, (int) ($query['page'] ?? 1));
+        $perPage = in_array((int) ($query['per_page'] ?? 10), [10, 25, 50], true) ? (int) ($query['per_page'] ?? 10) : 10;
+
+        inv_ok(InventoryHppReportService::dailyRecap($pdo, $start, $end, $warehouseId, $page, $perPage, $categoryId, $q), 'OK');
+    },
+
+    // The "Trace Detail HPP" panel's data for one date. Every returned line
+    // carries transaction_id — the frontend opens it via the existing
+    // TraceDrawer.openTransaction(), never a second trace implementation.
+    'GET /reports/inventory-hpp/day-detail' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $date = (string) ($query['date'] ?? '');
+        if ($date === '' || strtotime($date) === false) {
+            inv_error(422, 'VALIDATION_ERROR', 'date is required (YYYY-MM-DD)');
+        }
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+
+        inv_ok(InventoryHppReportService::dayDetail($pdo, $date, $warehouseId), 'OK');
+    },
+
+    'GET /reports/inventory-hpp/export' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $start = (string) ($query['start_date'] ?? '');
+        $end = (string) ($query['end_date'] ?? '');
+        if ($start === '' || $end === '' || strtotime($start) === false || strtotime($end) === false || strtotime($start) > strtotime($end)) {
+            inv_error(422, 'VALIDATION_ERROR', 'start_date and end_date are required and start_date must not be after end_date');
+        }
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        $categoryId = isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null;
+        $q = isset($query['q']) && $query['q'] !== '' ? (string) $query['q'] : null;
+
+        $sheets = InventoryHppReportService::buildExportSheets($pdo, $start, $end, $warehouseId, $categoryId, $q);
+        $tmpPath = tempnam(sys_get_temp_dir(), 'hpp_export_');
+        try {
+            ExcelWriterService::write($tmpPath, $sheets);
+            header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            header('Content-Disposition: attachment; filename="laporan-nilai-stok-hpp-' . date('Ymd_His') . '.xlsx"');
+            header('Content-Length: ' . filesize($tmpPath));
+            readfile($tmpPath);
+        } finally {
+            @unlink($tmpPath);
+        }
+        exit;
     },
 
     // ---- InventoryService: single source of truth reads (Section 7) ----

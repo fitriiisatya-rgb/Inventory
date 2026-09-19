@@ -453,3 +453,88 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
     .login-speech-bubble { position: static; margin: 8px auto 0; max-width: 220px; text-align: center; }
     .login-footer { flex-direction: column; align-items: center; text-align: center; padding: 14px 16px 20px; }
 }
+
+/* ============================================================
+   PHASE V2.3 — Laporan Nilai Stok & HPP (Inventory Value & HPP
+   Reconciliation). Reuses every existing token/component (.card,
+   .btn, .badge, .table-wrapper, .alert, .form-group) — this block only
+   adds the layout/visual pieces this report needed that nothing else
+   in the app already had (KPI cards, formula strip, warehouse panels,
+   sparklines, the Trace Detail side panel).
+   ============================================================ */
+.btn-icon { background: transparent; border: none; color: var(--text2); font-size: 1rem; cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm); }
+.btn-icon:hover { background: var(--bg3); color: var(--text); }
+
+.hpp-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.hpp-title { margin: 0; font-size: 1.5rem; color: var(--text); }
+.hpp-subtitle { color: var(--text2); font-size: 0.85rem; margin-top: 2px; }
+
+.hpp-filter-card { padding: 16px 20px; }
+.hpp-filter-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; align-items: end; }
+@media (max-width: 1200px) { .hpp-filter-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .hpp-filter-grid { grid-template-columns: 1fr; } }
+.hpp-date-range { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.hpp-date-range input { flex: 1; min-width: 0; width: 0; }
+.hpp-period-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
+.hpp-filter-actions { display: flex; gap: 10px; margin-top: 14px; justify-content: flex-end; flex-wrap: wrap; }
+
+.hpp-kpi-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 16px; }
+@media (max-width: 1300px) { .hpp-kpi-row { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 700px) { .hpp-kpi-row { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 420px) { .hpp-kpi-row { grid-template-columns: 1fr; } }
+.hpp-kpi-card { display: flex; gap: 10px; align-items: flex-start; padding: 14px 16px; margin-bottom: 0; }
+.hpp-kpi-icon { font-size: 1.3rem; }
+.hpp-kpi-label { color: var(--text2); font-size: 0.72rem; margin-bottom: 4px; }
+.hpp-kpi-value { color: var(--text); font-size: 1.05rem; font-weight: 700; margin-bottom: 4px; }
+.hpp-kpi-delta { font-size: 0.72rem; font-weight: 700; }
+.hpp-kpi-delta.up { color: var(--green); }
+.hpp-kpi-delta.down { color: var(--red); }
+.hpp-kpi-delta.neutral { color: var(--text3); }
+.hpp-kpi-delta-note { color: var(--text3); font-size: 0.68rem; }
+.hpp-variance-ok { border-color: rgba(16,185,129,0.4); }
+.hpp-variance-warn { border-color: rgba(245,158,11,0.5); }
+
+.hpp-formula-strip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 18px; }
+.hpp-formula-icon { font-size: 1.2rem; }
+.hpp-formula-label { color: var(--text2); font-size: 0.8rem; font-weight: 600; margin-right: 8px; }
+.hpp-formula-chip { background: var(--bg3); border-radius: var(--radius-sm); padding: 8px 14px; min-width: 130px; }
+.hpp-formula-chip-label { color: var(--text3); font-size: 0.65rem; }
+.hpp-formula-chip-value { color: var(--text); font-size: 0.85rem; font-weight: 700; }
+.hpp-formula-result { background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.4); }
+.hpp-formula-op { color: var(--text3); font-size: 1.1rem; font-weight: 700; }
+.hpp-formula-note { color: var(--text3); font-size: 0.7rem; margin-left: auto; }
+
+.hpp-body-row { display: flex; gap: 16px; align-items: flex-start; }
+.hpp-main-col { flex: 1; min-width: 0; }
+.hpp-trace-panel { width: 340px; flex-shrink: 0; position: sticky; top: 12px; }
+@media (max-width: 1100px) { .hpp-body-row { flex-direction: column; align-items: stretch; } .hpp-trace-panel { width: 100%; position: static; } }
+
+.hpp-warehouse-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+@media (max-width: 900px) { .hpp-warehouse-row { grid-template-columns: 1fr; } }
+.hpp-warehouse-panel-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 14px; flex-wrap: wrap; gap: 8px; }
+.hpp-warehouse-panel { min-width: 0; }
+.hpp-main-col, .hpp-body-row, .hpp-trace-panel { min-width: 0; }
+.hpp-warehouse-panel-title { color: var(--text); font-weight: 700; font-size: 0.95rem; }
+.hpp-warehouse-panel-subtitle { color: var(--text3); font-size: 0.72rem; margin-top: 2px; }
+.hpp-warehouse-panel-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+@media (max-width: 480px) { .hpp-warehouse-panel-grid { grid-template-columns: 1fr 1fr; } }
+.hpp-mini-stat-label { color: var(--text3); font-size: 0.68rem; }
+.hpp-mini-stat-value { color: var(--text); font-size: 0.82rem; font-weight: 600; }
+.hpp-sparkline { display: flex; align-items: flex-end; gap: 2px; height: 44px; }
+.hpp-sparkline-bar { flex: 1; background: var(--accent); border-radius: 2px 2px 0 0; opacity: 0.85; }
+
+.hpp-legend { color: var(--text3); font-size: 0.72rem; margin-top: 12px; line-height: 1.6; }
+
+.hpp-trace-date-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--bg3); border-radius: var(--radius-sm); padding: 6px 12px; font-size: 0.8rem; color: var(--text2); margin-bottom: 12px; }
+.hpp-trace-total-chip { background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.35); border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 14px; }
+.hpp-trace-total-label { color: var(--text3); font-size: 0.7rem; }
+.hpp-trace-total-value { color: var(--text); font-size: 1.2rem; font-weight: 700; }
+.hpp-trace-section-label { color: var(--text2); font-size: 0.75rem; font-weight: 600; margin: 10px 0 8px; }
+.hpp-trace-breakdown-row { display: flex; align-items: center; gap: 8px; font-size: 0.72rem; margin-bottom: 8px; }
+.hpp-trace-breakdown-label { width: 110px; color: var(--text2); flex-shrink: 0; }
+.hpp-trace-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.hpp-trace-breakdown-bar-wrap { flex: 1; height: 6px; background: var(--bg3); border-radius: 4px; overflow: hidden; }
+.hpp-trace-breakdown-bar { height: 100%; background: var(--accent); }
+.hpp-trace-breakdown-value { color: var(--text3); white-space: nowrap; font-size: 0.68rem; }
+.hpp-trace-detail-table table { font-size: 0.72rem; }
+.hpp-trace-detail-row:hover { background: var(--bg3); }
