@@ -34,6 +34,7 @@ const ReportHpp = (() => {
         container.innerHTML = '';
         container.appendChild(buildHeader());
         container.appendChild(buildFilterBar());
+        container.appendChild(UI.el('div', { id: 'hpp-cutover-banner' }));
         const kpiHost = UI.el('div', { class: 'hpp-kpi-row', id: 'hpp-kpi-row' });
         container.appendChild(kpiHost);
         const formulaHost = UI.el('div', { id: 'hpp-formula-strip' });
@@ -171,11 +172,41 @@ const ReportHpp = (() => {
     async function loadKpis() {
         const host = document.getElementById('hpp-kpi-row');
         const formulaHost = document.getElementById('hpp-formula-strip');
+        const bannerHost = document.getElementById('hpp-cutover-banner');
         host.innerHTML = '<div class="alert alert-info">Memuat ringkasan...</div>';
         try {
             const summary = await InvApi.hppSummary(hppParams());
+
+            // PHASE V2.3D: a default (never a user-picked) start date that
+            // begins before the real live opening date is silently corrected
+            // ONCE — never on a manual filter apply, since state._cutoverDefaultApplied
+            // is already true by then. Re-fetches with the corrected default
+            // instead of ever painting the misleading pre-go-live-truncated view.
+            if (!state._cutoverDefaultApplied) {
+                state._cutoverDefaultApplied = true;
+                const liveOpen = summary.cutover && summary.cutover.live_opening_date;
+                if (liveOpen && liveOpen > state.startDate) {
+                    state.startDate = liveOpen;
+                    const startInput = document.getElementById('hpp-start-date');
+                    if (startInput) startInput.value = liveOpen;
+                    await loadAll();
+                    return;
+                }
+            }
+
             host.innerHTML = '';
-            host.appendChild(kpiCard('📥', 'Nilai Stok Awal', summary.opening_value, summary.deltas_vs_previous_period.opening_value_pct));
+            if (bannerHost) {
+                bannerHost.innerHTML = '';
+                const banner = cutoverBanner(summary.cutover);
+                if (banner) bannerHost.appendChild(banner);
+            }
+
+            const cutover = summary.cutover;
+            const openingNote = cutover && cutover.live_opening_date && cutover.effective_start_date === cutover.live_opening_date
+                ? `Opening Go-Live ${fmtDateOnly(cutover.live_opening_date)}`
+                : undefined;
+
+            host.appendChild(kpiCard('📥', 'Nilai Stok Awal', summary.opening_value, summary.deltas_vs_previous_period.opening_value_pct, openingNote));
             host.appendChild(kpiCard('🛒', 'Pembelian Eksternal', summary.external_purchase, summary.deltas_vs_previous_period.external_purchase_pct));
             host.appendChild(kpiCard('📦', 'Barang Keluar FIFO / HPP Aktual', summary.fifo_hpp, summary.deltas_vs_previous_period.fifo_hpp_pct, 'Biaya aktual dari FIFO allocation — angka HPP yang sesungguhnya.'));
             host.appendChild(kpiCard('📤', 'Nilai Stok Akhir', summary.ending_value, summary.deltas_vs_previous_period.ending_value_pct));
@@ -188,6 +219,25 @@ const ReportHpp = (() => {
             UI.handleApiError(err);
             host.innerHTML = `<div class="alert alert-error">Gagal memuat ringkasan: ${(err && err.message) || ''}</div>`;
         }
+    }
+
+    // PHASE V2.3D — never presented as an error/warning (spec: "Do NOT
+    // present this as an error"), always alert-info styling.
+    function cutoverBanner(cutover) {
+        if (!cutover) return null;
+        if (cutover.is_pre_go_live_period) {
+            return UI.el('div', { class: 'alert alert-info hpp-cutover-banner' }, [
+                UI.el('div', {}, `Periode yang dipilih (${fmtDateOnly(cutover.requested_start_date)} – ${fmtDateOnly(cutover.requested_end_date)}) seluruhnya sebelum Opening Go-Live${cutover.live_opening_date ? ` (${fmtDateOnly(cutover.live_opening_date)})` : ''}.`),
+                UI.el('div', { style: 'margin-top:4px;' }, 'Tidak ada aktivitas ekonomi untuk direkonsiliasi pada periode ini — data sebelum Opening Go-Live merupakan histori audit dan tidak memengaruhi nilai inventory.'),
+            ]);
+        }
+        if (cutover.live_opening_date && cutover.effective_start_date !== cutover.requested_start_date) {
+            return UI.el('div', { class: 'alert alert-info hpp-cutover-banner' }, [
+                UI.el('div', { style: 'font-weight:600;' }, `Periode efektif inventory: ${fmtDateOnly(cutover.effective_start_date)} – ${fmtDateOnly(cutover.requested_end_date)}`),
+                UI.el('div', { style: 'margin-top:4px;' }, `Data inventory efektif tersedia mulai ${fmtDateOnly(cutover.live_opening_date)}. Periode sebelum tanggal tersebut merupakan histori audit dan tidak memengaruhi nilai inventory.`),
+            ]);
+        }
+        return null;
     }
 
     function kpiCard(icon, label, value, deltaPct, note) {
@@ -247,6 +297,10 @@ const ReportHpp = (() => {
                 render: (body) => {
                     body.appendChild(UI.el('p', { style: 'color:var(--text3); font-size:0.78rem; margin-bottom:14px;' },
                         'HPP Rekonsiliasi adalah nilai KONTROL (Stok Awal + Pembelian − Stok Akhir), bukan otomatis sama dengan HPP FIFO aktual. Selisihnya (Variance) dijelaskan oleh pergerakan non-HPP di bawah — tidak pernah dipaksa menjadi nol.'));
+                    if (b.cutover && b.cutover.live_opening_date && b.cutover.effective_start_date !== b.cutover.requested_start_date) {
+                        body.appendChild(UI.el('p', { style: 'color:var(--text3); font-size:0.72rem; margin:-8px 0 14px;' },
+                            `ℹ️ Dihitung dari periode efektif ${fmtDateOnly(b.cutover.effective_start_date)} – ${fmtDateOnly(b.cutover.requested_end_date)} (Opening Go-Live ${fmtDateOnly(b.cutover.live_opening_date)}).`));
+                    }
                     body.appendChild(UI.el('div', { class: 'hpp-bridge-table' }, [
                         UI.el('div', { class: 'hpp-bridge-row' }, [UI.el('span', {}, 'HPP Rekonsiliasi (Nilai Kontrol)'), UI.el('span', { class: 'mono' }, UI.formatMoney(b.hpp_reconciliation))]),
                         UI.el('div', { class: 'hpp-bridge-row' }, [UI.el('span', {}, 'FIFO HPP (Aktual)'), UI.el('span', { class: 'mono' }, UI.formatMoney(b.fifo_hpp))]),
@@ -349,24 +403,36 @@ const ReportHpp = (() => {
             defaultDir: 'asc',
             pageSize: 10,
             columns: [
-                { key: 'date', label: 'Tanggal', render: (r) => fmtDateOnly(r.date) },
-                { key: 'stok_awal', label: 'Stok Awal', render: (r) => UI.formatMoney(r.stok_awal) },
-                { key: 'pembelian', label: 'Pembelian', render: (r) => UI.formatMoney(r.pembelian) },
-                { key: 'fifo_out', label: 'FIFO OUT / HPP', render: (r) => UI.formatMoney(r.fifo_out) },
-                { key: 'transfer_in', label: 'Transfer IN', render: (r) => UI.formatMoney(r.transfer_in) },
-                { key: 'transfer_out', label: 'Transfer OUT', render: (r) => UI.formatMoney(r.transfer_out) },
-                { key: 'adjustment', label: 'Adjustment', render: (r) => UI.formatMoney(r.adjustment) },
-                { key: 'stok_akhir', label: 'Stok Akhir', render: (r) => UI.formatMoney(r.stok_akhir) },
-                { key: 'hpp_reconciliation', label: 'HPP Rekonsiliasi', render: (r) => UI.formatMoney(r.hpp_reconciliation) },
-                { key: 'variance', label: 'Variance', render: (r) => UI.el('span', { style: Math.abs(r.variance) < 0.5 ? 'color:var(--green);' : 'color:var(--orange);' }, UI.formatMoney(r.variance)) },
                 {
-                    key: 'aksi', label: 'Aksi', sortable: false, render: (r) => UI.el('button', { class: 'btn btn-secondary btn-sm hpp-row-trace-btn' }, '👁'),
+                    key: 'date', label: 'Tanggal', render: (r) => r.is_pre_go_live
+                        ? UI.el('span', {}, [fmtDateOnly(r.date), ' ', UI.el('span', { class: 'hpp-pre-go-live-badge' }, 'Histori Audit')])
+                        : fmtDateOnly(r.date),
+                },
+                { key: 'stok_awal', label: 'Stok Awal', render: (r) => dailyMoney(r, r.stok_awal) },
+                { key: 'pembelian', label: 'Pembelian', render: (r) => dailyMoney(r, r.pembelian) },
+                { key: 'fifo_out', label: 'FIFO OUT / HPP', render: (r) => dailyMoney(r, r.fifo_out) },
+                { key: 'transfer_in', label: 'Transfer IN', render: (r) => dailyMoney(r, r.transfer_in) },
+                { key: 'transfer_out', label: 'Transfer OUT', render: (r) => dailyMoney(r, r.transfer_out) },
+                { key: 'adjustment', label: 'Adjustment', render: (r) => dailyMoney(r, r.adjustment) },
+                { key: 'stok_akhir', label: 'Stok Akhir', render: (r) => dailyMoney(r, r.stok_akhir) },
+                { key: 'hpp_reconciliation', label: 'HPP Rekonsiliasi', render: (r) => dailyMoney(r, r.hpp_reconciliation) },
+                { key: 'variance', label: 'Variance', render: (r) => r.is_pre_go_live ? dailyMoney(r, r.variance) : UI.el('span', { style: Math.abs(r.variance) < 0.5 ? 'color:var(--green);' : 'color:var(--orange);' }, UI.formatMoney(r.variance)) },
+                {
+                    key: 'aksi', label: 'Aksi', sortable: false, render: (r) => r.is_pre_go_live ? '' : UI.el('button', { class: 'btn btn-secondary btn-sm hpp-row-trace-btn' }, '👁'),
                 },
             ],
             fetchPage: async ({ page, perPage }) => InvApi.hppDaily(hppParams({ page, per_page: perPage })),
-            onRowClick: (row) => openTracePanel(row.date),
+            onRowClick: (row) => { if (!row.is_pre_go_live) openTracePanel(row.date); },
             emptyMessage: 'Tidak ada data pada periode ini.',
         });
+    }
+
+    // PHASE V2.3D — pre-go-live rows are real, honest zeros (never
+    // fabricated), shown dimmed so they read as "nothing happened yet",
+    // not as a data gap or an error.
+    function dailyMoney(row, value) {
+        const money = UI.formatMoney(value);
+        return row.is_pre_go_live ? UI.el('span', { class: 'hpp-pre-go-live-value' }, money) : money;
     }
 
     function fmtDateOnly(value) {

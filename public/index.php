@@ -875,7 +875,7 @@ $routes = [
         $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
 
-        inv_ok(['panels' => InventoryHppReportService::warehouseBreakdown($pdo, $start, $end, $warehouseId)], 'OK');
+        inv_ok(InventoryHppReportService::warehouseBreakdown($pdo, $start, $end, $warehouseId), 'OK');
     },
 
     'GET /reports/inventory-hpp/daily' => function () use ($pdo, $query) {

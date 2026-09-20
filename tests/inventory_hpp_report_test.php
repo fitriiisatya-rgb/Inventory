@@ -151,7 +151,10 @@ check('company-wide summary matches single-active-warehouse summary when the oth
 // ============================================================
 echo "\n== C: warehouse breakdown ==\n";
 
-$panels = InventoryHppReportService::warehouseBreakdown($pdo, $startDate, $endDate, null);
+// PHASE V2.3D: warehouseBreakdown() now returns {cutover, panels} — cutover
+// metadata (requested/effective start, live_opening_date) alongside the
+// same panel list this test always expected.
+['panels' => $panels] = InventoryHppReportService::warehouseBreakdown($pdo, $startDate, $endDate, null);
 $panelA = null;
 foreach ($panels as $p) {
     if ((int) $p['warehouse']['id'] === $whAId) {
@@ -161,7 +164,7 @@ foreach ($panels as $p) {
 check('warehouse breakdown includes warehouse A with correct fifo_hpp', $panelA !== null && approx($panelA['fifo_hpp'], 30000.0));
 check('warehouse breakdown daily_trend is non-empty and covers the period', $panelA !== null && count($panelA['daily_trend']) === 28);
 
-$scopedPanels = InventoryHppReportService::warehouseBreakdown($pdo, $startDate, $endDate, $whAId);
+['panels' => $scopedPanels] = InventoryHppReportService::warehouseBreakdown($pdo, $startDate, $endDate, $whAId);
 check('warehouse-scoped breakdown returns exactly 1 panel', count($scopedPanels) === 1 && (int) $scopedPanels[0]['warehouse']['id'] === $whAId);
 
 // ============================================================

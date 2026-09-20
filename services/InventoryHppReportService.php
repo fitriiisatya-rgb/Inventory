@@ -82,6 +82,27 @@ use PDO;
  * explicitly excluded from every total here — they never moved real
  * stock).
  *
+ * Cutover awareness (PHASE V2.3D — see docs/PHASE_V2_3D_CUTOVER_UX.md):
+ * `requested_start_date`/`requested_end_date` are exactly what the caller
+ * asked for and are always echoed back unchanged in `period`/`cutover`.
+ * `effective_start_date = MAX(requested_start_date, live_opening_date)`
+ * (`cutoverContext()`) is what every economic formula below actually
+ * runs on — `live_opening_date` (`liveOpeningDate()`) is derived from
+ * data, never hardcoded: the EARLIEST of (a) any COMMITTED
+ * `stock_openings.cutoff_date` (the real go-live import event) and (b) the
+ * earliest POSTED, inventory_effect=1 OPENING transaction (covers a dataset
+ * that never went through the Opening Stock import UI, e.g. this project's
+ * own lower-level test fixtures) — a genuine MIN across both sources, not a
+ * strict priority order, so neither source can hide an earlier real date
+ * the other one has. A request whose ENTIRE range falls
+ * before that date (`effective_start_date > requested_end_date`) cannot
+ * be clamped into a valid window at all — `is_pre_go_live_period` is set
+ * and every economic figure is returned as a clean, honest 0 (never a
+ * fabricated movement/HPP/variance), rather than running the normal
+ * engine on a backwards date range. A request entirely at or after
+ * go-live is completely unaffected — `effective_start_date` just equals
+ * `requested_start_date`, byte-identical to PHASE V2.3C's behavior.
+ *
  * Core formulas (spec section — see docs/PHASE_V2_3_HPP_REPORT.md):
  *   Opening Value  = SUM(signed value) WHERE transaction_date <  start
  *                    (PLUS a boundary-exact OPENING row — see above)
@@ -117,16 +138,113 @@ final class InventoryHppReportService
     END";
 
     /**
+     * PHASE V2.3D — company-wide "when did live inventory economics
+     * begin" date, derived from data, never hardcoded: the EARLIEST of
+     * (a) any COMMITTED Stock Opening import batch's cutoff_date — the
+     * authoritative go-live event (`stock_openings.status = 'COMMITTED'`
+     * is only ever set by `ImportOpeningStockService::commit()`) — and
+     * (b) the earliest real, economically-effective OPENING transaction,
+     * which covers a dataset that never went through that import UI (e.g.
+     * this project's own lower-level test fixtures, which post
+     * OPENING-type transactions directly via FifoService). A genuine MIN
+     * across both sources, never a strict priority order — an import
+     * batch dated later than a directly-posted Opening (or vice versa)
+     * must never hide the earlier of the two real dates. Returns null
+     * when neither exists — nothing has gone live yet, so no cutover
+     * clamping applies anywhere and every report behaves exactly as it
+     * did before this phase.
+     */
+    private static function liveOpeningDate(PDO $pdo): ?string
+    {
+        $candidates = [];
+        $committed = $pdo->query("SELECT MIN(cutoff_date) FROM stock_openings WHERE status = 'COMMITTED'")->fetchColumn();
+        if ($committed !== false && $committed !== null) {
+            $candidates[] = (string) $committed;
+        }
+        $earliestOpeningTx = $pdo->query(
+            "SELECT MIN(DATE(transaction_date)) FROM inventory_transactions
+             WHERE transaction_type = 'OPENING' AND status = 'POSTED' AND inventory_effect = 1"
+        )->fetchColumn();
+        if ($earliestOpeningTx !== false && $earliestOpeningTx !== null) {
+            $candidates[] = (string) $earliestOpeningTx;
+        }
+        if (empty($candidates)) {
+            return null;
+        }
+        sort($candidates);
+        return $candidates[0];
+    }
+
+    /**
+     * PHASE V2.3D — the single place `effective_start_date` is computed:
+     * `MAX(requested_start_date, live_opening_date)`. See the class
+     * docblock's "Cutover awareness" section for the full rationale.
+     */
+    private static function cutoverContext(PDO $pdo, string $requestedStart, string $requestedEnd): array
+    {
+        $liveOpeningDate = self::liveOpeningDate($pdo);
+        $effectiveStart = ($liveOpeningDate !== null && $liveOpeningDate > $requestedStart) ? $liveOpeningDate : $requestedStart;
+        return [
+            'requested_start_date' => $requestedStart,
+            'requested_end_date' => $requestedEnd,
+            'effective_start_date' => $effectiveStart,
+            'live_opening_date' => $liveOpeningDate,
+            'is_pre_go_live_period' => $effectiveStart > $requestedEnd,
+        ];
+    }
+
+    /**
+     * A clean, honest zero — never a fabricated movement/HPP/variance —
+     * for a requested range that falls entirely before go-live.
+     */
+    private static function emptyPreGoLiveSummary(?int $warehouseId, array $cutover): array
+    {
+        return [
+            'period' => ['start_date' => $cutover['requested_start_date'], 'end_date' => $cutover['requested_end_date'], 'warehouse_id' => $warehouseId],
+            'cutover' => $cutover,
+            'opening_value' => 0.0,
+            'external_purchase' => 0.0,
+            'fifo_hpp' => 0.0,
+            'ending_value' => 0.0,
+            'hpp_reconciliation' => 0.0,
+            'variance' => 0.0,
+            'deltas_vs_previous_period' => [
+                'opening_value_pct' => null, 'external_purchase_pct' => null, 'fifo_hpp_pct' => null,
+                'ending_value_pct' => null, 'hpp_reconciliation_pct' => null,
+            ],
+            'non_hpp_movements' => [
+                'adjustment_net' => 0.0, 'opname_net' => 0.0, 'reversal_net' => 0.0, 'production_net' => 0.0,
+                'transfer_in' => 0.0, 'transfer_out' => 0.0, 'transfer_net' => 0.0, 'opening_mid_period' => 0.0,
+                'voided_out_net' => 0.0, 'voided_in_net' => 0.0,
+                'historical_import_note' => 'Historical import rows (inventory_effect=0) never affect stock and are excluded from every total above.',
+                'pre_go_live_note' => 'Periode yang diminta seluruhnya sebelum tanggal Opening Go-Live — tidak ada aktivitas ekonomi untuk direkonsiliasi.',
+            ],
+        ];
+    }
+
+    /**
      * Period-level (company or single-warehouse) summary: the 6 KPI cards +
      * the formula reconciliation strip + the non-HPP movement disclosure +
      * a same-length previous-period comparison for the "vs periode lalu" deltas.
      */
     public static function summary(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, ?int $categoryId = null, ?string $q = null): array
     {
-        $current = self::periodTotals($pdo, $startDate, $endDate, $warehouseId, $categoryId, $q);
+        $cutover = self::cutoverContext($pdo, $startDate, $endDate);
+        if ($cutover['is_pre_go_live_period']) {
+            return self::emptyPreGoLiveSummary($warehouseId, $cutover);
+        }
+        $effectiveStart = $cutover['effective_start_date'];
 
-        $days = self::daysBetween($startDate, $endDate);
-        $prevEnd = date('Y-m-d', strtotime($startDate . ' -1 day'));
+        $current = self::periodTotals($pdo, $effectiveStart, $endDate, $warehouseId, $categoryId, $q);
+
+        // The previous-period comparison anchors off the EFFECTIVE start, not
+        // the requested one — for a post-go-live query this is byte-identical
+        // to V2.3C (effective==requested); for a query clamped to go-live, the
+        // "previous period" is the N days immediately before go-live, which
+        // correctly reads ~0 (nothing economic happened there) rather than
+        // comparing against a nonsensical stretch of pre-cutover audit history.
+        $days = self::daysBetween($effectiveStart, $endDate);
+        $prevEnd = date('Y-m-d', strtotime($effectiveStart . ' -1 day'));
         $prevStart = date('Y-m-d', strtotime($prevEnd . ' -' . ($days - 1) . ' days'));
         $previous = self::periodTotals($pdo, $prevStart, $prevEnd, $warehouseId, $categoryId, $q);
 
@@ -139,6 +257,7 @@ final class InventoryHppReportService
 
         return [
             'period' => ['start_date' => $startDate, 'end_date' => $endDate, 'warehouse_id' => $warehouseId],
+            'cutover' => $cutover,
             'opening_value' => $current['opening'],
             'external_purchase' => $current['purchase'],
             'fifo_hpp' => $current['fifo_hpp'],
@@ -178,6 +297,8 @@ final class InventoryHppReportService
      */
     public static function warehouseBreakdown(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId): array
     {
+        $cutover = self::cutoverContext($pdo, $startDate, $endDate);
+
         if ($warehouseId !== null) {
             $whStmt = $pdo->prepare('SELECT id, code, name, warehouse_type FROM warehouses WHERE id = :id');
             $whStmt->execute(['id' => $warehouseId]);
@@ -190,7 +311,11 @@ final class InventoryHppReportService
         $panels = [];
         foreach ($warehouses as $wh) {
             $whId = (int) $wh['id'];
-            $totals = self::periodTotals($pdo, $startDate, $endDate, $whId, null, null);
+            if ($cutover['is_pre_go_live_period']) {
+                $totals = ['opening' => 0.0, 'purchase' => 0.0, 'fifo_hpp' => 0.0, 'transfer_in' => 0.0, 'transfer_out' => 0.0, 'ending' => 0.0];
+            } else {
+                $totals = self::periodTotals($pdo, $cutover['effective_start_date'], $endDate, $whId, null, null);
+            }
             $trend = self::dailyRunningValue($pdo, $startDate, $endDate, $whId);
             $panels[] = [
                 'warehouse' => $wh,
@@ -203,7 +328,7 @@ final class InventoryHppReportService
                 'daily_trend' => $trend,
             ];
         }
-        return $panels;
+        return ['cutover' => $cutover, 'panels' => $panels];
     }
 
     /**
@@ -220,7 +345,8 @@ final class InventoryHppReportService
             throw new ValidationException(["date range too large ({$days} days) — narrow it to at most " . self::MAX_DAYS . ' days']);
         }
 
-        $rows = self::buildDailyRows($pdo, $startDate, $endDate, $warehouseId, $categoryId, $q);
+        $result = self::buildDailyRows($pdo, $startDate, $endDate, $warehouseId, $categoryId, $q);
+        $rows = $result['rows'];
 
         $total = count($rows);
         $offset = max(0, ($page - 1) * $perPage);
@@ -228,6 +354,7 @@ final class InventoryHppReportService
 
         return [
             'rows' => $pageRows,
+            'cutover' => $result['cutover'],
             'pagination' => ['page' => $page, 'per_page' => $perPage, 'total' => $total, 'total_pages' => (int) ceil($total / max(1, $perPage))],
         ];
     }
@@ -341,7 +468,16 @@ final class InventoryHppReportService
      */
     public static function varianceBridge(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId): array
     {
-        $t = self::periodTotals($pdo, $startDate, $endDate, $warehouseId, null, null);
+        $cutover = self::cutoverContext($pdo, $startDate, $endDate);
+        if ($cutover['is_pre_go_live_period']) {
+            return [
+                'period' => ['start_date' => $startDate, 'end_date' => $endDate, 'warehouse_id' => $warehouseId],
+                'cutover' => $cutover,
+                'hpp_reconciliation' => 0.0, 'fifo_hpp' => 0.0, 'variance' => 0.0,
+                'components' => [], 'explained_total' => 0.0, 'unexplained' => 0.0, 'is_fully_explained' => true,
+            ];
+        }
+        $t = self::periodTotals($pdo, $cutover['effective_start_date'], $endDate, $warehouseId, null, null);
 
         $adjustmentNonOpname = round($t['adjustment_net'] - $t['opname_net'], 4);
         $components = [
@@ -360,6 +496,7 @@ final class InventoryHppReportService
 
         return [
             'period' => ['start_date' => $startDate, 'end_date' => $endDate, 'warehouse_id' => $warehouseId],
+            'cutover' => $cutover,
             'hpp_reconciliation' => $t['reconciliation'],
             'fifo_hpp' => $t['fifo_hpp'],
             'variance' => $t['variance'],
@@ -573,82 +710,123 @@ final class InventoryHppReportService
     /** Per-day running ending value across a range — used for the warehouse panel sparklines. */
     private static function dailyRunningValue(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId): array
     {
-        $rows = self::buildDailyRows($pdo, $startDate, $endDate, $warehouseId, null, null);
-        return array_map(static fn ($r) => ['date' => $r['date'], 'value' => $r['stok_akhir']], $rows);
+        $result = self::buildDailyRows($pdo, $startDate, $endDate, $warehouseId, null, null);
+        return array_map(static fn ($r) => ['date' => $r['date'], 'value' => $r['stok_akhir']], $result['rows']);
     }
 
-    /** @return list<array<string,mixed>> one row per calendar day in [startDate, endDate] */
+    /**
+     * PHASE V2.3D: every REQUESTED calendar day still appears (unchanged
+     * "every calendar day" design — see class docblock), but days strictly
+     * before `effective_start_date` are flagged `is_pre_go_live` and pinned
+     * to an honest all-zero row rather than derived from any query — there
+     * is structurally nothing to derive (inventory_effect=1 rows never
+     * exist before go-live), so zero is correct, not a placeholder. Once
+     * the walk reaches `effective_start_date`, the running total is seeded
+     * from the SAME boundary-inclusive opening computation `periodTotals()`
+     * uses, and the movement/FIFO queries are scoped to
+     * `[effective_start_date, end_excl)` — never `[requested_start_date,
+     * end_excl)` — so a mid-period OPENING row relative to the requested
+     * range but boundary-exact relative to go-live is classified exactly
+     * once, exactly like the period-level summary.
+     *
+     * @return array{rows: list<array<string,mixed>>, cutover: array}
+     */
     private static function buildDailyRows(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, ?int $categoryId, ?string $q): array
     {
         [$itemJoin, $itemWhere, $itemBind] = self::itemFilterClauses($categoryId, $q);
+        $cutover = self::cutoverContext($pdo, $startDate, $endDate);
+        $effectiveStart = $cutover['effective_start_date'];
 
-        // PHASE V2.3C §3: same boundary-inclusive opening as periodTotals().
-        $opening = self::signedValueBefore($pdo, $startDate, $warehouseId, $itemJoin, $itemWhere, $itemBind, true);
-
-        $movWhere = [
-            "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1',
-            't.transaction_date >= :start', 't.transaction_date < :end_excl',
-            // Excludes the same boundary-exact OPENING row $opening above already
-            // counted — otherwise day 1's net_signed_value would double it.
-            "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :start_boundary)",
-        ];
-        $bind = array_merge([
-            'start' => $startDate . ' 00:00:00',
-            'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00',
-            'start_boundary' => $startDate . ' 00:00:00',
-        ], $itemBind);
-        if ($warehouseId !== null) {
-            $movWhere[] = 'l.warehouse_id = :wh';
-            $bind['wh'] = $warehouseId;
-        }
-        $movWhere = array_merge($movWhere, $itemWhere);
-        $movWhereSql = implode(' AND ', $movWhere);
-        $stmt = $pdo->prepare(
-            "SELECT DATE(t.transaction_date) AS d,
-                SUM(CASE WHEN t.transaction_type = 'IN' AND t.status = 'POSTED' THEN l.subtotal ELSE 0 END) AS purchase,
-                SUM(CASE WHEN t.transaction_type = 'TRANSFER_IN' THEN l.subtotal ELSE 0 END) AS transfer_in,
-                SUM(CASE WHEN t.transaction_type = 'TRANSFER_OUT' THEN ABS(l.subtotal) ELSE 0 END) AS transfer_out,
-                SUM(CASE WHEN t.transaction_type = 'ADJUSTMENT' THEN l.subtotal ELSE 0 END) AS adjustment_net,
-                SUM(" . self::SIGNED_VALUE_SQL . ") AS net_signed_value
-             FROM inventory_transaction_lines l
-             JOIN inventory_transactions t ON t.id = l.transaction_id
-             {$itemJoin}
-             WHERE {$movWhereSql}
-             GROUP BY DATE(t.transaction_date)"
-        );
-        $stmt->execute($bind);
+        $opening = 0.0;
         $byDate = [];
-        foreach ($stmt->fetchAll() as $r) {
-            $byDate[$r['d']] = $r;
-        }
-
-        $fifoWhere = ["t.status = 'POSTED'", "t.transaction_type = 'OUT'", 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
-        $fifoBind = array_merge(['start' => $startDate . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'], $itemBind);
-        if ($warehouseId !== null) {
-            $fifoWhere[] = 'l.warehouse_id = :wh';
-            $fifoBind['wh'] = $warehouseId;
-        }
-        $fifoWhere = array_merge($fifoWhere, $itemWhere);
-        $fifoWhereSql = implode(' AND ', $fifoWhere);
-        $fstmt = $pdo->prepare(
-            "SELECT DATE(t.transaction_date) AS d, SUM(a.subtotal) AS v
-             FROM fifo_allocations a
-             JOIN inventory_transaction_lines l ON l.id = a.transaction_line_id
-             JOIN inventory_transactions t ON t.id = l.transaction_id
-             {$itemJoin}
-             WHERE {$fifoWhereSql}
-             GROUP BY DATE(t.transaction_date)"
-        );
-        $fstmt->execute($fifoBind);
         $fifoByDate = [];
-        foreach ($fstmt->fetchAll() as $r) {
-            $fifoByDate[$r['d']] = (float) $r['v'];
+
+        if (!$cutover['is_pre_go_live_period']) {
+            // PHASE V2.3C §3: same boundary-inclusive opening as periodTotals(),
+            // now anchored at effective_start_date (PHASE V2.3D) rather than
+            // the raw requested start.
+            $opening = self::signedValueBefore($pdo, $effectiveStart, $warehouseId, $itemJoin, $itemWhere, $itemBind, true);
+
+            $movWhere = [
+                "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1',
+                't.transaction_date >= :start', 't.transaction_date < :end_excl',
+                // Excludes the same boundary-exact OPENING row $opening above already
+                // counted — otherwise that day's net_signed_value would double it.
+                "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :start_boundary)",
+            ];
+            $bind = array_merge([
+                'start' => $effectiveStart . ' 00:00:00',
+                'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00',
+                'start_boundary' => $effectiveStart . ' 00:00:00',
+            ], $itemBind);
+            if ($warehouseId !== null) {
+                $movWhere[] = 'l.warehouse_id = :wh';
+                $bind['wh'] = $warehouseId;
+            }
+            $movWhere = array_merge($movWhere, $itemWhere);
+            $movWhereSql = implode(' AND ', $movWhere);
+            $stmt = $pdo->prepare(
+                "SELECT DATE(t.transaction_date) AS d,
+                    SUM(CASE WHEN t.transaction_type = 'IN' AND t.status = 'POSTED' THEN l.subtotal ELSE 0 END) AS purchase,
+                    SUM(CASE WHEN t.transaction_type = 'TRANSFER_IN' THEN l.subtotal ELSE 0 END) AS transfer_in,
+                    SUM(CASE WHEN t.transaction_type = 'TRANSFER_OUT' THEN ABS(l.subtotal) ELSE 0 END) AS transfer_out,
+                    SUM(CASE WHEN t.transaction_type = 'ADJUSTMENT' THEN l.subtotal ELSE 0 END) AS adjustment_net,
+                    SUM(" . self::SIGNED_VALUE_SQL . ") AS net_signed_value
+                 FROM inventory_transaction_lines l
+                 JOIN inventory_transactions t ON t.id = l.transaction_id
+                 {$itemJoin}
+                 WHERE {$movWhereSql}
+                 GROUP BY DATE(t.transaction_date)"
+            );
+            $stmt->execute($bind);
+            foreach ($stmt->fetchAll() as $r) {
+                $byDate[$r['d']] = $r;
+            }
+
+            $fifoWhere = ["t.status = 'POSTED'", "t.transaction_type = 'OUT'", 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
+            $fifoBind = array_merge(['start' => $effectiveStart . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'], $itemBind);
+            if ($warehouseId !== null) {
+                $fifoWhere[] = 'l.warehouse_id = :wh';
+                $fifoBind['wh'] = $warehouseId;
+            }
+            $fifoWhere = array_merge($fifoWhere, $itemWhere);
+            $fifoWhereSql = implode(' AND ', $fifoWhere);
+            $fstmt = $pdo->prepare(
+                "SELECT DATE(t.transaction_date) AS d, SUM(a.subtotal) AS v
+                 FROM fifo_allocations a
+                 JOIN inventory_transaction_lines l ON l.id = a.transaction_line_id
+                 JOIN inventory_transactions t ON t.id = l.transaction_id
+                 {$itemJoin}
+                 WHERE {$fifoWhereSql}
+                 GROUP BY DATE(t.transaction_date)"
+            );
+            $fstmt->execute($fifoBind);
+            foreach ($fstmt->fetchAll() as $r) {
+                $fifoByDate[$r['d']] = (float) $r['v'];
+            }
         }
 
         $rows = [];
-        $running = $opening;
+        $running = 0.0;
+        $seeded = false;
         $cursor = $startDate;
         while (strtotime($cursor) <= strtotime($endDate)) {
+            if ($cursor < $effectiveStart) {
+                // Pre-go-live: inventory_effect=1 structurally cannot exist here,
+                // so every column is a real, honest zero — never fabricated.
+                $rows[] = [
+                    'date' => $cursor, 'stok_awal' => 0.0, 'pembelian' => 0.0, 'fifo_out' => 0.0,
+                    'transfer_in' => 0.0, 'transfer_out' => 0.0, 'adjustment' => 0.0, 'stok_akhir' => 0.0,
+                    'hpp_reconciliation' => 0.0, 'variance' => 0.0, 'is_pre_go_live' => true,
+                ];
+                $cursor = date('Y-m-d', strtotime($cursor . ' +1 day'));
+                continue;
+            }
+            if (!$seeded) {
+                $running = $opening;
+                $seeded = true;
+            }
+
             $d = $byDate[$cursor] ?? null;
             $stokAwal = $running;
             $pembelian = $d !== null ? (float) $d['purchase'] : 0.0;
@@ -673,13 +851,14 @@ final class InventoryHppReportService
                 'stok_akhir' => $stokAkhir,
                 'hpp_reconciliation' => $hppReconciliation,
                 'variance' => $variance,
+                'is_pre_go_live' => false,
             ];
 
             $running = $stokAkhir;
             $cursor = date('Y-m-d', strtotime($cursor . ' +1 day'));
         }
 
-        return $rows;
+        return ['rows' => $rows, 'cutover' => $cutover];
     }
 
     private static function daysBetween(string $startDate, string $endDate): int
@@ -700,13 +879,24 @@ final class InventoryHppReportService
     public static function buildExportSheets(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, ?int $categoryId, ?string $q): array
     {
         $summary = self::summary($pdo, $startDate, $endDate, $warehouseId, $categoryId, $q);
-        $warehouses = self::warehouseBreakdown($pdo, $startDate, $endDate, $warehouseId);
-        $daily = self::buildDailyRows($pdo, $startDate, $endDate, $warehouseId, $categoryId, $q);
+        ['cutover' => $cutover, 'panels' => $warehouses] = self::warehouseBreakdown($pdo, $startDate, $endDate, $warehouseId);
+        ['rows' => $daily] = self::buildDailyRows($pdo, $startDate, $endDate, $warehouseId, $categoryId, $q);
+
+        // PHASE V2.3D: the export must state Requested Period, Effective
+        // Inventory Period, and Live Opening Date explicitly — never let the
+        // screen and the spreadsheet imply different things (spec: "Screen
+        // and Excel must never disagree").
+        $liveOpeningLabel = $cutover['live_opening_date'] ?? '(belum ada Opening Go-Live tercatat)';
+        $effectiveLabel = $cutover['is_pre_go_live_period']
+            ? '(seluruh periode sebelum Opening Go-Live — tidak ada aktivitas ekonomi)'
+            : $cutover['effective_start_date'] . ' s/d ' . $endDate;
 
         $summarySheet = [
             'headers' => ['Metrik', 'Nilai (Rp)'],
             'rows' => [
-                ['Periode', $startDate . ' s/d ' . $endDate],
+                ['Periode Diminta (Requested Period)', $startDate . ' s/d ' . $endDate],
+                ['Periode Efektif Inventory (Effective Inventory Period)', $effectiveLabel],
+                ['Tanggal Opening Go-Live (Live Opening Date)', $liveOpeningLabel],
                 ['Nilai Stok Awal', $summary['opening_value']],
                 ['Pembelian Eksternal', $summary['external_purchase']],
                 ['Barang Keluar FIFO / HPP', $summary['fifo_hpp']],
@@ -736,9 +926,10 @@ final class InventoryHppReportService
         ];
 
         $dailySheet = [
-            'headers' => ['Tanggal', 'Stok Awal', 'Pembelian', 'FIFO OUT/HPP', 'Transfer IN', 'Transfer OUT', 'Adjustment', 'Stok Akhir', 'HPP Rekonsiliasi', 'Variance'],
+            'headers' => ['Tanggal', 'Status', 'Stok Awal', 'Pembelian', 'FIFO OUT/HPP', 'Transfer IN', 'Transfer OUT', 'Adjustment', 'Stok Akhir', 'HPP Rekonsiliasi', 'Variance'],
             'rows' => array_map(static fn ($d) => [
-                $d['date'], $d['stok_awal'], $d['pembelian'], $d['fifo_out'], $d['transfer_in'],
+                $d['date'], $d['is_pre_go_live'] ? 'Histori Audit (Pre Go-Live)' : '',
+                $d['stok_awal'], $d['pembelian'], $d['fifo_out'], $d['transfer_in'],
                 $d['transfer_out'], $d['adjustment'], $d['stok_akhir'], $d['hpp_reconciliation'], $d['variance'],
             ], $daily),
         ];

@@ -550,3 +550,12 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 .hpp-bridge-total { font-weight: 700; color: var(--text); font-size: 0.95rem; }
 .hpp-bridge-total .mono { font-weight: 700; }
 .hpp-bridge-warn, .hpp-bridge-warn .mono { color: var(--orange); }
+
+/* PHASE V2.3D — cutover-aware UX: effective-period banner + pre-go-live rows */
+.hpp-cutover-banner { margin-bottom: 14px; font-size: 0.8rem; line-height: 1.5; }
+.hpp-pre-go-live-badge {
+    display: inline-block; font-size: 0.62rem; font-weight: 600; letter-spacing: 0.02em;
+    color: var(--text3); background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 6px; margin-left: 4px; text-transform: uppercase;
+}
+.hpp-pre-go-live-value { color: var(--text3); }
