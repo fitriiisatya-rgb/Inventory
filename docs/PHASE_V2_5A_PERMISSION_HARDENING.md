@@ -113,7 +113,8 @@ TOTAL                                         717/717 PASSED, 0 FAILED
 
 ## 5. Final commit
 
-See branch `claude/funny-ramanujan-wmrlig`.
+`a66c9f9d987493e7fa3c997d2ca3258957c93469` on branch
+`claude/funny-ramanujan-wmrlig`.
 
 ## 6. Push status
 
