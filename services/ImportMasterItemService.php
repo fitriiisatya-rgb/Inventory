@@ -10,14 +10,25 @@ use PDO;
  * Section 16 of the brief — nothing lands in `items` until an explicit
  * commit, and commit is refused outright while any row is ERROR.
  *
- * Expected CSV header (see templates/master_items.csv):
- * sku,barcode,name,category,brand,base_unit,purchase_unit,purchase_conversion,middle_unit,middle_conversion,minimum_stock,status
+ * Expected CSV/XLSX header (see templates/master_items.csv and the
+ * V2.6A-generated Download Template Excel): sku,barcode,name,category,
+ * brand,base_unit,purchase_unit,purchase_conversion,middle_unit,
+ * middle_conversion,minimum_stock,status,default_supplier_code,notes
+ *
+ * PHASE V2.6A: previously this only ever called readCsv() even though the
+ * upload route accepts .xlsx — a real .xlsx upload silently produced
+ * garbage rows (fgetcsv() on binary zip data). Now dispatches on the
+ * uploaded file's extension exactly like ImportOpeningStockService already
+ * does, reusing the same proven XlsxReaderService rather than a second
+ * xlsx parser.
  */
 final class ImportMasterItemService
 {
-    public static function stage(PDO $pdo, string $csvPath, string $fileName, int $uploadedBy): int
+    public static function stage(PDO $pdo, string $filePath, string $fileName, int $uploadedBy): int
     {
-        $rows = self::readCsv($csvPath);
+        $rows = str_ends_with(strtolower($fileName), '.xlsx')
+            ? XlsxReaderService::read($filePath)
+            : self::readCsv($filePath);
 
         $batchStmt = $pdo->prepare(
             'INSERT INTO import_batches (import_type, file_name, status, total_rows, uploaded_by, uploaded_at)

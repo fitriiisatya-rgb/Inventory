@@ -17,6 +17,7 @@ const Imports = (() => {
             commit: (id) => InvApi.commitMasterItem(id),
             preview: (id) => InvApi.previewImportBatch(id),
             traceOpener: (id) => TraceDrawer.openImport(id),
+            templateType: 'MASTER_ITEM',
         }));
         ['SUPPLIER', 'DIVISION', 'WAREHOUSE'].forEach((type) => {
             const label = { SUPPLIER: 'Supplier', DIVISION: 'Divisi', WAREHOUSE: 'Gudang' }[type];
@@ -26,6 +27,7 @@ const Imports = (() => {
                 commit: (id) => InvApi.commitSimpleMaster(type, id),
                 preview: (id) => InvApi.previewImportBatch(id),
                 traceOpener: (id) => TraceDrawer.openImport(id),
+                templateType: type,
             }));
         });
         container.appendChild(buildBatchSection({
@@ -50,7 +52,16 @@ const Imports = (() => {
         const alertId = `import-${cfg.key}-alert`;
         const previewId = `import-${cfg.key}-preview`;
         const card = UI.el('div', { class: 'card' }, [
-            UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, cfg.title)]),
+            UI.el('div', { class: 'card-header' }, [
+                UI.el('div', { class: 'card-title' }, cfg.title),
+                // PHASE V2.6A — template is generated fresh from the
+                // importer's real accepted headers on every click (never a
+                // stale static file), so it can never drift from what the
+                // importer actually accepts.
+                cfg.templateType ? UI.el('button', {
+                    class: 'btn btn-secondary btn-sm', id: `import-${cfg.key}-template-btn`,
+                }, '⬇ Download Template Excel') : null,
+            ]),
             cfg.note || null,
             UI.el('div', { id: alertId }),
             UI.el('div', { class: 'grid-2', html: `
@@ -61,6 +72,10 @@ const Imports = (() => {
         ]);
         setTimeout(() => {
             document.getElementById(`import-${cfg.key}-upload-btn`).addEventListener('click', () => uploadAndStage(cfg));
+            const templateBtn = document.getElementById(`import-${cfg.key}-template-btn`);
+            if (templateBtn) {
+                templateBtn.addEventListener('click', () => window.open(InvApi.importTemplateUrl(cfg.templateType), '_blank'));
+            }
         }, 0);
         return card;
     }

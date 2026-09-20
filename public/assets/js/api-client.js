@@ -248,6 +248,10 @@ const InvApi = (() => {
         },
 
         // ---- import ----
+        // PHASE V2.6A — Download Template Excel. GET is CSRF-exempt (see
+        // index.php's CSRF gate), so this is opened directly via
+        // window.open()/an <a href>, same pattern as hppExportUrl above.
+        importTemplateUrl: (type) => `/api/import/template/${type}`,
         uploadImportFile: (file) => upload('/import/upload', file),
         stageMasterItem: (filePath, fileName) => request('POST', '/import/master-item/stage', { file_path: filePath, file_name: fileName }),
         commitMasterItem: (id) => request('POST', `/import/master-item/${id}/commit`),

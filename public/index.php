@@ -43,9 +43,11 @@ require_once __DIR__ . '/../services/BookClosingService.php';
 require_once __DIR__ . '/../services/ReconciliationService.php';
 require_once __DIR__ . '/../services/SystemHealthService.php';
 require_once __DIR__ . '/../services/VoidService.php';
+require_once __DIR__ . '/../services/XlsxReaderService.php';
 require_once __DIR__ . '/../services/ImportMasterItemService.php';
 require_once __DIR__ . '/../services/ImportSimpleMasterService.php';
 require_once __DIR__ . '/../services/ImportOpeningStockService.php';
+require_once __DIR__ . '/../services/ImportTemplateService.php';
 require_once __DIR__ . '/../services/OpeningValidationService.php';
 require_once __DIR__ . '/../services/CostNormalizationService.php';
 require_once __DIR__ . '/../services/OpeningReconciliationService.php';
@@ -98,6 +100,7 @@ use App\Services\VoidService;
 use App\Services\ImportMasterItemService;
 use App\Services\ImportSimpleMasterService;
 use App\Services\ImportOpeningStockService;
+use App\Services\ImportTemplateService;
 use App\Services\ImportHistoricalTransactionService;
 
 $config = require __DIR__ . '/../config/config.php';
@@ -1908,6 +1911,33 @@ $routes = [
         );
         $lines->execute(['id' => (int) $params['id']]);
         inv_ok(['opening' => $opening, 'lines' => $lines->fetchAll()], 'OK');
+    },
+
+    // PHASE V2.6A: "Download Template Excel" — headers come straight from
+    // ImportTemplateService, which is built from the exact accepted-column
+    // list of the four importer services above (never a hand-maintained
+    // copy that can drift). Read-only, generates the file fresh on every
+    // request, no staging/commit/inventory effect whatsoever.
+    'GET /import/template/{type}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
+        $type = strtoupper($params['type']);
+        if (!in_array($type, ['MASTER_ITEM', 'SUPPLIER', 'DIVISION', 'WAREHOUSE'], true)) {
+            inv_error(404, 'NOT_FOUND', 'Unknown import template type');
+        }
+        $sheets = ImportTemplateService::build($type);
+        $tmpPath = tempnam(sys_get_temp_dir(), 'import_template_');
+        try {
+            ExcelWriterService::write($tmpPath, $sheets);
+            $fileName = 'template-import-' . strtolower(str_replace('_', '-', $type)) . '.xlsx';
+            header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            header('Content-Disposition: attachment; filename="' . $fileName . '"');
+            header('Content-Length: ' . filesize($tmpPath));
+            readfile($tmpPath);
+        } finally {
+            @unlink($tmpPath);
+        }
+        exit;
     },
 
     'POST /import/master-item/stage' => function () use ($pdo, $input) {

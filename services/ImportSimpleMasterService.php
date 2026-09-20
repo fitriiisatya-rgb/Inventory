@@ -10,6 +10,11 @@ use PDO;
  * template (code, name, status) and the same staging pattern as
  * ImportMasterItemService — one class covers all three rather than
  * duplicating near-identical staging code per entity.
+ *
+ * PHASE V2.6A: dispatches on the uploaded file's extension (readCsv() vs
+ * XlsxReaderService::read()) exactly like the other two importers now do —
+ * previously this only ever read CSV, silently mis-parsing any real .xlsx
+ * upload even though the upload route accepts one.
  */
 final class ImportSimpleMasterService
 {
@@ -34,11 +39,13 @@ final class ImportSimpleMasterService
     // working unchanged.
     private const WAREHOUSE_TYPES = ['MAIN', 'TRANSIT'];
 
-    public static function stage(PDO $pdo, string $importType, string $csvPath, string $fileName, int $uploadedBy): int
+    public static function stage(PDO $pdo, string $importType, string $filePath, string $fileName, int $uploadedBy): int
     {
         self::assertKnownType($importType);
         $table = self::TABLES[$importType];
-        $rows = self::readCsv($csvPath);
+        $rows = str_ends_with(strtolower($fileName), '.xlsx')
+            ? XlsxReaderService::read($filePath)
+            : self::readCsv($filePath);
 
         $batchStmt = $pdo->prepare(
             'INSERT INTO import_batches (import_type, file_name, status, total_rows, uploaded_by, uploaded_at)
