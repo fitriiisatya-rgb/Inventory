@@ -10,7 +10,7 @@
      request wave, so Chrome/Safari never mix an old JS file with new CSS
      (or vice versa) after a deployment; leaving it unchanged between
      deploys still lets the browser cache normally. -->
-<link rel="stylesheet" href="assets/css/app.css?v=20260927">
+<link rel="stylesheet" href="assets/css/app.css?v=20260928">
 </head>
 <body>
 
@@ -48,7 +48,7 @@
              fixed 1672:941 composition doesn't stay legible or tappable
              once scaled down to phone width. -->
         <div class="login-image-frame" aria-hidden="true">
-            <img src="assets/images/login-bg.png?v=20260927" class="login-bg-image" alt="">
+            <img src="assets/images/login-bg.png?v=20260928" class="login-bg-image" alt="">
         </div>
         <div class="login-card" id="login-card">
             <div class="login-card-logo">📦</div>
@@ -76,7 +76,7 @@
             </div>
         </div>
         <div class="login-mascot-wrap">
-            <img src="assets/images/fa-mascot.png?v=20260927" class="login-mascot" alt="Maskot FA Inventory Pro" width="420" height="420">
+            <img src="assets/images/fa-mascot.png?v=20260928" class="login-mascot" alt="Maskot FA Inventory Pro" width="420" height="420">
             <div class="login-speech-bubble">Halo!<br><small>Siap kelola Inventory hari ini?</small></div>
         </div>
     </div>
@@ -129,54 +129,99 @@
     <div class="app-shell-v2">
         <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
         <nav class="sidebar" id="sidebar">
-            <div class="sidebar-group">
+            <div class="sidebar-group sidebar-group-static">
                 <div class="sidebar-group-label">Overview</div>
                 <a class="sidebar-link active" data-tab="dashboard"><span class="icon">🏠</span> Dashboard</a>
             </div>
-            <div class="sidebar-group">
-                <div class="sidebar-group-label">Inventory</div>
-                <a class="sidebar-link" data-tab="stok-barang"><span class="icon">📦</span> Stok Barang</a>
-                <a class="sidebar-link" data-tab="laporan"><span class="icon">📇</span> Mutasi Stok / Ledger</a>
+            <div class="sidebar-group sidebar-group-collapsible" data-group="laporan">
+                <button type="button" class="sidebar-group-header" aria-expanded="false">
+                    <span class="sidebar-group-label">Laporan</span>
+                    <span class="accordion-arrow">&rsaquo;</span>
+                </button>
+                <div class="sidebar-submenu" hidden>
+                    <a class="sidebar-link" data-tab="laporan-hpp" data-require-permission="INVENTORY_VIEW"><span class="icon">📊</span> Nilai Stok &amp; HPP</a>
+                </div>
             </div>
-            <div class="sidebar-group">
-                <div class="sidebar-group-label">Transactions</div>
-                <a class="sidebar-link" data-tab="transaksi" data-require-permission="TRANSACTION_IN_CREATE,TRANSACTION_OUT_CREATE"><span class="icon">📥</span> Stock IN / OUT</a>
-                <a class="sidebar-link" data-tab="history-transaksi"><span class="icon">🧾</span> History Transaksi</a>
+            <div class="sidebar-group sidebar-group-collapsible" data-group="inventory">
+                <button type="button" class="sidebar-group-header" aria-expanded="false">
+                    <span class="sidebar-group-label">Inventory</span>
+                    <span class="accordion-arrow">&rsaquo;</span>
+                </button>
+                <div class="sidebar-submenu" hidden>
+                    <a class="sidebar-link" data-tab="stok-barang"><span class="icon">📦</span> Stok Barang</a>
+                    <a class="sidebar-link" data-tab="laporan"><span class="icon">📇</span> Mutasi Stok / Ledger</a>
+                </div>
             </div>
-            <div class="sidebar-group">
-                <div class="sidebar-group-label">Transfers</div>
-                <a class="sidebar-link" data-tab="transfer" data-require-permission="WAREHOUSE_TRANSFER_MANAGE"><span class="icon">🚚</span> Transfer</a>
+            <div class="sidebar-group sidebar-group-collapsible" data-group="transactions">
+                <button type="button" class="sidebar-group-header" aria-expanded="false">
+                    <span class="sidebar-group-label">Transactions</span>
+                    <span class="accordion-arrow">&rsaquo;</span>
+                </button>
+                <div class="sidebar-submenu" hidden>
+                    <a class="sidebar-link" data-tab="transaksi" data-require-permission="TRANSACTION_IN_CREATE,TRANSACTION_OUT_CREATE"><span class="icon">📥</span> Stock IN / OUT</a>
+                    <a class="sidebar-link" data-tab="history-transaksi"><span class="icon">🧾</span> History Transaksi</a>
+                </div>
             </div>
-            <div class="sidebar-group">
-                <div class="sidebar-group-label">Production</div>
-                <a class="sidebar-link" data-tab="produksi" data-require-permission="PRODUCTION_MANAGE"><span class="icon">🏭</span> Produksi</a>
+            <div class="sidebar-group sidebar-group-collapsible" data-group="transfers">
+                <button type="button" class="sidebar-group-header" aria-expanded="false">
+                    <span class="sidebar-group-label">Transfers</span>
+                    <span class="accordion-arrow">&rsaquo;</span>
+                </button>
+                <div class="sidebar-submenu" hidden>
+                    <a class="sidebar-link" data-tab="transfer" data-require-permission="WAREHOUSE_TRANSFER_MANAGE"><span class="icon">🚚</span> Transfer</a>
+                </div>
             </div>
-            <div class="sidebar-group">
-                <div class="sidebar-group-label">Stock Opname</div>
-                <a class="sidebar-link" data-tab="opname" data-require-permission="STOCK_OPNAME_MANAGE"><span class="icon">📋</span> Stock Opname</a>
+            <div class="sidebar-group sidebar-group-collapsible" data-group="production">
+                <button type="button" class="sidebar-group-header" aria-expanded="false">
+                    <span class="sidebar-group-label">Production</span>
+                    <span class="accordion-arrow">&rsaquo;</span>
+                </button>
+                <div class="sidebar-submenu" hidden>
+                    <a class="sidebar-link" data-tab="produksi" data-require-permission="PRODUCTION_MANAGE"><span class="icon">🏭</span> Produksi</a>
+                </div>
             </div>
-            <div class="sidebar-group">
-                <div class="sidebar-group-label">Master Data</div>
-                <a class="sidebar-link" data-tab="master-item"><span class="icon">📦</span> Master Barang</a>
-                <a class="sidebar-link" data-tab="master-warehouse" data-require-permission="MASTER_WAREHOUSE_MANAGE,INVENTORY_VIEW"><span class="icon">🏬</span> Master Gudang</a>
-                <a class="sidebar-link" data-tab="master-division" data-require-permission="MASTER_DIVISION_MANAGE,INVENTORY_VIEW"><span class="icon">🗂️</span> Master Divisi</a>
-                <a class="sidebar-link" data-tab="master-vendor" data-require-permission="MASTER_SUPPLIER_MANAGE,INVENTORY_VIEW"><span class="icon">📇</span> Vendor / Supplier</a>
-                <a class="sidebar-link" data-tab="master-bakery" data-require-permission="MASTER_BAKERY_DESTINATION_MANAGE,INVENTORY_VIEW"><span class="icon">🥖</span> Bakery Tujuan</a>
-                <a class="sidebar-link" data-tab="master-category" data-require-permission="MASTER_CATEGORY_MANAGE,INVENTORY_VIEW"><span class="icon">🏷️</span> Kategori</a>
-                <a class="sidebar-link" data-tab="import" data-require-role="ADMIN,SUPERADMIN"><span class="icon">📤</span> Import</a>
+            <div class="sidebar-group sidebar-group-collapsible" data-group="opname">
+                <button type="button" class="sidebar-group-header" aria-expanded="false">
+                    <span class="sidebar-group-label">Stock Opname</span>
+                    <span class="accordion-arrow">&rsaquo;</span>
+                </button>
+                <div class="sidebar-submenu" hidden>
+                    <a class="sidebar-link" data-tab="opname" data-require-permission="STOCK_OPNAME_MANAGE"><span class="icon">📋</span> Stock Opname</a>
+                </div>
             </div>
-            <div class="sidebar-group">
-                <div class="sidebar-group-label">Audit &amp; Control</div>
-                <a class="sidebar-link" data-tab="audit" data-require-permission="AUDIT_LOG_VIEW"><span class="icon">📜</span> Audit Log</a>
-                <a class="sidebar-link" data-tab="trace-center" data-require-permission="AUDIT_LOG_VIEW"><span class="icon">🔍</span> Trace Center</a>
+            <div class="sidebar-group sidebar-group-collapsible" data-group="master-data">
+                <button type="button" class="sidebar-group-header" aria-expanded="false">
+                    <span class="sidebar-group-label">Master Data</span>
+                    <span class="accordion-arrow">&rsaquo;</span>
+                </button>
+                <div class="sidebar-submenu" hidden>
+                    <a class="sidebar-link" data-tab="master-item"><span class="icon">📦</span> Master Barang</a>
+                    <a class="sidebar-link" data-tab="master-warehouse" data-require-permission="MASTER_WAREHOUSE_MANAGE,INVENTORY_VIEW"><span class="icon">🏬</span> Master Gudang</a>
+                    <a class="sidebar-link" data-tab="master-division" data-require-permission="MASTER_DIVISION_MANAGE,INVENTORY_VIEW"><span class="icon">🗂️</span> Master Divisi</a>
+                    <a class="sidebar-link" data-tab="master-vendor" data-require-permission="MASTER_SUPPLIER_MANAGE,INVENTORY_VIEW"><span class="icon">📇</span> Vendor / Supplier</a>
+                    <a class="sidebar-link" data-tab="master-bakery" data-require-permission="MASTER_BAKERY_DESTINATION_MANAGE,INVENTORY_VIEW"><span class="icon">🥖</span> Bakery Tujuan</a>
+                    <a class="sidebar-link" data-tab="master-category" data-require-permission="MASTER_CATEGORY_MANAGE,INVENTORY_VIEW"><span class="icon">🏷️</span> Kategori</a>
+                    <a class="sidebar-link" data-tab="import" data-require-role="ADMIN,SUPERADMIN"><span class="icon">📤</span> Import</a>
+                </div>
             </div>
-            <div class="sidebar-group">
-                <div class="sidebar-group-label">Settings</div>
-                <a class="sidebar-link" data-tab="closing" data-require-role="ADMIN,SUPERADMIN"><span class="icon">🔐</span> Tutup Buku</a>
+            <div class="sidebar-group sidebar-group-collapsible" data-group="audit-control">
+                <button type="button" class="sidebar-group-header" aria-expanded="false">
+                    <span class="sidebar-group-label">Audit &amp; Control</span>
+                    <span class="accordion-arrow">&rsaquo;</span>
+                </button>
+                <div class="sidebar-submenu" hidden>
+                    <a class="sidebar-link" data-tab="audit" data-require-permission="AUDIT_LOG_VIEW"><span class="icon">📜</span> Audit Log</a>
+                    <a class="sidebar-link" data-tab="trace-center" data-require-permission="AUDIT_LOG_VIEW"><span class="icon">🔍</span> Trace Center</a>
+                </div>
             </div>
-            <div class="sidebar-group">
-                <div class="sidebar-group-label">Laporan</div>
-                <a class="sidebar-link" data-tab="laporan-hpp" data-require-permission="INVENTORY_VIEW"><span class="icon">📊</span> Laporan</a>
+            <div class="sidebar-group sidebar-group-collapsible" data-group="settings">
+                <button type="button" class="sidebar-group-header" aria-expanded="false">
+                    <span class="sidebar-group-label">Settings</span>
+                    <span class="accordion-arrow">&rsaquo;</span>
+                </button>
+                <div class="sidebar-submenu" hidden>
+                    <a class="sidebar-link" data-tab="closing" data-require-role="ADMIN,SUPERADMIN"><span class="icon">🔐</span> Tutup Buku</a>
+                </div>
             </div>
         </nav>
 
@@ -209,36 +254,36 @@
     </div>
 </div>
 
-<script src="assets/js/api-client.js?v=20260927"></script>
-<script src="assets/js/ui.js?v=20260927"></script>
-<script src="assets/js/modal.js?v=20260927"></script>
-<script src="assets/js/drawer.js?v=20260927"></script>
-<script src="assets/js/data-table.js?v=20260927"></script>
-<script src="assets/js/auth.js?v=20260927"></script>
-<script src="assets/js/master.js?v=20260927"></script>
-<script src="assets/js/dashboard.js?v=20260927"></script>
-<script src="assets/js/stock-report.js?v=20260927"></script>
-<script src="assets/js/reports.js?v=20260927"></script>
-<script src="assets/js/transactions.js?v=20260927"></script>
-<script src="assets/js/transaction-history.js?v=20260927"></script>
-<script src="assets/js/transfers.js?v=20260927"></script>
-<script src="assets/js/production.js?v=20260927"></script>
-<script src="assets/js/stock-opname.js?v=20260927"></script>
-<script src="assets/js/adjustments.js?v=20260927"></script>
-<script src="assets/js/closing.js?v=20260927"></script>
-<script src="assets/js/imports.js?v=20260927"></script>
-<script src="assets/js/audit.js?v=20260927"></script>
-<script src="assets/js/master-common.js?v=20260927"></script>
-<script src="assets/js/master-categories.js?v=20260927"></script>
-<script src="assets/js/master-vendors.js?v=20260927"></script>
-<script src="assets/js/master-bakery-destinations.js?v=20260927"></script>
-<script src="assets/js/master-items.js?v=20260927"></script>
-<script src="assets/js/master-warehouses.js?v=20260927"></script>
-<script src="assets/js/master-divisions.js?v=20260927"></script>
-<script src="assets/js/trace-drawer.js?v=20260927"></script>
-<script src="assets/js/trace-center.js?v=20260927"></script>
-<script src="assets/js/report-hpp.js?v=20260927"></script>
-<script src="assets/js/sidebar.js?v=20260927"></script>
-<script src="assets/js/app.js?v=20260927"></script>
+<script src="assets/js/api-client.js?v=20260928"></script>
+<script src="assets/js/ui.js?v=20260928"></script>
+<script src="assets/js/modal.js?v=20260928"></script>
+<script src="assets/js/drawer.js?v=20260928"></script>
+<script src="assets/js/data-table.js?v=20260928"></script>
+<script src="assets/js/auth.js?v=20260928"></script>
+<script src="assets/js/master.js?v=20260928"></script>
+<script src="assets/js/dashboard.js?v=20260928"></script>
+<script src="assets/js/stock-report.js?v=20260928"></script>
+<script src="assets/js/reports.js?v=20260928"></script>
+<script src="assets/js/transactions.js?v=20260928"></script>
+<script src="assets/js/transaction-history.js?v=20260928"></script>
+<script src="assets/js/transfers.js?v=20260928"></script>
+<script src="assets/js/production.js?v=20260928"></script>
+<script src="assets/js/stock-opname.js?v=20260928"></script>
+<script src="assets/js/adjustments.js?v=20260928"></script>
+<script src="assets/js/closing.js?v=20260928"></script>
+<script src="assets/js/imports.js?v=20260928"></script>
+<script src="assets/js/audit.js?v=20260928"></script>
+<script src="assets/js/master-common.js?v=20260928"></script>
+<script src="assets/js/master-categories.js?v=20260928"></script>
+<script src="assets/js/master-vendors.js?v=20260928"></script>
+<script src="assets/js/master-bakery-destinations.js?v=20260928"></script>
+<script src="assets/js/master-items.js?v=20260928"></script>
+<script src="assets/js/master-warehouses.js?v=20260928"></script>
+<script src="assets/js/master-divisions.js?v=20260928"></script>
+<script src="assets/js/trace-drawer.js?v=20260928"></script>
+<script src="assets/js/trace-center.js?v=20260928"></script>
+<script src="assets/js/report-hpp.js?v=20260928"></script>
+<script src="assets/js/sidebar.js?v=20260928"></script>
+<script src="assets/js/app.js?v=20260928"></script>
 </body>
 </html>

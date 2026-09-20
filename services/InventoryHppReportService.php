@@ -131,7 +131,7 @@ final class InventoryHppReportService
     // negative economic value positive (see class docblock). The -direction
     // branch keeps ABS() deliberately: FifoService::postOut() provably never
     // writes a negative subtotal, so it's a documented no-op, not dead code.
-    private const SIGNED_VALUE_SQL = "CASE
+    public const SIGNED_VALUE_SQL = "CASE
         WHEN t.transaction_type IN ('IN','OPENING','TRANSFER_IN','PRODUCTION_OUT') THEN l.subtotal
         WHEN t.transaction_type IN ('OUT','TRANSFER_OUT','PRODUCTION_IN') THEN -ABS(l.subtotal)
         ELSE l.subtotal
@@ -154,7 +154,7 @@ final class InventoryHppReportService
      * clamping applies anywhere and every report behaves exactly as it
      * did before this phase.
      */
-    private static function liveOpeningDate(PDO $pdo): ?string
+    public static function liveOpeningDate(PDO $pdo): ?string
     {
         $candidates = [];
         $committed = $pdo->query("SELECT MIN(cutoff_date) FROM stock_openings WHERE status = 'COMMITTED'")->fetchColumn();
@@ -180,7 +180,7 @@ final class InventoryHppReportService
      * `MAX(requested_start_date, live_opening_date)`. See the class
      * docblock's "Cutover awareness" section for the full rationale.
      */
-    private static function cutoverContext(PDO $pdo, string $requestedStart, string $requestedEnd): array
+    public static function cutoverContext(PDO $pdo, string $requestedStart, string $requestedEnd): array
     {
         $liveOpeningDate = self::liveOpeningDate($pdo);
         $effectiveStart = ($liveOpeningDate !== null && $liveOpeningDate > $requestedStart) ? $liveOpeningDate : $requestedStart;
@@ -512,7 +512,7 @@ final class InventoryHppReportService
     // ------------------------------------------------------------------
 
     /** @return array{opening:float,purchase:float,fifo_hpp:float,ending:float,reconciliation:float,variance:float,adjustment_net:float,opname_net:float,reversal_net:float,production_net:float,transfer_in:float,transfer_out:float,opening_mid_period:float,voided_out_net:float,voided_in_net:float} */
-    private static function periodTotals(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, ?int $categoryId, ?string $q): array
+    public static function periodTotals(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, ?int $categoryId, ?string $q): array
     {
         [$itemJoin, $itemWhere, $itemBind] = self::itemFilterClauses($categoryId, $q);
 
@@ -602,7 +602,7 @@ final class InventoryHppReportService
      * correctly stay excluded, only `type='OPENING'` gets the boundary
      * inclusion.
      */
-    private static function signedValueBefore(PDO $pdo, string $beforeDate, ?int $warehouseId, string $itemJoin, array $itemWhere, array $itemBind, bool $isOpeningBoundary = false): float
+    public static function signedValueBefore(PDO $pdo, string $beforeDate, ?int $warehouseId, string $itemJoin, array $itemWhere, array $itemBind, bool $isOpeningBoundary = false): float
     {
         $dateCondition = $isOpeningBoundary
             ? "(t.transaction_date < :before OR (t.transaction_type = 'OPENING' AND t.transaction_date = :before_boundary))"
@@ -686,7 +686,7 @@ final class InventoryHppReportService
     }
 
     /** @return array{0:string,1:list<string>,2:array<string,mixed>} [join SQL, extra WHERE clauses, bind params] */
-    private static function itemFilterClauses(?int $categoryId, ?string $q): array
+    public static function itemFilterClauses(?int $categoryId, ?string $q): array
     {
         if ($categoryId === null && ($q === null || trim($q) === '')) {
             return ['', [], []];
@@ -731,7 +731,7 @@ final class InventoryHppReportService
      *
      * @return array{rows: list<array<string,mixed>>, cutover: array}
      */
-    private static function buildDailyRows(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, ?int $categoryId, ?string $q): array
+    public static function buildDailyRows(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, ?int $categoryId, ?string $q): array
     {
         [$itemJoin, $itemWhere, $itemBind] = self::itemFilterClauses($categoryId, $q);
         $cutover = self::cutoverContext($pdo, $startDate, $endDate);
@@ -765,12 +765,23 @@ final class InventoryHppReportService
             }
             $movWhere = array_merge($movWhere, $itemWhere);
             $movWhereSql = implode(' AND ', $movWhere);
+            // PHASE V2.6B: reversal_net/production_net/opening_mid_period/
+            // voided_out_net/voided_in_net are ADDITIVE disclosure columns —
+            // purely for the "Other IN"/breakdown-drawer reporting pack
+            // (Report 2, Pergerakan Stok Harian). The authoritative arithmetic
+            // path (net_signed_value -> stok_akhir below) is untouched, exactly
+            // mirroring periodTotals()'s own equivalent per-period buckets.
             $stmt = $pdo->prepare(
                 "SELECT DATE(t.transaction_date) AS d,
                     SUM(CASE WHEN t.transaction_type = 'IN' AND t.status = 'POSTED' THEN l.subtotal ELSE 0 END) AS purchase,
                     SUM(CASE WHEN t.transaction_type = 'TRANSFER_IN' THEN l.subtotal ELSE 0 END) AS transfer_in,
                     SUM(CASE WHEN t.transaction_type = 'TRANSFER_OUT' THEN ABS(l.subtotal) ELSE 0 END) AS transfer_out,
                     SUM(CASE WHEN t.transaction_type = 'ADJUSTMENT' THEN l.subtotal ELSE 0 END) AS adjustment_net,
+                    SUM(CASE WHEN t.transaction_type = 'REVERSAL' THEN l.subtotal ELSE 0 END) AS reversal_net,
+                    SUM(CASE WHEN t.transaction_type = 'PRODUCTION_OUT' THEN l.subtotal WHEN t.transaction_type = 'PRODUCTION_IN' THEN -ABS(l.subtotal) ELSE 0 END) AS production_net,
+                    SUM(CASE WHEN t.transaction_type = 'OPENING' THEN l.subtotal ELSE 0 END) AS opening_mid_period,
+                    SUM(CASE WHEN t.transaction_type = 'OUT' AND t.status = 'VOID' THEN -ABS(l.subtotal) ELSE 0 END) AS voided_out_net,
+                    SUM(CASE WHEN t.transaction_type = 'IN' AND t.status = 'VOID' THEN l.subtotal ELSE 0 END) AS voided_in_net,
                     SUM(" . self::SIGNED_VALUE_SQL . ") AS net_signed_value
                  FROM inventory_transaction_lines l
                  JOIN inventory_transactions t ON t.id = l.transaction_id
@@ -818,6 +829,8 @@ final class InventoryHppReportService
                     'date' => $cursor, 'stok_awal' => 0.0, 'pembelian' => 0.0, 'fifo_out' => 0.0,
                     'transfer_in' => 0.0, 'transfer_out' => 0.0, 'adjustment' => 0.0, 'stok_akhir' => 0.0,
                     'hpp_reconciliation' => 0.0, 'variance' => 0.0, 'is_pre_go_live' => true,
+                    'reversal_net' => 0.0, 'production_net' => 0.0, 'opening_mid_period' => 0.0,
+                    'voided_out_net' => 0.0, 'voided_in_net' => 0.0,
                 ];
                 $cursor = date('Y-m-d', strtotime($cursor . ' +1 day'));
                 continue;
@@ -835,6 +848,11 @@ final class InventoryHppReportService
             $adjustment = $d !== null ? (float) $d['adjustment_net'] : 0.0;
             $netSigned = $d !== null ? (float) $d['net_signed_value'] : 0.0;
             $fifoOut = $fifoByDate[$cursor] ?? 0.0;
+            $reversalNet = $d !== null ? (float) $d['reversal_net'] : 0.0;
+            $productionNet = $d !== null ? (float) $d['production_net'] : 0.0;
+            $openingMidPeriod = $d !== null ? (float) $d['opening_mid_period'] : 0.0;
+            $voidedOutNet = $d !== null ? (float) $d['voided_out_net'] : 0.0;
+            $voidedInNet = $d !== null ? (float) $d['voided_in_net'] : 0.0;
 
             $stokAkhir = round($running + $netSigned, 4);
             $hppReconciliation = round($stokAwal + $pembelian - $stokAkhir, 4);
@@ -845,6 +863,11 @@ final class InventoryHppReportService
                 'stok_awal' => round($stokAwal, 4),
                 'pembelian' => round($pembelian, 4),
                 'fifo_out' => round($fifoOut, 4),
+                'reversal_net' => round($reversalNet, 4),
+                'production_net' => round($productionNet, 4),
+                'opening_mid_period' => round($openingMidPeriod, 4),
+                'voided_out_net' => round($voidedOutNet, 4),
+                'voided_in_net' => round($voidedInNet, 4),
                 'transfer_in' => round($transferIn, 4),
                 'transfer_out' => round($transferOut, 4),
                 'adjustment' => round($adjustment, 4),
