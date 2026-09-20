@@ -62,7 +62,7 @@ const UI = (() => {
         const map = {
             PENDING: 'badge-pending', RECEIVED: 'badge-received', CANCELLED: 'badge-cancelled',
             OPEN: 'badge-open', FINALIZED: 'badge-finalized', POSTED: 'badge-posted',
-            VOID: 'badge-void', LOCKED: 'badge-locked', PASS: 'badge-pass',
+            VOID: 'badge-void', REVERSED: 'badge-reversed', LOCKED: 'badge-locked', PASS: 'badge-pass',
             WARNING: 'badge-warning', ERROR: 'badge-error',
         };
         return map[String(status).toUpperCase()] || 'badge-pending';

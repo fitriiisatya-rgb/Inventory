@@ -112,7 +112,10 @@ try {
         'request_uuid' => uid('void3'), 'transaction_id' => $inResult2['transaction_id'],
         'reason' => 'trying to void an already-voided transaction', 'voided_by' => $userId,
     ]));
-} catch (ValidationException $e) {
+} catch (\App\Services\TransactionAlreadyVoidException $e) {
+    // PHASE V2.5: this specific case now throws a dedicated exception
+    // (TRANSACTION_ALREADY_VOID) instead of the generic ValidationException
+    // it used to — same rejection, a more specific/structured error code.
     $doubleVoidRejected = true;
 }
 check('Double VOID with a NEW request_uuid on an already-voided transaction is rejected', $doubleVoidRejected);

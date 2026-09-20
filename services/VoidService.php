@@ -41,6 +41,11 @@ final class VoidService
             return ['success' => true, 'idempotent_replay' => true, 'reversal_transaction_id' => (int) $existing['id']];
         }
 
+        $reason = trim((string) $p['reason']);
+        if (mb_strlen($reason) < 5) {
+            throw new ValidationException(['a void reason of at least 5 characters is required']);
+        }
+
         $original = $pdo->prepare('SELECT * FROM inventory_transactions WHERE id = :id');
         $original->execute(['id' => $p['transaction_id']]);
         $original = $original->fetch();
@@ -48,11 +53,31 @@ final class VoidService
             throw new NotFoundException('original transaction not found');
         }
 
+        // PHASE V2.5: OPENING is the authoritative go-live baseline — never
+        // voidable through this generic flow, even by SUPERADMIN, and never
+        // silently lumped in with the generic "unsupported type" message
+        // below so the frontend can hide the button and the API can explain
+        // exactly why with a dedicated code (OPENING_PROTECTED).
+        if ($original['transaction_type'] === 'OPENING') {
+            throw new OpeningProtectedException((int) $original['id']);
+        }
+
+        // PHASE V2.5: a historical-import row (inventory_effect=0) never
+        // touched live stock/batches when it was posted — it exists for
+        // audit visibility only (V2.3D). Voiding it through this flow would
+        // fabricate a live FIFO reversal for a movement that was never live
+        // to begin with, so it is blocked outright rather than silently
+        // "succeeding" against batches/allocations that don't exist for it.
+        if ((int) $original['inventory_effect'] === 0) {
+            throw new ValidationException(["transaction {$original['id']} is a historical-import row (inventory_effect=0) and cannot be voided — it never affected live inventory"]);
+        }
+
         if ($original['status'] !== 'POSTED') {
             // A genuinely new void request (different request_uuid) against an
-            // already-VOIDED transaction is an error, not a silent no-op —
-            // idempotency only covers a retried request_uuid (handled above).
-            throw new ValidationException(["transaction {$p['transaction_id']} is already {$original['status']}, cannot void it again"]);
+            // already-VOIDED/REVERSED transaction is an error, not a silent
+            // no-op — idempotency only covers a retried request_uuid (handled
+            // above).
+            throw new TransactionAlreadyVoidException((int) $original['id'], (string) $original['status']);
         }
 
         if (!in_array($original['transaction_type'], self::VOIDABLE_TYPES, true)) {
@@ -93,13 +118,24 @@ final class VoidService
 
         $pdo->prepare(
             'UPDATE inventory_transactions SET status = \'VOID\', void_reason = :reason, voided_by = :by, voided_at = :now WHERE id = :id'
-        )->execute(['reason' => $p['reason'], 'by' => $p['voided_by'], 'now' => $now, 'id' => $original['id']]);
+        )->execute(['reason' => $reason, 'by' => $p['voided_by'], 'now' => $now, 'id' => $original['id']]);
 
         AuditService::log(
             $pdo, $p['voided_by'], $p['username'] ?? 'system', 'TRANSACTION_VOID',
             'inventory_transactions', $original['id'],
-            ['status' => 'POSTED'], ['status' => 'VOID', 'reversal_transaction_id' => $reversalTransactionId, 'locked_period_override' => $isLocked],
-            $p['reason']
+            ['status' => 'POSTED'],
+            [
+                'status' => 'VOID',
+                'action_type' => 'VOID',
+                'original_entity_type' => 'inventory_transactions',
+                'original_transaction_id' => (int) $original['id'],
+                'reversal_transaction_id' => $reversalTransactionId,
+                'warehouse_id' => (int) $original['warehouse_id'],
+                'before_status' => 'POSTED',
+                'after_status' => 'VOID',
+                'locked_period_override' => $isLocked,
+            ],
+            $reason
         );
 
         return [
@@ -118,6 +154,27 @@ final class VoidService
         $batch = $batch->fetch();
         if (!$batch) {
             throw new ValidationException(['original batch no longer exists — cannot reverse']);
+        }
+
+        // PHASE V2.5: if anything has already consumed from this batch (a
+        // later OUT/TRANSFER_OUT/PRODUCTION_IN/negative-ADJUSTMENT), its
+        // current qty_base is below what this line originally created — a
+        // naive `qty_base -= qty` here would drive it negative and corrupt
+        // FIFO lineage. Block rather than attempt a partial/unsafe reversal;
+        // the caller must void the downstream dependents first (their own
+        // reversal restores the batch to original_qty_base, at which point
+        // this void becomes safe).
+        if (abs((float) $batch['qty_base'] - (float) $batch['original_qty_base']) > 0.000001) {
+            $depStmt = $pdo->prepare(
+                "SELECT DISTINCT t.id, t.transaction_uuid, t.transaction_type, t.transaction_date, t.reference_no
+                 FROM fifo_allocations fa
+                 JOIN inventory_transaction_lines l2 ON l2.id = fa.transaction_line_id
+                 JOIN inventory_transactions t ON t.id = l2.transaction_id
+                 WHERE fa.batch_id = :batch_id AND t.status = 'POSTED' AND t.id <> :original_tx_id
+                 ORDER BY t.transaction_date"
+            );
+            $depStmt->execute(['batch_id' => $batch['id'], 'original_tx_id' => $line['transaction_id']]);
+            throw new VoidHasDownstreamDependenciesException((int) $line['transaction_id'], $depStmt->fetchAll());
         }
 
         $qty = abs((float) $line['base_qty']);

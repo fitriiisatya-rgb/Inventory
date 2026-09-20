@@ -155,8 +155,9 @@ final class TransferService
         if ($transfer['status'] !== 'PENDING') {
             throw new ValidationException(['only a PENDING (not yet received) transfer can be cancelled']);
         }
-        if (trim((string) ($p['reason'] ?? '')) === '') {
-            throw new ValidationException(['a cancel reason is required']);
+        $cancelReason = trim((string) ($p['reason'] ?? ''));
+        if (mb_strlen($cancelReason) < 5) {
+            throw new ValidationException(['a cancel reason of at least 5 characters is required']);
         }
 
         // Restore each consumed FIFO layer exactly as it was — no new batch, no re-averaging.
@@ -189,6 +190,176 @@ final class TransferService
         AuditService::log($pdo, $p['created_by'], $p['username'] ?? 'system', 'TRANSFER_CANCEL', 'warehouse_transfers', $transferId, null, null, $p['reason']);
 
         return ['success' => true, 'transfer_id' => $transferId];
+    }
+
+    /**
+     * PHASE V2.5: the RECEIVED-transfer correction flow. Reverses the WHOLE
+     * chain atomically — destination batch(es), TRANSFER_IN status,
+     * TRANSFER_OUT status, and the exact source FIFO allocations — never a
+     * second "cancel". Blocked (never a naive partial reversal) if anything
+     * has consumed from a destination batch since receipt: OUT, production,
+     * another transfer, an adjustment, or an opname correction all leave a
+     * live fifo_allocations claim against that batch, which this method
+     * detects and refuses to touch.
+     *
+     * @param array $p { created_by, username, reason (required, >=5 chars), request_uuid }
+     */
+    public static function reverse(PDO $pdo, int $transferId, array $p): array
+    {
+        $transfer = self::find($pdo, $transferId);
+        $requestUuid = $p['request_uuid'] ?? null;
+
+        if ($transfer['status'] === 'REVERSED') {
+            // Same request retried — safe no-op. A genuinely NEW attempt (no
+            // matching request_uuid) against an already-reversed transfer is
+            // an error, matching VoidService's/cancel()'s sibling pattern.
+            if ($requestUuid !== null && $requestUuid === $transfer['reverse_request_uuid']) {
+                return ['success' => true, 'idempotent_replay' => true, 'transfer_id' => $transferId];
+            }
+            throw new TransferAlreadyReversedException($transferId);
+        }
+        if ($transfer['status'] !== 'RECEIVED') {
+            throw new ValidationException(["only a RECEIVED transfer can be reversed (current status: {$transfer['status']})"]);
+        }
+
+        $reason = trim((string) ($p['reason'] ?? ''));
+        if (mb_strlen($reason) < 5) {
+            throw new ValidationException(['a reversal reason of at least 5 characters is required']);
+        }
+
+        $lines = $pdo->prepare('SELECT * FROM warehouse_transfer_lines WHERE transfer_id = :id');
+        $lines->execute(['id' => $transferId]);
+        $lines = $lines->fetchAll();
+
+        // Step 6: dependency analysis — for every destination batch this
+        // transfer created, verify its full received qty is still intact
+        // (qty_base == original_qty_base). If not, something downstream has
+        // already consumed from it and an automatic reversal cannot be
+        // guaranteed correct.
+        $dependencies = [];
+        foreach ($lines as $line) {
+            if ($line['in_transaction_line_id'] === null) {
+                continue; // defensive: shouldn't happen once status=RECEIVED
+            }
+            $batch = $pdo->prepare('SELECT * FROM inventory_batches WHERE source_transaction_line_id = :id');
+            $batch->execute(['id' => $line['in_transaction_line_id']]);
+            $batch = $batch->fetch();
+            if (!$batch) {
+                continue;
+            }
+            if (abs((float) $batch['qty_base'] - (float) $batch['original_qty_base']) > 0.000001) {
+                $depStmt = $pdo->prepare(
+                    "SELECT DISTINCT t.id, t.transaction_uuid, t.transaction_type, t.transaction_date, t.reference_no
+                     FROM fifo_allocations fa
+                     JOIN inventory_transaction_lines l2 ON l2.id = fa.transaction_line_id
+                     JOIN inventory_transactions t ON t.id = l2.transaction_id
+                     WHERE fa.batch_id = :batch_id AND t.status = 'POSTED'
+                     ORDER BY t.transaction_date"
+                );
+                $depStmt->execute(['batch_id' => $batch['id']]);
+                foreach ($depStmt->fetchAll() as $row) {
+                    $dependencies[(int) $row['id']] = $row; // de-dup by transaction id across lines
+                }
+            }
+        }
+        if (!empty($dependencies)) {
+            throw new TransferReversalHasDownstreamDependenciesException($transferId, array_values($dependencies));
+        }
+
+        $now = date('Y-m-d H:i:s');
+        $inTxIds = [];
+        $outTxIds = [];
+
+        foreach ($lines as $line) {
+            // Step 7: reverse destination inventory — this transfer's own
+            // batch is verified untouched above, so zeroing it out (never a
+            // physical delete — batches are never removed) is exactly the
+            // inverse of the receive() that created it.
+            if ($line['in_transaction_line_id'] !== null) {
+                $pdo->prepare(
+                    'UPDATE inventory_batches SET qty_base = 0 WHERE source_transaction_line_id = :line_id'
+                )->execute(['line_id' => $line['in_transaction_line_id']]);
+
+                $inTxRow = $pdo->prepare('SELECT transaction_id FROM inventory_transaction_lines WHERE id = :id');
+                $inTxRow->execute(['id' => $line['in_transaction_line_id']]);
+                $inTxIds[] = (int) $inTxRow->fetchColumn();
+            }
+
+            // Step 10: restore the exact original FIFO source allocations —
+            // never a re-average, never a new batch. A multi-layer transfer
+            // line creates one warehouse_transfer_lines row PER FIFO layer,
+            // but every one of those rows shares the SAME out_transaction_line_id
+            // (create() ran exactly one postOut() per user-requested line —
+            // see its class docblock). Restoring by "every fifo_allocations
+            // row for that out_transaction_line_id" would therefore restore
+            // every layer once PER warehouse_transfer_lines row — i.e. N
+            // times for an N-layer consumption. Match this line's own
+            // qty_base/unit_cost_base (LIMIT 1), the exact same
+            // disambiguation cancel() already uses for this identical
+            // shared-out_transaction_line_id shape.
+            if ($line['out_transaction_line_id'] !== null) {
+                $restoreBatch = $pdo->prepare(
+                    'UPDATE inventory_batches b
+                     JOIN fifo_allocations fa ON fa.batch_id = b.id
+                     SET b.qty_base = b.qty_base + fa.qty_allocated
+                     WHERE fa.transaction_line_id = :out_line_id AND fa.qty_allocated = :qty AND fa.unit_cost_base = :cost
+                     LIMIT 1'
+                );
+                $restoreBatch->execute(['out_line_id' => $line['out_transaction_line_id'], 'qty' => $line['qty_base'], 'cost' => $line['unit_cost_base']]);
+
+                $outTxRow = $pdo->prepare('SELECT transaction_id FROM inventory_transaction_lines WHERE id = :id');
+                $outTxRow->execute(['id' => $line['out_transaction_line_id']]);
+                $outTxIds[] = (int) $outTxRow->fetchColumn();
+            }
+        }
+
+        $inTxIds = array_values(array_unique($inTxIds));
+        $outTxIds = array_values(array_unique($outTxIds));
+
+        // Steps 8-9: flip TRANSFER_IN / TRANSFER_OUT transaction status to
+        // REVERSED — the original rows are never edited beyond status, never
+        // deleted, matching VoidService's/cancel()'s status-flip convention.
+        foreach ($inTxIds as $txId) {
+            $pdo->prepare("UPDATE inventory_transactions SET status = 'REVERSED' WHERE id = :id")->execute(['id' => $txId]);
+        }
+        foreach ($outTxIds as $txId) {
+            $pdo->prepare("UPDATE inventory_transactions SET status = 'REVERSED' WHERE id = :id")->execute(['id' => $txId]);
+        }
+
+        // Step 11: mark the transfer itself REVERSED.
+        $pdo->prepare(
+            "UPDATE warehouse_transfers
+             SET status = 'REVERSED', reverse_reason = :reason, reversed_by = :by, reversed_at = :now, reverse_request_uuid = :req_uuid
+             WHERE id = :id"
+        )->execute(['reason' => $reason, 'by' => $p['created_by'], 'now' => $now, 'req_uuid' => $requestUuid, 'id' => $transferId]);
+
+        // Step 12: full audit log — reuses the existing AuditService, no
+        // parallel audit framework.
+        AuditService::log(
+            $pdo, $p['created_by'], $p['username'] ?? 'system', 'TRANSFER_REVERSE',
+            'warehouse_transfers', $transferId,
+            ['status' => 'RECEIVED'],
+            [
+                'status' => 'REVERSED',
+                'action_type' => 'REVERSE_TRANSFER',
+                'original_entity_type' => 'warehouse_transfers',
+                'original_entity_id' => $transferId,
+                'transfer_id' => $transferId,
+                'transfer_out_transaction_ids' => $outTxIds,
+                'transfer_in_transaction_ids' => $inTxIds,
+                'warehouse_id' => (int) $transfer['from_warehouse_id'],
+                'before_status' => 'RECEIVED',
+                'after_status' => 'REVERSED',
+            ],
+            $reason
+        );
+
+        return [
+            'success' => true,
+            'transfer_id' => $transferId,
+            'transfer_out_transaction_ids' => $outTxIds,
+            'transfer_in_transaction_ids' => $inTxIds,
+        ];
     }
 
     public static function get(PDO $pdo, int $transferId): array

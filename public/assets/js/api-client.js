@@ -17,10 +17,14 @@ const InvApi = (() => {
     let csrfToken = null;
 
     class ApiError extends Error {
-        constructor(code, message, status) {
+        constructor(code, message, status, details) {
             super(message);
             this.code = code;
             this.status = status;
+            // PHASE V2.5: VOID_HAS_DOWNSTREAM_DEPENDENCIES / TRANSFER_REVERSAL_HAS_DOWNSTREAM_DEPENDENCIES
+            // carry a `dependencies` list — surfaced here so the UI can list
+            // the blocking transaction IDs instead of just the message text.
+            this.dependencies = details && details.dependencies ? details.dependencies : undefined;
         }
     }
     class NetworkError extends Error {
@@ -72,7 +76,7 @@ const InvApi = (() => {
         if (!payload.success) {
             const code = payload.error?.code || 'UNKNOWN_ERROR';
             const message = payload.error?.message || `Request failed (${res.status})`;
-            throw new ApiError(code, message, res.status);
+            throw new ApiError(code, message, res.status, payload.error);
         }
         return payload.data;
     }
@@ -205,6 +209,7 @@ const InvApi = (() => {
         createTransfer: (payload) => request('POST', '/transfers', payload),
         receiveTransfer: (id, payload) => request('POST', `/transfers/${id}/receive`, payload),
         cancelTransfer: (id, payload) => request('POST', `/transfers/${id}/cancel`, payload),
+        reverseTransfer: (id, payload) => request('POST', `/transfers/${id}/reverse`, payload),
         listTransfers: () => request('GET', '/transfers'),
         listPendingTransfers: () => request('GET', '/transfers/pending'),
         getTransfer: (id) => request('GET', `/transfers/${id}`),

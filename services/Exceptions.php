@@ -199,6 +199,80 @@ final class ValidationException extends RuntimeException
 }
 
 /**
+ * PHASE V2.5: OPENING is the authoritative go-live baseline — it is never
+ * voidable through the generic correction flow, even by SUPERADMIN. If a
+ * correction is ever genuinely required, it must go through a separate,
+ * explicitly controlled cutover/opening correction procedure (not built by
+ * this phase). Error code: OPENING_PROTECTED.
+ */
+final class OpeningProtectedException extends RuntimeException
+{
+    public function __construct(public readonly int $transactionId)
+    {
+        parent::__construct("OPENING_PROTECTED: transaction {$transactionId} is an OPENING record and cannot be voided/reversed through this flow");
+    }
+}
+
+/**
+ * PHASE V2.5: a genuinely new void request (different request_uuid) against
+ * a transaction that is no longer POSTED (already VOID or REVERSED). Distinct
+ * from the idempotent-replay path (a retried request_uuid returns success).
+ * Error code: TRANSACTION_ALREADY_VOID.
+ */
+final class TransactionAlreadyVoidException extends RuntimeException
+{
+    public function __construct(public readonly int $transactionId, public readonly string $currentStatus)
+    {
+        parent::__construct("TRANSACTION_ALREADY_VOID: transaction {$transactionId} is already {$currentStatus}, cannot void it again");
+    }
+}
+
+/**
+ * PHASE V2.5: an IN (or positive ADJUSTMENT) transaction's created batch has
+ * already been partially or fully consumed by a later OUT/TRANSFER_OUT/
+ * PRODUCTION_IN/negative-ADJUSTMENT transaction — a naive quantity
+ * subtraction would drive the batch negative and corrupt FIFO lineage.
+ * The void is blocked rather than attempting an unsafe partial reversal;
+ * the caller must void the downstream dependents first. Error code:
+ * VOID_HAS_DOWNSTREAM_DEPENDENCIES.
+ */
+final class VoidHasDownstreamDependenciesException extends RuntimeException
+{
+    /** @param array<int, array{id:int, transaction_uuid:string, transaction_type:string, transaction_date:string, reference_no:?string}> $dependencies */
+    public function __construct(public readonly int $transactionId, public readonly array $dependencies)
+    {
+        $ids = implode(', ', array_map(static fn ($d) => '#' . $d['id'], $dependencies));
+        parent::__construct("VOID_HAS_DOWNSTREAM_DEPENDENCIES: transaction {$transactionId}'s stock has already been consumed by: {$ids} — void those first");
+    }
+}
+
+/** Genuinely new attempt (different request_uuid) to reverse a transfer that is already REVERSED. Error code: TRANSFER_ALREADY_REVERSED. */
+final class TransferAlreadyReversedException extends RuntimeException
+{
+    public function __construct(public readonly int $transferId)
+    {
+        parent::__construct("TRANSFER_ALREADY_REVERSED: transfer {$transferId} has already been reversed");
+    }
+}
+
+/**
+ * PHASE V2.5: a RECEIVED transfer's destination batch(es) have already been
+ * consumed downstream (OUT, production, another transfer, adjustment, opname
+ * correction) — an automatic reversal cannot be guaranteed correct, so it is
+ * blocked rather than silently corrupting FIFO lineage. Error code:
+ * TRANSFER_REVERSAL_HAS_DOWNSTREAM_DEPENDENCIES.
+ */
+final class TransferReversalHasDownstreamDependenciesException extends RuntimeException
+{
+    /** @param array<int, array{id:int, transaction_uuid:string, transaction_type:string, transaction_date:string, reference_no:?string}> $dependencies */
+    public function __construct(public readonly int $transferId, public readonly array $dependencies)
+    {
+        $ids = implode(', ', array_map(static fn ($d) => '#' . $d['id'], $dependencies));
+        parent::__construct("TRANSFER_REVERSAL_HAS_DOWNSTREAM_DEPENDENCIES: transfer {$transferId}'s destination stock has already been used by: {$ids}");
+    }
+}
+
+/**
  * Shared "does this input array have everything it claims to" guard, used
  * by every service method that accepts a raw request payload — so a
  * malformed/incomplete client request fails as a clean VALIDATION_FAILED

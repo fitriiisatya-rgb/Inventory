@@ -405,13 +405,14 @@ final class TraceService
             'SELECT t.*, fw.code AS from_warehouse_code, fw.name AS from_warehouse_name,
                     tw.code AS to_warehouse_code, tw.name AS to_warehouse_name,
                     cu.username AS created_by_username, ru.username AS received_by_username,
-                    xu.username AS cancelled_by_username
+                    xu.username AS cancelled_by_username, vu.username AS reversed_by_username
              FROM warehouse_transfers t
              JOIN warehouses fw ON fw.id = t.from_warehouse_id
              JOIN warehouses tw ON tw.id = t.to_warehouse_id
              LEFT JOIN users cu ON cu.id = t.created_by
              LEFT JOIN users ru ON ru.id = t.received_by
              LEFT JOIN users xu ON xu.id = t.cancelled_by
+             LEFT JOIN users vu ON vu.id = t.reversed_by
              WHERE t.id = :id'
         );
         $stmt->execute(['id' => $transferId]);

@@ -12,6 +12,7 @@ const Transfers = (() => {
 
     const receiveUuids = new Map();
     const cancelUuids = new Map();
+    const reverseUuids = new Map();
 
     async function render(container) {
         container.innerHTML =
@@ -227,6 +228,22 @@ const Transfers = (() => {
     }
 
     function transferActions(t) {
+        // PHASE V2.5 — RECEIVED transfer correction: privileged-only
+        // (TRANSFER_REVERSE, never granted to STOCK — see the migration),
+        // so the permission check alone decides visibility here, same as
+        // the backend route (no per-warehouse gating on top of it).
+        if (t.status === 'RECEIVED') {
+            if (!Auth.hasPermission('TRANSFER_REVERSE')) {
+                return '-';
+            }
+            return [
+                UI.el('button', {
+                    class: 'btn btn-danger btn-sm transfer-reverse-btn',
+                    'data-id': String(t.id),
+                }, 'Reverse Transfer'),
+            ];
+        }
+
         if (t.status !== 'PENDING') {
             return '-';
         }
@@ -272,6 +289,7 @@ const Transfers = (() => {
     function wireRowActions() {
         document.querySelectorAll('.transfer-receive-btn').forEach((btn) => btn.addEventListener('click', () => receiveTransfer(Number(btn.dataset.id), btn)));
         document.querySelectorAll('.transfer-cancel-btn').forEach((btn) => btn.addEventListener('click', () => cancelTransfer(Number(btn.dataset.id), btn)));
+        document.querySelectorAll('.transfer-reverse-btn').forEach((btn) => btn.addEventListener('click', () => reverseTransfer(Number(btn.dataset.id), btn)));
         document.querySelectorAll('.transfer-trace-btn').forEach((btn) => btn.addEventListener('click', () => TraceDrawer.openTransfer(Number(btn.dataset.id))));
     }
 
@@ -302,6 +320,66 @@ const Transfers = (() => {
         } catch (err) {
             UI.handleApiError(err);
             btn.disabled = false;
+        }
+    }
+
+    // PHASE V2.5 — Reverse Transfer (RECEIVED only). Fetches the full
+    // transfer (with lines) for the confirmation modal's Total Item/Total
+    // Nilai — the list endpoint only returns the header.
+    async function reverseTransfer(id, btn) {
+        btn.disabled = true;
+        let full;
+        try {
+            full = await InvApi.getTransfer(id);
+        } catch (err) {
+            UI.handleApiError(err);
+            btn.disabled = false;
+            return;
+        }
+        const totalItem = (full.lines || []).length;
+        const totalNilai = (full.lines || []).reduce((sum, l) => sum + Number(l.qty_base) * Number(l.unit_cost_base), 0);
+
+        const reason = await Modal.form({
+            title: 'REVERSE TRANSFER',
+            infoRows: [
+                ['Transfer', `#${full.id}`],
+                ['Gudang Asal', whName(full.from_warehouse_id)],
+                ['Gudang Tujuan', whName(full.to_warehouse_id)],
+                ['Tanggal', UI.formatDate(full.ship_date)],
+                ['Status', UI.el('span', { class: `badge ${UI.badgeClass(full.status)}` }, full.status)],
+                ['Total Item', String(totalItem)],
+                ['Total Nilai', UI.formatMoney(totalNilai)],
+            ],
+            warning: 'Reversal akan membalik seluruh rantai transfer dan FIFO terkait.',
+            reasonLabel: 'Alasan Reversal',
+            reasonPlaceholder: 'Jelaskan alasan reversal transfer ini (minimal 5 karakter)',
+            confirmLabel: 'Reverse Transfer',
+            cancelLabel: 'Batal',
+            danger: true,
+        });
+        if (reason === null) {
+            btn.disabled = false;
+            return;
+        }
+
+        if (!reverseUuids.has(id)) reverseUuids.set(id, InvApi.newRequestUuid());
+        try {
+            await InvApi.reverseTransfer(id, { request_uuid: reverseUuids.get(id), reason });
+            UI.toast(`Transfer #${id} berhasil direversal.`, 'success');
+            reverseUuids.delete(id);
+            loadList();
+        } catch (err) {
+            btn.disabled = false;
+            if (err && err.dependencies && err.dependencies.length) {
+                const list = err.dependencies.map((dep) => `#${dep.id} — ${dep.transaction_type} (${UI.formatDate(dep.transaction_date)})`).join('\n');
+                await Modal.alert({
+                    title: 'Transfer Tidak Dapat Direversal Otomatis',
+                    message: `Transfer tidak dapat direversal otomatis karena stok hasil transfer sudah digunakan oleh transaksi berikutnya:\n\n${list}`,
+                });
+                return;
+            }
+            UI.handleApiError(err);
+            await Modal.alert({ title: 'Gagal Reverse Transfer', message: (err && err.message) || 'Terjadi kesalahan.' });
         }
     }
 

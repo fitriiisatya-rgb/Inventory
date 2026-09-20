@@ -82,6 +82,7 @@ tbody tr:hover { background: rgba(59,130,246,0.04); }
 .badge-finalized { background: rgba(245,158,11,0.15); color: #fbbf24; }
 .badge-posted { background: rgba(16,185,129,0.15); color: #34d399; }
 .badge-void { background: rgba(239,68,68,0.15); color: #f87171; }
+.badge-reversed { background: rgba(168,85,247,0.15); color: #c084fc; }
 .badge-locked { background: rgba(239,68,68,0.15); color: #f87171; }
 .badge-pass { background: rgba(16,185,129,0.15); color: #34d399; }
 .badge-warning { background: rgba(245,158,11,0.15); color: #fbbf24; }
@@ -89,7 +90,10 @@ tbody tr:hover { background: rgba(59,130,246,0.04); }
 
 .mono { font-family: 'JetBrains Mono', monospace; }
 
-.modal { display: none; position: fixed; top:0; left:0; width:100%; height:100%; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); justify-content: center; align-items: center; z-index: 1000; }
+/* PHASE V2.5: above the drawer (z-index 1101) — Void/Reverse Transfer
+   confirmations open FROM an already-open transaction/transfer drawer, and
+   a blocking confirmation must never render underneath it. */
+.modal { display: none; position: fixed; top:0; left:0; width:100%; height:100%; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); justify-content: center; align-items: center; z-index: 1200; }
 .modal.open { display: flex; }
 .modal-content { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; max-width: 560px; width: 90%; max-height: 85vh; overflow-y: auto; }
 .modal-content h3 { margin-bottom: 16px; }

@@ -645,18 +645,27 @@ CREATE TABLE warehouse_transfers (
     transfer_uuid       CHAR(36) NOT NULL UNIQUE,
     from_warehouse_id   INT UNSIGNED NOT NULL,
     to_warehouse_id     INT UNSIGNED NOT NULL,
-    status              ENUM('PENDING','RECEIVED','CANCELLED') NOT NULL DEFAULT 'PENDING',
+    status              ENUM('PENDING','RECEIVED','CANCELLED','REVERSED') NOT NULL DEFAULT 'PENDING',
     ship_date           DATETIME NOT NULL,                -- FIFO batch date on the receiving side (Section: "tanggal kirim")
     receive_date        DATETIME NULL,
     cancel_reason        VARCHAR(255) NULL,
     cancelled_by          INT UNSIGNED NULL,
     cancelled_at          DATETIME NULL,
+    -- PHASE V2.5: a RECEIVED transfer's correction path — the whole chain
+    -- (TRANSFER_OUT + TRANSFER_IN) is reversed atomically by
+    -- TransferService::reverse(), never a second CANCEL. Symmetric with the
+    -- cancel_* columns above.
+    reverse_reason        VARCHAR(255) NULL,
+    reversed_by            INT UNSIGNED NULL,
+    reversed_at            DATETIME NULL,
     -- Distinguish "same request retried" (idempotent no-op) from "a genuinely
-    -- new attempt to receive/cancel a transfer that's already in that state"
-    -- (TRANSFER_ALREADY_RECEIVED / TRANSFER_ALREADY_CANCELLED) — see VoidService's
-    -- sibling pattern for transactions.
+    -- new attempt to receive/cancel/reverse a transfer that's already in that
+    -- state" (TRANSFER_ALREADY_RECEIVED / TRANSFER_ALREADY_CANCELLED /
+    -- TRANSFER_ALREADY_REVERSED) — see VoidService's sibling pattern for
+    -- transactions.
     receive_request_uuid  VARCHAR(100) NULL,
     cancel_request_uuid   VARCHAR(100) NULL,
+    reverse_request_uuid  VARCHAR(100) NULL,
     created_by           INT UNSIGNED NOT NULL,
     received_by          INT UNSIGNED NULL,
     created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -665,6 +674,7 @@ CREATE TABLE warehouse_transfers (
     CONSTRAINT fk_wt_creator FOREIGN KEY (created_by) REFERENCES users(id),
     CONSTRAINT fk_wt_receiver FOREIGN KEY (received_by) REFERENCES users(id),
     CONSTRAINT fk_wt_canceller FOREIGN KEY (cancelled_by) REFERENCES users(id),
+    CONSTRAINT fk_wt_reverser FOREIGN KEY (reversed_by) REFERENCES users(id),
     CONSTRAINT chk_wt_diff_wh CHECK (from_warehouse_id <> to_warehouse_id),
     INDEX idx_wt_status (status)
 ) ENGINE=InnoDB;
@@ -890,7 +900,12 @@ INSERT INTO permissions (code, description) VALUES
     -- ADMIN/SUPERADMIN inherit these automatically (not in ADMIN's
     -- exclusion list below); STOCK/DIVISION/VIEWER get neither.
     ('MASTER_WAREHOUSE_MANAGE', 'Create/edit/deactivate/delete warehouse master data'),
-    ('MASTER_DIVISION_MANAGE',  'Create/edit/deactivate/delete division master data');
+    ('MASTER_DIVISION_MANAGE',  'Create/edit/deactivate/delete division master data'),
+    -- PHASE V2.5: same additive convention as the blocks above — ADMIN/SUPERADMIN
+    -- inherit this automatically (not in ADMIN's exclusion list below);
+    -- STOCK/DIVISION/VIEWER get it in neither case — reversing a RECEIVED
+    -- transfer is a privileged correction action, never a STOCK-role action.
+    ('TRANSFER_REVERSE', 'Reverse a RECEIVED warehouse transfer (whole TRANSFER_OUT/TRANSFER_IN chain) — privileged correction action');
 
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r CROSS JOIN permissions p WHERE r.code = 'SUPERADMIN';

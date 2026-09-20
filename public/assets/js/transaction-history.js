@@ -5,6 +5,9 @@
  * AUDIT_LOG_VIEW).
  */
 const TransactionHistory = (() => {
+    const voidUuids = new Map();
+    let activeDataTableReload = null;
+
     function render(container) {
         container.innerHTML = '';
 
@@ -33,7 +36,7 @@ const TransactionHistory = (() => {
         card.appendChild(tableHost);
         container.appendChild(card);
 
-        DataTable.render(tableHost, {
+        const dt = DataTable.render(tableHost, {
             storageKey: 'dt-transaction-history',
             filters: filters.map((f) => (f.type === 'date-like' ? { ...f, type: 'text', placeholder: `${f.label} (YYYY-MM-DD)` } : f)),
             defaultSort: 'date', defaultDir: 'desc',
@@ -59,6 +62,21 @@ const TransactionHistory = (() => {
             onRowClick: (row) => openDetail(row.transaction_id),
             emptyMessage: 'Tidak ada transaksi yang cocok dengan filter ini.',
         });
+        activeDataTableReload = dt.reload;
+    }
+
+    // PHASE V2.5 — transaction correction. IN/OUT/ADJUSTMENT while POSTED
+    // (never OPENING, never an already-VOID/REVERSED row, never a
+    // historical-import audit-only row) can be voided by a holder of
+    // TRANSACTION_VOID. The backend is the authoritative gate (STOCK never
+    // has this permission) — this check only decides whether the button is
+    // shown at all.
+    const VOIDABLE_TYPES = ['IN', 'OUT', 'ADJUSTMENT'];
+    function canVoid(d) {
+        return Auth.hasPermission('TRANSACTION_VOID')
+            && VOIDABLE_TYPES.includes(d.transaction_type)
+            && d.status === 'POSTED'
+            && !d.is_historical;
     }
 
     async function openDetail(transactionId) {
@@ -81,11 +99,18 @@ const TransactionHistory = (() => {
                         ['Dibuat Oleh', d.created_by.username],
                     ])));
 
+                    const actionsRow = UI.el('div', { style: 'margin-bottom:14px; display:flex; gap:8px; flex-wrap:wrap;' });
                     if (Auth.hasPermission('AUDIT_LOG_VIEW')) {
-                        const jejakBtn = UI.el('button', { class: 'btn btn-secondary btn-sm', style: 'margin-bottom:14px;' }, '🔍 Lihat Jejak Lengkap');
+                        const jejakBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, '🔍 Lihat Jejak Lengkap');
                         jejakBtn.addEventListener('click', () => TraceDrawer.openTransaction(transactionId));
-                        body.appendChild(jejakBtn);
+                        actionsRow.appendChild(jejakBtn);
                     }
+                    if (canVoid(d)) {
+                        const voidBtn = UI.el('button', { class: 'btn btn-danger btn-sm' }, '⛔ Void Transaksi');
+                        voidBtn.addEventListener('click', () => voidTransaction(d, voidBtn));
+                        actionsRow.appendChild(voidBtn);
+                    }
+                    if (actionsRow.children.length) body.appendChild(actionsRow);
 
                     d.lines.forEach((line, idx) => {
                         const lineRows = [
@@ -134,6 +159,55 @@ const TransactionHistory = (() => {
                 }
             },
         });
+    }
+
+    // PHASE V2.5 — Void Transaksi confirmation + submit. `d` is the full
+    // detail payload already loaded in the drawer (header fields present
+    // directly on it — note TransactionHistoryService::detail() exposes the
+    // primary key as `transaction_id`, not `id`).
+    async function voidTransaction(d, btn) {
+        const nilai = (d.lines || []).reduce((sum, l) => sum + Math.abs(Number(l.subtotal) || 0), 0);
+        const reason = await Modal.form({
+            title: 'VOID TRANSAKSI',
+            infoRows: [
+                ['Transaksi', `#${d.transaction_id}`],
+                ['Jenis', d.transaction_type],
+                ['Tanggal', UI.formatDate(d.transaction_date)],
+                ['Gudang', d.warehouse.name],
+                ['Reference', d.reference_no || '—'],
+                ['Dibuat Oleh', d.created_by.username],
+                ['Nilai', UI.formatMoney(nilai)],
+            ],
+            warning: 'Tindakan ini akan membuat transaksi REVERSAL yang membalik dampak transaksi asli. Transaksi asli tidak akan dihapus, hanya ditandai VOID.',
+            reasonLabel: 'Alasan Void',
+            reasonPlaceholder: 'Jelaskan alasan pembatalan transaksi ini (minimal 5 karakter)',
+            confirmLabel: 'Konfirmasi Void',
+            cancelLabel: 'Batal',
+            danger: true,
+        });
+        if (reason === null) return;
+
+        if (!voidUuids.has(d.transaction_id)) voidUuids.set(d.transaction_id, InvApi.newRequestUuid());
+        btn.disabled = true;
+        try {
+            await InvApi.voidTransaction(d.transaction_id, { request_uuid: voidUuids.get(d.transaction_id), reason });
+            UI.toast(`Transaksi #${d.transaction_id} berhasil di-void.`, 'success');
+            voidUuids.delete(d.transaction_id);
+            openDetail(d.transaction_id); // refresh the drawer in place — status/lines now reflect VOID + REVERSAL
+            if (activeDataTableReload) activeDataTableReload();
+        } catch (err) {
+            btn.disabled = false;
+            if (err && err.dependencies && err.dependencies.length) {
+                const list = err.dependencies.map((dep) => `#${dep.id} — ${dep.transaction_type} (${UI.formatDate(dep.transaction_date)})`).join('\n');
+                await Modal.alert({
+                    title: 'Tidak Dapat Di-void',
+                    message: `Stok dari transaksi ini sudah digunakan oleh transaksi berikut — void transaksi tersebut terlebih dahulu:\n\n${list}`,
+                });
+                return;
+            }
+            UI.handleApiError(err);
+            await Modal.alert({ title: 'Gagal Void Transaksi', message: (err && err.message) || 'Terjadi kesalahan.' });
+        }
     }
 
     return { render };

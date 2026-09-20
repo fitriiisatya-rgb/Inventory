@@ -120,12 +120,23 @@ function inv_ok(mixed $data, string $message = 'OK', int $httpStatus = 200): nev
     exit;
 }
 
-/** Error envelope — frozen shape, see file docblock. Frontend branches on `code`, never on `message`. */
-function inv_error(int $httpStatus, string $code, string $message): never
+/**
+ * Error envelope — frozen shape, see file docblock. Frontend branches on
+ * `code`, never on `message`. PHASE V2.5: `$details` is a purely additive,
+ * optional extra key (e.g. `dependencies` for a blocked void/reversal) —
+ * omitted entirely (not even present as null) for every pre-V2.5 caller, so
+ * the frozen `{code, message}` shape is unchanged for every existing
+ * consumer that doesn't pass it.
+ */
+function inv_error(int $httpStatus, string $code, string $message, ?array $details = null): never
 {
     http_response_code($httpStatus);
     header('Content-Type: application/json; charset=utf-8');
-    echo json_encode(['success' => false, 'error' => ['code' => $code, 'message' => $message]], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $error = ['code' => $code, 'message' => $message];
+    if ($details !== null) {
+        $error += $details;
+    }
+    echo json_encode(['success' => false, 'error' => $error], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
 
@@ -186,8 +197,24 @@ set_exception_handler(function (Throwable $e) use ($path) {
         TransferAlreadyCancelledException::class  => ['code' => 409, 'label' => 'TRANSFER_ALREADY_CANCELLED'],
         DuplicateRequestException::class          => ['code' => 409, 'label' => 'DUPLICATE_REQUEST'],
         ImportValidationException::class          => ['code' => 422, 'label' => 'IMPORT_VALIDATION_FAILED'],
+        // PHASE V2.5 — transaction correction / void / transfer reversal.
+        OpeningProtectedException::class                    => ['code' => 422, 'label' => 'OPENING_PROTECTED'],
+        TransactionAlreadyVoidException::class              => ['code' => 409, 'label' => 'TRANSACTION_ALREADY_VOID'],
+        TransferAlreadyReversedException::class             => ['code' => 409, 'label' => 'TRANSFER_ALREADY_REVERSED'],
+        VoidHasDownstreamDependenciesException::class       => ['code' => 422, 'label' => 'VOID_HAS_DOWNSTREAM_DEPENDENCIES'],
+        TransferReversalHasDownstreamDependenciesException::class => ['code' => 422, 'label' => 'TRANSFER_REVERSAL_HAS_DOWNSTREAM_DEPENDENCIES'],
         ValidationException::class                => ['code' => 422, 'label' => $importPrefixed ? 'IMPORT_VALIDATION_FAILED' : 'VALIDATION_ERROR'],
     ];
+    // PHASE V2.5: the two dependency exceptions carry a structured
+    // `dependencies` list the frontend renders verbatim (spec: "Then list
+    // dependency transaction IDs") — checked before the generic loop so the
+    // extra key rides along without touching every other error path.
+    if ($e instanceof VoidHasDownstreamDependenciesException) {
+        inv_error(422, 'VOID_HAS_DOWNSTREAM_DEPENDENCIES', $e->getMessage(), ['dependencies' => $e->dependencies]);
+    }
+    if ($e instanceof TransferReversalHasDownstreamDependenciesException) {
+        inv_error(422, 'TRANSFER_REVERSAL_HAS_DOWNSTREAM_DEPENDENCIES', $e->getMessage(), ['dependencies' => $e->dependencies]);
+    }
     foreach ($map as $class => $info) {
         if ($e instanceof $class) {
             inv_error($info['code'], $info['label'], $e->getMessage());
@@ -1259,6 +1286,32 @@ $routes = [
         );
 
         inv_ok($result, 'Transfer cancelled');
+    },
+
+    // PHASE V2.5: the RECEIVED-transfer correction flow. Privileged-only
+    // (TRANSFER_REVERSE is granted to SUPERADMIN/ADMIN, never STOCK — see
+    // the migration) — deliberately no per-warehouse scope check beyond the
+    // permission gate itself, the same pattern POST /transactions/{id}/void
+    // already uses for TRANSACTION_VOID: a correction action's authority
+    // comes from the permission, not from being "inside" one of the two
+    // warehouses the original transfer touched.
+    'POST /transfers/{id}/reverse' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'TRANSFER_REVERSE');
+
+        $transferId = (int) $params['id'];
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+
+        $result = Database::transaction(
+            fn (PDO $tx) => TransferService::reverse(
+                $tx,
+                $transferId,
+                $input
+            )
+        );
+
+        inv_ok($result, 'Transfer reversed');
     },
 
     'GET /transfers' => function () use ($pdo) {
