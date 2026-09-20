@@ -269,8 +269,8 @@ transfer modal, the post-reverse transfers list, and the trace chain.
 
 ## 15. Final commit
 
-See branch `claude/funny-ramanujan-wmrlig`. Commit follows this document in
-the same push.
+`341cd512e6d23c12b17106af56fae2194c81eea4` on branch
+`claude/funny-ramanujan-wmrlig`.
 
 ## 16. Push status
 
