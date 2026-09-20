@@ -16,7 +16,7 @@ reset_db() {
 }
 
 FAILED=0
-for test in tests/mysql_smoke_test.php tests/mysql_integration_test.php tests/mysql_importer_test.php tests/mysql_void_test.php tests/mysql_security_test.php tests/opening_g_data_2_test.php tests/migration_negative_stock_test.php tests/warehouse_isolation_regression_test.php tests/stock_policy_test.php tests/master_data_v2_test.php tests/stock_report_test.php tests/transaction_history_test.php tests/master_data_v2_1_test.php tests/trace_test.php tests/inventory_hpp_report_test.php tests/inventory_hpp_costing_audit_test.php; do
+for test in tests/mysql_smoke_test.php tests/mysql_integration_test.php tests/mysql_importer_test.php tests/mysql_void_test.php tests/mysql_security_test.php tests/opening_g_data_2_test.php tests/migration_negative_stock_test.php tests/warehouse_isolation_regression_test.php tests/stock_policy_test.php tests/master_data_v2_test.php tests/stock_report_test.php tests/transaction_history_test.php tests/master_data_v2_1_test.php tests/trace_test.php tests/inventory_hpp_report_test.php tests/inventory_hpp_costing_audit_test.php tests/inventory_hpp_v23c_production_hotfix_test.php; do
     echo "=============================================================="
     echo "Resetting database and running ${test}"
     echo "=============================================================="

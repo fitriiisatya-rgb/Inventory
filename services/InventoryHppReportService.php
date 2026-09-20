@@ -12,13 +12,28 @@ use PDO;
  * transaction_lines`) and the FIFO cost trail (`fifo_allocations`) —
  * per Section 13 of the spec, no new tables, no duplicated FIFO logic.
  *
- * Sign convention reused VERBATIM from InventoryService (the single
- * source of truth for it): IN/OPENING/TRANSFER_IN/PRODUCTION_OUT are
- * +ABS(subtotal); OUT/TRANSFER_OUT/PRODUCTION_IN are -ABS(subtotal);
- * ADJUSTMENT/REVERSAL are already signed at post time and used as-is.
- * Only inventory_effect=1 lines ever count (historical-import rows are
- * explicitly excluded from every total here — they never moved real
- * stock).
+ * Sign convention (PHASE V2.3C — audited against the REAL posting code,
+ * not assumed from names; see docs/PHASE_V2_3C_PRODUCTION_HOTFIX.md §1):
+ * `inventory_transaction_lines.base_qty` and `.subtotal` are POSITIVE for
+ * every transaction type except ADJUSTMENT/REVERSAL (already signed at
+ * post time) and the ONE deliberate exception in the whole system —
+ * `ImportOpeningStockService` posts a migration-negative Opening line via
+ * `FifoService::postIn()` with a NEGATIVE `input_qty` (only ever when
+ * `MigrationNegativeStockService::isWhitelisted()`), so THAT line's
+ * `base_qty`/`subtotal` are genuinely negative, on purpose, to preserve a
+ * known migration-negative balance's real economic value.
+ *
+ * The canonical rule (ONE expression, `SIGNED_VALUE_SQL`, used everywhere
+ * in this class — summary, daily, warehouse breakdown, export all resolve
+ * to it): for IN/OPENING/TRANSFER_IN/PRODUCTION_OUT, use `l.subtotal`
+ * AS-IS — never `ABS()` it, since every one of those postIn() call sites
+ * produces an inherently non-negative subtotal EXCEPT the migration-
+ * negative Opening case, where the raw (negative) value IS the correct
+ * one. For OUT/TRANSFER_OUT/PRODUCTION_IN, use `-ABS(l.subtotal)` — kept
+ * (not simplified to `-l.subtotal`) because `FifoService::postOut()`
+ * provably always writes a non-negative `subtotal` (a real magnitude
+ * accumulated from `qty * cost` sums, verified in the audit), so `ABS()`
+ * is a documented no-op there, not a blind removal candidate.
  *
  * Status filter (opening/ending/movement totals — everything EXCEPT the
  * OUT-side FIFO HPP totals): `status IN ('POSTED','VOID')`, never
@@ -36,10 +51,42 @@ use PDO;
  * excluding it (and never counting the REVERSAL, which is not itself
  * type OUT) is exactly correct — no matching broadening needed there.
  *
+ * External Purchase KPI vs. historical reconstruction (PHASE V2.3C §2):
+ * these are deliberately DIFFERENT filters on the SAME underlying ledger,
+ * not a contradiction. Opening/Ending (historical reconstruction, "what
+ * really happened, point in time") use `status IN ('POSTED','VOID')` as
+ * above — a voided IN's original entry and its REVERSAL both count, each
+ * on its own real date, netting to the true current state. The
+ * "Pembelian Eksternal" KPI (a business-facing headline figure) uses
+ * `status = 'POSTED'` ONLY for `type='IN'` — a cancelled purchase must
+ * never inflate what the business reads as "purchases made this period."
+ * The gap this deliberately opens (a voided IN no longer self-cancels
+ * against Purchase) is closed by its own disclosed bridge bucket,
+ * `voided_in_net`, exactly parallel to `voided_out_net` (§ varianceBridge
+ * docblock) — never silently absorbed, never left unexplained.
+ *
+ * OPENING period-start boundary (PHASE V2.3C §3): a stock OPENING
+ * transaction dated EXACTLY at a period's `start_date 00:00:00` is
+ * beginning inventory, not a movement that happened during the period —
+ * `signedValueBefore($isOpeningBoundary = true)` includes it via an
+ * explicit `OR (type='OPENING' AND date = :before)` clause (not a blanket
+ * `<` → `<=`, which would also swallow OTHER types' same-timestamp rows
+ * that genuinely belong to the period). Every movement-window query that
+ * could otherwise double-count that same row (periodTotals()'s
+ * `opening_mid_period`, buildDailyRows()'s day-1 net, exportNonHppSheet())
+ * explicitly excludes it via `NOT (type='OPENING' AND date = :start)`.
+ * Only Opening's OWN boundary call passes `$isOpeningBoundary = true`;
+ * Ending (computed via the same helper at `end_date + 1 day`) never does.
+ *
+ * Only inventory_effect=1 lines ever count (historical-import rows are
+ * explicitly excluded from every total here — they never moved real
+ * stock).
+ *
  * Core formulas (spec section — see docs/PHASE_V2_3_HPP_REPORT.md):
  *   Opening Value  = SUM(signed value) WHERE transaction_date <  start
+ *                    (PLUS a boundary-exact OPENING row — see above)
  *   Ending Value   = SUM(signed value) WHERE transaction_date <= end
- *   External Purchase = SUM(ABS(subtotal)) WHERE type = 'IN' in [start,end]
+ *   External Purchase = SUM(subtotal) WHERE type='IN' AND status='POSTED' in [start,end]
  *   FIFO HPP       = SUM(fifo_allocations.subtotal) for allocations whose
  *                    consuming line's transaction is type='OUT' in [start,end]
  *                    — read from the actual FIFO cost trail, not the
@@ -50,15 +97,21 @@ use PDO;
  *                    (algebraically equals the negated sum of every OTHER
  *                    movement in the period — adjustment, reversal,
  *                    production, opening-mid-period, net transfer
- *                    imbalance — which is why those buckets are always
- *                    disclosed alongside it, never hidden inside "HPP")
+ *                    imbalance, voided IN/OUT — which is why those
+ *                    buckets are always disclosed alongside it, never
+ *                    hidden inside "HPP")
  */
 final class InventoryHppReportService
 {
     private const MAX_DAYS = 400; // sanity bound on the daily-recap PHP loop, not a business rule
 
+    // PHASE V2.3C: the +direction branch uses l.subtotal AS-IS, never ABS() —
+    // ABS() was silently flipping a migration-negative Opening line's real
+    // negative economic value positive (see class docblock). The -direction
+    // branch keeps ABS() deliberately: FifoService::postOut() provably never
+    // writes a negative subtotal, so it's a documented no-op, not dead code.
     private const SIGNED_VALUE_SQL = "CASE
-        WHEN t.transaction_type IN ('IN','OPENING','TRANSFER_IN','PRODUCTION_OUT') THEN ABS(l.subtotal)
+        WHEN t.transaction_type IN ('IN','OPENING','TRANSFER_IN','PRODUCTION_OUT') THEN l.subtotal
         WHEN t.transaction_type IN ('OUT','TRANSFER_OUT','PRODUCTION_IN') THEN -ABS(l.subtotal)
         ELSE l.subtotal
     END";
@@ -109,6 +162,7 @@ final class InventoryHppReportService
                 'transfer_net' => round($current['transfer_in'] + $current['transfer_out'], 4),
                 'opening_mid_period' => $current['opening_mid_period'],
                 'voided_out_net' => $current['voided_out_net'],
+                'voided_in_net' => $current['voided_in_net'],
                 'historical_import_note' => 'Historical import rows (inventory_effect=0) never affect stock and are excluded from every total above.',
             ],
         ];
@@ -244,7 +298,8 @@ final class InventoryHppReportService
      * tests/inventory_hpp_costing_audit_test.php across cases A-H):
      *
      *   Variance = -(Adjustment_net + Reversal_net + Production_net
-     *                + Opening_mid_period + Transfer_net + Voided_out_net)
+     *                + Opening_mid_period + Transfer_net + Voided_out_net
+     *                + Voided_in_net)
      *
      * where Adjustment_net is split here into its Opname-tagged slice and
      * everything else, so "Opname Loss/Gain" is never buried inside a
@@ -266,6 +321,12 @@ final class InventoryHppReportService
      * list captures that gap, so without this term a voided OUT would
      * leave a real, non-zero residue in `unexplained` even though the
      * underlying numbers are all individually correct.
+     *
+     * Voided_in_net (PHASE V2.3C) is the mirror-image case, introduced when
+     * the "Pembelian Eksternal" KPI was changed to `status='POSTED'`-only
+     * (see class docblock §2): a voided IN's original entry is no longer
+     * absorbed by Purchase, so without this term it would leave the exact
+     * same kind of unexplained residue Voided_out_net was added to close.
      *
      * `unexplained` = variance - SUM(components) and is mathematically
      * guaranteed to be exactly 0 given the transaction types this method
@@ -291,6 +352,7 @@ final class InventoryHppReportService
             ['label' => 'Opening (mid-periode)', 'raw_value' => $t['opening_mid_period'], 'explains' => round(-$t['opening_mid_period'], 4)],
             ['label' => 'Transfer (net, harus ~0 di level perusahaan)', 'raw_value' => round($t['transfer_in'] + $t['transfer_out'], 4), 'explains' => round(-($t['transfer_in'] + $t['transfer_out']), 4)],
             ['label' => 'OUT Dibatalkan (Voided, entri asli dipulihkan)', 'raw_value' => $t['voided_out_net'], 'explains' => round(-$t['voided_out_net'], 4)],
+            ['label' => 'IN Dibatalkan (Voided, tidak dihitung sebagai Pembelian Eksternal)', 'raw_value' => $t['voided_in_net'], 'explains' => round(-$t['voided_in_net'], 4)],
         ];
 
         $explainedTotal = round(array_sum(array_column($components, 'explains')), 4);
@@ -312,16 +374,28 @@ final class InventoryHppReportService
     // Internal helpers
     // ------------------------------------------------------------------
 
-    /** @return array{opening:float,purchase:float,fifo_hpp:float,ending:float,reconciliation:float,variance:float,adjustment_net:float,opname_net:float,reversal_net:float,production_net:float,transfer_in:float,transfer_out:float,opening_mid_period:float,voided_out_net:float} */
+    /** @return array{opening:float,purchase:float,fifo_hpp:float,ending:float,reconciliation:float,variance:float,adjustment_net:float,opname_net:float,reversal_net:float,production_net:float,transfer_in:float,transfer_out:float,opening_mid_period:float,voided_out_net:float,voided_in_net:float} */
     private static function periodTotals(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, ?int $categoryId, ?string $q): array
     {
         [$itemJoin, $itemWhere, $itemBind] = self::itemFilterClauses($categoryId, $q);
 
-        $opening = self::signedValueBefore($pdo, $startDate, $warehouseId, $itemJoin, $itemWhere, $itemBind);
+        $opening = self::signedValueBefore($pdo, $startDate, $warehouseId, $itemJoin, $itemWhere, $itemBind, true);
         $ending = self::signedValueBefore($pdo, date('Y-m-d', strtotime($endDate . ' +1 day')), $warehouseId, $itemJoin, $itemWhere, $itemBind);
 
-        $movWhere = ["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
-        $movBind = array_merge(['start' => $startDate . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'], $itemBind);
+        // PHASE V2.3C §3: a boundary-exact OPENING row (transaction_date ==
+        // this period's own start) was just counted in $opening above — it
+        // must never ALSO be summed into a movement-window bucket below
+        // (opening_mid_period), or it would be double-counted.
+        $movWhere = [
+            "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1',
+            't.transaction_date >= :start', 't.transaction_date < :end_excl',
+            "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :start_boundary)",
+        ];
+        $movBind = array_merge([
+            'start' => $startDate . ' 00:00:00',
+            'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00',
+            'start_boundary' => $startDate . ' 00:00:00',
+        ], $itemBind);
         if ($warehouseId !== null) {
             $movWhere[] = 'l.warehouse_id = :wh';
             $movBind['wh'] = $warehouseId;
@@ -329,16 +403,24 @@ final class InventoryHppReportService
         $movWhere = array_merge($movWhere, $itemWhere);
         $movWhereSql = implode(' AND ', $movWhere);
 
+        // PHASE V2.3C §1/§2: the +direction CASE arms (purchase, transfer_in,
+        // production_out's contribution, opening_mid_period) use l.subtotal
+        // AS-IS, never ABS() — see SIGNED_VALUE_SQL's docblock for why.
+        // "purchase" additionally restricts to status='POSTED' — a business
+        // KPI, never inflated by a cancelled purchase (§2); Opening/Ending
+        // still see the VOID'd IN via the broadened status filter, and its
+        // gap is disclosed separately as voided_in_net below.
         $stmt = $pdo->prepare(
             "SELECT
-                SUM(CASE WHEN t.transaction_type = 'IN' THEN ABS(l.subtotal) ELSE 0 END) AS purchase,
-                SUM(CASE WHEN t.transaction_type = 'TRANSFER_IN' THEN ABS(l.subtotal) ELSE 0 END) AS transfer_in,
+                SUM(CASE WHEN t.transaction_type = 'IN' AND t.status = 'POSTED' THEN l.subtotal ELSE 0 END) AS purchase,
+                SUM(CASE WHEN t.transaction_type = 'TRANSFER_IN' THEN l.subtotal ELSE 0 END) AS transfer_in,
                 SUM(CASE WHEN t.transaction_type = 'TRANSFER_OUT' THEN -ABS(l.subtotal) ELSE 0 END) AS transfer_out,
                 SUM(CASE WHEN t.transaction_type = 'ADJUSTMENT' THEN l.subtotal ELSE 0 END) AS adjustment_net,
                 SUM(CASE WHEN t.transaction_type = 'REVERSAL' THEN l.subtotal ELSE 0 END) AS reversal_net,
-                SUM(CASE WHEN t.transaction_type = 'PRODUCTION_OUT' THEN ABS(l.subtotal) WHEN t.transaction_type = 'PRODUCTION_IN' THEN -ABS(l.subtotal) ELSE 0 END) AS production_net,
-                SUM(CASE WHEN t.transaction_type = 'OPENING' THEN ABS(l.subtotal) ELSE 0 END) AS opening_mid_period,
-                SUM(CASE WHEN t.transaction_type = 'OUT' AND t.status = 'VOID' THEN -ABS(l.subtotal) ELSE 0 END) AS voided_out_net
+                SUM(CASE WHEN t.transaction_type = 'PRODUCTION_OUT' THEN l.subtotal WHEN t.transaction_type = 'PRODUCTION_IN' THEN -ABS(l.subtotal) ELSE 0 END) AS production_net,
+                SUM(CASE WHEN t.transaction_type = 'OPENING' THEN l.subtotal ELSE 0 END) AS opening_mid_period,
+                SUM(CASE WHEN t.transaction_type = 'OUT' AND t.status = 'VOID' THEN -ABS(l.subtotal) ELSE 0 END) AS voided_out_net,
+                SUM(CASE WHEN t.transaction_type = 'IN' AND t.status = 'VOID' THEN l.subtotal ELSE 0 END) AS voided_in_net
              FROM inventory_transaction_lines l
              JOIN inventory_transactions t ON t.id = l.transaction_id
              {$itemJoin}
@@ -370,13 +452,29 @@ final class InventoryHppReportService
             'transfer_out' => round((float) ($mov['transfer_out'] ?? 0), 4),
             'opening_mid_period' => round((float) ($mov['opening_mid_period'] ?? 0), 4),
             'voided_out_net' => round((float) ($mov['voided_out_net'] ?? 0), 4),
+            'voided_in_net' => round((float) ($mov['voided_in_net'] ?? 0), 4),
         ];
     }
 
-    private static function signedValueBefore(PDO $pdo, string $beforeDate, ?int $warehouseId, string $itemJoin, array $itemWhere, array $itemBind): float
+    /**
+     * PHASE V2.3C §3: $isOpeningBoundary=true (only ever passed for a
+     * period's OWN opening figure, never for Ending) additionally pulls in
+     * a stock OPENING transaction dated EXACTLY at $beforeDate — beginning
+     * inventory, not a mid-period movement. Never a blanket `<` -> `<=`:
+     * every other type's same-timestamp row (if any existed) would still
+     * correctly stay excluded, only `type='OPENING'` gets the boundary
+     * inclusion.
+     */
+    private static function signedValueBefore(PDO $pdo, string $beforeDate, ?int $warehouseId, string $itemJoin, array $itemWhere, array $itemBind, bool $isOpeningBoundary = false): float
     {
-        $where = ["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', 't.transaction_date < :before'];
+        $dateCondition = $isOpeningBoundary
+            ? "(t.transaction_date < :before OR (t.transaction_type = 'OPENING' AND t.transaction_date = :before_boundary))"
+            : 't.transaction_date < :before';
+        $where = ["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', $dateCondition];
         $bind = array_merge(['before' => $beforeDate . ' 00:00:00'], $itemBind);
+        if ($isOpeningBoundary) {
+            $bind['before_boundary'] = $beforeDate . ' 00:00:00';
+        }
         if ($warehouseId !== null) {
             $where[] = 'l.warehouse_id = :wh';
             $bind['wh'] = $warehouseId;
@@ -484,10 +582,21 @@ final class InventoryHppReportService
     {
         [$itemJoin, $itemWhere, $itemBind] = self::itemFilterClauses($categoryId, $q);
 
-        $opening = self::signedValueBefore($pdo, $startDate, $warehouseId, $itemJoin, $itemWhere, $itemBind);
+        // PHASE V2.3C §3: same boundary-inclusive opening as periodTotals().
+        $opening = self::signedValueBefore($pdo, $startDate, $warehouseId, $itemJoin, $itemWhere, $itemBind, true);
 
-        $movWhere = ["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
-        $bind = array_merge(['start' => $startDate . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'], $itemBind);
+        $movWhere = [
+            "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1',
+            't.transaction_date >= :start', 't.transaction_date < :end_excl',
+            // Excludes the same boundary-exact OPENING row $opening above already
+            // counted — otherwise day 1's net_signed_value would double it.
+            "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :start_boundary)",
+        ];
+        $bind = array_merge([
+            'start' => $startDate . ' 00:00:00',
+            'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00',
+            'start_boundary' => $startDate . ' 00:00:00',
+        ], $itemBind);
         if ($warehouseId !== null) {
             $movWhere[] = 'l.warehouse_id = :wh';
             $bind['wh'] = $warehouseId;
@@ -496,8 +605,8 @@ final class InventoryHppReportService
         $movWhereSql = implode(' AND ', $movWhere);
         $stmt = $pdo->prepare(
             "SELECT DATE(t.transaction_date) AS d,
-                SUM(CASE WHEN t.transaction_type = 'IN' THEN ABS(l.subtotal) ELSE 0 END) AS purchase,
-                SUM(CASE WHEN t.transaction_type = 'TRANSFER_IN' THEN ABS(l.subtotal) ELSE 0 END) AS transfer_in,
+                SUM(CASE WHEN t.transaction_type = 'IN' AND t.status = 'POSTED' THEN l.subtotal ELSE 0 END) AS purchase,
+                SUM(CASE WHEN t.transaction_type = 'TRANSFER_IN' THEN l.subtotal ELSE 0 END) AS transfer_in,
                 SUM(CASE WHEN t.transaction_type = 'TRANSFER_OUT' THEN ABS(l.subtotal) ELSE 0 END) AS transfer_out,
                 SUM(CASE WHEN t.transaction_type = 'ADJUSTMENT' THEN l.subtotal ELSE 0 END) AS adjustment_net,
                 SUM(" . self::SIGNED_VALUE_SQL . ") AS net_signed_value
@@ -614,6 +723,7 @@ final class InventoryHppReportService
                 ['Transfer OUT', $summary['non_hpp_movements']['transfer_out']],
                 ['Transfer net (harus ~0 di level perusahaan)', $summary['non_hpp_movements']['transfer_net']],
                 ['OUT Dibatalkan (Voided, net)', $summary['non_hpp_movements']['voided_out_net']],
+                ['IN Dibatalkan (Voided, net — bukan Pembelian Eksternal)', $summary['non_hpp_movements']['voided_in_net']],
             ],
         ];
 
@@ -684,12 +794,22 @@ final class InventoryHppReportService
     {
         $where = [
             "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1',
-            // A voided OUT (status=VOID) belongs here too — its POSTED counterpart never
-            // does, that one is already disclosed in the "Detail Transaksi FIFO" sheet.
-            "(t.transaction_type IN ('ADJUSTMENT','REVERSAL','PRODUCTION_IN','PRODUCTION_OUT','OPENING') OR (t.transaction_type = 'OUT' AND t.status = 'VOID'))",
+            // A voided OUT or voided IN (status=VOID) belongs here too — the POSTED
+            // OUT counterpart never does (already in "Detail Transaksi FIFO"), and a
+            // POSTED IN is a real Purchase (Ringkasan sheet), not a non-HPP movement.
+            "(t.transaction_type IN ('ADJUSTMENT','REVERSAL','PRODUCTION_IN','PRODUCTION_OUT','OPENING')
+              OR (t.transaction_type = 'OUT' AND t.status = 'VOID')
+              OR (t.transaction_type = 'IN' AND t.status = 'VOID'))",
             't.transaction_date >= :start', 't.transaction_date < :end_excl',
+            // PHASE V2.3C §3: the boundary-exact OPENING row is already disclosed as
+            // "Nilai Stok Awal" in the Ringkasan sheet — never listed here a second time.
+            "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :start_boundary)",
         ];
-        $bind = ['start' => $startDate . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'];
+        $bind = [
+            'start' => $startDate . ' 00:00:00',
+            'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00',
+            'start_boundary' => $startDate . ' 00:00:00',
+        ];
         if ($warehouseId !== null) {
             $where[] = 'l.warehouse_id = :wh';
             $bind['wh'] = $warehouseId;
