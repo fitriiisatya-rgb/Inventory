@@ -901,18 +901,22 @@ INSERT INTO permissions (code, description) VALUES
     -- exclusion list below); STOCK/DIVISION/VIEWER get neither.
     ('MASTER_WAREHOUSE_MANAGE', 'Create/edit/deactivate/delete warehouse master data'),
     ('MASTER_DIVISION_MANAGE',  'Create/edit/deactivate/delete division master data'),
-    -- PHASE V2.5: same additive convention as the blocks above — ADMIN/SUPERADMIN
-    -- inherit this automatically (not in ADMIN's exclusion list below);
-    -- STOCK/DIVISION/VIEWER get it in neither case — reversing a RECEIVED
-    -- transfer is a privileged correction action, never a STOCK-role action.
+    -- PHASE V2.5: reversing a RECEIVED transfer is a privileged correction
+    -- action. PHASE V2.5A tightened this (and TRANSACTION_VOID below) to
+    -- SUPERADMIN only — see ADMIN's exclusion list below.
     ('TRANSFER_REVERSE', 'Reverse a RECEIVED warehouse transfer (whole TRANSFER_OUT/TRANSFER_IN chain) — privileged correction action');
 
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r CROSS JOIN permissions p WHERE r.code = 'SUPERADMIN';
 
+-- PHASE V2.5A: correction actions (void a posted transaction, reverse a
+-- RECEIVED transfer) are SUPERADMIN-only — ADMIN is explicitly NOT
+-- equivalent here, unlike every other ADMIN grant in this exclusion-list
+-- pattern. TRANSACTION_VOID_LOCKED_PERIOD was already SUPERADMIN-only from
+-- the original schema; TRANSACTION_VOID and TRANSFER_REVERSE join it here.
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r, permissions p
-WHERE r.code = 'ADMIN' AND p.code NOT IN ('SYSTEM_SETTINGS_MANAGE','USER_MANAGE','TRANSACTION_VOID_LOCKED_PERIOD');
+WHERE r.code = 'ADMIN' AND p.code NOT IN ('SYSTEM_SETTINGS_MANAGE','USER_MANAGE','TRANSACTION_VOID_LOCKED_PERIOD','TRANSACTION_VOID','TRANSFER_REVERSE');
 
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r, permissions p

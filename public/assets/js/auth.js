@@ -20,12 +20,21 @@ const Auth = (() => {
         SUPERADMIN: ['*'],
     };
 
+    // PHASE V2.5A: ADMIN's '*' above is a blanket cosmetic shorthand, but the
+    // backend's own ADMIN grant (database/schema.sql) is actually "everything
+    // EXCEPT this list" — mirrored here exactly so the button-hiding logic
+    // never over-promises what the server will accept. Correction actions
+    // (void a posted transaction, reverse a RECEIVED transfer) are
+    // SUPERADMIN-only; ADMIN is deliberately not equivalent for these two.
+    const ADMIN_EXCLUDED_PERMISSIONS = ['SYSTEM_SETTINGS_MANAGE', 'USER_MANAGE', 'TRANSACTION_VOID_LOCKED_PERIOD', 'TRANSACTION_VOID', 'TRANSFER_REVERSE'];
+
     function user() {
         return currentUser;
     }
 
     function hasPermission(permCode) {
         if (!currentUser) return false;
+        if (currentUser.role_code === 'ADMIN' && ADMIN_EXCLUDED_PERMISSIONS.includes(permCode)) return false;
         const granted = ROLE_PERMISSIONS[currentUser.role_code] || [];
         return granted.includes('*') || granted.includes(permCode);
     }

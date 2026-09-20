@@ -1,5 +1,12 @@
 # Phase V2.5 — Transaction Correction / Void / Transfer Reversal
 
+> **Amended by Phase V2.5A** (`docs/PHASE_V2_5A_PERMISSION_HARDENING.md`):
+> this document's §6 and every "SUPERADMIN/ADMIN" phrasing below describes
+> the *original* V2.5 grant, which the owner did not approve. V2.5A
+> restricted VOID and REVERSE TRANSFER to **SUPERADMIN only** — read that
+> document for the corrected, current permission model. Left unedited here
+> as the historical record of what V2.5 actually shipped.
+
 Base: branch `claude/funny-ramanujan-wmrlig`, on top of `56f3ee7` (V2.3D
 cutover-aware HPP) plus everything that already existed there — Trace
 Center/TraceDrawer, FIFO protections, warehouse isolation, and the current

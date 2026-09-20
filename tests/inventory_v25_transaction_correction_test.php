@@ -70,6 +70,7 @@ function check(string $name, bool $pass, string $detail = ''): void
 // ---- shared fixtures ----
 $superadminRoleId = (int) $pdo->query("SELECT id FROM roles WHERE code='SUPERADMIN'")->fetchColumn();
 $stockRoleId = (int) $pdo->query("SELECT id FROM roles WHERE code='STOCK'")->fetchColumn();
+$adminRoleId = (int) $pdo->query("SELECT id FROM roles WHERE code='ADMIN'")->fetchColumn();
 $kgUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='KG'")->fetchColumn();
 
 function makeUser(PDO $pdo, int $roleId, ?int $warehouseId = null): int
@@ -524,14 +525,22 @@ check('HPP variance is exactly 0 across a VOID+REVERSAL pair (they economically 
 check('Ending value equals opening + purchase (the voided OUT contributes nothing net)', approx((float) $summary26['ending_value'], (float) $summary26['opening_value'] + (float) $summary26['external_purchase']), json_encode($summary26));
 
 // =============================================================================
-echo "\n== HTTP-level cases: 2 (STOCK cannot void), 27 (warehouse isolation), 28 (SUPERADMIN access) ==\n";
+echo "\n== HTTP-level cases: 2/5A.2 (STOCK), 5A.2/5A.3 (ADMIN 403), 27 (warehouse isolation), 28/5A.1 (SUPERADMIN access) ==\n";
 $port = 8700 + random_int(0, 300);
 $docRoot = __DIR__ . '/../public';
 $stockUser = makeUser($pdo, $stockRoleId, $whA);
 $stockUsername = $pdo->query("SELECT username FROM users WHERE id = {$stockUser}")->fetchColumn();
-$adminUser = makeUser($pdo, $superadminRoleId);
-$adminUsername = $pdo->query("SELECT username FROM users WHERE id = {$adminUser}")->fetchColumn();
-$pdo->prepare('UPDATE users SET password_hash = :h WHERE id IN (:s, :a)')->execute(['h' => password_hash('V25Http!123', PASSWORD_BCRYPT), 's' => $stockUser, 'a' => $adminUser]);
+// PHASE V2.5A: a real SUPERADMIN-role session (correction actions succeed)
+// and a real ADMIN-role session (correction actions must be REJECTED — the
+// owner-mandated hardening: ADMIN is explicitly not treated as equivalent
+// to SUPERADMIN for VOID/REVERSE, unlike every other privileged action in
+// this codebase).
+$superadminHttpUser = makeUser($pdo, $superadminRoleId);
+$superadminHttpUsername = $pdo->query("SELECT username FROM users WHERE id = {$superadminHttpUser}")->fetchColumn();
+$adminHttpUser = makeUser($pdo, $adminRoleId);
+$adminHttpUsername = $pdo->query("SELECT username FROM users WHERE id = {$adminHttpUser}")->fetchColumn();
+$pdo->prepare('UPDATE users SET password_hash = :h WHERE id IN (:s, :sa, :a)')
+    ->execute(['h' => password_hash('V25Http!123', PASSWORD_BCRYPT), 's' => $stockUser, 'sa' => $superadminHttpUser, 'a' => $adminHttpUser]);
 
 // Deliberately a SEPARATE item per fixture — sharing one item between the
 // "void this IN" and the "transfer this stock" fixtures would make the
@@ -549,6 +558,21 @@ $transferHttp = Database::transaction(fn (PDO $tx) => TransferService::create($t
     'lines' => [['item_id' => $itemHttpXfer, 'input_qty' => 5, 'input_unit_id' => $kgUnitId]],
 ]));
 Database::transaction(fn (PDO $tx) => TransferService::receive($tx, $transferHttp['transfer_id'], ['created_by' => $superadmin]));
+
+// A second, ADMIN-only-attempt pair of fixtures (must stay untouched by the
+// rejected ADMIN calls below, then get cleanly voided/reversed by the real
+// SUPERADMIN checks further down).
+$itemHttpAdmin = makeItem($pdo, $kgUnitId, 'HTTP-ADMIN');
+$inHttpAdminAttempt = postIn($pdo, $itemHttpAdmin, $whA, 12, 3000, '2026-09-01 08:00:00', $superadmin, $kgUnitId);
+
+$itemHttpAdminXfer = makeItem($pdo, $kgUnitId, 'HTTP-ADMIN-XFER');
+postIn($pdo, $itemHttpAdminXfer, $whA, 5, 3000, '2026-09-01 08:00:00', $superadmin, $kgUnitId);
+$transferHttpAdminAttempt = Database::transaction(fn (PDO $tx) => TransferService::create($tx, [
+    'transfer_uuid' => uid('xferhttpadmin'), 'from_warehouse_id' => $whA, 'to_warehouse_id' => $whB,
+    'ship_date' => '2026-09-05 08:00:00', 'created_by' => $superadmin,
+    'lines' => [['item_id' => $itemHttpAdminXfer, 'input_qty' => 5, 'input_unit_id' => $kgUnitId]],
+]));
+Database::transaction(fn (PDO $tx) => TransferService::receive($tx, $transferHttpAdminAttempt['transfer_id'], ['created_by' => $superadmin]));
 
 $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
 $process = proc_open(sprintf('php -S 127.0.0.1:%d -t %s', $port, escapeshellarg($docRoot)), $descriptors, $pipes, __DIR__ . '/..');
@@ -596,29 +620,53 @@ function httpLogin(string $base, string $user, string $pass): array
 
 try {
     $stockSess = httpLogin($base, $stockUsername, 'V25Http!123');
-    $adminSess = httpLogin($base, $adminUsername, 'V25Http!123');
+    $superadminSess = httpLogin($base, $superadminHttpUsername, 'V25Http!123');
+    $adminSess = httpLogin($base, $adminHttpUsername, 'V25Http!123');
 
-    // ---- Case 2: STOCK cannot void IN ----
+    // ---- Case 2 / V2.5A test 3: STOCK cannot void IN ----
     $stockVoidAttempt = httpCall('POST', "{$base}/transactions/{$inHttp['transaction_id']}/void", ['reason' => 'stock trying to void'], $stockSess['jar'], $stockSess['csrf']);
-    check('Case 2: STOCK cannot void a transaction (403 FORBIDDEN)', $stockVoidAttempt['status'] === 403 && ($stockVoidAttempt['body']['error']['code'] ?? null) === 'FORBIDDEN', json_encode($stockVoidAttempt['body']));
+    check('Case 2 / V2.5A#3: STOCK cannot void a transaction (403 FORBIDDEN)', $stockVoidAttempt['status'] === 403 && ($stockVoidAttempt['body']['error']['code'] ?? null) === 'FORBIDDEN', json_encode($stockVoidAttempt['body']));
 
-    // ---- Case 27: warehouse isolation — STOCK also cannot reverse a transfer, even one touching their own warehouse ----
+    // ---- Case 27 / V2.5A test 6: warehouse isolation — STOCK also cannot reverse a transfer, even one touching their own warehouse ----
     $stockReverseAttempt = httpCall('POST', "{$base}/transfers/{$transferHttp['transfer_id']}/reverse", ['reason' => 'stock trying to reverse'], $stockSess['jar'], $stockSess['csrf']);
-    check('Case 27: STOCK cannot reverse a transfer touching their own warehouse (403 FORBIDDEN — permission, not scope)', $stockReverseAttempt['status'] === 403 && ($stockReverseAttempt['body']['error']['code'] ?? null) === 'FORBIDDEN', json_encode($stockReverseAttempt['body']));
+    check('Case 27 / V2.5A#6: STOCK cannot reverse a transfer touching their own warehouse (403 FORBIDDEN — permission, not scope)', $stockReverseAttempt['status'] === 403 && ($stockReverseAttempt['body']['error']['code'] ?? null) === 'FORBIDDEN', json_encode($stockReverseAttempt['body']));
 
-    // ---- Case 28: SUPERADMIN access — real HTTP round trip succeeds for both actions ----
-    $adminVoid = httpCall('POST', "{$base}/transactions/{$inHttp['transaction_id']}/void", ['request_uuid' => uid('void-http'), 'reason' => 'superadmin http void test'], $adminSess['jar'], $adminSess['csrf']);
-    check('Case 28: SUPERADMIN can void via the real HTTP API', ($adminVoid['body']['data']['success'] ?? false) === true, json_encode($adminVoid['body']));
+    // ---- V2.5A test 2: ADMIN receives 403 for void — ADMIN is explicitly NOT equivalent to SUPERADMIN here ----
+    $adminVoidAttempt = httpCall('POST', "{$base}/transactions/{$inHttpAdminAttempt['transaction_id']}/void", ['reason' => 'admin trying to void — must be rejected'], $adminSess['jar'], $adminSess['csrf']);
+    check('V2.5A#2: ADMIN receives 403 FORBIDDEN for void (not equivalent to SUPERADMIN)', $adminVoidAttempt['status'] === 403 && ($adminVoidAttempt['body']['error']['code'] ?? null) === 'FORBIDDEN', json_encode($adminVoidAttempt['body']));
+    $adminVoidedTxStatus = $pdo->query("SELECT status FROM inventory_transactions WHERE id = {$inHttpAdminAttempt['transaction_id']}")->fetchColumn();
+    check('The rejected ADMIN void attempt left the transaction untouched (still POSTED)', $adminVoidedTxStatus === 'POSTED');
 
-    $adminReverse = httpCall('POST', "{$base}/transfers/{$transferHttp['transfer_id']}/reverse", ['reason' => 'superadmin http reverse test'], $adminSess['jar'], $adminSess['csrf']);
-    check('Case 28: SUPERADMIN can reverse a RECEIVED transfer via the real HTTP API', ($adminReverse['body']['data']['success'] ?? false) === true, json_encode($adminReverse['body']));
+    // ---- V2.5A test 5: ADMIN receives 403 for transfer reversal ----
+    $adminReverseAttempt = httpCall('POST', "{$base}/transfers/{$transferHttpAdminAttempt['transfer_id']}/reverse", ['reason' => 'admin trying to reverse — must be rejected'], $adminSess['jar'], $adminSess['csrf']);
+    check('V2.5A#5: ADMIN receives 403 FORBIDDEN for transfer reversal (not equivalent to SUPERADMIN)', $adminReverseAttempt['status'] === 403 && ($adminReverseAttempt['body']['error']['code'] ?? null) === 'FORBIDDEN', json_encode($adminReverseAttempt['body']));
+    $adminReversedTransferStatus = $pdo->query("SELECT status FROM warehouse_transfers WHERE id = {$transferHttpAdminAttempt['transfer_id']}")->fetchColumn();
+    check('The rejected ADMIN reverse attempt left the transfer untouched (still RECEIVED)', $adminReversedTransferStatus === 'RECEIVED');
+
+    // ---- V2.5A test 10: existing PENDING-transfer-cancel permission (WAREHOUSE_TRANSFER_MANAGE) is untouched — ADMIN can still cancel a PENDING transfer ----
+    $itemAdminCancel = makeItem($pdo, $kgUnitId, 'HTTP-ADMIN-CANCEL');
+    postIn($pdo, $itemAdminCancel, $whA, 9, 2000, '2026-09-01 08:00:00', $superadmin, $kgUnitId);
+    $transferAdminCancel = Database::transaction(fn (PDO $tx) => TransferService::create($tx, [
+        'transfer_uuid' => uid('xferadmincancel'), 'from_warehouse_id' => $whA, 'to_warehouse_id' => $whB,
+        'ship_date' => '2026-09-05 08:00:00', 'created_by' => $superadmin,
+        'lines' => [['item_id' => $itemAdminCancel, 'input_qty' => 4, 'input_unit_id' => $kgUnitId]],
+    ]));
+    $adminCancelAttempt = httpCall('POST', "{$base}/transfers/{$transferAdminCancel['transfer_id']}/cancel", ['reason' => 'admin cancelling a PENDING transfer — this permission is unchanged'], $adminSess['jar'], $adminSess['csrf']);
+    check('V2.5A#10: ADMIN can still cancel a PENDING transfer (WAREHOUSE_TRANSFER_MANAGE unchanged by this hardening)', ($adminCancelAttempt['body']['data']['success'] ?? false) === true, json_encode($adminCancelAttempt['body']));
+
+    // ---- Case 28 / V2.5A test 1+4: SUPERADMIN access — real HTTP round trip succeeds for both actions ----
+    $adminVoid = httpCall('POST', "{$base}/transactions/{$inHttp['transaction_id']}/void", ['request_uuid' => uid('void-http'), 'reason' => 'superadmin http void test'], $superadminSess['jar'], $superadminSess['csrf']);
+    check('Case 28 / V2.5A#1: SUPERADMIN can void an eligible IN via the real HTTP API', ($adminVoid['body']['data']['success'] ?? false) === true, json_encode($adminVoid['body']));
+
+    $adminReverse = httpCall('POST', "{$base}/transfers/{$transferHttp['transfer_id']}/reverse", ['reason' => 'superadmin http reverse test'], $superadminSess['jar'], $superadminSess['csrf']);
+    check('Case 28 / V2.5A#4: SUPERADMIN can reverse an eligible RECEIVED transfer via the real HTTP API', ($adminReverse['body']['data']['success'] ?? false) === true, json_encode($adminReverse['body']));
 
     // ---- Case 30 (HTTP half): idempotent replay of the SAME void request over HTTP ----
     // (a fresh transaction, since the one above is already VOID)
     $inHttp2 = postIn($pdo, $itemHttp, $whA, 8, 3000, '2026-09-01 08:00:00', $superadmin, $kgUnitId);
     $voidUuidHttp = uid('void-http-idem');
-    $firstHttpVoid = httpCall('POST', "{$base}/transactions/{$inHttp2['transaction_id']}/void", ['request_uuid' => $voidUuidHttp, 'reason' => 'idempotent http void test'], $adminSess['jar'], $adminSess['csrf']);
-    $secondHttpVoid = httpCall('POST', "{$base}/transactions/{$inHttp2['transaction_id']}/void", ['request_uuid' => $voidUuidHttp, 'reason' => 'idempotent http void test'], $adminSess['jar'], $adminSess['csrf']);
+    $firstHttpVoid = httpCall('POST', "{$base}/transactions/{$inHttp2['transaction_id']}/void", ['request_uuid' => $voidUuidHttp, 'reason' => 'idempotent http void test'], $superadminSess['jar'], $superadminSess['csrf']);
+    $secondHttpVoid = httpCall('POST', "{$base}/transactions/{$inHttp2['transaction_id']}/void", ['request_uuid' => $voidUuidHttp, 'reason' => 'idempotent http void test'], $superadminSess['jar'], $superadminSess['csrf']);
     check('Case 30 (HTTP): replaying the same request_uuid over HTTP returns the same idempotent result, no duplicate side effect', ($secondHttpVoid['body']['data']['idempotent_replay'] ?? false) === true && ($secondHttpVoid['body']['data']['reversal_transaction_id'] ?? null) === ($firstHttpVoid['body']['data']['reversal_transaction_id'] ?? null));
 } finally {
     proc_terminate($process);
