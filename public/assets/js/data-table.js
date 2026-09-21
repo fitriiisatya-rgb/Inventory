@@ -224,7 +224,22 @@ const DataTable = (() => {
 
         renderHead();
         load();
-        return { reload: load, getFilters: () => state.filters };
+        return {
+            reload: load,
+            getFilters: () => state.filters,
+            // PHASE V2.6D — lets a caller drive a filter programmatically
+            // (e.g. Laporan Stok's clickable Aman/Warning/Habis counter
+            // chips) through the exact same path a real filter input
+            // change takes: mutates state.filters, resets to page 1, and
+            // reloads. Purely additive on the returned handle — every
+            // existing caller that never calls this keeps its current
+            // behavior unchanged.
+            setFilter: (key, value) => {
+                state.filters[key] = value === undefined || value === '' ? undefined : value;
+                state.page = 1;
+                load();
+            },
+        };
     }
 
     return { render };

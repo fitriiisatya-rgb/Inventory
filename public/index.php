@@ -909,13 +909,20 @@ $routes = [
             inv_require_warehouse_scope($user, $warehouseId);
         }
 
+        $itemStatusParam = in_array($query['item_status'] ?? '', ['ACTIVE', 'INACTIVE'], true) ? $query['item_status'] : null;
+        $reportStatusParam = in_array($query['report_status'] ?? '', ['AMAN', 'WARNING', 'HABIS'], true) ? $query['report_status'] : null;
+
         $params = [
             'warehouse_id' => $warehouseId,
             'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
             'q' => $query['q'] ?? null,
             'status' => $query['status'] ?? null,
+            'report_status' => $reportStatusParam,
+            'item_status' => $itemStatusParam,
+            // item_status (tri-state) overrides active_only when given, same
+            // convention StockReportService::buildQuery() already documents.
+            'active_only' => $itemStatusParam === null && (!isset($query['active_only']) || $query['active_only'] !== '0'),
             'include_zero_stock' => !isset($query['include_zero_stock']) || $query['include_zero_stock'] !== '0',
-            'active_only' => !isset($query['active_only']) || $query['active_only'] !== '0',
             'page' => (int) ($query['page'] ?? 1),
             'per_page' => (int) ($query['per_page'] ?? 50),
             'sort' => $query['sort'] ?? 'name',
@@ -925,6 +932,28 @@ $routes = [
         if (($query['format'] ?? '') === 'csv') {
             $rows = StockReportService::exportAll($pdo, $params);
             $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+
+            // PHASE V2.6D — "Laporan Stok" (the Reporting Pack page) asks
+            // for a focused 8-column export (SKU/Nama/Kategori/Satuan/
+            // Stok Tersedia/Stok Minimal/Status/Nilai, using the new
+            // AMAN/WARNING/HABIS status). The older "Stok Barang" tab
+            // shares this same route/endpoint for its own 14-column export
+            // (with the original 5-tier status plus buffer/last-movement
+            // columns) — `view=report` switches shape ADDITIVELY; omitting
+            // it (every existing caller, including Stok Barang) keeps the
+            // exact original column set, byte-identical.
+            if (($query['view'] ?? '') === 'report') {
+                inv_export_csv(
+                    ['laporan-stok', $whLabel, date('Y-m-d')],
+                    ['SKU', 'Nama Produk', 'Kategori', 'Satuan', 'Stok Tersedia', 'Stok Minimal', 'Status', 'Nilai Stok'],
+                    $rows,
+                    static fn (array $r) => [
+                        $r['sku'], $r['name'], $r['category']['name'] ?? '', $r['unit']['code'],
+                        $r['qty_base'], $r['minimum_stock'], $r['report_status'], $r['value'],
+                    ]
+                );
+            }
+
             inv_export_csv(
                 ['laporan-stok', $whLabel, date('Y-m-d')],
                 ['SKU', 'Nama Barang', 'Kategori', 'Satuan', 'Qty', 'Nilai', 'Rata-rata Biaya', 'Minimum', 'Buffer', 'Buffer Dikonfigurasi', 'Status', 'Terakhir Masuk', 'Terakhir Keluar', 'Terakhir Bergerak'],
@@ -938,6 +967,81 @@ $routes = [
         }
 
         inv_ok(StockReportService::list($pdo, $params), 'OK');
+    },
+
+    // PHASE V2.6D — "Semua Produk / Aman / Warning / Habis" counters for
+    // Laporan Stok, computed over the FULL filtered dataset (never just the
+    // current page — see StockReportService::statusCounts()'s own
+    // docblock for why this is a separate query from list()'s summary
+    // block). Same warehouse-scope enforcement as GET /reports/stock,
+    // copied rather than shared to keep each route's auth path
+    // independently readable.
+    'GET /reports/stock/status-counts' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        if ($user['role_code'] === 'STOCK') {
+            if (empty($user['warehouse_id'])) {
+                inv_error(403, 'FORBIDDEN', 'STOCK user has no warehouse assignment');
+            }
+            if ($warehouseId !== null) {
+                inv_require_warehouse_scope($user, $warehouseId);
+            } else {
+                $warehouseId = (int) $user['warehouse_id'];
+            }
+        } elseif ($warehouseId !== null) {
+            inv_require_warehouse_scope($user, $warehouseId);
+        }
+
+        $itemStatusParam = in_array($query['item_status'] ?? '', ['ACTIVE', 'INACTIVE'], true) ? $query['item_status'] : null;
+        inv_ok(StockReportService::statusCounts($pdo, [
+            'warehouse_id' => $warehouseId,
+            'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
+            'q' => $query['q'] ?? null,
+            'item_status' => $itemStatusParam,
+            'active_only' => $itemStatusParam === null && (!isset($query['active_only']) || $query['active_only'] !== '0'),
+        ]), 'OK');
+    },
+
+    // PHASE V2.6D — Kartu Stok (Stock Card): one item's movement history
+    // for one warehouse, with a running balance. Reuses the EXISTING
+    // InventoryService::ledger() (the same engine the "Mutasi Stok /
+    // Ledger" tab already uses) and InventoryService::currentStock() —
+    // never a second inventory ledger. ledger() already correctly keeps
+    // historical (inventory_effect=0, 1-15 Sep) rows out of the live
+    // running balance (see its own docblock) — this route only adds
+    // pagination over its already-computed, already-ordered output; the
+    // running-balance computation itself is untouched.
+    'GET /reports/stock/card' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $itemId = (int) ($query['item_id'] ?? 0);
+        $warehouseId = (int) ($query['warehouse_id'] ?? 0);
+        if ($itemId <= 0 || $warehouseId <= 0) {
+            inv_error(422, 'VALIDATION_ERROR', 'item_id and warehouse_id are required');
+        }
+        inv_require_warehouse_scope($user, $warehouseId);
+
+        $current = InventoryService::currentStock($pdo, $itemId, $warehouseId);
+        $fullLedger = InventoryService::ledger($pdo, $itemId, $warehouseId);
+        $live = array_values(array_filter($fullLedger, static fn (array $r) => !$r['is_historical']));
+        $historical = array_values(array_filter($fullLedger, static fn (array $r) => $r['is_historical']));
+
+        $page = max(1, (int) ($query['page'] ?? 1));
+        $perPage = min(200, max(1, (int) ($query['per_page'] ?? 50)));
+        $total = count($live);
+        $offset = ($page - 1) * $perPage;
+
+        inv_ok([
+            'item_id' => $itemId,
+            'warehouse_id' => $warehouseId,
+            'current' => $current,
+            'movements' => array_slice($live, $offset, $perPage),
+            'pagination' => ['page' => $page, 'per_page' => $perPage, 'total' => $total, 'total_pages' => (int) ceil($total / max(1, $perPage))],
+            'historical' => $historical,
+        ], 'OK');
     },
 
     // ---- PHASE V2: GET /reports/transactions — "History Transaksi"

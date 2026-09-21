@@ -226,6 +226,10 @@ const InvApi = (() => {
         // ---- PHASE V2: reports ----
         stockReport: (params = {}) => request('GET', `/reports/stock?${new URLSearchParams(params).toString()}`),
         stockReportCsvUrl: (params = {}) => `/api/reports/stock?${new URLSearchParams({ ...params, format: 'csv' }).toString()}`,
+        // ---- PHASE V2.6D: Laporan Stok all-product + Kartu Stok ----
+        stockStatusCounts: (params = {}) => request('GET', `/reports/stock/status-counts${qs(params)}`),
+        stockCard: (params = {}) => request('GET', `/reports/stock/card${qs(params)}`),
+        stockReportExportUrl: (params = {}) => `/api/reports/stock${qs({ ...params, view: 'report', format: 'csv' })}`,
         transactionReport: (params = {}) => request('GET', `/reports/transactions?${new URLSearchParams(params).toString()}`),
         transactionDetail: (id) => request('GET', `/reports/transactions/${id}`),
 

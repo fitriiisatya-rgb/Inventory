@@ -203,6 +203,19 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 .badge-status-migration_negative_review { background: rgba(168,85,247,0.15); color: #c084fc; }
 .buffer-unconfigured-note { font-size: 0.68rem; color: var(--text3); font-style: italic; margin-top: 2px; }
 
+/* PHASE V2.6D — Laporan Stok: clickable "Stok Tersedia" value (opens
+   Kartu Stok / warehouse breakdown) and clickable Kartu Stok movement
+   rows (opens TraceDrawer). Reuses --accent, no new hardcoded colors. */
+.stock-qty-link { color: var(--accent); cursor: pointer; font-weight: 700; text-decoration: underline dotted; text-underline-offset: 2px; }
+.stock-qty-link:hover { color: var(--accent2, var(--accent)); }
+.stock-card-row-clickable { cursor: pointer; }
+.stock-card-row-clickable:hover { background: rgba(59,130,246,0.08); }
+.stock-counter-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.stock-counter-chip { cursor: pointer; padding: 8px 16px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg2); font-size: 0.8rem; font-weight: 600; transition: 0.15s; }
+.stock-counter-chip:hover { border-color: var(--accent); }
+.stock-counter-chip.active { border-color: var(--accent); background: rgba(59,130,246,0.12); }
+.stock-counter-chip .stock-counter-value { font-size: 1.05rem; font-weight: 800; margin-left: 6px; }
+
 /* data-table: sticky header, column-picker, toolbar */
 .dt-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
 .dt-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

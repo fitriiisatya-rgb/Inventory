@@ -50,12 +50,13 @@ final class StockReportService
         $supplierId = $params['supplier_id'] ?? null;
         $itemStatus = $params['item_status'] ?? null;
         $stockStatusComposite = $params['stock_status'] ?? null;
+        $reportStatus = $params['report_status'] ?? null;
         $page = max(1, (int) ($params['page'] ?? 1));
         $perPage = min(200, max(1, (int) ($params['per_page'] ?? 50)));
         $sortKey = self::SORTABLE[$params['sort'] ?? 'name'] ?? 'i.name';
         $dir = strtoupper($params['dir'] ?? 'ASC') === 'DESC' ? 'DESC' : 'ASC';
 
-        [$select, $joins, $where, $having, $bind] = self::buildQuery($pdo, $warehouseId, $categoryId, $q, $activeOnly, $includeZeroStock, $statusFilter, $supplierId, $itemStatus, $stockStatusComposite);
+        [$select, $joins, $where, $having, $bind] = self::buildQuery($pdo, $warehouseId, $categoryId, $q, $activeOnly, $includeZeroStock, $statusFilter, $supplierId, $itemStatus, $stockStatusComposite, $reportStatus);
 
         // Must select the full aliased column list (not just i.id) when HAVING
         // references computed aliases like qty_base/status.
@@ -118,8 +119,9 @@ final class StockReportService
         $supplierId = $params['supplier_id'] ?? null;
         $itemStatus = $params['item_status'] ?? null;
         $stockStatusComposite = $params['stock_status'] ?? null;
+        $reportStatus = $params['report_status'] ?? null;
 
-        [$select, $joins, $where, $having, $bind] = self::buildQuery($pdo, $warehouseId, $categoryId, $q, $activeOnly, $includeZeroStock, $statusFilter, $supplierId, $itemStatus, $stockStatusComposite);
+        [$select, $joins, $where, $having, $bind] = self::buildQuery($pdo, $warehouseId, $categoryId, $q, $activeOnly, $includeZeroStock, $statusFilter, $supplierId, $itemStatus, $stockStatusComposite, $reportStatus);
         $sql = "SELECT {$select} {$joins} WHERE {$where} " . ($having !== '' ? "HAVING {$having}" : '') . ' ORDER BY i.name ASC';
         $stmt = $pdo->prepare($sql);
         $stmt->execute($bind);
@@ -127,8 +129,50 @@ final class StockReportService
         return array_map(fn ($r) => self::formatRow($r), $stmt->fetchAll());
     }
 
+    /**
+     * PHASE V2.6D — "Semua Produk / Aman / Warning / Habis" counters for
+     * Laporan Stok. Deliberately its own query rather than reusing list()'s
+     * summary block: those existing counters are scoped to the SAME
+     * having-filters as the current view (so e.g. filtering to one 5-tier
+     * `status` collapses the others to 0) — exactly right for that block,
+     * but wrong here, since these 4 counters must stay stable reference
+     * points while only the table itself narrows when one is clicked. So
+     * this intentionally reuses buildQuery()'s $select/$joins/$where (the
+     * warehouse/category/search/product-status scope) but ignores its
+     * $having entirely — no report_status, no legacy status/stock_status
+     * filter ever narrows the counts themselves. One aggregate query, full
+     * filtered population, never just the current page.
+     *
+     * @return array{total:int, aman:int, warning:int, habis:int}
+     */
+    public static function statusCounts(PDO $pdo, array $params): array
+    {
+        $warehouseId = $params['warehouse_id'] ?? null;
+        $categoryId = $params['category_id'] ?? null;
+        $q = trim((string) ($params['q'] ?? ''));
+        $activeOnly = $params['active_only'] ?? true;
+        $supplierId = $params['supplier_id'] ?? null;
+        $itemStatus = $params['item_status'] ?? null;
+
+        [$select, $joins, $where, , $bind] = self::buildQuery($pdo, $warehouseId, $categoryId, $q, $activeOnly, true, null, $supplierId, $itemStatus, null, null);
+        $sql = "SELECT report_status, COUNT(*) AS cnt FROM (SELECT {$select} {$joins} WHERE {$where}) counted GROUP BY report_status";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($bind);
+
+        $counts = ['total' => 0, 'aman' => 0, 'warning' => 0, 'habis' => 0];
+        foreach ($stmt->fetchAll() as $row) {
+            $n = (int) $row['cnt'];
+            $counts['total'] += $n;
+            $key = strtolower((string) $row['report_status']);
+            if (isset($counts[$key])) {
+                $counts[$key] = $n;
+            }
+        }
+        return $counts;
+    }
+
     /** @return array{0:string,1:string,2:string,3:string,4:array} [select, joins, where, having, bind] */
-    private static function buildQuery(PDO $pdo, ?int $warehouseId, ?int $categoryId, string $q, bool $activeOnly, bool $includeZeroStock, ?string $statusFilter, ?int $supplierId = null, ?string $itemStatus = null, ?string $stockStatusComposite = null): array
+    private static function buildQuery(PDO $pdo, ?int $warehouseId, ?int $categoryId, string $q, bool $activeOnly, bool $includeZeroStock, ?string $statusFilter, ?int $supplierId = null, ?string $itemStatus = null, ?string $stockStatusComposite = null, ?string $reportStatus = null): array
     {
         $bind = [];
 
@@ -220,7 +264,22 @@ final class StockReportService
                 WHEN COALESCE(b.qty_base, 0) < {$minimumExpr} THEN 'CRITICAL'
                 WHEN {$bufferExpr} IS NOT NULL AND COALESCE(b.qty_base, 0) < {$bufferExpr} THEN 'LOW'
                 ELSE 'SAFE'
-            END AS status
+            END AS status,
+            -- PHASE V2.6D — Laporan Stok's simplified 3-state view. A
+            -- DELIBERATELY separate column from `status` above: that one
+            -- is the existing 5-tier CRITICAL/LOW/SAFE/OUT_OF_STOCK/
+            -- MIGRATION_NEGATIVE_REVIEW model other pages (Stok Barang,
+            -- the Dashboard's Need Attention widget) already depend on and
+            -- must never change. This mirrors the exact owner-specified
+            -- formula: <=0 stock is HABIS regardless of minimum (a
+            -- migration-negative item is qty<0<=0, so it is HABIS here
+            -- too — no separate branch needed), otherwise <=minimum is
+            -- WARNING, else AMAN. Buffer stock never enters this formula.
+            CASE
+                WHEN COALESCE(b.qty_base, 0) <= 0 THEN 'HABIS'
+                WHEN COALESCE(b.qty_base, 0) <= {$minimumExpr} THEN 'WARNING'
+                ELSE 'AMAN'
+            END AS report_status
         ";
 
         $whereParts = ['1=1'];
@@ -272,6 +331,10 @@ final class StockReportService
         } elseif ($stockStatusComposite === 'NEEDS_ATTENTION') {
             $havingParts[] = "status <> 'SAFE'";
         }
+        if ($reportStatus === 'AMAN' || $reportStatus === 'WARNING' || $reportStatus === 'HABIS') {
+            $havingParts[] = 'report_status = :report_status';
+            $bind['report_status'] = $reportStatus;
+        }
         $having = implode(' AND ', $havingParts);
 
         return [$select, $joins, $where, $having, $bind];
@@ -297,6 +360,7 @@ final class StockReportService
             'buffer_stock' => $r['buffer_stock'] === null ? null : round((float) $r['buffer_stock'], 6),
             'buffer_configured' => $r['buffer_stock'] !== null,
             'status' => $r['status'],
+            'report_status' => $r['report_status'],
             'migration_negative_review' => $r['status'] === 'MIGRATION_NEGATIVE_REVIEW',
             'last_in' => $r['last_in'],
             'last_out' => $r['last_out'],
