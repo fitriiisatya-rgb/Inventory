@@ -67,6 +67,8 @@
         laporan: 'Mutasi Stok / Ledger', 'history-transaksi': 'History Transaksi', transaksi: 'Stock IN / OUT',
         transfer: 'Transfer', produksi: 'Produksi', opname: 'Stock Opname', import: 'Import',
         audit: 'Audit Log', closing: 'Tutup Buku', 'laporan-hpp': 'Laporan Nilai Stok & HPP',
+        'laporan-ringkasan': 'Ringkasan Inventory',
+        'laporan-pergerakan': 'Pergerakan Stok Harian', 'laporan-rekonsiliasi': 'Rekonsiliasi Arus Stok',
     };
 
     function activateTab(name) {
@@ -117,6 +119,12 @@
             Closing.render(document.getElementById('tab-closing'));
         } else if (name === 'laporan-hpp') {
             ReportHpp.render(document.getElementById('tab-laporan-hpp'));
+        } else if (name === 'laporan-ringkasan') {
+            ReportSummary.render(document.getElementById('tab-laporan-ringkasan'));
+        } else if (name === 'laporan-pergerakan') {
+            ReportMovement.render(document.getElementById('tab-laporan-pergerakan'));
+        } else if (name === 'laporan-rekonsiliasi') {
+            ReportReconciliation.render(document.getElementById('tab-laporan-rekonsiliasi'));
         }
     }
 

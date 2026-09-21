@@ -181,6 +181,13 @@ const InvApi = (() => {
         hppVarianceBridge: (params) => request('GET', `/reports/inventory-hpp/variance-bridge${qs(params)}`),
         hppExportUrl: (params) => `/api/reports/inventory-hpp/export${qs(params)}`,
 
+        // ---- PHASE V2.6B: Pergerakan Stok Harian + Rekonsiliasi Arus Stok (read-only) ----
+        movementDaily: (params) => request('GET', `/reports/movement/daily${qs(params)}`),
+        movementDayBreakdown: (params) => request('GET', `/reports/movement/day-breakdown${qs(params)}`),
+        movementDayTransactions: (params) => request('GET', `/reports/movement/day-transactions${qs(params)}`),
+        reconciliationMovement: (params) => request('GET', `/reports/reconciliation/movement${qs(params)}`),
+        summaryInventory: (params) => request('GET', `/reports/summary/inventory${qs(params)}`),
+
         // ---- PHASE V2: per-item-per-warehouse stock policy ----
         getStockPolicy: (itemId, warehouseId) => request('GET', `/stock-policy?item_id=${itemId}&warehouse_id=${warehouseId}`),
         saveStockPolicy: (payload) => request('PUT', '/stock-policy', payload),

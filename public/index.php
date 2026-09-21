@@ -54,6 +54,9 @@ require_once __DIR__ . '/../services/OpeningReconciliationService.php';
 require_once __DIR__ . '/../services/MovementReconciliationReviewService.php';
 require_once __DIR__ . '/../services/ImportHistoricalTransactionService.php';
 require_once __DIR__ . '/../services/InventoryHppReportService.php';
+require_once __DIR__ . '/../services/InventoryMovementReportService.php';
+require_once __DIR__ . '/../services/InventoryReconciliationReportService.php';
+require_once __DIR__ . '/../services/InventorySummaryReportService.php';
 require_once __DIR__ . '/../services/ExcelWriterService.php';
 
 use App\Services\AuthService;
@@ -789,13 +792,18 @@ $routes = [
             header('Content-Type: text/csv; charset=utf-8');
             header('Content-Disposition: attachment; filename="laporan-stok-' . date('Ymd_His') . '.csv"');
             $out = fopen('php://output', 'w');
-            fputcsv($out, ['SKU', 'Nama Barang', 'Kategori', 'Satuan', 'Qty', 'Nilai', 'Rata-rata Biaya', 'Minimum', 'Buffer', 'Buffer Dikonfigurasi', 'Status', 'Terakhir Masuk', 'Terakhir Keluar', 'Terakhir Bergerak']);
+            // PHP 8.4 deprecates relying on fputcsv()'s implicit default $escape —
+            // passed explicitly here (',', '"', '\\') to keep byte-identical CSV
+            // output to every PHP version before 8.4, pre-existing bug unrelated
+            // to V2.6, surfaced by this sandbox's PHP 8.4 runtime during the
+            // V2.6B full-regression run.
+            fputcsv($out, ['SKU', 'Nama Barang', 'Kategori', 'Satuan', 'Qty', 'Nilai', 'Rata-rata Biaya', 'Minimum', 'Buffer', 'Buffer Dikonfigurasi', 'Status', 'Terakhir Masuk', 'Terakhir Keluar', 'Terakhir Bergerak'], ',', '"', '\\');
             foreach ($rows as $r) {
                 fputcsv($out, [
                     $r['sku'], $r['name'], $r['category']['name'] ?? '', $r['unit']['code'],
                     $r['qty_base'], $r['value'], $r['average_cost'], $r['minimum_stock'], $r['buffer_stock'],
                     $r['buffer_configured'] ? 'Ya' : 'Tidak', $r['status'], $r['last_in'], $r['last_out'], $r['last_movement'],
-                ]);
+                ], ',', '"', '\\');
             }
             fclose($out);
             exit;
@@ -984,6 +992,86 @@ $routes = [
             @unlink($tmpPath);
         }
         exit;
+    },
+
+    // ============================================================
+    // PHASE V2.6B — Reporting Pack: Report 2 "Pergerakan Stok Harian" +
+    // Report 14 "Rekonsiliasi Arus Stok". Strictly read-only, same
+    // INVENTORY_VIEW gate and STOCK-forced-to-own-warehouse pattern as
+    // the HPP report above (inv_hpp_resolve_warehouse_scope is fully
+    // generic despite its name — reused verbatim, never duplicated).
+    // Drill-down carries real transaction_id so the frontend opens it via
+    // the EXISTING TraceDrawer — no second trace implementation here.
+    // ============================================================
+    'GET /reports/movement/daily' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $start = (string) ($query['start_date'] ?? '');
+        $end = (string) ($query['end_date'] ?? '');
+        if ($start === '' || $end === '' || strtotime($start) === false || strtotime($end) === false || strtotime($start) > strtotime($end)) {
+            inv_error(422, 'VALIDATION_ERROR', 'start_date and end_date are required and start_date must not be after end_date');
+        }
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+
+        inv_ok(InventoryMovementReportService::dailyMovement($pdo, $start, $end, $warehouseId), 'OK');
+    },
+
+    'GET /reports/movement/day-breakdown' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $date = (string) ($query['date'] ?? '');
+        if ($date === '' || strtotime($date) === false) {
+            inv_error(422, 'VALIDATION_ERROR', 'date is required (YYYY-MM-DD)');
+        }
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+
+        inv_ok(InventoryMovementReportService::dayBreakdown($pdo, $date, $warehouseId), 'OK');
+    },
+
+    'GET /reports/movement/day-transactions' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $date = (string) ($query['date'] ?? '');
+        $category = (string) ($query['category'] ?? '');
+        if ($date === '' || strtotime($date) === false || $category === '') {
+            inv_error(422, 'VALIDATION_ERROR', 'date and category are required');
+        }
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+
+        inv_ok(InventoryMovementReportService::categoryTransactions($pdo, $date, $warehouseId, $category), 'OK');
+    },
+
+    'GET /reports/reconciliation/movement' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $start = (string) ($query['start_date'] ?? '');
+        $end = (string) ($query['end_date'] ?? '');
+        if ($start === '' || $end === '' || strtotime($start) === false || strtotime($end) === false || strtotime($start) > strtotime($end)) {
+            inv_error(422, 'VALIDATION_ERROR', 'start_date and end_date are required and start_date must not be after end_date');
+        }
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+
+        inv_ok(InventoryReconciliationReportService::run($pdo, $start, $end, $warehouseId), 'OK');
+    },
+
+    // PHASE V2.6B — Report 1 "Ringkasan Inventory" (management overview).
+    'GET /reports/summary/inventory' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $start = (string) ($query['start_date'] ?? '');
+        $end = (string) ($query['end_date'] ?? '');
+        if ($start === '' || $end === '' || strtotime($start) === false || strtotime($end) === false || strtotime($start) > strtotime($end)) {
+            inv_error(422, 'VALIDATION_ERROR', 'start_date and end_date are required and start_date must not be after end_date');
+        }
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        $categoryId = isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null;
+
+        inv_ok(InventorySummaryReportService::summary($pdo, $start, $end, $warehouseId, $categoryId), 'OK');
     },
 
     // ---- InventoryService: single source of truth reads (Section 7) ----
