@@ -35,6 +35,7 @@ const ReportMovement = (() => {
             UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '📅 Pergerakan Stok Harian')]),
             UI.el('div', { id: 'movement-daily-host' }),
         ]));
+        mainCol.appendChild(UI.el('div', { id: 'movement-historical-host' }));
         bodyRow.appendChild(mainCol);
 
         const drawerHost = UI.el('div', { class: 'hpp-trace-panel', id: 'movement-breakdown-panel' });
@@ -131,6 +132,7 @@ const ReportMovement = (() => {
                     const banner = cutoverBanner(result.cutover);
                     if (banner) bannerHost.appendChild(banner);
                 }
+                renderHistoricalSection(result.historical || []);
                 const start = (page - 1) * perPage;
                 const totalPages = Math.max(1, Math.ceil(result.rows.length / perPage));
                 return {
@@ -141,6 +143,81 @@ const ReportMovement = (() => {
             onRowClick: (row) => { if (!row.is_pre_go_live) openBreakdown(row.date); },
             emptyMessage: 'Tidak ada data pada periode ini.',
         });
+    }
+
+    // MANDATORY CORRECTION A — historical (inventory_effect=0) nominal IN/
+    // OUT disclosure, rendered as a visually distinct section: it NEVER
+    // shares a Saldo Awal/Akhir with the live table above (historical rows
+    // structurally cannot affect live economics — see the service's own
+    // docblock), it only discloses raw historical nominal activity for
+    // audit purposes.
+    function renderHistoricalSection(historicalRows) {
+        const host = document.getElementById('movement-historical-host');
+        if (!host) return;
+        host.innerHTML = '';
+        if (!historicalRows.length) return;
+
+        const rows = historicalRows.map((h) => UI.el('tr', { class: 'movement-historical-row' }, [
+            UI.el('td', {}, fmtDateOnly(h.date)),
+            UI.el('td', {}, UI.formatMoney(h.historical_in)),
+            UI.el('td', {}, UI.formatMoney(h.historical_out)),
+            UI.el('td', {}, UI.formatNumber(h.transaction_count)),
+        ]));
+        rows.forEach((tr, i) => tr.addEventListener('click', () => openHistoricalTransactions(historicalRows[i].date)));
+
+        host.appendChild(UI.el('div', { class: 'card', style: 'margin-top:16px;' }, [
+            UI.el('div', { class: 'card-header' }, [
+                UI.el('div', { class: 'card-title' }, [
+                    UI.el('span', { class: 'hpp-pre-go-live-badge' }, 'HISTORICAL'),
+                    ' Pergerakan Historis / Reporting Only',
+                ]),
+            ]),
+            UI.el('p', { style: 'color:var(--text3); font-size:0.75rem; margin: 0 0 10px;' },
+                'Reporting Only — Tidak memengaruhi stok/HPP live. Data ini adalah aktivitas nominal historis (1–15 Sep atau tanggal historis lain) yang tetap dapat diaudit, namun TIDAK menjadi bagian dari Saldo Awal/Akhir live di atas.'),
+            UI.el('div', { class: 'table-wrapper' }, [
+                UI.el('table', {}, [
+                    UI.el('thead', {}, [UI.el('tr', {}, ['Tanggal', 'Historical IN', 'Historical OUT', 'Jumlah Transaksi'].map((h) => UI.el('th', {}, h)))]),
+                    UI.el('tbody', {}, rows),
+                ]),
+            ]),
+        ]));
+    }
+
+    async function openHistoricalTransactions(date) {
+        Drawer.open({ title: `Historis — ${fmtDateOnly(date)}`, render: (body) => { body.innerHTML = '<div class="alert alert-info">Memuat transaksi historis...</div>'; } });
+        try {
+            const rows = await InvApi.movementHistoricalTransactions({ date, warehouse_id: state.warehouseId || undefined });
+            Drawer.open({
+                title: `Historis / Reporting Only — ${fmtDateOnly(date)}`,
+                render: (body) => {
+                    body.appendChild(UI.el('div', { class: 'alert alert-info' }, 'HISTORICAL — Reporting Only, tidak memengaruhi stok/HPP live.'));
+                    if (!rows.length) {
+                        body.appendChild(UI.el('div', { class: 'alert alert-info' }, 'Tidak ada transaksi historis pada tanggal ini.'));
+                        return;
+                    }
+                    const trRows = rows.map((r, i) => UI.el('tr', { class: 'hpp-trace-detail-row', 'data-tx-id': String(r.transaction_id) }, [
+                        UI.el('td', {}, String(i + 1)),
+                        UI.el('td', {}, r.reference_no || '-'),
+                        UI.el('td', {}, `${r.sku} — ${r.item_name}`),
+                        UI.el('td', {}, r.warehouse_code),
+                        UI.el('td', {}, UI.formatNumber(r.qty)),
+                        UI.el('td', {}, UI.formatMoney(r.value)),
+                    ]));
+                    body.appendChild(UI.el('div', { class: 'table-wrapper hpp-trace-detail-table' }, [
+                        UI.el('table', {}, [
+                            UI.el('thead', {}, [UI.el('tr', {}, ['No', 'Referensi', 'Barang', 'Gudang', 'Qty', 'Nilai'].map((h) => UI.el('th', {}, h)))]),
+                            UI.el('tbody', {}, trRows),
+                        ]),
+                    ]));
+                    body.querySelectorAll('.hpp-trace-detail-row').forEach((row) => {
+                        row.addEventListener('click', () => TraceDrawer.openTransaction(Number(row.dataset.txId)));
+                        row.style.cursor = 'pointer';
+                    });
+                },
+            });
+        } catch (err) {
+            UI.handleApiError(err);
+        }
     }
 
     function cutoverBanner(cutover) {

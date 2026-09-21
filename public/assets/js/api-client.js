@@ -185,8 +185,22 @@ const InvApi = (() => {
         movementDaily: (params) => request('GET', `/reports/movement/daily${qs(params)}`),
         movementDayBreakdown: (params) => request('GET', `/reports/movement/day-breakdown${qs(params)}`),
         movementDayTransactions: (params) => request('GET', `/reports/movement/day-transactions${qs(params)}`),
+        movementHistoricalTransactions: (params) => request('GET', `/reports/movement/historical-transactions${qs(params)}`),
         reconciliationMovement: (params) => request('GET', `/reports/reconciliation/movement${qs(params)}`),
         summaryInventory: (params) => request('GET', `/reports/summary/inventory${qs(params)}`),
+
+        // ---- PHASE V2.6B: remaining Reporting Pack ----
+        purchaseReport: (params) => request('GET', `/reports/purchase${qs(params)}`),
+        purchaseReportSummary: (params) => request('GET', `/reports/purchase/summary${qs(params)}`),
+        purchaseBySupplier: (params) => request('GET', `/reports/purchase/by-supplier${qs(params)}`),
+        inOutReport: (params) => request('GET', `/reports/in-out${qs(params)}`),
+        inOutReportSummary: (params) => request('GET', `/reports/in-out/summary${qs(params)}`),
+        bakeryDistribution: (params) => request('GET', `/reports/distribution/bakery${qs(params)}`),
+        transferReport: (params) => request('GET', `/reports/transfer${qs(params)}`),
+        opnameReport: (params) => request('GET', `/reports/opname${qs(params)}`),
+        adjustmentReport: (params) => request('GET', `/reports/adjustment${qs(params)}`),
+        expiryReport: (params) => request('GET', `/reports/expiry${qs(params)}`),
+        slowMovementReport: (params) => request('GET', `/reports/slow-movement${qs(params)}`),
 
         // ---- PHASE V2: per-item-per-warehouse stock policy ----
         getStockPolicy: (itemId, warehouseId) => request('GET', `/stock-policy?item_id=${itemId}&warehouse_id=${warehouseId}`),

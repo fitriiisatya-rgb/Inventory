@@ -25,11 +25,22 @@ use PDO;
  *     batches right now" figure, structurally unable to drift from the
  *     ledger unless something bypassed FifoService/StockAdjustmentService
  *     directly. This is a genuine, meaningful control check, not a
- *     tautology: it can only ever be exactly reproduced from `end_date`
- *     when `end_date` is today (inventory_batches has no historical
- *     snapshot capability) — `is_same_day_check` tells the caller whether
- *     that condition holds, and the Difference is always shown either
- *     way, never hidden or suppressed when the dates don't line up.
+ *     tautology — but ONLY when `end_date` is today: inventory_batches
+ *     has no historical snapshot capability, so comparing a past
+ *     end_date's ledger-derived Ending against TODAY's physical batches
+ *     is not apples-to-apples (anything posted between end_date and
+ *     today would show up as a false "difference").
+ *
+ * MANDATORY CORRECTION B: rather than compute a misleading Difference
+ * for that non-comparable case, `runForScope()` returns
+ * `actual_available=false`, `actual_value=null`, `difference=null`,
+ * `status='NOT_COMPARABLE'` (a fixed `reason` string) for ANY end_date
+ * that is not today — this covers both the pre-go-live historical
+ * window and an ordinary past-period report equally, since neither has
+ * a real comparable snapshot. Only `end_date === today` ever returns
+ * `actual_available=true` with a real BALANCE/REVIEW verdict — and that
+ * verdict is never forced: a genuine nonzero Difference always shows as
+ * REVIEW, never silently rounded away.
  *
  * Company consolidation reuses InventoryMovementReportService's own
  * transfer-elimination algebra (warehouse_id = null) — this class never
@@ -77,6 +88,17 @@ final class InventoryReconciliationReportService
     private static function runForScope(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, string $code, string $name, string $today): array
     {
         $cutover = InventoryHppReportService::cutoverContext($pdo, $startDate, $endDate);
+        $isSameDayCheck = $endDate === $today;
+        // MANDATORY CORRECTION B: inventory_batches holds only the CURRENT
+        // physical state — there is no historical snapshot table. Actual
+        // Ending is therefore only ever a fair, comparable figure when
+        // end_date IS today; for any other end_date (including, but not
+        // limited to, the pre-go-live historical window) this class must
+        // never imply a comparison it cannot honestly make. NOT_COMPARABLE
+        // is returned instead of BALANCE/REVIEW, with actual_available=
+        // false and both actual_value/difference explicitly null — never a
+        // fabricated 0 or a silently-computed-but-misleading number.
+        static $notComparableReason = 'Historical physical inventory snapshot is not available.';
 
         if ($cutover['is_pre_go_live_period']) {
             return [
@@ -84,8 +106,11 @@ final class InventoryReconciliationReportService
                 'cutover' => $cutover, 'saldo_awal' => 0.0,
                 'external_purchase' => 0.0, 'other_in' => 0.0, 'transfer_in' => 0.0, 'adjustment_positive' => 0.0,
                 'out_usage' => 0.0, 'transfer_out' => 0.0, 'adjustment_negative' => 0.0, 'other_out' => 0.0,
-                'theoretical_ending' => 0.0, 'actual_ending' => self::actualEnding($pdo, $warehouseId),
-                'difference' => null, 'status' => 'REVIEW', 'is_same_day_check' => $endDate === $today,
+                'transfer_elimination' => 0.0,
+                'theoretical_ending' => 0.0,
+                'actual_available' => false, 'actual_value' => null,
+                'difference' => null, 'status' => 'NOT_COMPARABLE', 'is_same_day_check' => $isSameDayCheck,
+                'reason' => $notComparableReason,
                 'note' => 'Periode seluruhnya sebelum Opening Go-Live — tidak ada pergerakan ekonomi untuk direkonsiliasi.',
             ];
         }
@@ -106,18 +131,6 @@ final class InventoryReconciliationReportService
         }
         $saldoAwal ??= 0.0;
         $theoreticalEnding = round($saldoAwal + $barangMasuk - $barangKeluar, 4);
-        $actualEnding = self::actualEnding($pdo, $warehouseId);
-        $isSameDayCheck = $endDate === $today;
-        $difference = round($theoreticalEnding - $actualEnding, 4);
-
-        // A same-day check is a real, apples-to-apples comparison against
-        // the current batch state — any nonzero Difference is a genuine
-        // control finding. A past end_date compares against TODAY's batch
-        // state (inventory_batches has no historical snapshot), so a
-        // nonzero Difference there is expected whenever anything posted
-        // between end_date and today — still shown, never hidden, but
-        // status is never flagged REVIEW purely because of that timing gap.
-        $status = abs($difference) < 0.5 ? 'BALANCE' : ($isSameDayCheck ? 'REVIEW' : 'REVIEW_TIMING_GAP');
 
         // Period-level category buckets, derived the same way
         // dailyMovement() derives each day's — summed straight across the
@@ -125,8 +138,7 @@ final class InventoryReconciliationReportService
         // disclosure stay consistent with Report 2's own numbers for the
         // identical period/scope.
         $buckets = self::sumBreakdownCategories($pdo, $startDate, $endDate, $warehouseId, $cutover['effective_start_date']);
-
-        return [
+        $base = [
             'warehouse_id' => $warehouseId, 'warehouse_code' => $code, 'warehouse_name' => $name,
             'cutover' => $cutover, 'saldo_awal' => round($saldoAwal, 4),
             'external_purchase' => $buckets['external_purchase'], 'other_in' => $buckets['other_in'],
@@ -134,8 +146,25 @@ final class InventoryReconciliationReportService
             'out_usage' => $buckets['out_usage'], 'transfer_out' => $buckets['transfer_out'],
             'adjustment_negative' => $buckets['adjustment_negative'], 'other_out' => $buckets['other_out'],
             'transfer_elimination' => $buckets['transfer_elimination'],
-            'theoretical_ending' => $theoreticalEnding, 'actual_ending' => $actualEnding,
-            'difference' => $difference, 'status' => $status, 'is_same_day_check' => $isSameDayCheck,
+            'theoretical_ending' => $theoreticalEnding,
+        ];
+
+        if (!$isSameDayCheck) {
+            return $base + [
+                'actual_available' => false, 'actual_value' => null,
+                'difference' => null, 'status' => 'NOT_COMPARABLE', 'is_same_day_check' => false,
+                'reason' => $notComparableReason,
+            ];
+        }
+
+        $actualEnding = self::actualEnding($pdo, $warehouseId);
+        $difference = round($theoreticalEnding - $actualEnding, 4);
+        $status = abs($difference) < 0.5 ? 'BALANCE' : 'REVIEW';
+
+        return $base + [
+            'actual_available' => true, 'actual_value' => $actualEnding,
+            'difference' => $difference, 'status' => $status, 'is_same_day_check' => true,
+            'reason' => null,
         ];
     }
 

@@ -82,7 +82,8 @@ const ReportReconciliation = (() => {
 
     function scopeCard(s) {
         const balanced = s.status === 'BALANCE';
-        const statusLabel = { BALANCE: '✅ BALANCE', REVIEW: '⚠️ REVIEW', REVIEW_TIMING_GAP: 'ℹ️ REVIEW (selisih waktu)' }[s.status] || s.status;
+        const notComparable = s.status === 'NOT_COMPARABLE';
+        const statusLabel = { BALANCE: '✅ BALANCE', REVIEW: '⚠️ REVIEW', NOT_COMPARABLE: 'ℹ️ NOT COMPARABLE' }[s.status] || s.status;
         const rows = [
             ['Saldo Awal', s.saldo_awal],
             ['+ Pembelian Eksternal', s.external_purchase],
@@ -98,22 +99,23 @@ const ReportReconciliation = (() => {
             rows.push(['Transfer Internal (Eliminasi)', s.transfer_elimination]);
         }
 
-        return UI.el('div', { class: `card hpp-warehouse-panel ${balanced ? '' : 'hpp-variance-warn'}` }, [
+        return UI.el('div', { class: `card hpp-warehouse-panel ${balanced ? '' : (notComparable ? '' : 'hpp-variance-warn')}` }, [
             UI.el('div', { class: 'hpp-warehouse-panel-header' }, [
                 UI.el('div', {}, [
                     UI.el('div', { class: 'hpp-warehouse-panel-title' }, `🏢 ${s.warehouse_name}`),
-                    s.is_same_day_check === false ? UI.el('div', { class: 'hpp-warehouse-panel-subtitle' }, 'Perbandingan bukan same-day — lihat catatan di bawah.') : null,
+                    s.is_same_day_check === false ? UI.el('div', { class: 'hpp-warehouse-panel-subtitle' }, 'Perbandingan Saldo Akhir Aktual hanya berlaku untuk Tanggal Akhir = hari ini.') : null,
                 ]),
-                UI.el('div', { class: `hpp-kpi-delta ${balanced ? 'up' : 'down'}` }, statusLabel),
+                UI.el('div', { class: `hpp-kpi-delta ${balanced ? 'up' : (notComparable ? 'neutral' : 'down')}` }, statusLabel),
             ]),
             s.note ? UI.el('div', { class: 'alert alert-info' }, s.note) : null,
+            notComparable ? UI.el('div', { class: 'alert alert-info' }, s.reason || 'Historical physical inventory snapshot is not available.') : null,
             UI.el('div', { class: 'hpp-bridge-table' }, rows.map(([label, value]) => UI.el('div', { class: 'hpp-bridge-row' }, [
                 UI.el('span', {}, label), UI.el('span', { class: 'mono' }, UI.formatMoney(value)),
             ]))),
             UI.el('div', { class: 'hpp-bridge-divider' }),
             UI.el('div', { class: 'hpp-bridge-row hpp-bridge-total' }, [UI.el('span', {}, 'Saldo Akhir Teoritis'), UI.el('span', { class: 'mono' }, UI.formatMoney(s.theoretical_ending))]),
-            UI.el('div', { class: 'hpp-bridge-row hpp-bridge-total' }, [UI.el('span', {}, 'Saldo Akhir Aktual'), UI.el('span', { class: 'mono' }, UI.formatMoney(s.actual_ending))]),
-            UI.el('div', { class: `hpp-bridge-row hpp-bridge-total ${balanced ? '' : 'hpp-bridge-warn'}` }, [UI.el('span', {}, 'Selisih'), UI.el('span', { class: 'mono' }, s.difference === null ? '-' : UI.formatMoney(s.difference))]),
+            UI.el('div', { class: 'hpp-bridge-row hpp-bridge-total' }, [UI.el('span', {}, 'Saldo Akhir Aktual'), UI.el('span', { class: 'mono' }, s.actual_available ? UI.formatMoney(s.actual_value) : 'NOT COMPARABLE')]),
+            UI.el('div', { class: `hpp-bridge-row hpp-bridge-total ${balanced ? '' : (notComparable ? '' : 'hpp-bridge-warn')}` }, [UI.el('span', {}, 'Selisih'), UI.el('span', { class: 'mono' }, s.difference === null ? '—' : UI.formatMoney(s.difference))]),
         ]);
     }
 

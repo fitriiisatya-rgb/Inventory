@@ -141,8 +141,19 @@
                 <div class="sidebar-submenu" hidden>
                     <a class="sidebar-link" data-tab="laporan-ringkasan" data-require-permission="INVENTORY_VIEW"><span class="icon">🧾</span> Ringkasan Inventory</a>
                     <a class="sidebar-link" data-tab="laporan-pergerakan" data-require-permission="INVENTORY_VIEW"><span class="icon">📅</span> Pergerakan Stok Harian</a>
-                    <a class="sidebar-link" data-tab="laporan-rekonsiliasi" data-require-permission="INVENTORY_VIEW"><span class="icon">🧮</span> Rekonsiliasi Arus Stok</a>
+                    <a class="sidebar-link" data-tab="laporan-stok" data-require-permission="INVENTORY_VIEW"><span class="icon">📦</span> Laporan Stok</a>
+                    <a class="sidebar-link" data-tab="laporan-pembelian" data-require-permission="INVENTORY_VIEW"><span class="icon">🛒</span> Laporan Pembelian</a>
+                    <a class="sidebar-link" data-tab="laporan-inout" data-require-permission="INVENTORY_VIEW"><span class="icon">🔁</span> Laporan IN / OUT</a>
+                    <a class="sidebar-link" data-tab="laporan-transfer" data-require-permission="WAREHOUSE_TRANSFER_MANAGE"><span class="icon">🚚</span> Laporan Transfer</a>
                     <a class="sidebar-link" data-tab="laporan-hpp" data-require-permission="INVENTORY_VIEW"><span class="icon">📊</span> Nilai Stok &amp; HPP</a>
+                    <a class="sidebar-link" data-tab="laporan-opname" data-require-permission="INVENTORY_VIEW"><span class="icon">📋</span> Laporan Stock Opname</a>
+                    <a class="sidebar-link" data-tab="laporan-adjustment" data-require-permission="INVENTORY_VIEW"><span class="icon">⚖️</span> Adjustment / Selisih</a>
+                    <a class="sidebar-link" data-tab="laporan-expiry" data-require-permission="INVENTORY_VIEW"><span class="icon">⏰</span> Expired / Near Expired</a>
+                    <a class="sidebar-link" data-tab="laporan-supplier" data-require-permission="INVENTORY_VIEW"><span class="icon">🏭</span> Pembelian per Supplier</a>
+                    <a class="sidebar-link" data-tab="laporan-bakery" data-require-permission="INVENTORY_VIEW"><span class="icon">🥖</span> Distribusi per Bakery</a>
+                    <a class="sidebar-link" data-tab="laporan-slow-movement" data-require-permission="INVENTORY_VIEW"><span class="icon">🐢</span> Slow / No Movement</a>
+                    <a class="sidebar-link" data-tab="laporan-rekonsiliasi" data-require-permission="INVENTORY_VIEW"><span class="icon">🧮</span> Rekonsiliasi Arus Stok</a>
+                    <a class="sidebar-link" data-tab="laporan-audit" data-require-permission="AUDIT_LOG_VIEW"><span class="icon">📜</span> Audit Transaksi</a>
                 </div>
             </div>
             <div class="sidebar-group sidebar-group-collapsible" data-group="inventory">
@@ -253,6 +264,17 @@
                 <div class="tab-content" id="tab-laporan-ringkasan"></div>
                 <div class="tab-content" id="tab-laporan-pergerakan"></div>
                 <div class="tab-content" id="tab-laporan-rekonsiliasi"></div>
+                <div class="tab-content" id="tab-laporan-stok"></div>
+                <div class="tab-content" id="tab-laporan-pembelian"></div>
+                <div class="tab-content" id="tab-laporan-inout"></div>
+                <div class="tab-content" id="tab-laporan-transfer"></div>
+                <div class="tab-content" id="tab-laporan-opname"></div>
+                <div class="tab-content" id="tab-laporan-adjustment"></div>
+                <div class="tab-content" id="tab-laporan-expiry"></div>
+                <div class="tab-content" id="tab-laporan-supplier"></div>
+                <div class="tab-content" id="tab-laporan-bakery"></div>
+                <div class="tab-content" id="tab-laporan-slow-movement"></div>
+                <div class="tab-content" id="tab-laporan-audit"></div>
             </main>
 
             <footer>Inventory Pro &mdash; PHP + MySQL backend. Environment Production.</footer>
@@ -288,10 +310,22 @@
 <script src="assets/js/master-divisions.js?v=20260928"></script>
 <script src="assets/js/trace-drawer.js?v=20260928"></script>
 <script src="assets/js/trace-center.js?v=20260928"></script>
+<script src="assets/js/report-common.js?v=20260928"></script>
 <script src="assets/js/report-hpp.js?v=20260928"></script>
 <script src="assets/js/report-summary.js?v=20260928"></script>
 <script src="assets/js/report-movement.js?v=20260928"></script>
 <script src="assets/js/report-reconciliation.js?v=20260928"></script>
+<script src="assets/js/report-stock.js?v=20260928"></script>
+<script src="assets/js/report-purchase.js?v=20260928"></script>
+<script src="assets/js/report-supplier.js?v=20260928"></script>
+<script src="assets/js/report-inout.js?v=20260928"></script>
+<script src="assets/js/report-bakery.js?v=20260928"></script>
+<script src="assets/js/report-transfer.js?v=20260928"></script>
+<script src="assets/js/report-opname.js?v=20260928"></script>
+<script src="assets/js/report-adjustment.js?v=20260928"></script>
+<script src="assets/js/report-expiry.js?v=20260928"></script>
+<script src="assets/js/report-slow-movement.js?v=20260928"></script>
+<script src="assets/js/report-audit.js?v=20260928"></script>
 <script src="assets/js/sidebar.js?v=20260928"></script>
 <script src="assets/js/app.js?v=20260928"></script>
 </body>

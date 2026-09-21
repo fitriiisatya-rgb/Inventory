@@ -69,6 +69,11 @@
         audit: 'Audit Log', closing: 'Tutup Buku', 'laporan-hpp': 'Laporan Nilai Stok & HPP',
         'laporan-ringkasan': 'Ringkasan Inventory',
         'laporan-pergerakan': 'Pergerakan Stok Harian', 'laporan-rekonsiliasi': 'Rekonsiliasi Arus Stok',
+        'laporan-stok': 'Laporan Stok', 'laporan-pembelian': 'Laporan Pembelian', 'laporan-inout': 'Laporan IN / OUT',
+        'laporan-transfer': 'Laporan Transfer', 'laporan-opname': 'Laporan Stock Opname',
+        'laporan-adjustment': 'Adjustment / Selisih', 'laporan-expiry': 'Expired / Near Expired',
+        'laporan-supplier': 'Pembelian per Supplier', 'laporan-bakery': 'Distribusi per Bakery',
+        'laporan-slow-movement': 'Slow / No Movement', 'laporan-audit': 'Audit Transaksi',
     };
 
     function activateTab(name) {
@@ -125,6 +130,28 @@
             ReportMovement.render(document.getElementById('tab-laporan-pergerakan'));
         } else if (name === 'laporan-rekonsiliasi') {
             ReportReconciliation.render(document.getElementById('tab-laporan-rekonsiliasi'));
+        } else if (name === 'laporan-stok') {
+            ReportStock.render(document.getElementById('tab-laporan-stok'));
+        } else if (name === 'laporan-pembelian') {
+            ReportPurchase.render(document.getElementById('tab-laporan-pembelian'));
+        } else if (name === 'laporan-inout') {
+            ReportInOut.render(document.getElementById('tab-laporan-inout'));
+        } else if (name === 'laporan-transfer') {
+            ReportTransferList.render(document.getElementById('tab-laporan-transfer'));
+        } else if (name === 'laporan-opname') {
+            ReportOpname.render(document.getElementById('tab-laporan-opname'));
+        } else if (name === 'laporan-adjustment') {
+            ReportAdjustment.render(document.getElementById('tab-laporan-adjustment'));
+        } else if (name === 'laporan-expiry') {
+            ReportExpiry.render(document.getElementById('tab-laporan-expiry'));
+        } else if (name === 'laporan-supplier') {
+            ReportSupplier.render(document.getElementById('tab-laporan-supplier'));
+        } else if (name === 'laporan-bakery') {
+            ReportBakery.render(document.getElementById('tab-laporan-bakery'));
+        } else if (name === 'laporan-slow-movement') {
+            ReportSlowMovement.render(document.getElementById('tab-laporan-slow-movement'));
+        } else if (name === 'laporan-audit') {
+            ReportAudit.render(document.getElementById('tab-laporan-audit'));
         }
     }
 

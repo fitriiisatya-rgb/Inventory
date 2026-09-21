@@ -204,6 +204,24 @@ final class TransactionHistoryService
             $where[] = 't.transaction_type = :transaction_type';
             $bind['transaction_type'] = $params['transaction_type'];
         }
+        // PHASE V2.6B — Reports 4/5/11/12 filter by a SET of types (e.g.
+        // IN/OUT together, or IN alone for "qualifying purchase") rather
+        // than one exact type; kept alongside the single-value filter
+        // above (never both passed by the same caller) so the pre-existing
+        // "History Transaksi" tab's own single-type filter is untouched.
+        if (!empty($params['transaction_types']) && is_array($params['transaction_types'])) {
+            $placeholders = [];
+            foreach (array_values($params['transaction_types']) as $i => $type) {
+                $key = "ttype{$i}";
+                $placeholders[] = ":{$key}";
+                $bind[$key] = $type;
+            }
+            $where[] = 't.transaction_type IN (' . implode(',', $placeholders) . ')';
+        }
+        if (isset($params['is_historical_import'])) {
+            $where[] = 't.is_historical_import = :is_hist';
+            $bind['is_hist'] = $params['is_historical_import'] ? 1 : 0;
+        }
         if (!empty($params['date_from'])) {
             $where[] = 't.transaction_date >= :date_from';
             $bind['date_from'] = $params['date_from'];
@@ -253,5 +271,96 @@ final class TransactionHistoryService
             'division' => $r['division_id'] !== null ? ['id' => (int) $r['division_id'], 'name' => $r['division_name']] : null,
             'created_by' => ['id' => (int) $r['created_by_id'], 'username' => $r['created_by_username']],
         ];
+    }
+
+    /**
+     * PHASE V2.6B — reused by Report 4 (Laporan Pembelian) and Report 5
+     * (Laporan IN/OUT). Live totals (`total_value`/`transaction_count`/
+     * `counterparty_count`) NEVER include a historical-import row —
+     * `is_historical_import=1` is excluded unconditionally here, distinct
+     * from `list()` above which still surfaces historical rows (tagged
+     * `is_historical`) for on-request audit visibility. Same
+     * buildFilters()/baseSelectSql() as list() — no second query engine.
+     *
+     * @param string $counterpartyColumn 'supplier_id' or 'bakery_destination_id' — null-safe, counts DISTINCT non-null values only.
+     */
+    public static function summary(PDO $pdo, array $params, string $counterpartyColumn = 'supplier_id'): array
+    {
+        [$where, $bind] = self::buildFilters($pdo, $params);
+        $where .= ' AND t.is_historical_import = 0';
+        $baseSql = self::baseSelectSql();
+
+        $stmt = $pdo->prepare(
+            "SELECT COUNT(DISTINCT transaction_id) AS transaction_count,
+                    COUNT(DISTINCT {$counterpartyColumn}) AS counterparty_count,
+                    COALESCE(SUM(subtotal), 0) AS total_value
+             FROM ({$baseSql} WHERE {$where}) counted"
+        );
+        $stmt->execute($bind);
+        $row = $stmt->fetch() ?: [];
+
+        $transactionCount = (int) ($row['transaction_count'] ?? 0);
+        $totalValue = round((float) ($row['total_value'] ?? 0), 4);
+
+        return [
+            'total_value' => $totalValue,
+            'transaction_count' => $transactionCount,
+            'counterparty_count' => (int) ($row['counterparty_count'] ?? 0),
+            'average_transaction_value' => $transactionCount > 0 ? round($totalValue / $transactionCount, 4) : 0.0,
+        ];
+    }
+
+    /**
+     * PHASE V2.6B — Report 11 (Pembelian per Supplier) / Report 12
+     * (Distribusi per Bakery): one row per counterparty. Same historical
+     * exclusion as summary() above. `$nameSql` must be a single column
+     * expression already present in baseSelectSql()'s SELECT list (e.g.
+     * `'supplier_name'` or `'bakery_destination_name'`).
+     *
+     * @param string $groupColumn 'supplier_id' or 'bakery_destination_id'
+     * @param string $nameColumn 'supplier_name' or 'bakery_destination_name'
+     * @return list<array{id:int, name:string, transaction_count:int, total_value:float, average_value:float, unique_sku:int, latest_date:string}>
+     */
+    public static function groupedSummary(PDO $pdo, array $params, string $groupColumn, string $nameColumn): array
+    {
+        [$where, $bind] = self::buildFilters($pdo, $params);
+        $where .= ' AND t.is_historical_import = 0';
+        $baseSql = self::baseSelectSql();
+
+        // `{$groupColumn}`/`{$nameColumn}` (e.g. supplier_id/supplier_name)
+        // are SELECT-list aliases of baseSelectSql() — only usable OUTSIDE
+        // that query's own WHERE, hence the NOT NULL filter is applied here
+        // at the outer level (against the `counted` derived table's real
+        // columns), never folded into `$where` above.
+        $stmt = $pdo->prepare(
+            "SELECT {$groupColumn} AS group_id, {$nameColumn} AS group_name,
+                    COUNT(DISTINCT transaction_id) AS transaction_count,
+                    COUNT(DISTINCT item_id) AS unique_sku,
+                    COALESCE(SUM(subtotal), 0) AS total_value,
+                    MAX(transaction_date) AS latest_date
+             FROM ({$baseSql} WHERE {$where}) counted
+             WHERE {$groupColumn} IS NOT NULL
+             GROUP BY {$groupColumn}, {$nameColumn}
+             ORDER BY total_value DESC"
+        );
+        $stmt->execute($bind);
+        $rows = $stmt->fetchAll();
+
+        $grandTotal = array_sum(array_map(static fn ($r) => (float) $r['total_value'], $rows));
+
+        return array_map(static function (array $r) use ($grandTotal) {
+            $count = (int) $r['transaction_count'];
+            $value = round((float) $r['total_value'], 4);
+            return [
+                'id' => (int) $r['group_id'],
+                'name' => $r['group_name'],
+                'transaction_count' => $count,
+                'total_value' => $value,
+                'average_value' => $count > 0 ? round($value / $count, 4) : 0.0,
+                'unique_sku' => (int) $r['unique_sku'],
+                'latest_date' => $r['latest_date'],
+                'share_pct' => $grandTotal > 0 ? round($value / $grandTotal * 100, 2) : 0.0,
+            ];
+        }, $rows);
     }
 }

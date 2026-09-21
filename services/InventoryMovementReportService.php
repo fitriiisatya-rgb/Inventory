@@ -85,7 +85,23 @@ final class InventoryMovementReportService
      * Rupiah) — the disclosure buckets used to derive Barang Masuk/Keluar
      * are NOT part of this row shape; they live behind dayBreakdown().
      *
-     * @return array{rows: list<array<string,mixed>>, cutover: array}
+     * MANDATORY CORRECTION A: a day before go-live shows an honest zero
+     * for the LIVE columns (nothing with inventory_effect=1 can exist
+     * there — see class docblock) but that is deliberately incomplete on
+     * its own for audit purposes, since real historical activity
+     * (is_historical_import=1, inventory_effect=0) can and does exist on
+     * those same dates. `historical` is therefore a SEPARATE array,
+     * queried independently (historicalByDate()) and NEVER merged into
+     * `rows`' stok_awal/barang_masuk/barang_keluar/stok_akhir — by
+     * construction it cannot bridge into the 16-Sep-style live Opening
+     * (that anchor is seeded exclusively from
+     * InventoryHppReportService::signedValueBefore(), which itself only
+     * ever sums inventory_effect=1 rows). A day can have BOTH a live row
+     * (usually all-zero pre-go-live, or real activity post-go-live) and a
+     * historical row; the frontend renders them as two clearly distinct
+     * sections, never one merged number.
+     *
+     * @return array{rows: list<array<string,mixed>>, cutover: array, historical: list<array<string,mixed>>}
      */
     public static function dailyMovement(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId): array
     {
@@ -99,6 +115,8 @@ final class InventoryMovementReportService
             $opening = InventoryHppReportService::signedValueBefore($pdo, $effectiveStart, $warehouseId, '', [], [], true);
             $byDate = self::bucketsByDate($pdo, $effectiveStart, $endDate, $warehouseId);
         }
+
+        $historical = self::historicalByDate($pdo, $startDate, $endDate, $warehouseId);
 
         $rows = [];
         $running = 0.0;
@@ -136,7 +154,7 @@ final class InventoryMovementReportService
             $cursor = date('Y-m-d', strtotime($cursor . ' +1 day'));
         }
 
-        return ['rows' => $rows, 'cutover' => $cutover];
+        return ['rows' => $rows, 'cutover' => $cutover, 'historical' => $historical];
     }
 
     /**
@@ -238,6 +256,54 @@ final class InventoryMovementReportService
         ], $rows);
     }
 
+    /**
+     * MANDATORY CORRECTION A drill-down: the actual historical
+     * (is_historical_import=1) transactions behind one day's Historical
+     * IN/OUT disclosure. Every row is clearly `is_historical: true` and
+     * carries a real transaction_id for the existing TraceDrawer — no
+     * second trace implementation here either.
+     */
+    public static function historicalTransactions(PDO $pdo, string $date, ?int $warehouseId): array
+    {
+        $where = ['t.is_historical_import = 1', 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
+        $bind = ['start' => $date . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($date . ' +1 day')) . ' 00:00:00'];
+        if ($warehouseId !== null) {
+            $where[] = 'l.warehouse_id = :wh';
+            $bind['wh'] = $warehouseId;
+        }
+        $whereSql = implode(' AND ', $where);
+
+        $stmt = $pdo->prepare(
+            "SELECT t.id AS transaction_id, t.transaction_type, t.status, t.reference_no, t.transaction_date,
+                    t.warehouse_id, w.code AS warehouse_code, w.name AS warehouse_name,
+                    i.sku, i.name AS item_name, l.base_qty, l.subtotal
+             FROM inventory_transaction_lines l
+             JOIN inventory_transactions t ON t.id = l.transaction_id
+             JOIN items i ON i.id = l.item_id
+             JOIN warehouses w ON w.id = l.warehouse_id
+             WHERE {$whereSql}
+             ORDER BY t.transaction_date ASC, t.id ASC
+             LIMIT 500"
+        );
+        $stmt->execute($bind);
+
+        return array_map(static fn ($r) => [
+            'transaction_id' => (int) $r['transaction_id'],
+            'transaction_type' => $r['transaction_type'],
+            'status' => $r['status'],
+            'reference_no' => $r['reference_no'],
+            'transaction_date' => $r['transaction_date'],
+            'warehouse_id' => (int) $r['warehouse_id'],
+            'warehouse_code' => $r['warehouse_code'],
+            'warehouse_name' => $r['warehouse_name'],
+            'sku' => $r['sku'],
+            'item_name' => $r['item_name'],
+            'qty' => round((float) $r['base_qty'], 6),
+            'value' => round(abs((float) $r['subtotal']), 4),
+            'is_historical' => true,
+        ], $stmt->fetchAll());
+    }
+
     // ---- internals ----------------------------------------------------
 
     private static function emptyBuckets(): array
@@ -247,6 +313,63 @@ final class InventoryMovementReportService
             'out_usage' => 0.0, 'adjustment_positive' => 0.0, 'adjustment_negative' => 0.0,
             'in_value_total' => 0.0, 'out_value_total' => 0.0,
         ];
+    }
+
+    /**
+     * MANDATORY CORRECTION A — nominal Historical IN/OUT + transaction
+     * count per day, sourced ONLY from is_historical_import=1 rows
+     * (inventory_effect=0 by construction — ImportHistoricalTransactionService
+     * never sets it otherwise). Completely independent of bucketsByDate()
+     * above (which explicitly requires inventory_effect=1): a day can
+     * appear in both, but the two numbers are never summed together
+     * anywhere in this class. Every REQUESTED calendar day with historical
+     * activity is included, regardless of where it falls relative to
+     * live_opening_date — this is a reporting/audit disclosure, not a
+     * live-economics figure, so it is not clamped by cutoverContext().
+     *
+     * @return list<array{date:string, historical_in:float, historical_out:float, transaction_count:int}>
+     */
+    private static function historicalByDate(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId): array
+    {
+        $where = [
+            't.is_historical_import = 1',
+            't.transaction_date >= :start', 't.transaction_date < :end_excl',
+        ];
+        $bind = [
+            'start' => $startDate . ' 00:00:00',
+            'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00',
+        ];
+        if ($warehouseId !== null) {
+            $where[] = 'l.warehouse_id = :wh';
+            $bind['wh'] = $warehouseId;
+        }
+        $whereSql = implode(' AND ', $where);
+
+        $stmt = $pdo->prepare(
+            "SELECT DATE(t.transaction_date) AS d,
+                SUM(CASE
+                    WHEN t.transaction_type IN ('IN','OPENING','TRANSFER_IN','PRODUCTION_OUT') THEN l.subtotal
+                    WHEN t.transaction_type = 'ADJUSTMENT' AND l.subtotal > 0 THEN l.subtotal
+                    ELSE 0 END) AS historical_in,
+                SUM(CASE
+                    WHEN t.transaction_type IN ('OUT','TRANSFER_OUT','PRODUCTION_IN') THEN ABS(l.subtotal)
+                    WHEN t.transaction_type = 'ADJUSTMENT' AND l.subtotal < 0 THEN -l.subtotal
+                    ELSE 0 END) AS historical_out,
+                COUNT(DISTINCT t.id) AS transaction_count
+             FROM inventory_transaction_lines l
+             JOIN inventory_transactions t ON t.id = l.transaction_id
+             WHERE {$whereSql}
+             GROUP BY DATE(t.transaction_date)
+             ORDER BY DATE(t.transaction_date) ASC"
+        );
+        $stmt->execute($bind);
+
+        return array_map(static fn ($r) => [
+            'date' => $r['d'],
+            'historical_in' => round((float) $r['historical_in'], 4),
+            'historical_out' => round((float) $r['historical_out'], 4),
+            'transaction_count' => (int) $r['transaction_count'],
+        ], $stmt->fetchAll());
     }
 
     /** @return array<string, array<string,float>> keyed by 'Y-m-d' */

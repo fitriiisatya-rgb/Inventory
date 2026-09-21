@@ -57,6 +57,11 @@ require_once __DIR__ . '/../services/InventoryHppReportService.php';
 require_once __DIR__ . '/../services/InventoryMovementReportService.php';
 require_once __DIR__ . '/../services/InventoryReconciliationReportService.php';
 require_once __DIR__ . '/../services/InventorySummaryReportService.php';
+require_once __DIR__ . '/../services/TransferReportService.php';
+require_once __DIR__ . '/../services/StockOpnameReportService.php';
+require_once __DIR__ . '/../services/AdjustmentReportService.php';
+require_once __DIR__ . '/../services/ExpiryReportService.php';
+require_once __DIR__ . '/../services/SlowMovementReportService.php';
 require_once __DIR__ . '/../services/ExcelWriterService.php';
 
 use App\Services\AuthService;
@@ -1044,6 +1049,21 @@ $routes = [
         inv_ok(InventoryMovementReportService::categoryTransactions($pdo, $date, $warehouseId, $category), 'OK');
     },
 
+    // MANDATORY CORRECTION A — historical (inventory_effect=0) disclosure
+    // drill-down for one date's underlying transactions.
+    'GET /reports/movement/historical-transactions' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $date = (string) ($query['date'] ?? '');
+        if ($date === '' || strtotime($date) === false) {
+            inv_error(422, 'VALIDATION_ERROR', 'date is required (YYYY-MM-DD)');
+        }
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+
+        inv_ok(InventoryMovementReportService::historicalTransactions($pdo, $date, $warehouseId), 'OK');
+    },
+
     'GET /reports/reconciliation/movement' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
@@ -1072,6 +1092,187 @@ $routes = [
         $categoryId = isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null;
 
         inv_ok(InventorySummaryReportService::summary($pdo, $start, $end, $warehouseId, $categoryId), 'OK');
+    },
+
+    // ============================================================
+    // PHASE V2.6B — remaining Reporting Pack items (Reports 4,5,6,8,9,
+    // 10,11,12,13). Report 3 (Laporan Stok) reuses GET /reports/stock
+    // verbatim (StockReportService, unchanged) and Report 15 (Audit
+    // Transaksi) reuses GET /audit-logs verbatim (TraceService, unchanged)
+    // — no new route for either. Every route below is INVENTORY_VIEW-gated
+    // read-only, STOCK-forced-to-own-warehouse via inv_hpp_resolve_warehouse_scope.
+    // ============================================================
+
+    // Report 4 — Laporan Pembelian: qualifying purchase = type IN, POSTED,
+    // never a transfer/production/opening/adjustment (TransactionHistoryService's
+    // own type filter already excludes everything else by construction).
+    'GET /reports/purchase' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        $params = [
+            'warehouse_id' => $warehouseId, 'transaction_type' => 'IN',
+            'supplier_id' => isset($query['supplier_id']) && $query['supplier_id'] !== '' ? (int) $query['supplier_id'] : null,
+            'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
+            'q' => $query['q'] ?? null,
+            'is_historical_import' => isset($query['historical']) && $query['historical'] === '1' ? true : (isset($query['historical']) && $query['historical'] === '0' ? false : null),
+            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
+        ];
+        if ($params['is_historical_import'] === null) {
+            unset($params['is_historical_import']);
+        }
+        inv_ok(TransactionHistoryService::list($pdo, $params), 'OK');
+    },
+    'GET /reports/purchase/summary' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        inv_ok(TransactionHistoryService::summary($pdo, [
+            'warehouse_id' => $warehouseId, 'transaction_type' => 'IN',
+            'supplier_id' => isset($query['supplier_id']) && $query['supplier_id'] !== '' ? (int) $query['supplier_id'] : null,
+            'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
+        ], 'supplier_id'), 'OK');
+    },
+
+    // Report 11 — Pembelian per Supplier: same qualifying-purchase
+    // definition as Report 4, grouped.
+    'GET /reports/purchase/by-supplier' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        inv_ok(TransactionHistoryService::groupedSummary($pdo, [
+            'warehouse_id' => $warehouseId, 'transaction_type' => 'IN',
+            'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
+        ], 'supplier_id', 'supplier_name'), 'OK');
+    },
+
+    // Report 5 — Laporan IN/OUT: unified operational view of both types.
+    'GET /reports/in-out' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        $direction = $query['direction'] ?? '';
+        $types = in_array($direction, ['IN', 'OUT'], true) ? [$direction] : ['IN', 'OUT'];
+        inv_ok(TransactionHistoryService::list($pdo, [
+            'warehouse_id' => $warehouseId, 'transaction_types' => $types,
+            'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
+            'item_id' => isset($query['item_id']) && $query['item_id'] !== '' ? (int) $query['item_id'] : null,
+            'supplier_id' => isset($query['supplier_id']) && $query['supplier_id'] !== '' ? (int) $query['supplier_id'] : null,
+            'bakery_destination_id' => isset($query['bakery_destination_id']) && $query['bakery_destination_id'] !== '' ? (int) $query['bakery_destination_id'] : null,
+            'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
+            'q' => $query['q'] ?? null,
+            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
+        ]), 'OK');
+    },
+    'GET /reports/in-out/summary' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        $base = [
+            'warehouse_id' => $warehouseId,
+            'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
+        ];
+        $inSummary = TransactionHistoryService::summary($pdo, $base + ['transaction_type' => 'IN']);
+        $outSummary = TransactionHistoryService::summary($pdo, $base + ['transaction_type' => 'OUT']);
+        inv_ok([
+            'total_in_value' => $inSummary['total_value'], 'total_out_value' => $outSummary['total_value'],
+            'net_movement' => round($inSummary['total_value'] - $outSummary['total_value'], 4),
+            'transaction_count' => $inSummary['transaction_count'] + $outSummary['transaction_count'],
+        ], 'OK');
+    },
+
+    // Report 12 — Distribusi per Bakery: qualifying OUT rows with a real
+    // bakery_destination_id — a plain warehouse transfer (bakery_destination_id
+    // is NULL by the chk_tx_bakery_destination_out_only constraint on any
+    // non-OUT type) can never appear here.
+    'GET /reports/distribution/bakery' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        inv_ok(TransactionHistoryService::groupedSummary($pdo, [
+            'warehouse_id' => $warehouseId, 'transaction_type' => 'OUT',
+            'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
+        ], 'bakery_destination_id', 'bakery_destination_name'), 'OK');
+    },
+
+    // Report 6 — Laporan Transfer.
+    'GET /reports/transfer' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_TRANSFER_MANAGE');
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        inv_ok(TransferReportService::list($pdo, [
+            'warehouse_id' => $warehouseId,
+            'from_warehouse_id' => isset($query['from_warehouse_id']) && $query['from_warehouse_id'] !== '' ? (int) $query['from_warehouse_id'] : null,
+            'to_warehouse_id' => isset($query['to_warehouse_id']) && $query['to_warehouse_id'] !== '' ? (int) $query['to_warehouse_id'] : null,
+            'status' => $query['status'] ?? null,
+            'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
+            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
+        ]), 'OK');
+    },
+
+    // Report 8 — Stock Opname.
+    'GET /reports/opname' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        inv_ok(StockOpnameReportService::list($pdo, [
+            'warehouse_id' => $warehouseId, 'status' => $query['status'] ?? null,
+            'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
+            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
+        ]), 'OK');
+    },
+
+    // Report 9 — Adjustment / Selisih.
+    'GET /reports/adjustment' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        inv_ok(AdjustmentReportService::list($pdo, [
+            'warehouse_id' => $warehouseId,
+            'direction' => in_array($query['direction'] ?? '', ['POSITIVE', 'NEGATIVE'], true) ? $query['direction'] : null,
+            'adjustment_type' => $query['adjustment_type'] ?? null,
+            'item_id' => isset($query['item_id']) && $query['item_id'] !== '' ? (int) $query['item_id'] : null,
+            'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
+            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
+        ]), 'OK');
+    },
+
+    // Report 10 — Expired / Near Expired.
+    'GET /reports/expiry' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        inv_ok(ExpiryReportService::list($pdo, [
+            'warehouse_id' => $warehouseId,
+            'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
+            'status' => $query['status'] ?? null,
+            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
+        ]), 'OK');
+    },
+
+    // Report 13 — Slow / No Movement.
+    'GET /reports/slow-movement' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        inv_ok(SlowMovementReportService::list($pdo, [
+            'warehouse_id' => $warehouseId,
+            'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
+            'threshold_days' => (int) ($query['threshold_days'] ?? 30),
+            'include_zero_stock' => isset($query['include_zero_stock']) && $query['include_zero_stock'] === '1',
+            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
+        ]), 'OK');
     },
 
     // ---- InventoryService: single source of truth reads (Section 7) ----

@@ -182,6 +182,55 @@ $realA = InventoryService::currentStock($pdo, $itemA, $whA);
 check('final stok_akhir matches the real batch-based currentStock() value (independent cross-check)', approx($lastRow['stok_akhir'], (float) $realA['value']), "{$lastRow['stok_akhir']} vs {$realA['value']}");
 
 // ============================================================
+// CASE A2 — MANDATORY CORRECTION A: historical (inventory_effect=0)
+// nominal IN/OUT disclosure, fully separate from live economics
+// ============================================================
+echo "\n== CASE A2: historical movement disclosure (Correction A) ==\n";
+
+// A historical-import-style row — is_historical_import=1, inventory_effect=0,
+// exactly what ImportHistoricalTransactionService::commit() writes — on
+// 2026-06-03, a date with NO other activity in Case A's live fixture, so
+// any live-side leakage would be unmistakable.
+$histTxStmt = $pdo->prepare(
+    "INSERT INTO inventory_transactions
+        (transaction_uuid, transaction_type, transaction_date, posting_date, warehouse_id, status, is_historical_import, inventory_effect, created_by, created_at)
+     VALUES (:uuid, 'IN', :tx_date, :post_date, :wh, 'POSTED', 1, 0, :created_by, :created_at)"
+);
+$nowForHist = date('Y-m-d H:i:s');
+$histTxStmt->execute(['uuid' => uid('mv-hist'), 'tx_date' => '2026-06-03 09:00:00', 'post_date' => $nowForHist, 'wh' => $whA, 'created_by' => $adminUserId, 'created_at' => $nowForHist]);
+$histTxId = (int) $pdo->lastInsertId();
+$pdo->prepare(
+    'INSERT INTO inventory_transaction_lines
+        (transaction_id, line_no, item_id, item_name_snapshot, input_qty, input_unit_id, conversion_factor_snapshot,
+         base_qty, unit_price_input, unit_cost_base, subtotal, warehouse_id)
+     VALUES (:tx, 1, :item, :name, 77, :unit, 1, 77, 900, 900, :subtotal, :wh)'
+)->execute(['tx' => $histTxId, 'item' => $itemA, 'name' => 'Historical fixture line', 'unit' => $kgUnitId, 'subtotal' => 77 * 900, 'wh' => $whA]);
+
+$effectRow = $pdo->prepare('SELECT is_historical_import, inventory_effect FROM inventory_transactions WHERE id = :id');
+$effectRow->execute(['id' => $histTxId]);
+$effectRow = $effectRow->fetch();
+check('the historical fixture row is stored with inventory_effect=0 (never mutates live stock by construction)', (int) $effectRow['inventory_effect'] === 0 && (int) $effectRow['is_historical_import'] === 1);
+
+$mvAWithHist = InventoryMovementReportService::dailyMovement($pdo, '2026-06-01', '2026-06-10', $whA);
+check('adding a historical row never changes the live rows (identical to before the insert)', json_encode($mvAWithHist['rows']) === json_encode($rows), 'live rows byte-identical before/after historical insert');
+
+$histRow = null;
+foreach ($mvAWithHist['historical'] as $h) {
+    if ($h['date'] === '2026-06-03') $histRow = $h;
+}
+check('the historical disclosure array contains the 2026-06-03 row', $histRow !== null, json_encode($mvAWithHist['historical']));
+check('historical_in reflects the real historical nominal value (77 x 900 = 69,300), visible for audit', $histRow !== null && approx($histRow['historical_in'], 69300.0), (string) ($histRow['historical_in'] ?? 'missing'));
+check('historical transaction_count is 1 for that date', $histRow !== null && $histRow['transaction_count'] === 1, (string) ($histRow['transaction_count'] ?? 'missing'));
+
+$histTx = InventoryMovementReportService::historicalTransactions($pdo, '2026-06-03', $whA);
+check('historicalTransactions() drill-down carries the real transaction_id for TraceDrawer', count($histTx) === 1 && $histTx[0]['transaction_id'] === $histTxId && $histTx[0]['is_historical'] === true);
+
+// 16-Sep-style boundary proof: live Opening (seeded exclusively from
+// signedValueBefore(), which only ever sums inventory_effect=1 rows) is
+// exactly unchanged — the historical row can never bridge into it.
+check('live Opening (stok_awal on the first day) is not double-counted by the historical row', approx($mvAWithHist['rows'][0]['stok_awal'], $rows[0]['stok_awal']), "{$mvAWithHist['rows'][0]['stok_awal']} vs {$rows[0]['stok_awal']}");
+
+// ============================================================
 // CASE B — warehouse transfer inclusion vs company-level elimination
 // ============================================================
 echo "\n== CASE B: transfer inclusion (warehouse) vs elimination (company) ==\n";
@@ -277,15 +326,30 @@ check('categoryTransactions carries a real transaction_id for TraceDrawer drill-
 // ============================================================
 echo "\n== CASE E: reconciliation Difference is disclosed, never forced to 0 ==\n";
 
-$reconA = InventoryReconciliationReportService::run($pdo, '2026-06-01', '2026-06-10', $whA);
+// CORRECTION B — a PAST end_date (not today) is never claimed comparable:
+// inventory_batches has no historical snapshot, so this must return
+// NOT_COMPARABLE with actual_available=false and null actual_value/difference,
+// never a fabricated or misleading BALANCE/REVIEW verdict.
+$reconPast = InventoryReconciliationReportService::run($pdo, '2026-06-01', '2026-06-10', $whA);
+$scopePast = $reconPast['scopes'][0];
+check('a non-today end_date is never claimed comparable: status=NOT_COMPARABLE', $scopePast['status'] === 'NOT_COMPARABLE', $scopePast['status']);
+check('a non-comparable scope reports actual_available=false', $scopePast['actual_available'] === false);
+check('a non-comparable scope reports actual_value=null (never a fabricated number)', $scopePast['actual_value'] === null);
+check('a non-comparable scope reports difference=null (never a fabricated number)', $scopePast['difference'] === null);
+check('a non-comparable scope carries an explicit reason', is_string($scopePast['reason']) && $scopePast['reason'] !== '');
+check('theoretical_ending is still computed and matches the movement engine even when not comparable', approx($scopePast['theoretical_ending'], $lastRow['stok_akhir']), "{$scopePast['theoretical_ending']} vs {$lastRow['stok_akhir']}");
+
+// A same-day (end_date === today) check IS a fair comparison and must
+// still work exactly as before: BALANCE for an undisturbed scope.
+$reconA = InventoryReconciliationReportService::run($pdo, '2026-06-01', $today, $whA);
 $scopeA = $reconA['scopes'][0];
-check('reconciliation returns a status field', in_array($scopeA['status'], ['BALANCE', 'REVIEW', 'REVIEW_TIMING_GAP'], true), $scopeA['status']);
-check('reconciliation theoretical_ending matches dailyMovement\'s own last stok_akhir for the same range/scope', approx($scopeA['theoretical_ending'], $lastRow['stok_akhir']), "{$scopeA['theoretical_ending']} vs {$lastRow['stok_akhir']}");
-check('a correct, undisturbed scope reconciles to BALANCE with ~0 difference', $scopeA['status'] === 'BALANCE' && approx((float) $scopeA['difference'], 0.0), "{$scopeA['status']} diff={$scopeA['difference']}");
+check('reconciliation returns a status field', in_array($scopeA['status'], ['BALANCE', 'REVIEW', 'NOT_COMPARABLE'], true), $scopeA['status']);
+check('a same-day, undisturbed scope reports actual_available=true', $scopeA['actual_available'] === true);
+check('a correct, undisturbed same-day scope reconciles to BALANCE with ~0 difference', $scopeA['status'] === 'BALANCE' && approx((float) $scopeA['difference'], 0.0), "{$scopeA['status']} diff={$scopeA['difference']}");
 
 // Deliberate test-only ledger/batch drift (never done outside a throwaway
 // test database) — proves Difference surfaces a REAL discrepancy rather
-// than being silently forced to balance.
+// than being silently forced to balance, on a same-day (comparable) check.
 $driftWh = makeWarehouse($pdo, 'MV-DRIFT-WH');
 $driftItem = makeItem($pdo, $kgUnitId, 'MV-DRIFT-SKU');
 postOpening($pdo, $driftItem, $driftWh, 100, 1000, '2026-06-01 00:00:00', $adminUserId, $kgUnitId);
@@ -294,7 +358,7 @@ $pdo->prepare('UPDATE inventory_batches SET qty_base = qty_base - 10 WHERE item_
 $reconDrift = InventoryReconciliationReportService::run($pdo, '2026-06-01', $today, $driftWh);
 $scopeDrift = $reconDrift['scopes'][0];
 check('an induced ledger/batch drift produces a nonzero, disclosed Difference (never silently balanced)', abs((float) $scopeDrift['difference']) > 5000.0, (string) $scopeDrift['difference']);
-check('an induced drift is flagged REVIEW, not BALANCE', $scopeDrift['status'] !== 'BALANCE', $scopeDrift['status']);
+check('an induced drift is flagged REVIEW, not BALANCE', $scopeDrift['status'] === 'REVIEW', $scopeDrift['status']);
 
 // ============================================================
 // CASE F — InventorySummaryReportService (Report 1): consistency with
