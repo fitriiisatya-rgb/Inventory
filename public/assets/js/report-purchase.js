@@ -15,6 +15,7 @@ const ReportPurchase = (() => {
             title: 'Laporan Pembelian',
             subtitle: 'Pembelian eksternal dari supplier (transfer/produksi/opening/adjustment TIDAK dihitung sebagai pembelian).',
             storageKey: 'dt-report-purchase',
+            exportUrl: (state) => InvApi.purchaseReportExportUrl(clean(state)),
             filters: [
                 { key: 'date_from', label: 'Dari Tanggal', type: 'date' },
                 { key: 'date_to', label: 'Sampai Tanggal', type: 'date' },

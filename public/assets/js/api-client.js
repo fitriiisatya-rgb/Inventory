@@ -201,6 +201,23 @@ const InvApi = (() => {
         adjustmentReport: (params) => request('GET', `/reports/adjustment${qs(params)}`),
         expiryReport: (params) => request('GET', `/reports/expiry${qs(params)}`),
         slowMovementReport: (params) => request('GET', `/reports/slow-movement${qs(params)}`),
+        auditReport: (params) => request('GET', `/reports/audit${qs(params)}`),
+
+        // ---- PHASE V2.6C: CSV export URLs (opened via window.open, same
+        // CSRF-exempt-GET pattern as hppExportUrl/importTemplateUrl above) ----
+        summaryInventoryExportUrl: (params) => `/api/reports/summary/inventory${qs(Object.assign({}, params, { format: 'csv' }))}`,
+        movementDailyExportUrl: (params) => `/api/reports/movement/daily${qs(Object.assign({}, params, { format: 'csv' }))}`,
+        reconciliationExportUrl: (params) => `/api/reports/reconciliation/movement${qs(Object.assign({}, params, { format: 'csv' }))}`,
+        purchaseReportExportUrl: (params) => `/api/reports/purchase${qs(Object.assign({}, params, { format: 'csv' }))}`,
+        purchaseBySupplierExportUrl: (params) => `/api/reports/purchase/by-supplier${qs(Object.assign({}, params, { format: 'csv' }))}`,
+        inOutReportExportUrl: (params) => `/api/reports/in-out${qs(Object.assign({}, params, { format: 'csv' }))}`,
+        bakeryDistributionExportUrl: (params) => `/api/reports/distribution/bakery${qs(Object.assign({}, params, { format: 'csv' }))}`,
+        transferReportExportUrl: (params) => `/api/reports/transfer${qs(Object.assign({}, params, { format: 'csv' }))}`,
+        opnameReportExportUrl: (params) => `/api/reports/opname${qs(Object.assign({}, params, { format: 'csv' }))}`,
+        adjustmentReportExportUrl: (params) => `/api/reports/adjustment${qs(Object.assign({}, params, { format: 'csv' }))}`,
+        expiryReportExportUrl: (params) => `/api/reports/expiry${qs(Object.assign({}, params, { format: 'csv' }))}`,
+        slowMovementReportExportUrl: (params) => `/api/reports/slow-movement${qs(Object.assign({}, params, { format: 'csv' }))}`,
+        auditReportExportUrl: (params) => `/api/reports/audit/export${qs(params)}`,
 
         // ---- PHASE V2: per-item-per-warehouse stock policy ----
         getStockPolicy: (itemId, warehouseId) => request('GET', `/stock-policy?item_id=${itemId}&warehouse_id=${warehouseId}`),

@@ -15,6 +15,7 @@ const ReportInOut = (() => {
             title: 'Laporan IN / OUT',
             subtitle: 'Seluruh transaksi barang masuk dan keluar operasional.',
             storageKey: 'dt-report-inout',
+            exportUrl: (state) => InvApi.inOutReportExportUrl(clean(state)),
             filters: [
                 { key: 'date_from', label: 'Dari Tanggal', type: 'date' },
                 { key: 'date_to', label: 'Sampai Tanggal', type: 'date' },

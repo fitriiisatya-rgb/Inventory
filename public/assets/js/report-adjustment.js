@@ -14,6 +14,7 @@ const ReportAdjustment = (() => {
             title: 'Adjustment / Selisih',
             subtitle: 'Riwayat koreksi stok — opening TIDAK termasuk (tabel/jenis transaksi terpisah).',
             storageKey: 'dt-report-adjustment',
+            exportUrl: (state) => InvApi.adjustmentReportExportUrl(state),
             filters: [
                 { key: 'date_from', label: 'Dari Tanggal', type: 'date' },
                 { key: 'date_to', label: 'Sampai Tanggal', type: 'date' },

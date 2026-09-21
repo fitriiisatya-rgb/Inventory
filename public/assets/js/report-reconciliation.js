@@ -22,17 +22,22 @@ const ReportReconciliation = (() => {
         state = { startDate: range.start, endDate: range.end, warehouseId: '' };
 
         container.innerHTML = '';
+        const exportBtn = UI.el('button', { class: 'btn btn-success', id: 'recon-export-btn' }, '⬇ Export CSV');
+        exportBtn.addEventListener('click', () => window.open(InvApi.reconciliationExportUrl({
+            start_date: state.startDate, end_date: state.endDate, warehouse_id: state.warehouseId || undefined,
+        }), '_blank'));
         container.appendChild(UI.el('div', { class: 'hpp-page-header' }, [
             UI.el('div', {}, [
                 UI.el('h2', { class: 'hpp-title' }, 'Rekonsiliasi Arus Stok'),
                 UI.el('div', { class: 'hpp-subtitle' }, 'Saldo Awal + Pergerakan = Saldo Akhir Teoritis, dibandingkan dengan Saldo Akhir Aktual'),
             ]),
+            exportBtn,
         ]));
         container.appendChild(buildFilterBar());
         container.appendChild(UI.el('div', { id: 'recon-host' }));
         container.appendChild(UI.el('div', { class: 'hpp-legend' },
             'Saldo Akhir Aktual dibaca langsung dari batch stok saat ini (inventory_batches). Perbandingan hanya sepenuhnya presisi bila Tanggal Akhir = hari ini; ' +
-            'bila periode berakhir di masa lalu, Selisih dapat mencerminkan transaksi yang terjadi setelah Tanggal Akhir — tetap ditampilkan, tidak pernah disembunyikan.'));
+            'bila periode berakhir di masa lalu, status akan NOT COMPARABLE — tidak pernah ditampilkan seolah cocok. Rentang maksimal 366 hari.'));
 
         load();
     }

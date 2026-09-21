@@ -29,7 +29,10 @@ final class TransactionHistoryService
     {
         [$where, $bind] = self::buildFilters($pdo, $params);
         $page = max(1, (int) ($params['page'] ?? 1));
-        $perPage = min(200, max(1, (int) ($params['per_page'] ?? 50)));
+        // PHASE V2.6C: raised from 200 so CSV export (Reports 4/5/11/12) can
+        // request "everything matching the current filters" in one page —
+        // still a bounded 5000, never truly unbounded.
+        $perPage = min(5000, max(1, (int) ($params['per_page'] ?? 50)));
         $sortKey = self::SORTABLE[$params['sort'] ?? 'date'] ?? 't.transaction_date';
         $dir = strtoupper($params['dir'] ?? 'DESC') === 'ASC' ? 'ASC' : 'DESC';
 

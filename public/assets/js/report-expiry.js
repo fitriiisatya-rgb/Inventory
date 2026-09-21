@@ -18,6 +18,7 @@ const ReportExpiry = (() => {
             title: 'Expired / Near Expired',
             subtitle: 'Informasi kedaluwarsa dari data yang sudah tersimpan.',
             storageKey: 'dt-report-expiry',
+            exportUrl: (state) => InvApi.expiryReportExportUrl(state),
             note: 'ℹ️ Laporan ini bersifat informasi saja — TIDAK mengubah FIFO, HPP, atau alokasi batch, dan tidak memblokir transaksi OUT.',
             filters: [
                 { key: 'warehouse_id', label: 'Gudang', type: 'select', options: whOptions },

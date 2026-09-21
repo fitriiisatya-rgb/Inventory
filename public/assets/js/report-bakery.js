@@ -12,6 +12,7 @@ const ReportBakery = (() => {
             title: 'Distribusi per Bakery',
             subtitle: 'Distribusi OUT ke tujuan bakery — transfer antar gudang TIDAK dihitung sebagai distribusi bakery.',
             storageKey: 'dt-report-bakery',
+            exportUrl: (state) => InvApi.bakeryDistributionExportUrl(state),
             filters: [
                 { key: 'date_from', label: 'Dari Tanggal', type: 'date' },
                 { key: 'date_to', label: 'Sampai Tanggal', type: 'date' },

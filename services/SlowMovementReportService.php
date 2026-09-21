@@ -25,7 +25,9 @@ final class SlowMovementReportService
         $threshold = in_array($requestedThreshold, [30, 60, 90], true) ? $requestedThreshold : 30;
         [$where, $bind] = self::buildFilters($params);
         $page = max(1, (int) ($params['page'] ?? 1));
-        $perPage = min(200, max(1, (int) ($params['per_page'] ?? 50)));
+        // PHASE V2.6C: raised from 200 so CSV export can request the full
+        // filtered set in one page — still bounded, never unbounded.
+        $perPage = min(5000, max(1, (int) ($params['per_page'] ?? 50)));
 
         $baseSql = self::baseSql();
         $stmt = $pdo->prepare("{$baseSql} WHERE {$where}");

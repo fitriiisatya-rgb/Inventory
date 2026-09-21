@@ -16,6 +16,7 @@ const ReportOpname = (() => {
             title: 'Laporan Stock Opname',
             subtitle: 'Riwayat sesi stock opname — sistem model saat ini (single count).',
             storageKey: 'dt-report-opname',
+            exportUrl: (state) => InvApi.opnameReportExportUrl(state),
             filters: [
                 { key: 'date_from', label: 'Dari Tanggal', type: 'date' },
                 { key: 'date_to', label: 'Sampai Tanggal', type: 'date' },

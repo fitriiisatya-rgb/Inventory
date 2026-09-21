@@ -110,6 +110,14 @@ use App\Services\ImportSimpleMasterService;
 use App\Services\ImportOpeningStockService;
 use App\Services\ImportTemplateService;
 use App\Services\ImportHistoricalTransactionService;
+use App\Services\InventoryMovementReportService;
+use App\Services\InventoryReconciliationReportService;
+use App\Services\InventorySummaryReportService;
+use App\Services\TransferReportService;
+use App\Services\StockOpnameReportService;
+use App\Services\AdjustmentReportService;
+use App\Services\ExpiryReportService;
+use App\Services\SlowMovementReportService;
 
 $config = require __DIR__ . '/../config/config.php';
 
@@ -148,6 +156,50 @@ function inv_error(int $httpStatus, string $code, string $message, ?array $detai
         $error += $details;
     }
     echo json_encode(['success' => false, 'error' => $error], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+/**
+ * PHASE V2.6C — shared CSV export infrastructure, reused by every report's
+ * export route instead of duplicating header/escaping/filename logic
+ * per-report. Every caller already did its own filtering/warehouse-scope
+ * resolution BEFORE building `$rows` — this function only ever writes
+ * what it's handed, never fetches or filters on its own.
+ *
+ * - `$filenameParts` is joined with '_' and sanitized to [A-Za-z0-9_-]
+ *   only (e.g. ['laporan-pembelian', 'SCM', '2026-09-01', '2026-09-30']
+ *   -> laporan-pembelian_SCM_2026-09-01_2026-09-30.csv).
+ * - A UTF-8 BOM is written first so Excel opens Rupiah/Indonesian text
+ *   correctly without a manual "Import as UTF-8" step.
+ * - `$escape` is always passed explicitly to fputcsv() — PHP 8.4
+ *   deprecates relying on its implicit default (see the V2.6B fix to the
+ *   pre-existing Laporan Stok export this same phase's regression run
+ *   surfaced).
+ * - Never mutates anything; the route calling this must already be a
+ *   pure GET/read path.
+ *
+ * @param list<string> $filenameParts
+ * @param list<string> $header
+ * @param iterable<array> $rows
+ * @param callable(array):list<scalar|null> $mapRow
+ */
+function inv_export_csv(array $filenameParts, array $header, iterable $rows, callable $mapRow): never
+{
+    $safeParts = array_map(static fn ($p) => preg_replace('/[^A-Za-z0-9_-]+/', '-', (string) $p), $filenameParts);
+    $filename = implode('_', array_filter($safeParts, static fn ($p) => $p !== ''));
+    if ($filename === '') {
+        $filename = 'export';
+    }
+
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '.csv"');
+    $out = fopen('php://output', 'w');
+    fwrite($out, "\xEF\xBB\xBF"); // UTF-8 BOM — Excel-friendly
+    fputcsv($out, $header, ',', '"', '\\');
+    foreach ($rows as $row) {
+        fputcsv($out, $mapRow($row), ',', '"', '\\');
+    }
+    fclose($out);
     exit;
 }
 
@@ -306,6 +358,21 @@ function inv_hpp_resolve_warehouse_scope(array $user, ?int $requestedWarehouseId
         inv_require_warehouse_scope($user, $requestedWarehouseId);
     }
     return $requestedWarehouseId;
+}
+
+/**
+ * PHASE V2.6C — interactive-period guard for Rekonsiliasi Arus Stok. Never
+ * touches InventoryReconciliationReportService's own (already-validated)
+ * math — this is a pure input-validation gate at the route boundary, same
+ * layer as the existing start<=end check every report route already has.
+ * 366 (not 365) so a genuine leap-year 12-month span is never rejected.
+ */
+function inv_require_reconciliation_range(string $start, string $end): void
+{
+    $days = (int) floor((strtotime($end) - strtotime($start)) / 86400) + 1;
+    if ($days > 366) {
+        inv_error(422, 'VALIDATION_ERROR', 'Rentang Rekonsiliasi maksimal 366 hari. Pilih periode yang lebih pendek.', ['max_days' => 366, 'requested_days' => $days]);
+    }
 }
 
 $pdo = Database::connection();
@@ -794,24 +861,17 @@ $routes = [
 
         if (($query['format'] ?? '') === 'csv') {
             $rows = StockReportService::exportAll($pdo, $params);
-            header('Content-Type: text/csv; charset=utf-8');
-            header('Content-Disposition: attachment; filename="laporan-stok-' . date('Ymd_His') . '.csv"');
-            $out = fopen('php://output', 'w');
-            // PHP 8.4 deprecates relying on fputcsv()'s implicit default $escape —
-            // passed explicitly here (',', '"', '\\') to keep byte-identical CSV
-            // output to every PHP version before 8.4, pre-existing bug unrelated
-            // to V2.6, surfaced by this sandbox's PHP 8.4 runtime during the
-            // V2.6B full-regression run.
-            fputcsv($out, ['SKU', 'Nama Barang', 'Kategori', 'Satuan', 'Qty', 'Nilai', 'Rata-rata Biaya', 'Minimum', 'Buffer', 'Buffer Dikonfigurasi', 'Status', 'Terakhir Masuk', 'Terakhir Keluar', 'Terakhir Bergerak'], ',', '"', '\\');
-            foreach ($rows as $r) {
-                fputcsv($out, [
+            $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+            inv_export_csv(
+                ['laporan-stok', $whLabel, date('Y-m-d')],
+                ['SKU', 'Nama Barang', 'Kategori', 'Satuan', 'Qty', 'Nilai', 'Rata-rata Biaya', 'Minimum', 'Buffer', 'Buffer Dikonfigurasi', 'Status', 'Terakhir Masuk', 'Terakhir Keluar', 'Terakhir Bergerak'],
+                $rows,
+                static fn (array $r) => [
                     $r['sku'], $r['name'], $r['category']['name'] ?? '', $r['unit']['code'],
                     $r['qty_base'], $r['value'], $r['average_cost'], $r['minimum_stock'], $r['buffer_stock'],
                     $r['buffer_configured'] ? 'Ya' : 'Tidak', $r['status'], $r['last_in'], $r['last_out'], $r['last_movement'],
-                ], ',', '"', '\\');
-            }
-            fclose($out);
-            exit;
+                ]
+            );
         }
 
         inv_ok(StockReportService::list($pdo, $params), 'OK');
@@ -1019,7 +1079,41 @@ $routes = [
         $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
 
-        inv_ok(InventoryMovementReportService::dailyMovement($pdo, $start, $end, $warehouseId), 'OK');
+        $result = InventoryMovementReportService::dailyMovement($pdo, $start, $end, $warehouseId);
+
+        // Two logically different tables (live 5-column vs historical
+        // disclosure) don't share one header row, so this writes directly
+        // rather than through inv_export_csv()'s single-header shape — same
+        // BOM/escape/filename-sanitization conventions, never a second
+        // ad-hoc CSV writer.
+        if (($query['format'] ?? '') === 'csv') {
+            $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+            $filename = implode('_', array_filter([
+                preg_replace('/[^A-Za-z0-9_-]+/', '-', 'pergerakan-stok-harian'),
+                preg_replace('/[^A-Za-z0-9_-]+/', '-', $whLabel),
+                $start, $end,
+            ]));
+            header('Content-Type: text/csv; charset=utf-8');
+            header('Content-Disposition: attachment; filename="' . $filename . '.csv"');
+            $out = fopen('php://output', 'w');
+            fwrite($out, "\xEF\xBB\xBF");
+            fputcsv($out, ['Tanggal', 'Saldo Awal', 'Barang Masuk', 'Barang Keluar', 'Saldo Akhir', 'Keterangan'], ',', '"', '\\');
+            foreach ($result['rows'] as $r) {
+                fputcsv($out, [$r['date'], $r['stok_awal'], $r['barang_masuk'], $r['barang_keluar'], $r['stok_akhir'], $r['is_pre_go_live'] ? 'PRE-GO-LIVE (nol)' : ''], ',', '"', '\\');
+            }
+            if (!empty($result['historical'])) {
+                fputcsv($out, [], ',', '"', '\\');
+                fputcsv($out, ['HISTORICAL / REPORTING ONLY — Tidak mengubah stok/HPP live'], ',', '"', '\\');
+                fputcsv($out, ['Tanggal', 'Historical IN', 'Historical OUT', 'Jumlah Transaksi'], ',', '"', '\\');
+                foreach ($result['historical'] as $h) {
+                    fputcsv($out, [$h['date'], $h['historical_in'], $h['historical_out'], $h['transaction_count']], ',', '"', '\\');
+                }
+            }
+            fclose($out);
+            exit;
+        }
+
+        inv_ok($result, 'OK');
     },
 
     'GET /reports/movement/day-breakdown' => function () use ($pdo, $query) {
@@ -1072,10 +1166,29 @@ $routes = [
         if ($start === '' || $end === '' || strtotime($start) === false || strtotime($end) === false || strtotime($start) > strtotime($end)) {
             inv_error(422, 'VALIDATION_ERROR', 'start_date and end_date are required and start_date must not be after end_date');
         }
+        inv_require_reconciliation_range($start, $end);
         $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
 
-        inv_ok(InventoryReconciliationReportService::run($pdo, $start, $end, $warehouseId), 'OK');
+        $result = InventoryReconciliationReportService::run($pdo, $start, $end, $warehouseId);
+
+        if (($query['format'] ?? '') === 'csv') {
+            $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+            inv_export_csv(
+                ['rekonsiliasi-arus-stok', $whLabel, $start, $end],
+                ['Gudang', 'Saldo Awal', 'Pembelian Eksternal', 'Lainnya (Masuk)', 'Transfer IN', 'Adjustment Positif', 'OUT/Pemakaian', 'Transfer OUT', 'Adjustment Negatif', 'Lainnya (Keluar)', 'Saldo Akhir Teoritis', 'Saldo Akhir Aktual', 'Selisih', 'Status'],
+                $result['scopes'],
+                static fn (array $s) => [
+                    $s['warehouse_name'], $s['saldo_awal'], $s['external_purchase'], $s['other_in'],
+                    $s['transfer_in'] ?? '', $s['adjustment_positive'], $s['out_usage'], $s['transfer_out'] ?? '',
+                    $s['adjustment_negative'], $s['other_out'], $s['theoretical_ending'],
+                    $s['actual_available'] ? $s['actual_value'] : 'NOT COMPARABLE',
+                    $s['difference'] ?? 'NOT COMPARABLE', $s['status'],
+                ]
+            );
+        }
+
+        inv_ok($result, 'OK');
     },
 
     // PHASE V2.6B — Report 1 "Ringkasan Inventory" (management overview).
@@ -1091,7 +1204,29 @@ $routes = [
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
         $categoryId = isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null;
 
-        inv_ok(InventorySummaryReportService::summary($pdo, $start, $end, $warehouseId, $categoryId), 'OK');
+        $result = InventorySummaryReportService::summary($pdo, $start, $end, $warehouseId, $categoryId);
+
+        if (($query['format'] ?? '') === 'csv') {
+            $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+            $kv = [
+                ['Nilai Awal', $result['beginning_inventory_value']], ['Pembelian Eksternal', $result['external_purchase']],
+                ['Lainnya (Masuk)', $result['other_in']], ['Transfer IN', $result['transfer_in'] ?? 'N/A (dieliminasi)'],
+                ['Adjustment Positif', $result['adjustment_positive']], ['OUT/Pemakaian', $result['out_usage']],
+                ['Transfer OUT', $result['transfer_out'] ?? 'N/A (dieliminasi)'], ['Adjustment Negatif', $result['adjustment_negative']],
+                ['Lainnya (Keluar)', $result['other_out']], ['Nilai Akhir', $result['ending_inventory_value']],
+                ['HPP FIFO', $result['fifo_hpp']], ['SKU Aktif', $result['active_sku']], ['SKU Ada Stok', $result['sku_with_stock']],
+                ['Migration Negative Count', $result['migration_negative_count']], ['Pending Transfers', $result['pending_transfers']],
+                ['Active Opname', $result['active_opname']],
+            ];
+            inv_export_csv(
+                ['ringkasan-inventory', $whLabel, $start, $end],
+                ['Metrik', 'Nilai'],
+                $kv,
+                static fn (array $row) => $row
+            );
+        }
+
+        inv_ok($result, 'OK');
     },
 
     // ============================================================
@@ -1111,18 +1246,36 @@ $routes = [
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
         $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        $isExport = ($query['format'] ?? '') === 'csv';
         $params = [
             'warehouse_id' => $warehouseId, 'transaction_type' => 'IN',
             'supplier_id' => isset($query['supplier_id']) && $query['supplier_id'] !== '' ? (int) $query['supplier_id'] : null,
             'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
             'q' => $query['q'] ?? null,
             'is_historical_import' => isset($query['historical']) && $query['historical'] === '1' ? true : (isset($query['historical']) && $query['historical'] === '0' ? false : null),
-            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
+            'page' => $isExport ? 1 : (int) ($query['page'] ?? 1), 'per_page' => $isExport ? 5000 : (int) ($query['per_page'] ?? 50),
         ];
         if ($params['is_historical_import'] === null) {
             unset($params['is_historical_import']);
         }
-        inv_ok(TransactionHistoryService::list($pdo, $params), 'OK');
+        $result = TransactionHistoryService::list($pdo, $params);
+
+        if ($isExport) {
+            $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+            inv_export_csv(
+                ['laporan-pembelian', $whLabel, (string) ($query['date_from'] ?? 'all'), (string) ($query['date_to'] ?? 'all')],
+                ['Tanggal', 'Gudang', 'Supplier', 'Referensi', 'SKU', 'Barang', 'Qty Input', 'Satuan Input', 'Base Qty', 'Harga Satuan', 'Nilai Pembelian', 'Dibuat Oleh', 'Transaction ID', 'Keterangan'],
+                $result['rows'],
+                static fn (array $r) => [
+                    $r['transaction_date'], $r['warehouse']['name'], $r['supplier']['name'] ?? '', $r['reference_no'],
+                    $r['item']['sku'], $r['item']['name'], $r['input_qty'], $r['input_unit']['code'], $r['base_qty'],
+                    $r['unit_cost_base'], $r['subtotal'], $r['created_by']['username'], $r['transaction_id'],
+                    $r['is_historical'] ? 'HISTORICAL / REPORTING ONLY' : '',
+                ]
+            );
+        }
+
+        inv_ok($result, 'OK');
     },
     'GET /reports/purchase/summary' => function () use ($pdo, $query) {
         $user = inv_require_auth();
@@ -1143,10 +1296,22 @@ $routes = [
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
         $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
-        inv_ok(TransactionHistoryService::groupedSummary($pdo, [
+        $rows = TransactionHistoryService::groupedSummary($pdo, [
             'warehouse_id' => $warehouseId, 'transaction_type' => 'IN',
             'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
-        ], 'supplier_id', 'supplier_name'), 'OK');
+        ], 'supplier_id', 'supplier_name');
+
+        if (($query['format'] ?? '') === 'csv') {
+            $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+            inv_export_csv(
+                ['pembelian-per-supplier', $whLabel, (string) ($query['date_from'] ?? 'all'), (string) ($query['date_to'] ?? 'all')],
+                ['Supplier', 'Jumlah Transaksi', 'Total Pembelian', 'Rata-rata', 'SKU Unik', 'Pembelian Terakhir', '% dari Total'],
+                $rows,
+                static fn (array $r) => [$r['name'], $r['transaction_count'], $r['total_value'], $r['average_value'], $r['unique_sku'], $r['latest_date'], $r['share_pct']]
+            );
+        }
+
+        inv_ok($rows, 'OK');
     },
 
     // Report 5 — Laporan IN/OUT: unified operational view of both types.
@@ -1157,7 +1322,8 @@ $routes = [
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
         $direction = $query['direction'] ?? '';
         $types = in_array($direction, ['IN', 'OUT'], true) ? [$direction] : ['IN', 'OUT'];
-        inv_ok(TransactionHistoryService::list($pdo, [
+        $isExport = ($query['format'] ?? '') === 'csv';
+        $result = TransactionHistoryService::list($pdo, [
             'warehouse_id' => $warehouseId, 'transaction_types' => $types,
             'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
             'item_id' => isset($query['item_id']) && $query['item_id'] !== '' ? (int) $query['item_id'] : null,
@@ -1165,8 +1331,25 @@ $routes = [
             'bakery_destination_id' => isset($query['bakery_destination_id']) && $query['bakery_destination_id'] !== '' ? (int) $query['bakery_destination_id'] : null,
             'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
             'q' => $query['q'] ?? null,
-            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
-        ]), 'OK');
+            'page' => $isExport ? 1 : (int) ($query['page'] ?? 1), 'per_page' => $isExport ? 5000 : (int) ($query['per_page'] ?? 50),
+        ]);
+
+        if ($isExport) {
+            $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+            inv_export_csv(
+                ['laporan-in-out', $whLabel, (string) ($query['date_from'] ?? 'all'), (string) ($query['date_to'] ?? 'all')],
+                ['Tanggal', 'Referensi', 'Tipe', 'Gudang', 'SKU', 'Barang', 'Qty', 'Base Qty', 'Nilai', 'Supplier/Bakery', 'User', 'Status', 'Keterangan'],
+                $result['rows'],
+                static fn (array $r) => [
+                    $r['transaction_date'], $r['reference_no'], $r['transaction_type'], $r['warehouse']['name'],
+                    $r['item']['sku'], $r['item']['name'], $r['input_qty'], $r['base_qty'], $r['subtotal'],
+                    $r['supplier']['name'] ?? ($r['bakery_destination']['name'] ?? ''), $r['created_by']['username'], $r['status'],
+                    $r['is_historical'] ? 'HISTORICAL / REPORTING ONLY' : '',
+                ]
+            );
+        }
+
+        inv_ok($result, 'OK');
     },
     'GET /reports/in-out/summary' => function () use ($pdo, $query) {
         $user = inv_require_auth();
@@ -1195,10 +1378,22 @@ $routes = [
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
         $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
-        inv_ok(TransactionHistoryService::groupedSummary($pdo, [
+        $rows = TransactionHistoryService::groupedSummary($pdo, [
             'warehouse_id' => $warehouseId, 'transaction_type' => 'OUT',
             'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
-        ], 'bakery_destination_id', 'bakery_destination_name'), 'OK');
+        ], 'bakery_destination_id', 'bakery_destination_name');
+
+        if (($query['format'] ?? '') === 'csv') {
+            $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+            inv_export_csv(
+                ['distribusi-per-bakery', $whLabel, (string) ($query['date_from'] ?? 'all'), (string) ($query['date_to'] ?? 'all')],
+                ['Bakery', 'Jumlah Transaksi', 'Total Nilai OUT', 'SKU Unik', 'Distribusi Terakhir'],
+                $rows,
+                static fn (array $r) => [$r['name'], $r['transaction_count'], $r['total_value'], $r['unique_sku'], $r['latest_date']]
+            );
+        }
+
+        inv_ok($rows, 'OK');
     },
 
     // Report 6 — Laporan Transfer.
@@ -1207,14 +1402,30 @@ $routes = [
         inv_require_permission($pdo, $user, 'WAREHOUSE_TRANSFER_MANAGE');
         $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
-        inv_ok(TransferReportService::list($pdo, [
+        $isExport = ($query['format'] ?? '') === 'csv';
+        $result = TransferReportService::list($pdo, [
             'warehouse_id' => $warehouseId,
             'from_warehouse_id' => isset($query['from_warehouse_id']) && $query['from_warehouse_id'] !== '' ? (int) $query['from_warehouse_id'] : null,
             'to_warehouse_id' => isset($query['to_warehouse_id']) && $query['to_warehouse_id'] !== '' ? (int) $query['to_warehouse_id'] : null,
             'status' => $query['status'] ?? null,
             'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
-            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
-        ]), 'OK');
+            'page' => $isExport ? 1 : (int) ($query['page'] ?? 1), 'per_page' => $isExport ? 5000 : (int) ($query['per_page'] ?? 50),
+        ]);
+
+        if ($isExport) {
+            $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+            inv_export_csv(
+                ['laporan-transfer', $whLabel, (string) ($query['date_from'] ?? 'all'), (string) ($query['date_to'] ?? 'all')],
+                ['No. Transfer', 'Tanggal Kirim', 'Dari', 'Ke', 'Status', 'Jumlah SKU', 'Nilai Transfer', 'Lead Time (hari)', 'Dibuat Oleh', 'Diterima Oleh', 'Diterima Pada'],
+                $result['rows'],
+                static fn (array $r) => [
+                    "TRF-{$r['id']}", $r['ship_date'], $r['from_warehouse']['name'], $r['to_warehouse']['name'], $r['status'],
+                    $r['item_count'], $r['transfer_value'], $r['lead_time_days'] ?? '', $r['created_by'], $r['received_by'] ?? '', $r['receive_date'] ?? '',
+                ]
+            );
+        }
+
+        inv_ok($result, 'OK');
     },
 
     // Report 8 — Stock Opname.
@@ -1223,11 +1434,27 @@ $routes = [
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
         $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
-        inv_ok(StockOpnameReportService::list($pdo, [
+        $isExport = ($query['format'] ?? '') === 'csv';
+        $result = StockOpnameReportService::list($pdo, [
             'warehouse_id' => $warehouseId, 'status' => $query['status'] ?? null,
             'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
-            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
-        ]), 'OK');
+            'page' => $isExport ? 1 : (int) ($query['page'] ?? 1), 'per_page' => $isExport ? 5000 : (int) ($query['per_page'] ?? 50),
+        ]);
+
+        if ($isExport) {
+            $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+            inv_export_csv(
+                ['laporan-stock-opname', $whLabel, (string) ($query['date_from'] ?? 'all'), (string) ($query['date_to'] ?? 'all')],
+                ['Sesi', 'Gudang', 'Tanggal Sesi', 'Status', 'Qty Sistem', 'Qty Dihitung', 'Selisih Qty', 'Selisih Nilai', 'Dibuat Oleh', 'Finalisasi'],
+                $result['rows'],
+                static fn (array $r) => [
+                    "OPN-{$r['id']}", $r['warehouse']['name'], $r['session_date'], $r['status'],
+                    $r['system_qty'], $r['counted_qty'], $r['variance_qty'], $r['variance_value'], $r['created_by'], $r['finalized_at'] ?? '',
+                ]
+            );
+        }
+
+        inv_ok($result, 'OK');
     },
 
     // Report 9 — Adjustment / Selisih.
@@ -1236,14 +1463,30 @@ $routes = [
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
         $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
-        inv_ok(AdjustmentReportService::list($pdo, [
+        $isExport = ($query['format'] ?? '') === 'csv';
+        $result = AdjustmentReportService::list($pdo, [
             'warehouse_id' => $warehouseId,
             'direction' => in_array($query['direction'] ?? '', ['POSITIVE', 'NEGATIVE'], true) ? $query['direction'] : null,
             'adjustment_type' => $query['adjustment_type'] ?? null,
             'item_id' => isset($query['item_id']) && $query['item_id'] !== '' ? (int) $query['item_id'] : null,
             'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null,
-            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
-        ]), 'OK');
+            'page' => $isExport ? 1 : (int) ($query['page'] ?? 1), 'per_page' => $isExport ? 5000 : (int) ($query['per_page'] ?? 50),
+        ]);
+
+        if ($isExport) {
+            $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+            inv_export_csv(
+                ['adjustment-selisih', $whLabel, (string) ($query['date_from'] ?? 'all'), (string) ($query['date_to'] ?? 'all')],
+                ['Tanggal', 'Gudang', 'SKU', 'Barang', 'Qty', 'Nilai', 'Arah', 'Alasan', 'Sumber', 'User', 'Status'],
+                $result['rows'],
+                static fn (array $r) => [
+                    $r['date'], $r['warehouse']['name'], $r['item']['sku'], $r['item']['name'],
+                    $r['adjustment_qty'], $r['adjustment_value'], $r['direction'], $r['reason'], $r['source_module'], $r['created_by'], $r['status'],
+                ]
+            );
+        }
+
+        inv_ok($result, 'OK');
     },
 
     // Report 10 — Expired / Near Expired.
@@ -1252,12 +1495,28 @@ $routes = [
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
         $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
-        inv_ok(ExpiryReportService::list($pdo, [
+        $isExport = ($query['format'] ?? '') === 'csv';
+        $result = ExpiryReportService::list($pdo, [
             'warehouse_id' => $warehouseId,
             'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
             'status' => $query['status'] ?? null,
-            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
-        ]), 'OK');
+            'page' => $isExport ? 1 : (int) ($query['page'] ?? 1), 'per_page' => $isExport ? 5000 : (int) ($query['per_page'] ?? 50),
+        ]);
+
+        if ($isExport) {
+            $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+            inv_export_csv(
+                ['expired-near-expired', $whLabel, date('Y-m-d')],
+                ['Gudang', 'SKU', 'Barang', 'Batch', 'Qty Sisa', 'Nilai', 'Tanggal Expiry', 'Sisa Hari', 'Status'],
+                $result['rows'],
+                static fn (array $r) => [
+                    $r['warehouse']['name'], $r['item']['sku'], $r['item']['name'], $r['batch_id'],
+                    $r['qty_remaining'], $r['inventory_value'], $r['expiry_date'], $r['days_remaining'], $r['status'],
+                ]
+            );
+        }
+
+        inv_ok($result, 'OK');
     },
 
     // Report 13 — Slow / No Movement.
@@ -1266,13 +1525,78 @@ $routes = [
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
         $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
-        inv_ok(SlowMovementReportService::list($pdo, [
+        $isExport = ($query['format'] ?? '') === 'csv';
+        $result = SlowMovementReportService::list($pdo, [
             'warehouse_id' => $warehouseId,
             'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
             'threshold_days' => (int) ($query['threshold_days'] ?? 30),
             'include_zero_stock' => isset($query['include_zero_stock']) && $query['include_zero_stock'] === '1',
-            'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
+            'page' => $isExport ? 1 : (int) ($query['page'] ?? 1), 'per_page' => $isExport ? 5000 : (int) ($query['per_page'] ?? 50),
+        ]);
+
+        if ($isExport) {
+            $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
+            inv_export_csv(
+                ['slow-no-movement', $whLabel, (string) $result['threshold_days'] . 'hari', date('Y-m-d')],
+                ['Gudang', 'SKU', 'Barang', 'Qty On Hand', 'Nilai', 'Terakhir Masuk', 'Terakhir Keluar', 'Hari Sejak Bergerak', 'Status'],
+                $result['rows'],
+                static fn (array $r) => [
+                    $r['warehouse']['name'], $r['item']['sku'], $r['item']['name'], $r['qty_on_hand'], $r['inventory_value'],
+                    $r['last_in'] ?? '', $r['last_out'] ?? '', $r['days_since_movement'] ?? 'never', $r['status'],
+                ]
+            );
+        }
+
+        inv_ok($result, 'OK');
+    },
+
+    // Report 15 — Audit Transaksi. PHASE V2.6C: proper server-side
+    // pagination via the EXISTING TraceService::browseEvents() (it always
+    // supported page/per_page/total/total_pages — the older GET /audit-logs
+    // route this report used to piggyback on just never exposed that,
+    // capping itself at a flat 500 rows). Neither TraceService nor
+    // audit_logs is replaced — this route calls the same, unmodified
+    // browseEvents() the Trace Center already relies on. browseEvents()
+    // already projects only {id, action_code, entity_type, entity_id,
+    // actor, before, after, reason, created_at} — password/session/CSRF
+    // fields are never selected into that shape in the first place.
+    'GET /reports/audit' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        $perPage = min(100, max(1, (int) ($query['per_page'] ?? 25)));
+        inv_ok(TraceService::browseEvents($pdo, [
+            'entity_type' => $query['entity_type'] ?? null,
+            'action_code' => $query['action_code'] ?? null,
+            'username' => $query['username'] ?? null,
+            'date_from' => $query['date_from'] ?? null,
+            'date_to' => $query['date_to'] ?? null,
+            'dir' => $query['dir'] ?? 'desc',
+            'page' => (int) ($query['page'] ?? 1),
+            'per_page' => $perPage,
         ]), 'OK');
+    },
+    'GET /reports/audit/export' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        // Export is still bounded (2000, not literally "everything") —
+        // audit_logs has no warehouse scope to narrow by, so an unbounded
+        // export here is the one place a filter alone can't cap the size.
+        $result = TraceService::browseEvents($pdo, [
+            'entity_type' => $query['entity_type'] ?? null,
+            'action_code' => $query['action_code'] ?? null,
+            'username' => $query['username'] ?? null,
+            'date_from' => $query['date_from'] ?? null,
+            'date_to' => $query['date_to'] ?? null,
+            'dir' => $query['dir'] ?? 'desc',
+            'page' => 1,
+            'per_page' => 2000,
+        ]);
+        inv_export_csv(
+            ['audit-transaksi', (string) ($query['date_from'] ?? 'all'), (string) ($query['date_to'] ?? 'all')],
+            ['Timestamp', 'User', 'Action', 'Entity Type', 'Entity ID', 'Alasan'],
+            $result['rows'],
+            static fn (array $r) => [$r['created_at'], $r['actor'], $r['action_code'], $r['entity_type'], $r['entity_id'] ?? '', $r['reason'] ?? '']
+        );
     },
 
     // ---- InventoryService: single source of truth reads (Section 7) ----

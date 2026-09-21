@@ -52,11 +52,14 @@ const ReportMovement = (() => {
     }
 
     function buildHeader() {
+        const exportBtn = UI.el('button', { class: 'btn btn-success', id: 'movement-export-btn' }, '⬇ Export CSV');
+        exportBtn.addEventListener('click', () => window.open(InvApi.movementDailyExportUrl(movementParams()), '_blank'));
         return UI.el('div', { class: 'hpp-page-header' }, [
             UI.el('div', {}, [
                 UI.el('h2', { class: 'hpp-title' }, 'Pergerakan Stok Harian'),
                 UI.el('div', { class: 'hpp-subtitle' }, 'Saldo Awal, Barang Masuk, Barang Keluar, Saldo Akhir per hari (nominal Rupiah)'),
             ]),
+            exportBtn,
         ]);
     }
 

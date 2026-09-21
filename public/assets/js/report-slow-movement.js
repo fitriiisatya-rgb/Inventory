@@ -14,6 +14,7 @@ const ReportSlowMovement = (() => {
             subtitle: 'SKU dengan stok yang belum bergerak dalam N hari terakhir (deskriptif, bukan vonis obsolete).',
             storageKey: 'dt-report-slow-movement',
             defaultFilters: { threshold_days: '30' },
+            exportUrl: (state) => InvApi.slowMovementReportExportUrl(state),
             filters: [
                 { key: 'threshold_days', label: 'Ambang (hari)', type: 'select', options: [{ value: '30', label: '30 hari' }, { value: '60', label: '60 hari' }, { value: '90', label: '90 hari' }] },
                 { key: 'warehouse_id', label: 'Gudang', type: 'select', options: whOptions },

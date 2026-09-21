@@ -16,6 +16,7 @@ const ReportTransferList = (() => {
             title: 'Laporan Transfer',
             subtitle: 'Riwayat transfer antar gudang — status, nilai, dan lead time.',
             storageKey: 'dt-report-transfer',
+            exportUrl: (state) => InvApi.transferReportExportUrl(state),
             filters: [
                 { key: 'date_from', label: 'Dari Tanggal Kirim', type: 'date' },
                 { key: 'date_to', label: 'Sampai Tanggal Kirim', type: 'date' },

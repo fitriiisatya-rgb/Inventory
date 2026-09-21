@@ -264,7 +264,11 @@ try {
     check('STOCK user cannot GET /reports/stock for another warehouse', $stockOtherReport['status'] === 403 && $stockOtherReport['body']['error']['code'] === 'FORBIDDEN');
 
     $stockCsvExport = httpCall('GET', "{$base}/reports/stock?format=csv", null, $stockJar);
-    check('CSV export returns text/csv content and starts with the header row', str_starts_with((string) $stockCsvExport['raw'], 'SKU,'), substr((string) $stockCsvExport['raw'], 0, 40));
+    // PHASE V2.6C: exports now lead with a UTF-8 BOM (Excel-friendly —
+    // see inv_export_csv()) before the header row, so this strips it
+    // first rather than checking the raw byte stream literally.
+    $stockCsvBody = str_starts_with((string) $stockCsvExport['raw'], "\xEF\xBB\xBF") ? substr((string) $stockCsvExport['raw'], 3) : (string) $stockCsvExport['raw'];
+    check('CSV export returns text/csv content and starts with the header row', str_starts_with($stockCsvBody, 'SKU,'), substr((string) $stockCsvExport['raw'], 0, 40));
 
     @unlink($stockJar);
 } finally {

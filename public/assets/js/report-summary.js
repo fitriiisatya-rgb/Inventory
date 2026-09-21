@@ -26,6 +26,13 @@ const ReportSummary = (() => {
                 UI.el('h2', { class: 'hpp-title' }, 'Ringkasan Inventory'),
                 UI.el('div', { class: 'hpp-subtitle' }, 'Gambaran umum untuk manajemen — gudang dan periode terpilih'),
             ]),
+            (() => {
+                const btn = UI.el('button', { class: 'btn btn-success', id: 'summary-export-btn' }, '⬇ Export CSV');
+                setTimeout(() => btn.addEventListener('click', () => window.open(InvApi.summaryInventoryExportUrl({
+                    start_date: state.startDate, end_date: state.endDate, warehouse_id: state.warehouseId || undefined,
+                }), '_blank')), 0);
+                return btn;
+            })(),
         ]));
         container.appendChild(buildFilterBar());
         container.appendChild(UI.el('div', { id: 'summary-host' }));

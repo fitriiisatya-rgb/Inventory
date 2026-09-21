@@ -13,6 +13,7 @@ const ReportSupplier = (() => {
             title: 'Pembelian per Supplier',
             subtitle: 'Ringkasan pembelian eksternal dikelompokkan per supplier.',
             storageKey: 'dt-report-supplier',
+            exportUrl: (state) => InvApi.purchaseBySupplierExportUrl(state),
             filters: [
                 { key: 'date_from', label: 'Dari Tanggal', type: 'date' },
                 { key: 'date_to', label: 'Sampai Tanggal', type: 'date' },
