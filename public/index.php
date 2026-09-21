@@ -195,12 +195,51 @@ function inv_export_csv(array $filenameParts, array $header, iterable $rows, cal
     header('Content-Disposition: attachment; filename="' . $filename . '.csv"');
     $out = fopen('php://output', 'w');
     fwrite($out, "\xEF\xBB\xBF"); // UTF-8 BOM — Excel-friendly
-    fputcsv($out, $header, ',', '"', '\\');
+    inv_csv_write_row($out, $header);
     foreach ($rows as $row) {
-        fputcsv($out, $mapRow($row), ',', '"', '\\');
+        inv_csv_write_row($out, $mapRow($row));
     }
     fclose($out);
     exit;
+}
+
+/**
+ * PHASE V2.6 FINAL GATE — CSV/Excel formula-injection hardening, ONE
+ * centralized helper for every CSV export in the app (inv_export_csv()
+ * above, plus the one ad-hoc writer at GET /reports/movement/daily that
+ * needs a second header block). Export-layer only: this never touches
+ * what is stored or returned by the JSON API, only the bytes written
+ * into the downloaded .csv file.
+ *
+ * A text cell whose value starts with '=', '+', '-' or '@' can be
+ * interpreted by Excel/Sheets/LibreOffice as a formula when the CSV is
+ * opened (e.g. a `reason`, `actor`, or item-name field set to
+ * `=cmd|'/c calc'!A1` by whoever entered that data). The standard
+ * mitigation is to prefix such a cell with a single quote so the
+ * spreadsheet application treats it as literal text.
+ *
+ * This must never re-classify a genuine numeric business figure (a
+ * negative variance like -1250.50, a signed value, a percentage) as
+ * "formula-like" text merely because its string form starts with '-'
+ * or '+' — is_numeric() covers both real PHP int/float values AND the
+ * numeric strings PDO returns for DECIMAL columns, so those always pass
+ * through untouched and unquoted.
+ */
+function inv_csv_safe_cell(mixed $value): mixed
+{
+    if (!is_string($value) || $value === '' || is_numeric($value)) {
+        return $value;
+    }
+    if (preg_match('/^[=+\-@]/', $value) === 1) {
+        return "'" . $value;
+    }
+    return $value;
+}
+
+/** @param list<scalar|null> $row */
+function inv_csv_write_row($out, array $row): void
+{
+    fputcsv($out, array_map('inv_csv_safe_cell', $row), ',', '"', '\\');
 }
 
 // ---- CORS: only the configured new-domain origins, never a silent open policy ----
@@ -358,6 +397,30 @@ function inv_hpp_resolve_warehouse_scope(array $user, ?int $requestedWarehouseId
         inv_require_warehouse_scope($user, $requestedWarehouseId);
     }
     return $requestedWarehouseId;
+}
+
+/**
+ * PHASE V2.6 FINAL GATE — audit_logs (and every entity_type it covers:
+ * users, roles, categories, suppliers, system settings, ...) has no
+ * reliable per-row warehouse column, and several entity_types have no
+ * warehouse concept at all. That makes a per-event warehouse filter
+ * unsafe to build honestly: it would either guess ownership (wrong by
+ * construction for entity_types with no warehouse) or silently show a
+ * mix of "resolved" and "unresolved" rows to a warehouse-scoped user.
+ * Per the release-gate policy, the secure default for an unresolved case
+ * is full denial, not a partial/best-effort filter — so this route
+ * never even queries audit_logs for a warehouse-scoped role. Today only
+ * STOCK carries a non-null warehouse_id (and STOCK doesn't hold
+ * AUDIT_LOG_VIEW in the seeded permission set either — see
+ * database/schema.sql — so this is redundant defense-in-depth against
+ * that permission grant ever changing, applied identically to both
+ * GET /reports/audit and GET /reports/audit/export).
+ */
+function inv_require_company_wide_audit_scope(array $user): void
+{
+    if (!empty($user['warehouse_id'])) {
+        inv_error(403, 'FORBIDDEN', 'Audit Transaksi is a company-wide report and is not available to a warehouse-scoped role.');
+    }
 }
 
 /**
@@ -1097,16 +1160,16 @@ $routes = [
             header('Content-Disposition: attachment; filename="' . $filename . '.csv"');
             $out = fopen('php://output', 'w');
             fwrite($out, "\xEF\xBB\xBF");
-            fputcsv($out, ['Tanggal', 'Saldo Awal', 'Barang Masuk', 'Barang Keluar', 'Saldo Akhir', 'Keterangan'], ',', '"', '\\');
+            inv_csv_write_row($out, ['Tanggal', 'Saldo Awal', 'Barang Masuk', 'Barang Keluar', 'Saldo Akhir', 'Keterangan']);
             foreach ($result['rows'] as $r) {
-                fputcsv($out, [$r['date'], $r['stok_awal'], $r['barang_masuk'], $r['barang_keluar'], $r['stok_akhir'], $r['is_pre_go_live'] ? 'PRE-GO-LIVE (nol)' : ''], ',', '"', '\\');
+                inv_csv_write_row($out, [$r['date'], $r['stok_awal'], $r['barang_masuk'], $r['barang_keluar'], $r['stok_akhir'], $r['is_pre_go_live'] ? 'PRE-GO-LIVE (nol)' : '']);
             }
             if (!empty($result['historical'])) {
-                fputcsv($out, [], ',', '"', '\\');
-                fputcsv($out, ['HISTORICAL / REPORTING ONLY — Tidak mengubah stok/HPP live'], ',', '"', '\\');
-                fputcsv($out, ['Tanggal', 'Historical IN', 'Historical OUT', 'Jumlah Transaksi'], ',', '"', '\\');
+                inv_csv_write_row($out, []);
+                inv_csv_write_row($out, ['HISTORICAL / REPORTING ONLY — Tidak mengubah stok/HPP live']);
+                inv_csv_write_row($out, ['Tanggal', 'Historical IN', 'Historical OUT', 'Jumlah Transaksi']);
                 foreach ($result['historical'] as $h) {
-                    fputcsv($out, [$h['date'], $h['historical_in'], $h['historical_out'], $h['transaction_count']], ',', '"', '\\');
+                    inv_csv_write_row($out, [$h['date'], $h['historical_in'], $h['historical_out'], $h['transaction_count']]);
                 }
             }
             fclose($out);
@@ -1563,6 +1626,7 @@ $routes = [
     'GET /reports/audit' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        inv_require_company_wide_audit_scope($user);
         $perPage = min(100, max(1, (int) ($query['per_page'] ?? 25)));
         inv_ok(TraceService::browseEvents($pdo, [
             'entity_type' => $query['entity_type'] ?? null,
@@ -1578,6 +1642,7 @@ $routes = [
     'GET /reports/audit/export' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
+        inv_require_company_wide_audit_scope($user);
         // Export is still bounded (2000, not literally "everything") —
         // audit_logs has no warehouse scope to narrow by, so an unbounded
         // export here is the one place a filter alone can't cap the size.
