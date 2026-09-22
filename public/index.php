@@ -64,6 +64,8 @@ require_once __DIR__ . '/../services/ExpiryReportService.php';
 require_once __DIR__ . '/../services/SlowMovementReportService.php';
 require_once __DIR__ . '/../services/ExcelWriterService.php';
 require_once __DIR__ . '/../services/PurchaseCostingService.php';
+require_once __DIR__ . '/../services/PurchaseCostingGateway.php';
+require_once __DIR__ . '/../services/ImportLiveTransactionService.php';
 
 use App\Services\AuthService;
 use App\Services\Database;
@@ -120,7 +122,9 @@ use App\Services\AdjustmentReportService;
 use App\Services\ExpiryReportService;
 use App\Services\SlowMovementReportService;
 use App\Services\PurchaseCostingService;
+use App\Services\PurchaseCostingGateway;
 use App\Services\UnitConversionService;
+use App\Services\ImportLiveTransactionService;
 
 $config = require __DIR__ . '/../config/config.php';
 
@@ -452,93 +456,18 @@ function inv_require_reconciliation_range(string $start, string $end): void
  * own, completely unmodified unit_cost_base/subtotal formulas land
  * exactly on final_unit_cost_base/final_inventory_cost.
  */
+// PHASE V2.8: the actual glue now lives in PurchaseCostingGateway (so
+// ImportLiveTransactionService can reuse it too, outside of any HTTP
+// request) — these two wrappers are kept so every existing call site
+// below is untouched, and behave byte-for-byte as before.
 function inv_purchase_costing_preview(PDO $pdo, array $input): array
 {
-    $itemId = (int) ($input['item_id'] ?? 0);
-    $unitId = (int) ($input['input_unit_id'] ?? 0);
-    $qty = (float) ($input['input_qty'] ?? 0);
-    $grossPrice = (float) ($input['unit_price_input'] ?? 0);
-    $txDate = (string) ($input['transaction_date'] ?? '');
-
-    $conversion = UnitConversionService::getActiveConversion($pdo, $itemId, $unitId, $txDate);
-    if ($conversion === null) {
-        throw new UnitConversionNotApprovedException($itemId, $unitId);
-    }
-    $factor = (float) $conversion['conversion_to_base'];
-    $baseQty = round($qty * $factor, 6);
-
-    $preview = PurchaseCostingService::buildCostPreview(
-        [
-            'invoice_discount_type' => $input['invoice_discount_type'] ?? 'NONE',
-            'invoice_discount_value' => (float) ($input['invoice_discount_value'] ?? 0),
-            'ppn_treatment' => $input['ppn_treatment'] ?? 'NONE',
-            'ppn_rate' => (float) ($input['ppn_rate'] ?? 0),
-            'ppn_creditable_pct' => (float) ($input['ppn_creditable_pct'] ?? 0),
-            'freight_treatment' => $input['freight_treatment'] ?? 'NONE',
-            'freight_amount' => (float) ($input['freight_amount'] ?? 0),
-        ],
-        [[
-            'qty' => $qty, 'gross_unit_price' => $grossPrice, 'base_qty' => $baseQty,
-            'line_discount_type' => $input['line_discount_type'] ?? 'NONE',
-            'line_discount_value' => (float) ($input['line_discount_value'] ?? 0),
-        ]]
-    );
-
-    $line = $preview['lines'][0];
-    $equivalentUnitPriceInput = $qty > 0 ? round($line['final_inventory_cost'] / $qty, 4) : 0.0;
-
-    return ['preview' => $preview, 'equivalent_unit_price_input' => $equivalentUnitPriceInput];
+    return PurchaseCostingGateway::preview($pdo, $input);
 }
 
-/**
- * Persists purchase_invoice_headers + purchase_line_costs for a
- * just-posted transaction — and cross-checks the precomputed preview
- * against what FifoService ACTUALLY posted (never silently trusts the
- * preview). A mismatch throws and, since this always runs inside the same
- * Database::transaction() as the FifoService::postIn() call, rolls back
- * the whole thing including the FIFO batch just created — nothing is
- * ever left half-posted.
- */
 function inv_persist_purchase_costing(PDO $pdo, array $posted, int $createdBy, array $costing): void
 {
-    $header = $costing['preview']['header'];
-    $line = $costing['preview']['lines'][0];
-
-    $actualInventoryCost = round((float) $posted['unit_cost_base'] * (float) $posted['base_qty'], 4);
-    if (abs($actualInventoryCost - $line['final_inventory_cost']) >= 0.0001) {
-        throw new ValidationException(["Cost reconciliation failed: FIFO posted {$actualInventoryCost} but purchase costing computed {$line['final_inventory_cost']} — nothing was committed"]);
-    }
-
-    $pdo->prepare(
-        'INSERT INTO purchase_invoice_headers
-            (transaction_id, gross_purchase, line_discount_total, invoice_discount_type, invoice_discount_value,
-             invoice_discount_amount, net_purchase_before_tax, ppn_treatment, ppn_rate, ppn_creditable_pct, ppn_amount,
-             ppn_creditable_amount, ppn_non_creditable_amount, freight_treatment, freight_amount, invoice_total,
-             inventory_cost_total, created_by)
-         VALUES (:tx, :gross, :ldt, :idt, :idv, :ida, :npbt, :ppnt, :ppnr, :ppncp, :ppna, :ppnca, :ppnnca, :ft, :fa, :it, :ict, :cb)'
-    )->execute([
-        'tx' => $posted['transaction_id'], 'gross' => $header['gross_purchase'], 'ldt' => $header['line_discount_total'],
-        'idt' => $header['invoice_discount_type'], 'idv' => $header['invoice_discount_value'], 'ida' => $header['invoice_discount_amount'],
-        'npbt' => $header['net_purchase_before_tax'], 'ppnt' => $header['ppn_treatment'], 'ppnr' => $header['ppn_rate'],
-        'ppncp' => $header['ppn_creditable_pct'], 'ppna' => $header['ppn_amount'], 'ppnca' => $header['ppn_creditable_amount'],
-        'ppnnca' => $header['ppn_non_creditable_amount'], 'ft' => $header['freight_treatment'], 'fa' => $header['freight_amount'],
-        'it' => $header['invoice_total'], 'ict' => $header['inventory_cost_total'], 'cb' => $createdBy,
-    ]);
-
-    $pdo->prepare(
-        'INSERT INTO purchase_line_costs
-            (transaction_line_id, transaction_id, gross_unit_price_input, gross_amount, line_discount_type, line_discount_value,
-             line_discount_amount, net_after_line_discount, invoice_discount_allocated, net_purchase_before_tax, ppn_allocated,
-             ppn_creditable_allocated, ppn_non_creditable_allocated, freight_allocated, final_inventory_cost, final_unit_cost_base)
-         VALUES (:line_id, :tx, :gup, :ga, :ldt, :ldv, :lda, :nald, :ida, :npbt, :ppna, :ppnca, :ppnnca, :fa, :fic, :fucb)'
-    )->execute([
-        'line_id' => $posted['line_id'], 'tx' => $posted['transaction_id'],
-        'gup' => $line['gross_unit_price_input'], 'ga' => $line['gross_amount'],
-        'ldt' => $line['line_discount_type'], 'ldv' => $line['line_discount_value'], 'lda' => $line['line_discount_amount'],
-        'nald' => $line['net_after_line_discount'], 'ida' => $line['invoice_discount_allocated'], 'npbt' => $line['net_purchase_before_tax'],
-        'ppna' => $line['ppn_allocated'], 'ppnca' => $line['ppn_creditable_allocated'], 'ppnnca' => $line['ppn_non_creditable_allocated'],
-        'fa' => $line['freight_allocated'], 'fic' => $line['final_inventory_cost'], 'fucb' => $line['final_unit_cost_base'],
-    ]);
+    PurchaseCostingGateway::persist($pdo, $posted, $createdBy, $costing);
 }
 
 /**
@@ -2896,7 +2825,7 @@ $routes = [
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
         $type = strtoupper($params['type']);
-        if (!in_array($type, ['MASTER_ITEM', 'SUPPLIER', 'DIVISION', 'WAREHOUSE'], true)) {
+        if (!in_array($type, ['MASTER_ITEM', 'SUPPLIER', 'DIVISION', 'WAREHOUSE', 'LIVE_TRANSACTION'], true)) {
             inv_error(404, 'NOT_FOUND', 'Unknown import template type');
         }
         $sheets = ImportTemplateService::build($type);
@@ -2924,6 +2853,28 @@ $routes = [
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
         $result = Database::transaction(fn (PDO $tx) => ImportMasterItemService::commit($tx, (int) $params['id'], $user['id']));
+        inv_ok($result, 'Committed');
+    },
+
+    // PHASE V2.8 — "Import Transaksi Live": IN/OUT only, real FIFO effect
+    // (never historical). Same IMPORT_MANAGE gate as every other import
+    // type above — ADMIN/SUPERADMIN only, consistent with the rest of this
+    // module (neither role is warehouse/division-scoped, so no further
+    // per-row scope check is needed on top of ImportLiveTransactionService's
+    // own warehouse-active check). MUST be declared before the generic
+    // 'POST /import/{type}/...' routes below — the router matches
+    // parameterized routes in array order and 'live-transaction' would
+    // otherwise be swallowed by {type} there first.
+    'POST /import/live-transaction/stage' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
+        $id = ImportLiveTransactionService::stage($pdo, $input['file_path'], $input['file_name'] ?? basename($input['file_path']), $user['id']);
+        inv_ok(['import_batch_id' => $id], 'Staged');
+    },
+    'POST /import/live-transaction/{id}/commit' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
+        $result = Database::transaction(fn (PDO $tx) => ImportLiveTransactionService::commit($tx, (int) $params['id'], $user['id']));
         inv_ok($result, 'Committed');
     },
 

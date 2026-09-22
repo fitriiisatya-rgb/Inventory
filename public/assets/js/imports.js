@@ -46,6 +46,19 @@ const Imports = (() => {
             note: UI.el('div', { class: 'banner-historical' }, '⚠️ HISTORICAL IMPORT — tidak mempengaruhi saldo stok (inventory_effect=0). Data ini hanya untuk laporan/audit, TIDAK membuat batch FIFO dan TIDAK bisa diubah menjadi mempengaruhi stok.'),
             traceOpener: (id) => TraceDrawer.openImport(id),
         }));
+        // PHASE V2.8 — the opposite of Historis above: every row here posts
+        // through the real FifoService::postIn()/postOut(), same as a
+        // manual Transaksi Masuk/Keluar (and, for IN, the same real V2.7
+        // Purchase Costing engine). IN/OUT only.
+        container.appendChild(buildBatchSection({
+            key: 'live-transaction', title: '⚡ Import Transaksi Live (IN/OUT)',
+            stage: (path, name) => InvApi.stageLiveTransaction(path, name),
+            commit: (id) => InvApi.commitLiveTransaction(id),
+            preview: (id) => InvApi.previewImportBatch(id),
+            note: UI.el('div', { class: 'alert alert-info' }, '⚡ LIVE IMPORT — setiap baris membuat TRANSAKSI NYATA (mempengaruhi saldo stok FIFO), persis seperti input manual. Hanya IN dan OUT yang didukung. Baris diproses kronologis berdasarkan tanggal transaksi saat commit.'),
+            traceOpener: (id) => TraceDrawer.openImport(id),
+            templateType: 'LIVE_TRANSACTION',
+        }));
     }
 
     function buildBatchSection(cfg) {

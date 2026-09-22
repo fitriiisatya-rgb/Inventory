@@ -48,6 +48,15 @@ final class ImportTemplateService
     // TRANSIT only — see ImportSimpleMasterService::WAREHOUSE_TYPES).
     private const WAREHOUSE_HEADERS = ['warehouse_code', 'warehouse_name', 'status', 'warehouse_type'];
 
+    // PHASE V2.8 — exactly ImportLiveTransactionService's accepted columns
+    // (services/ImportLiveTransactionService.php: validateRow()/postRow()).
+    private const LIVE_TRANSACTION_HEADERS = [
+        'transaction_date', 'transaction_type', 'warehouse_code', 'sku', 'input_qty', 'input_unit',
+        'unit_price_input', 'supplier_code', 'division_code', 'reference_no', 'notes',
+        'line_discount_type', 'line_discount_value', 'invoice_discount_type', 'invoice_discount_value',
+        'ppn_treatment', 'ppn_rate', 'ppn_creditable_pct', 'freight_treatment', 'freight_amount',
+    ];
+
     /** @return array<string, array{headers: list<string>, rows: list<list<string>>}> */
     public static function build(string $importType): array
     {
@@ -96,6 +105,29 @@ final class ImportTemplateService
                     'status: ACTIVE atau INACTIVE (default ACTIVE jika dikosongkan).',
                     'warehouse_type: opsional, MAIN atau TRANSIT (default MAIN jika dikosongkan).',
                     'PENTING: gudang KARANG_TENGAH sedang PENDING_CUTOVER dan TIDAK BOLEH ditambahkan lewat template ini. Jangan menambahkan baris untuk Karang Tengah.',
+                    'Isi data pada sheet "Template". Baris pertama (header) JANGAN diubah.',
+                ]
+            ),
+            'LIVE_TRANSACTION' => self::sheets(
+                self::LIVE_TRANSACTION_HEADERS,
+                [
+                    'transaction_date: wajib, format YYYY-MM-DD.',
+                    'transaction_type: wajib, IN atau OUT saja (transfer/produksi/opening/adjustment TIDAK didukung importer ini).',
+                    'warehouse_code: wajib, harus gudang yang AKTIF (gudang PENDING_CUTOVER seperti Karang Tengah akan DITOLAK).',
+                    'sku: wajib, harus sudah ada di master barang.',
+                    'input_qty: wajib, angka > 0.',
+                    'input_unit: wajib, kode satuan yang sudah dikenal sistem dan punya konversi aktif untuk barang ini.',
+                    'unit_price_input: WAJIB untuk baris IN (harga beli per satuan input, sebelum diskon/PPN/freight). Diabaikan untuk baris OUT.',
+                    'supplier_code: opsional, hanya untuk IN (jika tidak ditemukan, baris tetap VALID/WARNING, hanya dikosongkan).',
+                    'division_code: opsional, hanya untuk OUT (jika tidak ditemukan, baris tetap VALID/WARNING, hanya dikosongkan).',
+                    'reference_no, notes: opsional.',
+                    'line_discount_type/line_discount_value, invoice_discount_type/invoice_discount_value: opsional, hanya untuk IN (PERCENT/AMOUNT/NONE — default NONE/0, sama seperti Purchase Costing manual).',
+                    'ppn_treatment: opsional, hanya untuk IN (CREDITABLE/NON_CREDITABLE/PARTIALLY_CREDITABLE/NONE — default NONE).',
+                    'ppn_rate, ppn_creditable_pct: opsional, hanya untuk IN, angka.',
+                    'freight_treatment: opsional, hanya untuk IN (CAPITALIZE/EXPENSE/NONE — default NONE).',
+                    'freight_amount: opsional, hanya untuk IN, angka >= 0.',
+                    'PENTING: setiap baris di sini membuat TRANSAKSI NYATA (efek FIFO nyata) persis seperti input manual Transaksi Masuk/Keluar — bukan data historis.',
+                    'PENTING: baris diproses secara KRONOLOGIS berdasarkan transaction_date saat commit, bukan urutan baris di file.',
                     'Isi data pada sheet "Template". Baris pertama (header) JANGAN diubah.',
                 ]
             ),

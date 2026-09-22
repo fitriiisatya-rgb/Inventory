@@ -895,8 +895,12 @@ CREATE TABLE system_settings (
 CREATE TABLE import_batches (
     id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     import_type     ENUM('MASTER_ITEM','SUPPLIER','DIVISION','WAREHOUSE',
-                          'OPENING_STOCK','HISTORICAL_TRANSACTION') NOT NULL,
+                          'OPENING_STOCK','HISTORICAL_TRANSACTION','LIVE_TRANSACTION') NOT NULL,
     file_name       VARCHAR(255) NOT NULL,
+    -- PHASE V2.8: SHA256 of the uploaded file's bytes — stage-time half of
+    -- the two-layer duplicate-import protection (see
+    -- ImportLiveTransactionService). NULL for every pre-V2.8 import type.
+    source_file_hash VARCHAR(64) NULL,
     status          ENUM('STAGED','VALIDATED','COMMITTED','REJECTED') NOT NULL DEFAULT 'STAGED',
     total_rows      INT UNSIGNED NOT NULL DEFAULT 0,
     valid_rows      INT UNSIGNED NOT NULL DEFAULT 0,
@@ -907,7 +911,8 @@ CREATE TABLE import_batches (
     committed_by    INT UNSIGNED NULL,
     committed_at    DATETIME NULL,
     CONSTRAINT fk_ib_uploader FOREIGN KEY (uploaded_by) REFERENCES users(id),
-    CONSTRAINT fk_ib_committer FOREIGN KEY (committed_by) REFERENCES users(id)
+    CONSTRAINT fk_ib_committer FOREIGN KEY (committed_by) REFERENCES users(id),
+    INDEX idx_ib_type_hash (import_type, source_file_hash)
 ) ENGINE=InnoDB;
 
 CREATE TABLE import_rows (
