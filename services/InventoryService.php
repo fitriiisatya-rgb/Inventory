@@ -67,6 +67,9 @@ final class InventoryService
         $total = ['qty_base' => 0.0, 'value' => 0.0];
         $anyUnresolved = false;
         foreach ($rows as &$r) {
+            // qty_base is never clamped/floored here — a migration-negative
+            // warehouse's balance stays signed (negative) all the way
+            // through to report_status below, exactly like currentStock().
             $r['qty_base'] = round((float) $r['qty'], 6);
             $r['value'] = round((float) $r['value'], 4);
             unset($r['qty']);
@@ -75,7 +78,20 @@ final class InventoryService
             $anyUnresolved = $anyUnresolved || $flags['migration_negative_review'];
             $total['qty_base'] += (float) $r['qty_base'];
             $total['value'] += (float) $r['value'];
+
+            // PHASE V2.9 — each row gets ITS OWN warehouse-resolved minimum
+            // (StockPolicyService::resolve(): that warehouse's own
+            // item_warehouse_stock_policy override if one exists, else
+            // items.minimum_stock as fallback) and the matching 3-state
+            // report_status. Never the item's single global minimum
+            // reused across every warehouse — that would let one
+            // warehouse's healthy stock visually mask another warehouse's
+            // real shortage.
+            $policy = StockPolicyService::resolve($pdo, $itemId, (int) $r['warehouse_id']);
+            $r['minimum_stock'] = $policy['minimum_stock'];
+            $r['report_status'] = StockPolicyService::reportStatus($r['qty_base'], $policy['minimum_stock']);
         }
+        unset($r);
         return [
             'by_warehouse' => $rows,
             'total' => ['qty_base' => round($total['qty_base'], 6), 'value' => round($total['value'], 4)],

@@ -895,7 +895,7 @@ CREATE TABLE system_settings (
 CREATE TABLE import_batches (
     id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     import_type     ENUM('MASTER_ITEM','SUPPLIER','DIVISION','WAREHOUSE',
-                          'OPENING_STOCK','HISTORICAL_TRANSACTION','LIVE_TRANSACTION') NOT NULL,
+                          'OPENING_STOCK','HISTORICAL_TRANSACTION','LIVE_TRANSACTION','MINIMUM_STOCK') NOT NULL,
     file_name       VARCHAR(255) NOT NULL,
     -- PHASE V2.8: SHA256 of the uploaded file's bytes — stage-time half of
     -- the two-layer duplicate-import protection (see

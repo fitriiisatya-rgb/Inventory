@@ -59,6 +59,19 @@ const Imports = (() => {
             traceOpener: (id) => TraceDrawer.openImport(id),
             templateType: 'LIVE_TRANSACTION',
         }));
+        // PHASE V2.9 — bulk edit of the EXISTING per-item-per-warehouse
+        // minimum/buffer policy (StockPolicyService, PUT /stock-policy) —
+        // never a second data model. One row = one SKU+Gudang combination;
+        // re-importing the same combination updates it, never duplicates.
+        container.appendChild(buildBatchSection({
+            key: 'minimum-stock', title: '📉 Import Stok Minimal per Gudang',
+            stage: (path, name) => InvApi.stageMinimumStock(path, name),
+            commit: (id) => InvApi.commitMinimumStock(id),
+            preview: (id) => InvApi.previewImportBatch(id),
+            note: UI.el('div', { class: 'alert alert-info' }, 'Mengatur Stok Minimal KHUSUS gudang (mengganti Stok Minimal global HANYA untuk gudang tersebut). Tidak mempengaruhi saldo stok FIFO.'),
+            traceOpener: (id) => TraceDrawer.openImport(id),
+            templateType: 'MINIMUM_STOCK',
+        }));
     }
 
     function buildBatchSection(cfg) {

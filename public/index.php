@@ -66,6 +66,7 @@ require_once __DIR__ . '/../services/ExcelWriterService.php';
 require_once __DIR__ . '/../services/PurchaseCostingService.php';
 require_once __DIR__ . '/../services/PurchaseCostingGateway.php';
 require_once __DIR__ . '/../services/ImportLiveTransactionService.php';
+require_once __DIR__ . '/../services/ImportStockPolicyService.php';
 
 use App\Services\AuthService;
 use App\Services\Database;
@@ -125,6 +126,7 @@ use App\Services\PurchaseCostingService;
 use App\Services\PurchaseCostingGateway;
 use App\Services\UnitConversionService;
 use App\Services\ImportLiveTransactionService;
+use App\Services\ImportStockPolicyService;
 
 $config = require __DIR__ . '/../config/config.php';
 
@@ -2825,7 +2827,7 @@ $routes = [
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
         $type = strtoupper($params['type']);
-        if (!in_array($type, ['MASTER_ITEM', 'SUPPLIER', 'DIVISION', 'WAREHOUSE', 'LIVE_TRANSACTION'], true)) {
+        if (!in_array($type, ['MASTER_ITEM', 'SUPPLIER', 'DIVISION', 'WAREHOUSE', 'LIVE_TRANSACTION', 'MINIMUM_STOCK'], true)) {
             inv_error(404, 'NOT_FOUND', 'Unknown import template type');
         }
         $sheets = ImportTemplateService::build($type);
@@ -2875,6 +2877,24 @@ $routes = [
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
         $result = Database::transaction(fn (PDO $tx) => ImportLiveTransactionService::commit($tx, (int) $params['id'], $user['id']));
+        inv_ok($result, 'Committed');
+    },
+
+    // PHASE V2.9 — bulk "Minimum Stock per Gudang" import. Same
+    // IMPORT_MANAGE gate as every other import type (ADMIN/SUPERADMIN
+    // already hold STOCK_POLICY_MANAGE too, per role_permissions). MUST
+    // be declared before the generic 'POST /import/{type}/...' routes
+    // below, same reason as live-transaction above.
+    'POST /import/minimum-stock/stage' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
+        $id = ImportStockPolicyService::stage($pdo, $input['file_path'], $input['file_name'] ?? basename($input['file_path']), $user['id']);
+        inv_ok(['import_batch_id' => $id], 'Staged');
+    },
+    'POST /import/minimum-stock/{id}/commit' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'IMPORT_MANAGE');
+        $result = Database::transaction(fn (PDO $tx) => ImportStockPolicyService::commit($tx, (int) $params['id'], $user['id']));
         inv_ok($result, 'Committed');
     },
 

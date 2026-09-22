@@ -307,6 +307,8 @@ const InvApi = (() => {
         commitHistorical: (id) => request('POST', `/import/historical/${id}/commit`),
         stageLiveTransaction: (filePath, fileName) => request('POST', '/import/live-transaction/stage', { file_path: filePath, file_name: fileName }),
         commitLiveTransaction: (id) => request('POST', `/import/live-transaction/${id}/commit`),
+        stageMinimumStock: (filePath, fileName) => request('POST', '/import/minimum-stock/stage', { file_path: filePath, file_name: fileName }),
+        commitMinimumStock: (id) => request('POST', `/import/minimum-stock/${id}/commit`),
         previewImportBatch: (id) => request('GET', `/import/batches/${id}/rows`),
         previewOpeningStockBatch: (id) => request('GET', `/import/opening-stock/${id}/rows`),
     };

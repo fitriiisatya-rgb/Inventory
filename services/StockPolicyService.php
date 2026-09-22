@@ -96,10 +96,14 @@ final class StockPolicyService
         if ($itemCheck->fetchColumn() === false) {
             throw new NotFoundException("item {$itemId}");
         }
-        $whCheck = $pdo->prepare('SELECT id FROM warehouses WHERE id = :id');
+        // PHASE V2.9: is_active = 1 required — same guard as the V2.6
+        // all-warehouse backend fix and the V2.8 live-transaction
+        // importer. A PENDING_CUTOVER warehouse (e.g. Karang Tengah) must
+        // never be configured with a live minimum/buffer stock policy.
+        $whCheck = $pdo->prepare('SELECT id FROM warehouses WHERE id = :id AND is_active = 1');
         $whCheck->execute(['id' => $warehouseId]);
         if ($whCheck->fetchColumn() === false) {
-            throw new NotFoundException("warehouse {$warehouseId}");
+            throw new ValidationException(["warehouse {$warehouseId} is unknown or not active — cannot set a stock policy for it"]);
         }
 
         $existing = $pdo->prepare('SELECT id, minimum_stock_base, buffer_stock_base FROM item_warehouse_stock_policy WHERE item_id = :i AND warehouse_id = :w');
@@ -172,5 +176,38 @@ final class StockPolicyService
             return self::STATUS_LOW;
         }
         return self::STATUS_SAFE;
+    }
+
+    public const REPORT_STATUS_AMAN = 'AMAN';
+    public const REPORT_STATUS_WARNING = 'WARNING';
+    public const REPORT_STATUS_HABIS = 'HABIS';
+
+    /**
+     * PHASE V2.9 — the simplified 3-state view "Laporan Stok" and the
+     * All-Warehouse breakdown both use, DELIBERATELY separate from
+     * stockStatus() above (that 5-tier model other pages already depend
+     * on and must never change). Owner-specified formula, boundary
+     * INCLUSIVE at exactly minimum: qty<=0 is HABIS regardless of
+     * minimum (a migration-negative qty<0 is HABIS too, no separate
+     * branch needed), otherwise qty<=minimum is WARNING, else AMAN.
+     * Buffer stock never enters this formula. Must be called with an
+     * already per-warehouse-RESOLVED minimum (StockPolicyService::resolve()
+     * — never items.minimum_stock directly), so a status computed for one
+     * warehouse is never silently reused for another. This is byte-for-
+     * byte the same formula StockReportService's SQL CASE computes
+     * inline for its own paginated query — kept as a separate SQL
+     * expression there (so status filtering/sorting stays in the DB),
+     * but any NEW non-SQL call site (e.g. the All-Warehouse breakdown)
+     * must call this method rather than re-deriving the formula again.
+     */
+    public static function reportStatus(float $qty, float $minimum): string
+    {
+        if ($qty <= 0) {
+            return self::REPORT_STATUS_HABIS;
+        }
+        if ($qty <= $minimum) {
+            return self::REPORT_STATUS_WARNING;
+        }
+        return self::REPORT_STATUS_AMAN;
     }
 }

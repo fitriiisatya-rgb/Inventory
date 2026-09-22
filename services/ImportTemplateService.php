@@ -57,6 +57,10 @@ final class ImportTemplateService
         'ppn_treatment', 'ppn_rate', 'ppn_creditable_pct', 'freight_treatment', 'freight_amount',
     ];
 
+    // PHASE V2.9 — exactly ImportStockPolicyService's accepted columns
+    // (services/ImportStockPolicyService.php: validateRow()/commit()).
+    private const MINIMUM_STOCK_HEADERS = ['sku', 'warehouse_code', 'minimum_stock', 'buffer_stock'];
+
     /** @return array<string, array{headers: list<string>, rows: list<list<string>>}> */
     public static function build(string $importType): array
     {
@@ -128,6 +132,18 @@ final class ImportTemplateService
                     'freight_amount: opsional, hanya untuk IN, angka >= 0.',
                     'PENTING: setiap baris di sini membuat TRANSAKSI NYATA (efek FIFO nyata) persis seperti input manual Transaksi Masuk/Keluar — bukan data historis.',
                     'PENTING: baris diproses secara KRONOLOGIS berdasarkan transaction_date saat commit, bukan urutan baris di file.',
+                    'Isi data pada sheet "Template". Baris pertama (header) JANGAN diubah.',
+                ]
+            ),
+            'MINIMUM_STOCK' => self::sheets(
+                self::MINIMUM_STOCK_HEADERS,
+                [
+                    'sku: wajib, harus sudah ada di master barang.',
+                    'warehouse_code: wajib, harus gudang yang AKTIF (gudang PENDING_CUTOVER seperti Karang Tengah akan DITOLAK).',
+                    'minimum_stock: wajib, angka >= 0. Ini akan menjadi Stok Minimal KHUSUS untuk kombinasi barang+gudang ini, menggantikan Stok Minimal global barang tersebut HANYA untuk gudang ini.',
+                    'buffer_stock: opsional, angka >= 0. Kosongkan jika tidak ingin mengatur buffer.',
+                    'PENTING: satu baris = satu kombinasi SKU + Gudang. Baris berikutnya dengan SKU+Gudang yang sama akan MENIMPA (update) nilai sebelumnya, bukan menduplikasi.',
+                    'PENTING: ini TIDAK mengubah Stok Minimal global barang (Master Barang) — hanya menambah/mengubah pengaturan KHUSUS gudang tersebut.',
                     'Isi data pada sheet "Template". Baris pertama (header) JANGAN diubah.',
                 ]
             ),

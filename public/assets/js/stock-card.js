@@ -66,6 +66,17 @@ const StockCard = (() => {
                 const statusRow = UI.el('div', { style: 'margin:-6px 0 14px; display:flex; align-items:center; gap:8px;' }, ['Status:', statusBadge(status)]);
                 body.appendChild(statusRow);
 
+                // PHASE V2.9 — edit the EXISTING per-item-per-warehouse
+                // policy (StockPolicyService, PUT /stock-policy). STOCK
+                // role holds INVENTORY_VIEW (sees the figures above) but
+                // not STOCK_POLICY_MANAGE by default (schema.sql
+                // role_permissions), so it stays view-only here unless
+                // that grant is explicitly given — never a frontend-only
+                // check, the PUT route re-enforces this permission itself.
+                if (Auth.hasPermission('STOCK_POLICY_MANAGE')) {
+                    body.appendChild(editMinimumControl(ctx, page));
+                }
+
                 body.appendChild(UI.el('h4', { style: 'margin:14px 0 8px; font-size:0.85rem; color:var(--text2);' }, '📈 LIVE STOCK CARD (16 Sep onward)'));
                 body.appendChild(movementTable(result.movements, ctx));
 
@@ -82,6 +93,75 @@ const StockCard = (() => {
                 }
             },
         });
+    }
+
+    /**
+     * PHASE V2.9 — inline "Ubah Stok Minimal" control for one item+gudang.
+     * Fetches the current policy fresh (never trusts ctx.minimum_stock's
+     * possibly-stale origin, e.g. a value carried over from the "Semua
+     * Gudang" breakdown before it too was fixed to resolve per-warehouse)
+     * so the edit form always starts from THIS warehouse's real current
+     * minimum/buffer.
+     */
+    function editMinimumControl(ctx, page) {
+        const host = UI.el('div', { style: 'margin:-4px 0 14px;' });
+        const toggleBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, '✏️ Ubah Stok Minimal');
+        host.appendChild(toggleBtn);
+
+        toggleBtn.addEventListener('click', async () => {
+            toggleBtn.disabled = true;
+            let policy;
+            try {
+                policy = await InvApi.getStockPolicy(ctx.item_id, ctx.warehouse_id);
+            } catch (err) {
+                UI.handleApiError(err);
+                toggleBtn.disabled = false;
+                return;
+            }
+            host.innerHTML = '';
+            const minInput = UI.el('input', { type: 'number', step: 'any', min: '0', value: String(policy.minimum_stock) });
+            const bufInput = UI.el('input', { type: 'number', step: 'any', min: '0', value: policy.buffer_configured ? String(policy.buffer_stock) : '' });
+            const alertBox = UI.el('div', { id: 'stock-policy-edit-alert' });
+            const saveBtn = UI.el('button', { class: 'btn btn-primary btn-sm' }, 'Simpan');
+            const cancelBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Batal');
+            saveBtn.addEventListener('click', async () => {
+                alertBox.innerHTML = '';
+                const minVal = parseFloat(minInput.value);
+                if (!(minVal >= 0)) {
+                    alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Stok Minimal harus angka >= 0.'));
+                    return;
+                }
+                const bufVal = bufInput.value.trim() === '' ? null : parseFloat(bufInput.value);
+                if (bufVal !== null && !(bufVal >= 0)) {
+                    alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Buffer Stock harus angka >= 0 (atau kosongkan).'));
+                    return;
+                }
+                saveBtn.disabled = true;
+                try {
+                    await InvApi.saveStockPolicy({ item_id: ctx.item_id, warehouse_id: ctx.warehouse_id, minimum_stock: minVal, buffer_stock: bufVal });
+                } catch (err) {
+                    UI.handleApiError(err);
+                    alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal menyimpan.'));
+                    saveBtn.disabled = false;
+                    return;
+                }
+                // Refresh THIS warehouse's own ctx.minimum_stock and
+                // re-render the whole drawer so the Stok Minimal figure
+                // and status badge above update immediately.
+                ctx.minimum_stock = minVal;
+                renderPage(ctx, page);
+            });
+            cancelBtn.addEventListener('click', () => renderPage(ctx, page));
+            host.appendChild(UI.el('div', { class: 'grid-2', style: 'max-width:420px; gap:8px; align-items:end;' }, [
+                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Stok Minimal (gudang ini)'), minInput]),
+                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Buffer Stock (opsional)'), bufInput]),
+            ]));
+            host.appendChild(UI.el('div', { style: 'display:flex; gap:8px; margin-top:6px;' }, [saveBtn, cancelBtn]));
+            host.appendChild(alertBox);
+            toggleBtn.disabled = false;
+        });
+
+        return host;
     }
 
     function movementTable(rows, ctx, isHistorical) {
@@ -152,28 +232,45 @@ const StockCard = (() => {
                     ['Satuan', ctx.unit],
                     ['Total Stok (semua gudang aktif)', UI.formatNumber(result.total.qty_base)],
                 ])));
+                // PHASE V2.9 — each row's minimum_stock/report_status now
+                // comes straight from the backend (InventoryService::
+                // currentStockAllWarehouses(), resolved via
+                // StockPolicyService PER warehouse) — never a single
+                // company-wide minimum reused across every row, which
+                // would let one warehouse's healthy stock visually mask
+                // another warehouse's real shortage.
                 const trs = rows.map((r) => {
                     const wh = Master.warehouseById(r.warehouse_id);
+                    const whName = (wh && wh.name) || `#${r.warehouse_id}`;
                     const tr = UI.el('tr', { class: 'stock-card-row-clickable' }, [
-                        UI.el('td', {}, (wh && wh.name) || `#${r.warehouse_id}`),
+                        UI.el('td', {}, whName),
                         UI.el('td', {}, UI.formatNumber(r.qty_base)),
+                        UI.el('td', {}, UI.formatNumber(r.minimum_stock)),
+                        UI.el('td', {}, statusBadge(r.report_status)),
                         UI.el('td', {}, UI.formatMoney(r.value)),
                     ]);
                     tr.addEventListener('click', () => open({
                         item_id: ctx.item_id, sku: ctx.sku, name: ctx.name, category: ctx.category, unit: ctx.unit,
-                        warehouse_id: r.warehouse_id, warehouse_name: (wh && wh.name) || `#${r.warehouse_id}`,
-                        minimum_stock: ctx.minimum_stock,
+                        warehouse_id: r.warehouse_id, warehouse_name: whName,
+                        // THIS row's own resolved minimum — NOT ctx.minimum_stock
+                        // (which may be the "Semua Gudang" global fallback the
+                        // calling Laporan Stok row used, a different
+                        // warehouse's own Kartu Stok's value, or stale from a
+                        // previous navigation — never assumed to apply here).
+                        minimum_stock: r.minimum_stock,
                     }));
                     return tr;
                 });
                 trs.push(UI.el('tr', { style: 'font-weight:700; border-top:2px solid var(--border);' }, [
                     UI.el('td', {}, 'TOTAL'),
                     UI.el('td', {}, UI.formatNumber(result.total.qty_base)),
+                    UI.el('td', {}, '-'),
+                    UI.el('td', {}, '-'),
                     UI.el('td', {}, UI.formatMoney(result.total.value)),
                 ]));
                 body.appendChild(UI.el('div', { class: 'table-wrapper' }, [
                     UI.el('table', {}, [
-                        UI.el('thead', {}, [UI.el('tr', {}, ['Gudang', 'Stok Tersedia', 'Nilai Stok'].map((h) => UI.el('th', {}, h)))]),
+                        UI.el('thead', {}, [UI.el('tr', {}, ['Gudang', 'Stok Tersedia', 'Stok Minimal', 'Status', 'Nilai Stok'].map((h) => UI.el('th', {}, h)))]),
                         UI.el('tbody', {}, trs),
                     ]),
                 ]));
