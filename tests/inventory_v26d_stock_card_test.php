@@ -220,6 +220,34 @@ check('breakdown shows 125 for whA', ($breakdownByWh[$whA]['qty_base'] ?? null) 
 check('breakdown shows 55 for whB', ($breakdownByWh[$whB]['qty_base'] ?? null) === 55.0);
 
 // ============================================================
+// V2.6 FINAL PRE-DEPLOY CHECK — a PENDING_CUTOVER warehouse (Karang
+// Tengah today) must be excluded from the all-warehouse breakdown at
+// the BACKEND, structurally — never relying only on the frontend's own
+// is_active filter, and never relying merely on the empirical fact that
+// such a warehouse has never been transacted. Simulated here by an
+// inactive warehouse that (unrealistically, but as a defensive worst
+// case) DOES have a stray batch row — currentStockAllWarehouses() must
+// still never surface it.
+// ============================================================
+echo "\n== D2: inactive/PENDING_CUTOVER warehouse never leaks into the all-warehouse breakdown ==\n";
+
+$pdo->prepare('INSERT INTO warehouses (code, name, is_active) VALUES (:c, :n, 0)')->execute(['c' => uid('V26D-KT'), 'n' => 'V26D Karang Tengah (PENDING_CUTOVER)']);
+$whKT = (int) $pdo->lastInsertId();
+// A stray batch — simulating an accidental/erroneous write, not a real
+// transaction (Karang Tengah is never transacted through in normal use).
+$pdo->prepare(
+    'INSERT INTO inventory_batches (item_id, warehouse_id, qty_base, original_qty_base, unit_cost_base, received_date, created_at)
+     VALUES (:item, :wh, 999, 999, 1000, :recv, :now)'
+)->execute(['item' => $itemMulti, 'wh' => $whKT, 'recv' => '2026-07-01 00:00:00', 'now' => date('Y-m-d H:i:s')]);
+
+$breakdownAfterStray = InventoryService::currentStockAllWarehouses($pdo, $itemMulti);
+$strayByWh = [];
+foreach ($breakdownAfterStray['by_warehouse'] as $r) { $strayByWh[(int) $r['warehouse_id']] = $r; }
+check('inactive (PENDING_CUTOVER) warehouse never appears in by_warehouse, even with a stray batch row', !isset($strayByWh[$whKT]), json_encode(array_keys($strayByWh)));
+check('by_warehouse contains exactly the 2 active warehouses (whA, whB), never a 3rd', count($breakdownAfterStray['by_warehouse']) === 2, json_encode(array_keys($strayByWh)));
+check('total qty_base still 180 — the stray inactive-warehouse batch (999) is never folded in', $breakdownAfterStray['total']['qty_base'] === 180.0, (string) $breakdownAfterStray['total']['qty_base']);
+
+// ============================================================
 // E — COUNTERS: full filtered dataset, follows filters, never page-limited
 // ============================================================
 echo "\n== E: Aman/Warning/Habis counters ==\n";
@@ -394,6 +422,24 @@ try {
     check('STOCK-A GET /reports/stock/status-counts?warehouse_id=whB is rejected with 403', $stockACounts['status'] === 403, (string) $stockACounts['status']);
     $stockACard = httpCall('GET', "{$base}/reports/stock/card?item_id={$itemLedger}&warehouse_id={$whB}", null, $stockAJar);
     check('STOCK-A GET /reports/stock/card?warehouse_id=whB (Kartu Stok for a DIFFERENT warehouse) is rejected with 403', $stockACard['status'] === 403, (string) $stockACard['status']);
+
+    echo "\n== D2 (HTTP): all-warehouse breakdown endpoint never leaks the inactive warehouse ==\n";
+    $breakdownHttp = httpCall('GET', "{$base}/inventory/current/{$skuMulti}", null, $superJar);
+    check('SUPERADMIN GET /inventory/current/{sku} (the actual endpoint the "Semua Gudang" breakdown calls) returns 200', $breakdownHttp['status'] === 200, (string) $breakdownHttp['status']);
+    $byWhHttp = $breakdownHttp['body']['data']['by_warehouse'] ?? [];
+    $byWhHttpIds = array_column($byWhHttp, 'warehouse_id');
+    check('response includes SCM-equivalent warehouse (whA)', in_array($whA, $byWhHttpIds, true), json_encode($byWhHttpIds));
+    check('response includes CIBADAK-equivalent warehouse (whB)', in_array($whB, $byWhHttpIds, true), json_encode($byWhHttpIds));
+    check('response NEVER includes the inactive/PENDING_CUTOVER warehouse (whKT), even though it holds a stray batch row', !in_array($whKT, $byWhHttpIds, true), json_encode($byWhHttpIds));
+    check('response contains exactly 2 warehouse rows, never a 3rd', count($byWhHttp) === 2, json_encode($byWhHttpIds));
+
+    // STOCK cannot use this endpoint to reach another warehouse either —
+    // without warehouse_id, a STOCK user is forced to their OWN scope
+    // (never the all-warehouse breakdown, never the inactive warehouse).
+    $stockBreakdownHttp = httpCall('GET', "{$base}/inventory/current/{$skuMulti}", null, $stockAJar);
+    check('STOCK-A GET /inventory/current/{sku} (no warehouse_id) is forced to their own warehouse, never the all-warehouse breakdown', ($stockBreakdownHttp['body']['data']['qty_base'] ?? null) == 125, json_encode($stockBreakdownHttp['body']['data'] ?? null));
+    $stockBreakdownKt = httpCall('GET', "{$base}/inventory/current/{$skuMulti}?warehouse_id={$whKT}", null, $stockAJar);
+    check('STOCK-A explicitly requesting the inactive warehouse_id is rejected with 403 (never silently served)', $stockBreakdownKt['status'] === 403, (string) $stockBreakdownKt['status']);
 
     echo "\n== F (HTTP): Kartu Stok pagination + Trace link ==\n";
     $cardP1 = httpCall('GET', "{$base}/reports/stock/card?item_id={$itemLedger}&warehouse_id={$whA}&per_page=3&page=1", null, $superJar);
