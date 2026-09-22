@@ -63,6 +63,7 @@ require_once __DIR__ . '/../services/AdjustmentReportService.php';
 require_once __DIR__ . '/../services/ExpiryReportService.php';
 require_once __DIR__ . '/../services/SlowMovementReportService.php';
 require_once __DIR__ . '/../services/ExcelWriterService.php';
+require_once __DIR__ . '/../services/PurchaseCostingService.php';
 
 use App\Services\AuthService;
 use App\Services\Database;
@@ -118,6 +119,8 @@ use App\Services\StockOpnameReportService;
 use App\Services\AdjustmentReportService;
 use App\Services\ExpiryReportService;
 use App\Services\SlowMovementReportService;
+use App\Services\PurchaseCostingService;
+use App\Services\UnitConversionService;
 
 $config = require __DIR__ . '/../config/config.php';
 
@@ -436,6 +439,145 @@ function inv_require_reconciliation_range(string $start, string $end): void
     if ($days > 366) {
         inv_error(422, 'VALIDATION_ERROR', 'Rentang Rekonsiliasi maksimal 366 hari. Pilih periode yang lebih pendek.', ['max_days' => 366, 'requested_days' => $days]);
     }
+}
+
+/**
+ * PHASE V2.7 — resolves the unit conversion factor exactly like
+ * FifoService::postIn() will (same UnitConversionService lookup, same
+ * transaction_date), then builds PurchaseCostingService's cost preview
+ * for the CURRENT single-line-per-transaction Stock IN flow (see that
+ * service's own architecture note — $lines always has exactly one
+ * element here). Returns the full preview plus the equivalent
+ * unit_price_input that FifoService::postIn() must be called with so its
+ * own, completely unmodified unit_cost_base/subtotal formulas land
+ * exactly on final_unit_cost_base/final_inventory_cost.
+ */
+function inv_purchase_costing_preview(PDO $pdo, array $input): array
+{
+    $itemId = (int) ($input['item_id'] ?? 0);
+    $unitId = (int) ($input['input_unit_id'] ?? 0);
+    $qty = (float) ($input['input_qty'] ?? 0);
+    $grossPrice = (float) ($input['unit_price_input'] ?? 0);
+    $txDate = (string) ($input['transaction_date'] ?? '');
+
+    $conversion = UnitConversionService::getActiveConversion($pdo, $itemId, $unitId, $txDate);
+    if ($conversion === null) {
+        throw new UnitConversionNotApprovedException($itemId, $unitId);
+    }
+    $factor = (float) $conversion['conversion_to_base'];
+    $baseQty = round($qty * $factor, 6);
+
+    $preview = PurchaseCostingService::buildCostPreview(
+        [
+            'invoice_discount_type' => $input['invoice_discount_type'] ?? 'NONE',
+            'invoice_discount_value' => (float) ($input['invoice_discount_value'] ?? 0),
+            'ppn_treatment' => $input['ppn_treatment'] ?? 'NONE',
+            'ppn_rate' => (float) ($input['ppn_rate'] ?? 0),
+            'ppn_creditable_pct' => (float) ($input['ppn_creditable_pct'] ?? 0),
+            'freight_treatment' => $input['freight_treatment'] ?? 'NONE',
+            'freight_amount' => (float) ($input['freight_amount'] ?? 0),
+        ],
+        [[
+            'qty' => $qty, 'gross_unit_price' => $grossPrice, 'base_qty' => $baseQty,
+            'line_discount_type' => $input['line_discount_type'] ?? 'NONE',
+            'line_discount_value' => (float) ($input['line_discount_value'] ?? 0),
+        ]]
+    );
+
+    $line = $preview['lines'][0];
+    $equivalentUnitPriceInput = $qty > 0 ? round($line['final_inventory_cost'] / $qty, 4) : 0.0;
+
+    return ['preview' => $preview, 'equivalent_unit_price_input' => $equivalentUnitPriceInput];
+}
+
+/**
+ * Persists purchase_invoice_headers + purchase_line_costs for a
+ * just-posted transaction — and cross-checks the precomputed preview
+ * against what FifoService ACTUALLY posted (never silently trusts the
+ * preview). A mismatch throws and, since this always runs inside the same
+ * Database::transaction() as the FifoService::postIn() call, rolls back
+ * the whole thing including the FIFO batch just created — nothing is
+ * ever left half-posted.
+ */
+function inv_persist_purchase_costing(PDO $pdo, array $posted, int $createdBy, array $costing): void
+{
+    $header = $costing['preview']['header'];
+    $line = $costing['preview']['lines'][0];
+
+    $actualInventoryCost = round((float) $posted['unit_cost_base'] * (float) $posted['base_qty'], 4);
+    if (abs($actualInventoryCost - $line['final_inventory_cost']) >= 0.0001) {
+        throw new ValidationException(["Cost reconciliation failed: FIFO posted {$actualInventoryCost} but purchase costing computed {$line['final_inventory_cost']} — nothing was committed"]);
+    }
+
+    $pdo->prepare(
+        'INSERT INTO purchase_invoice_headers
+            (transaction_id, gross_purchase, line_discount_total, invoice_discount_type, invoice_discount_value,
+             invoice_discount_amount, net_purchase_before_tax, ppn_treatment, ppn_rate, ppn_creditable_pct, ppn_amount,
+             ppn_creditable_amount, ppn_non_creditable_amount, freight_treatment, freight_amount, invoice_total,
+             inventory_cost_total, created_by)
+         VALUES (:tx, :gross, :ldt, :idt, :idv, :ida, :npbt, :ppnt, :ppnr, :ppncp, :ppna, :ppnca, :ppnnca, :ft, :fa, :it, :ict, :cb)'
+    )->execute([
+        'tx' => $posted['transaction_id'], 'gross' => $header['gross_purchase'], 'ldt' => $header['line_discount_total'],
+        'idt' => $header['invoice_discount_type'], 'idv' => $header['invoice_discount_value'], 'ida' => $header['invoice_discount_amount'],
+        'npbt' => $header['net_purchase_before_tax'], 'ppnt' => $header['ppn_treatment'], 'ppnr' => $header['ppn_rate'],
+        'ppncp' => $header['ppn_creditable_pct'], 'ppna' => $header['ppn_amount'], 'ppnca' => $header['ppn_creditable_amount'],
+        'ppnnca' => $header['ppn_non_creditable_amount'], 'ft' => $header['freight_treatment'], 'fa' => $header['freight_amount'],
+        'it' => $header['invoice_total'], 'ict' => $header['inventory_cost_total'], 'cb' => $createdBy,
+    ]);
+
+    $pdo->prepare(
+        'INSERT INTO purchase_line_costs
+            (transaction_line_id, transaction_id, gross_unit_price_input, gross_amount, line_discount_type, line_discount_value,
+             line_discount_amount, net_after_line_discount, invoice_discount_allocated, net_purchase_before_tax, ppn_allocated,
+             ppn_creditable_allocated, ppn_non_creditable_allocated, freight_allocated, final_inventory_cost, final_unit_cost_base)
+         VALUES (:line_id, :tx, :gup, :ga, :ldt, :ldv, :lda, :nald, :ida, :npbt, :ppna, :ppnca, :ppnnca, :fa, :fic, :fucb)'
+    )->execute([
+        'line_id' => $posted['line_id'], 'tx' => $posted['transaction_id'],
+        'gup' => $line['gross_unit_price_input'], 'ga' => $line['gross_amount'],
+        'ldt' => $line['line_discount_type'], 'ldv' => $line['line_discount_value'], 'lda' => $line['line_discount_amount'],
+        'nald' => $line['net_after_line_discount'], 'ida' => $line['invoice_discount_allocated'], 'npbt' => $line['net_purchase_before_tax'],
+        'ppna' => $line['ppn_allocated'], 'ppnca' => $line['ppn_creditable_allocated'], 'ppnnca' => $line['ppn_non_creditable_allocated'],
+        'fa' => $line['freight_allocated'], 'fic' => $line['final_inventory_cost'], 'fucb' => $line['final_unit_cost_base'],
+    ]);
+}
+
+/**
+ * PHASE V2.7.9 — enriches Laporan Pembelian rows (from
+ * TransactionHistoryService::list(), unchanged) with the purchase costing
+ * breakdown where it exists. A LEFT-JOIN-shaped lookup, never a required
+ * one: any row whose transaction was never posted through the costed flow
+ * (OPENING/TRANSFER_IN/historical/pre-V2.7 IN) simply gets
+ * purchase_costing = null — TransactionHistoryService itself is never
+ * modified, this only adds a field to the already-returned rows.
+ */
+function inv_enrich_purchase_costing(PDO $pdo, array $rows): array
+{
+    $lineIds = array_values(array_unique(array_column($rows, 'line_id')));
+    if ($lineIds === []) {
+        return $rows;
+    }
+    $placeholders = implode(',', array_fill(0, count($lineIds), '?'));
+    $stmt = $pdo->prepare("SELECT * FROM purchase_line_costs WHERE transaction_line_id IN ({$placeholders})");
+    $stmt->execute($lineIds);
+    $byLineId = [];
+    foreach ($stmt->fetchAll() as $c) {
+        $byLineId[(int) $c['transaction_line_id']] = $c;
+    }
+    foreach ($rows as &$r) {
+        $c = $byLineId[$r['line_id']] ?? null;
+        $r['purchase_costing'] = $c === null ? null : [
+            'gross_unit_price_input' => round((float) $c['gross_unit_price_input'], 4),
+            'gross_amount' => round((float) $c['gross_amount'], 4),
+            'line_discount_amount' => round((float) $c['line_discount_amount'], 4),
+            'invoice_discount_allocated' => round((float) $c['invoice_discount_allocated'], 4),
+            'net_purchase_before_tax' => round((float) $c['net_purchase_before_tax'], 4),
+            'ppn_allocated' => round((float) $c['ppn_allocated'], 4),
+            'freight_allocated' => round((float) $c['freight_allocated'], 4),
+            'final_inventory_cost' => round((float) $c['final_inventory_cost'], 4),
+        ];
+    }
+    unset($r);
+    return $rows;
 }
 
 $pdo = Database::connection();
@@ -1426,16 +1568,25 @@ $routes = [
             unset($params['is_historical_import']);
         }
         $result = TransactionHistoryService::list($pdo, $params);
+        // PHASE V2.7.9 — additive costing breakdown, null for any row not
+        // posted through the costed purchase flow (see this helper's own
+        // docblock).
+        $result['rows'] = inv_enrich_purchase_costing($pdo, $result['rows']);
 
         if ($isExport) {
             $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
             inv_export_csv(
                 ['laporan-pembelian', $whLabel, (string) ($query['date_from'] ?? 'all'), (string) ($query['date_to'] ?? 'all')],
-                ['Tanggal', 'Gudang', 'Supplier', 'Referensi', 'SKU', 'Barang', 'Qty Input', 'Satuan Input', 'Base Qty', 'Harga Satuan', 'Nilai Pembelian', 'Dibuat Oleh', 'Transaction ID', 'Keterangan'],
+                ['Tanggal', 'Gudang', 'Supplier', 'Referensi', 'SKU', 'Barang', 'Qty Input', 'Satuan Input', 'Base Qty',
+                    'Gross', 'Diskon Baris', 'Diskon Invoice', 'Net Purchase', 'PPN', 'Freight',
+                    'Harga Satuan (Final)', 'Nilai Pembelian (FIFO Cost)', 'Dibuat Oleh', 'Transaction ID', 'Keterangan'],
                 $result['rows'],
                 static fn (array $r) => [
                     $r['transaction_date'], $r['warehouse']['name'], $r['supplier']['name'] ?? '', $r['reference_no'],
                     $r['item']['sku'], $r['item']['name'], $r['input_qty'], $r['input_unit']['code'], $r['base_qty'],
+                    $r['purchase_costing']['gross_amount'] ?? '', $r['purchase_costing']['line_discount_amount'] ?? '',
+                    $r['purchase_costing']['invoice_discount_allocated'] ?? '', $r['purchase_costing']['net_purchase_before_tax'] ?? '',
+                    $r['purchase_costing']['ppn_allocated'] ?? '', $r['purchase_costing']['freight_allocated'] ?? '',
                     $r['unit_cost_base'], $r['subtotal'], $r['created_by']['username'], $r['transaction_id'],
                     $r['is_historical'] ? 'HISTORICAL / REPORTING ONLY' : '',
                 ]
@@ -1928,13 +2079,54 @@ $routes = [
         );
     },
 
+    // PHASE V2.7 — read-only Cost Preview, called by the Transaksi Masuk
+    // wizard before POST. Never posts anything; reuses the exact same
+    // inv_purchase_costing_preview() helper the real POST below uses, so
+    // the preview the user reviews is guaranteed identical to what gets
+    // persisted (same code path, not a second implementation).
+    'GET /transactions/in/cost-preview' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'TRANSACTION_IN_CREATE');
+        foreach (['item_id', 'input_unit_id', 'input_qty', 'unit_price_input', 'transaction_date'] as $f) {
+            if (!isset($query[$f]) || $query[$f] === '') {
+                inv_error(422, 'VALIDATION_ERROR', "{$f} is required for cost preview");
+            }
+        }
+        $costing = inv_purchase_costing_preview($pdo, $query);
+        inv_ok($costing['preview'], 'OK');
+    },
+
     'POST /transactions/in' => function () use ($pdo, $input) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'TRANSACTION_IN_CREATE');
         if (isset($input['warehouse_id'])) { inv_require_warehouse_scope($user, (int) $input['warehouse_id']); }
         $input['created_by'] = $user['id'];
         $input['username'] = $user['username'];
-        $result = Database::transaction(fn (PDO $tx) => FifoService::postIn($tx, $input));
+
+        // PHASE V2.7 — every genuine Transaksi Masuk (transaction_type
+        // defaults to 'IN' inside FifoService::postIn() itself; no other
+        // caller of this route ever sends a different type) is now
+        // costed. The new discount/PPN/freight fields are all optional
+        // and default to NONE/0, which makes the cost preview's output
+        // mathematically identical to the raw gross price — a caller
+        // that sends none of them (every pre-V2.7 client) gets a
+        // byte-identical unit_price_input/unit_cost_base to before this
+        // phase. FifoService::postIn() itself is never modified — only
+        // what gets passed into it changes.
+        $txType = $input['transaction_type'] ?? 'IN';
+        $costing = null;
+        if ($txType === 'IN') {
+            $costing = inv_purchase_costing_preview($pdo, $input);
+            $input['unit_price_input'] = $costing['equivalent_unit_price_input'];
+        }
+
+        $result = Database::transaction(function (PDO $tx) use ($input, $costing) {
+            $posted = FifoService::postIn($tx, $input);
+            if ($costing !== null && empty($posted['idempotent_replay'])) {
+                inv_persist_purchase_costing($tx, $posted, $input['created_by'], $costing);
+            }
+            return $posted;
+        });
         inv_ok($result, 'Transaction posted');
     },
     'POST /transactions/out' => function () use ($pdo, $input) {

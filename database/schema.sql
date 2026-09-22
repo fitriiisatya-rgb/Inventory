@@ -381,6 +381,83 @@ CREATE TABLE fifo_allocations (
 COMMENT='The auditable FIFO cost trail: which batches (and at what cost) were consumed by which outbound line.';
 
 -- ============================================================================
+-- 4A. PURCHASE COSTING (PHASE V2.7 — database/migrations/2026_09_22_v2_7_purchase_costing.sql)
+--
+-- Optional 1:1 companions to inventory_transactions/inventory_transaction_lines,
+-- present only for a Stock IN posted through the costed purchase flow.
+-- Every other transaction (OPENING, TRANSFER_IN, historical IN, pre-V2.7 IN)
+-- has no matching row — read paths LEFT JOIN and treat NULL as "no costing
+-- data", never as zero/blocking. FifoService's cost formula is untouched:
+-- the final landed unit cost is computed by PurchaseCostingService BEFORE
+-- FifoService::postIn() is called.
+-- ============================================================================
+
+CREATE TABLE purchase_invoice_headers (
+    id                          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    transaction_id               BIGINT UNSIGNED NOT NULL UNIQUE,
+    gross_purchase                DECIMAL(20,4) NOT NULL,
+    line_discount_total           DECIMAL(20,4) NOT NULL DEFAULT 0,
+    invoice_discount_type         ENUM('PERCENT','AMOUNT','NONE') NOT NULL DEFAULT 'NONE',
+    invoice_discount_value        DECIMAL(20,4) NOT NULL DEFAULT 0,
+    invoice_discount_amount       DECIMAL(20,4) NOT NULL DEFAULT 0,
+    net_purchase_before_tax       DECIMAL(20,4) NOT NULL,
+    -- CREDITABLE: 0 enters inventory cost. NON_CREDITABLE: full ppn_amount
+    -- enters inventory cost. PARTIALLY_CREDITABLE: ppn_creditable_pct
+    -- (0-100) splits ppn_amount into ppn_creditable_amount/
+    -- ppn_non_creditable_amount. Never hard-coded — see PurchaseCostingService.
+    ppn_treatment                  ENUM('CREDITABLE','NON_CREDITABLE','PARTIALLY_CREDITABLE','NONE') NOT NULL DEFAULT 'NONE',
+    ppn_rate                       DECIMAL(8,4) NOT NULL DEFAULT 0,
+    ppn_creditable_pct             DECIMAL(6,3) NOT NULL DEFAULT 0,
+    ppn_amount                     DECIMAL(20,4) NOT NULL DEFAULT 0,
+    ppn_creditable_amount          DECIMAL(20,4) NOT NULL DEFAULT 0,
+    ppn_non_creditable_amount      DECIMAL(20,4) NOT NULL DEFAULT 0,
+    -- CAPITALIZE: freight_amount is allocated into inventory line cost.
+    -- EXPENSE: freight_amount is recorded (still part of invoice_total)
+    -- but never enters inventory cost.
+    freight_treatment               ENUM('CAPITALIZE','EXPENSE','NONE') NOT NULL DEFAULT 'NONE',
+    freight_amount                  DECIMAL(20,4) NOT NULL DEFAULT 0,
+    -- Supplier Invoice / Payable = net_purchase_before_tax + ppn_amount
+    -- (full, both creditable and non-creditable) + freight_amount (full,
+    -- regardless of capitalize/expense treatment).
+    invoice_total                   DECIMAL(20,4) NOT NULL,
+    -- Inventory / FIFO Cost = net_purchase_before_tax +
+    -- ppn_non_creditable_amount + (freight_amount if CAPITALIZE else 0).
+    -- Must equal SUM(purchase_line_costs.final_inventory_cost) for this
+    -- transaction — enforced before POST, never silently corrected.
+    inventory_cost_total            DECIMAL(20,4) NOT NULL,
+    created_by                      INT UNSIGNED NOT NULL,
+    created_at                      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_pih_tx FOREIGN KEY (transaction_id) REFERENCES inventory_transactions(id),
+    CONSTRAINT fk_pih_user FOREIGN KEY (created_by) REFERENCES users(id)
+) ENGINE=InnoDB
+COMMENT='PHASE V2.7 — one row per Stock IN posted through the costed purchase flow. Never present for OPENING/TRANSFER_IN/historical/pre-V2.7 IN rows.';
+
+CREATE TABLE purchase_line_costs (
+    id                            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    transaction_line_id            BIGINT UNSIGNED NOT NULL UNIQUE,
+    transaction_id                 BIGINT UNSIGNED NOT NULL,
+    gross_unit_price_input          DECIMAL(20,4) NOT NULL,
+    gross_amount                    DECIMAL(20,4) NOT NULL,
+    line_discount_type              ENUM('PERCENT','AMOUNT','NONE') NOT NULL DEFAULT 'NONE',
+    line_discount_value             DECIMAL(20,4) NOT NULL DEFAULT 0,
+    line_discount_amount            DECIMAL(20,4) NOT NULL DEFAULT 0,
+    net_after_line_discount         DECIMAL(20,4) NOT NULL,
+    invoice_discount_allocated      DECIMAL(20,4) NOT NULL DEFAULT 0,
+    net_purchase_before_tax         DECIMAL(20,4) NOT NULL,
+    ppn_allocated                    DECIMAL(20,4) NOT NULL DEFAULT 0,
+    ppn_creditable_allocated         DECIMAL(20,4) NOT NULL DEFAULT 0,
+    ppn_non_creditable_allocated     DECIMAL(20,4) NOT NULL DEFAULT 0,
+    freight_allocated                DECIMAL(20,4) NOT NULL DEFAULT 0,
+    final_inventory_cost             DECIMAL(20,4) NOT NULL,
+    final_unit_cost_base             DECIMAL(20,4) NOT NULL,
+    created_at                       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_plc_line FOREIGN KEY (transaction_line_id) REFERENCES inventory_transaction_lines(id),
+    CONSTRAINT fk_plc_tx FOREIGN KEY (transaction_id) REFERENCES inventory_transactions(id),
+    INDEX idx_plc_tx (transaction_id)
+) ENGINE=InnoDB
+COMMENT='PHASE V2.7 — one row per Stock IN LINE posted through the costed purchase flow.';
+
+-- ============================================================================
 -- 5. OPENING STOCK (authoritative baseline — see Section 14)
 -- ============================================================================
 
@@ -950,7 +1027,12 @@ INSERT INTO system_settings (setting_key, setting_value, description) VALUES
     ('price_anomaly_high_multiplier', '5',    'Reject/flag when new unit cost > reference price x this multiplier'),
     ('price_anomaly_low_multiplier',  '0.2',  'Reject/flag when new unit cost < reference price x this multiplier'),
     ('allow_negative_stock_default',  '0',    'Global default; per-transaction override still requires permission + reason'),
-    ('idempotency_window_hours',      '72',   'How long a transaction_uuid is checked for replay before archival');
+    ('idempotency_window_hours',      '72',   'How long a transaction_uuid is checked for replay before archival'),
+    -- PHASE V2.7: default only, pre-fills the Cost Preview UI. Never
+    -- authoritative after posting — every costed Stock IN snapshots its
+    -- own ppn_rate/ppn_amount in purchase_invoice_headers; changing this
+    -- setting never recalculates a historical transaction's cost.
+    ('default_ppn_rate',              '11',   'Default PPN rate (%) pre-filled on a new costed Stock IN — each transaction still snapshots its own rate');
 
 -- No rows are seeded into: warehouses, suppliers, divisions, items,
 -- item_unit_conversions, item_price_history, inventory_batches,

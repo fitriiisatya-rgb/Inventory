@@ -45,8 +45,18 @@ const ReportPurchase = (() => {
                 { key: 'item', label: 'Barang', render: (r) => r.item.name },
                 { key: 'input_qty', label: 'Qty Input', render: (r) => `${UI.formatNumber(r.input_qty)} ${r.input_unit.code}` },
                 { key: 'base_qty', label: 'Base Qty', render: (r) => UI.formatNumber(r.base_qty) },
-                { key: 'unit_cost_base', label: 'Harga Satuan', render: (r) => UI.formatMoney(r.unit_cost_base) },
-                { key: 'subtotal', label: 'Nilai Pembelian', render: (r) => UI.formatMoney(r.subtotal) },
+                // PHASE V2.7 — only ever populated for a purchase posted
+                // through the costed Stock IN flow; every older/other
+                // transaction (OPENING/TRANSFER_IN/historical) shows '-',
+                // never a fabricated 0.
+                { key: 'gross', label: 'Gross', render: (r) => (r.purchase_costing ? UI.formatMoney(r.purchase_costing.gross_amount) : '-') },
+                { key: 'line_discount', label: 'Diskon Baris', render: (r) => (r.purchase_costing ? UI.formatMoney(r.purchase_costing.line_discount_amount) : '-') },
+                { key: 'invoice_discount', label: 'Diskon Invoice', render: (r) => (r.purchase_costing ? UI.formatMoney(r.purchase_costing.invoice_discount_allocated) : '-') },
+                { key: 'net_purchase', label: 'Net Purchase', render: (r) => (r.purchase_costing ? UI.formatMoney(r.purchase_costing.net_purchase_before_tax) : '-') },
+                { key: 'ppn', label: 'PPN', render: (r) => (r.purchase_costing ? UI.formatMoney(r.purchase_costing.ppn_allocated) : '-') },
+                { key: 'freight', label: 'Freight', render: (r) => (r.purchase_costing ? UI.formatMoney(r.purchase_costing.freight_allocated) : '-') },
+                { key: 'unit_cost_base', label: 'Harga Satuan (Final)', render: (r) => UI.formatMoney(r.unit_cost_base) },
+                { key: 'subtotal', label: 'Nilai Pembelian (FIFO Cost)', render: (r) => UI.formatMoney(r.subtotal) },
                 { key: 'created_by', label: 'Dibuat Oleh', render: (r) => r.created_by.username },
             ],
             fetchPage: async (state) => InvApi.purchaseReport(clean(state)),

@@ -38,6 +38,19 @@ const Transactions = (() => {
             allowNegative: false, negativeReason: '',
             requestUuid: null,
             lastResult: null,
+            // PHASE V2.7 — Purchase Costing (Stock IN only). All optional;
+            // '' -> NONE/0 gets sent, which is mathematically a no-op (the
+            // Cost Preview equals the raw gross price exactly). Default
+            // PPN rate mirrors the seeded system_settings.default_ppn_rate
+            // (11%) — there is no settings-read API today (that table is
+            // not otherwise wired to anything in the app), so this is a
+            // client-side default only; every transaction still snapshots
+            // whatever rate the operator actually submits.
+            lineDiscountType: 'NONE', lineDiscountValue: '',
+            invoiceDiscountType: 'NONE', invoiceDiscountValue: '',
+            ppnTreatment: 'NONE', ppnRate: '11', ppnCreditablePct: '',
+            freightTreatment: 'NONE', freightAmount: '',
+            costPreview: null,
         };
     }
     const state = { in: freshState(), out: freshState() };
@@ -179,8 +192,9 @@ const Transactions = (() => {
                 <div class="form-group"><label>Barang</label><select id="in-item"><option value="">- pilih barang -</option>${itemOptions}</select></div>
                 <div class="form-group"><label>Satuan</label><select id="in-unit"></select></div>
                 <div class="form-group"><label>Jumlah</label><input type="number" id="in-qty" min="0" step="any" value="${s.qty}"></div>
-                <div class="form-group"><label>Harga Satuan (Rp)</label><input type="number" id="in-price" min="0" step="any" value="${s.price}"></div>
+                <div class="form-group"><label>Harga Satuan / Gross (Rp)</label><input type="number" id="in-price" min="0" step="any" value="${s.price}"></div>
             ` }),
+            purchaseCostingFields(s),
         ]);
         setTimeout(() => {
             const itemSel = document.getElementById('in-item');
@@ -202,6 +216,7 @@ const Transactions = (() => {
             unitSel.addEventListener('change', () => { s.unitId = unitSel.value; });
             document.getElementById('in-qty').addEventListener('input', (e) => { s.qty = e.target.value; });
             document.getElementById('in-price').addEventListener('input', (e) => { s.price = e.target.value; });
+            bindPurchaseCostingFields(s);
             if (itemSel.value) loadUnits();
         }, 0);
         wrap.appendChild(navButtons('in', {
@@ -217,6 +232,116 @@ const Transactions = (() => {
         return wrap;
     }
 
+    // ============================================================
+    // PHASE V2.7 — Purchase Costing input fields (Stock IN only).
+    // Collapsed by default ("opsional") since most Stock IN entries never
+    // need them — every field left at NONE/0 makes the Cost Preview
+    // mathematically identical to the raw gross price (see
+    // PurchaseCostingService::buildCostPreview()).
+    // ============================================================
+    function purchaseCostingFields(s) {
+        return UI.el('details', { class: 'card', style: 'margin-top:10px; padding:12px;' }, [
+            UI.el('summary', { style: 'cursor:pointer; font-weight:600;' }, '💰 Purchase Costing (opsional): Diskon, PPN, Freight'),
+            UI.el('div', { class: 'grid-3', style: 'margin-top:12px;', html: `
+                <div class="form-group"><label>Diskon Baris — Tipe</label>
+                    <select id="in-linedisc-type">
+                        <option value="NONE" ${s.lineDiscountType === 'NONE' ? 'selected' : ''}>Tidak Ada</option>
+                        <option value="PERCENT" ${s.lineDiscountType === 'PERCENT' ? 'selected' : ''}>Persen (%)</option>
+                        <option value="AMOUNT" ${s.lineDiscountType === 'AMOUNT' ? 'selected' : ''}>Nominal (Rp)</option>
+                    </select>
+                </div>
+                <div class="form-group"><label>Diskon Baris — Nilai</label><input type="number" id="in-linedisc-value" min="0" step="any" value="${s.lineDiscountValue}"></div>
+                <div class="form-group"></div>
+                <div class="form-group"><label>Diskon Invoice — Tipe</label>
+                    <select id="in-invdisc-type">
+                        <option value="NONE" ${s.invoiceDiscountType === 'NONE' ? 'selected' : ''}>Tidak Ada</option>
+                        <option value="PERCENT" ${s.invoiceDiscountType === 'PERCENT' ? 'selected' : ''}>Persen (%)</option>
+                        <option value="AMOUNT" ${s.invoiceDiscountType === 'AMOUNT' ? 'selected' : ''}>Nominal (Rp)</option>
+                    </select>
+                </div>
+                <div class="form-group"><label>Diskon Invoice — Nilai</label><input type="number" id="in-invdisc-value" min="0" step="any" value="${s.invoiceDiscountValue}"></div>
+                <div class="form-group"></div>
+                <div class="form-group"><label>PPN — Perlakuan</label>
+                    <select id="in-ppn-treatment">
+                        <option value="NONE" ${s.ppnTreatment === 'NONE' ? 'selected' : ''}>Tidak Ada PPN</option>
+                        <option value="CREDITABLE" ${s.ppnTreatment === 'CREDITABLE' ? 'selected' : ''}>Creditable / Recoverable</option>
+                        <option value="NON_CREDITABLE" ${s.ppnTreatment === 'NON_CREDITABLE' ? 'selected' : ''}>Non-Creditable</option>
+                        <option value="PARTIALLY_CREDITABLE" ${s.ppnTreatment === 'PARTIALLY_CREDITABLE' ? 'selected' : ''}>Partially Creditable</option>
+                    </select>
+                </div>
+                <div class="form-group"><label>PPN — Rate (%)</label><input type="number" id="in-ppn-rate" min="0" step="any" value="${s.ppnRate}"></div>
+                <div class="form-group" id="in-ppn-pct-group" style="display:${s.ppnTreatment === 'PARTIALLY_CREDITABLE' ? '' : 'none'};"><label>PPN — % Creditable</label><input type="number" id="in-ppn-pct" min="0" max="100" step="any" value="${s.ppnCreditablePct}"></div>
+                <div class="form-group"><label>Freight — Perlakuan</label>
+                    <select id="in-freight-treatment">
+                        <option value="NONE" ${s.freightTreatment === 'NONE' ? 'selected' : ''}>Tidak Ada</option>
+                        <option value="CAPITALIZE" ${s.freightTreatment === 'CAPITALIZE' ? 'selected' : ''}>Capitalize (masuk HPP)</option>
+                        <option value="EXPENSE" ${s.freightTreatment === 'EXPENSE' ? 'selected' : ''}>Expense (tidak masuk HPP)</option>
+                    </select>
+                </div>
+                <div class="form-group"><label>Freight — Nominal (Rp)</label><input type="number" id="in-freight-amount" min="0" step="any" value="${s.freightAmount}"></div>
+            ` }),
+        ]);
+    }
+
+    function bindPurchaseCostingFields(s) {
+        const bind = (id, key, isNumber) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', (e) => { s[key] = e.target.value; });
+        };
+        bind('in-linedisc-type', 'lineDiscountType');
+        bind('in-linedisc-value', 'lineDiscountValue');
+        bind('in-invdisc-type', 'invoiceDiscountType');
+        bind('in-invdisc-value', 'invoiceDiscountValue');
+        bind('in-ppn-rate', 'ppnRate');
+        bind('in-ppn-pct', 'ppnCreditablePct');
+        bind('in-freight-treatment', 'freightTreatment');
+        bind('in-freight-amount', 'freightAmount');
+        const ppnTreatmentSel = document.getElementById('in-ppn-treatment');
+        if (ppnTreatmentSel) {
+            ppnTreatmentSel.addEventListener('change', (e) => {
+                s.ppnTreatment = e.target.value;
+                const pctGroup = document.getElementById('in-ppn-pct-group');
+                if (pctGroup) pctGroup.style.display = e.target.value === 'PARTIALLY_CREDITABLE' ? '' : 'none';
+            });
+        }
+    }
+
+    function costingParams(s) {
+        return {
+            item_id: s.itemId, input_unit_id: s.unitId, input_qty: s.qty, unit_price_input: s.price,
+            transaction_date: s.date,
+            line_discount_type: s.lineDiscountType, line_discount_value: s.lineDiscountValue || 0,
+            invoice_discount_type: s.invoiceDiscountType, invoice_discount_value: s.invoiceDiscountValue || 0,
+            ppn_treatment: s.ppnTreatment, ppn_rate: s.ppnRate || 0, ppn_creditable_pct: s.ppnCreditablePct || 0,
+            freight_treatment: s.freightTreatment, freight_amount: s.freightAmount || 0,
+        };
+    }
+
+    function costPreviewPanel(preview) {
+        if (!preview) return UI.el('div', {});
+        const h = preview.header;
+        const row = (label, value, bold) => UI.el('div', { style: `display:flex; justify-content:space-between; padding:3px 0;${bold ? ' font-weight:700; border-top:1px solid var(--border); margin-top:4px; padding-top:6px;' : ''}` }, [
+            UI.el('span', {}, label), UI.el('span', {}, UI.formatMoney(value)),
+        ]);
+        return UI.el('div', { class: 'card', style: 'margin-top:12px; padding:12px; background:var(--bg2);' }, [
+            UI.el('div', { style: 'font-weight:700; margin-bottom:8px;' }, '💰 Cost Preview'),
+            row('Gross Purchase', h.gross_purchase),
+            row('Diskon Baris', -h.line_discount_total),
+            row('Diskon Invoice', -h.invoice_discount_amount),
+            row('Net Purchase Before Tax', h.net_purchase_before_tax, true),
+            row('PPN', h.ppn_amount),
+            row('Freight', h.freight_amount),
+            row('Supplier Invoice / Payable', h.invoice_total, true),
+            UI.el('div', { style: 'height:10px;' }),
+            row('Net Purchase', h.net_purchase_before_tax),
+            row('PPN Non-Creditable', h.ppn_non_creditable_amount),
+            row('Freight Capitalized', h.freight_treatment === 'CAPITALIZE' ? h.freight_amount : 0),
+            row('Inventory / FIFO Cost', h.inventory_cost_total, true),
+            UI.el('div', { style: 'font-size:0.75rem; color:var(--text3); margin-top:8px;' }, `PPN Recoverable: ${UI.formatMoney(h.ppn_creditable_amount)} · PPN Non-Creditable: ${UI.formatMoney(h.ppn_non_creditable_amount)}`),
+        ]);
+    }
+
     // Synchronous return (a loading placeholder) + async population — never
     // returns a Promise to the caller, which just does body.appendChild(...).
     function inStep3Review() {
@@ -228,6 +353,21 @@ const Transactions = (() => {
             const wh = Master.warehouseById(s.warehouseId);
             const supplier = s.supplierId ? Master.supplierById(s.supplierId) : null;
 
+            // PHASE V2.7 — real Cost Preview from the server (the EXACT
+            // same PurchaseCostingService::buildCostPreview() call the
+            // POST will use), never a second client-side cost formula.
+            // Unit-conversion factor/base qty are still a client preview
+            // only (POST remains the sole authority), same convention as
+            // every other stepper review step in this file.
+            let costPreview = null;
+            let previewError = null;
+            try {
+                costPreview = await InvApi.purchaseCostPreview(costingParams(s));
+                s.costPreview = costPreview;
+            } catch (err) {
+                previewError = (err && err.message) || 'Gagal memuat cost preview';
+            }
+
             let factor = 1;
             try {
                 const units = await InvApi.itemUnits(s.itemId);
@@ -235,7 +375,6 @@ const Transactions = (() => {
                 if (unit) factor = Number(unit.conversion_to_base);
             } catch (err) { /* preview-only; POST will still validate authoritatively */ }
             const baseQtyPreview = Number(s.qty) * factor;
-            const valuePreview = Number(s.qty) * Number(s.price);
 
             wrap.innerHTML = '';
             wrap.appendChild(UI.el('div', { id: 'in-review-alert' }));
@@ -248,12 +387,17 @@ const Transactions = (() => {
                 ['Jumlah Input', UI.formatNumber(Number(s.qty))],
                 ['Konversi ke Base (preview)', UI.formatNumber(factor, 6)],
                 ['Qty Base (preview)', UI.formatNumber(baseQtyPreview)],
-                ['Harga Satuan', UI.formatMoney(Number(s.price))],
-                ['Nilai Transaksi', UI.formatMoney(valuePreview)],
+                ['Harga Satuan / Gross', UI.formatMoney(Number(s.price))],
             ]));
-            wrap.appendChild(UI.el('p', { style: 'color:var(--text3); font-size:0.75rem; margin-top:10px;' }, 'Nilai "preview" dihitung di browser untuk membantu peninjauan — nilai final tetap dihitung dan divalidasi oleh server saat disimpan.'));
 
-            const postBtn = UI.el('button', { class: 'btn btn-primary', id: 'in-post-btn' }, 'Simpan Transaksi Masuk');
+            if (previewError) {
+                wrap.appendChild(UI.el('div', { class: 'alert alert-error', style: 'margin-top:10px;' }, `Gagal memuat Cost Preview: ${previewError}`));
+            } else {
+                wrap.appendChild(costPreviewPanel(costPreview));
+            }
+            wrap.appendChild(UI.el('p', { style: 'color:var(--text3); font-size:0.75rem; margin-top:10px;' }, 'Cost Preview dihitung oleh server — nilai final yang sama persis akan digunakan saat POST (bukan perhitungan kedua di browser).'));
+
+            const postBtn = UI.el('button', { class: 'btn btn-primary', id: 'in-post-btn', ...(previewError ? { disabled: 'disabled' } : {}) }, 'Simpan Transaksi Masuk');
             postBtn.addEventListener('click', () => submitIn());
             wrap.appendChild(UI.el('div', { style: 'display:flex; gap:10px; margin-top:16px;' }, [
                 (() => { const b = UI.el('button', { class: 'btn btn-secondary' }, '‹ Kembali'); b.addEventListener('click', () => goToStep('in', 2)); return b; })(),
@@ -282,6 +426,13 @@ const Transactions = (() => {
                 input_unit_id: Number(s.unitId), input_qty: Number(s.qty),
                 unit_price_input: Number(s.price), transaction_date: s.date,
                 reference_no: s.reference || null, supplier_id: s.supplierId || null,
+                // PHASE V2.7 — optional; all default to NONE/0 server-side
+                // if omitted, so a plain Stock IN (every field left blank)
+                // behaves byte-identically to before this phase.
+                line_discount_type: s.lineDiscountType, line_discount_value: Number(s.lineDiscountValue || 0),
+                invoice_discount_type: s.invoiceDiscountType, invoice_discount_value: Number(s.invoiceDiscountValue || 0),
+                ppn_treatment: s.ppnTreatment, ppn_rate: Number(s.ppnRate || 0), ppn_creditable_pct: Number(s.ppnCreditablePct || 0),
+                freight_treatment: s.freightTreatment, freight_amount: Number(s.freightAmount || 0),
                 ...extra,
             };
             const result = await InvApi.postTransactionIn(payload);

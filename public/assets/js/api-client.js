@@ -243,6 +243,8 @@ const InvApi = (() => {
 
         // ---- transactions ----
         postTransactionIn: (payload) => request('POST', '/transactions/in', payload),
+        // ---- PHASE V2.7: purchase costing (Cost Preview before POST) ----
+        purchaseCostPreview: (params) => request('GET', `/transactions/in/cost-preview${qs(params)}`),
         postTransactionOut: (payload) => request('POST', '/transactions/out', payload),
         voidTransaction: (transactionId, payload) => request('POST', `/transactions/${transactionId}/void`, payload),
 
