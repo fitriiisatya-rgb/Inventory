@@ -301,7 +301,13 @@ postIn($pdo, $itemA11, $scmId, 5, 1000, $adminUserId);
 $breakdownA11 = InventoryService::currentStockAllWarehouses($pdo, $itemA11);
 $whIdsA11 = array_map('intval', array_column($breakdownA11['by_warehouse'], 'warehouse_id'));
 check('A11 Karang Tengah (inactive) never appears despite holding a stray batch', !in_array($ktId, $whIdsA11, true), json_encode($whIdsA11));
-check('A11 exactly 1 row (SCM only)', count($whIdsA11) === 1, (string) count($whIdsA11));
+// GAP 1 hardening (post-gate): the breakdown now includes every ACTIVE
+// warehouse even with zero stock for this item (see
+// tests/inventory_final_hardening_test.php Section A) — CIBADAK
+// legitimately appears here too, never omitted just because this SKU
+// was never posted there. Exactly the 2 active warehouses (SCM,
+// CIBADAK), never the inactive Karang Tengah 3rd.
+check('A11 exactly 2 rows (SCM + CIBADAK, both active; CIBADAK included even with zero stock for this item)', count($whIdsA11) === 2, json_encode($whIdsA11));
 
 // ============================================================
 // Section A summary before starting the HTTP server for Section B.

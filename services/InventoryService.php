@@ -44,23 +44,30 @@ final class InventoryService
     /**
      * Same figure, summed across every warehouse (dashboard-level "total
      * stock of this SKU"; also the source for Laporan Stok's "Semua
-     * Gudang" per-warehouse breakdown drawer). Joined to `warehouses` and
-     * filtered to is_active=1 so a PENDING_CUTOVER warehouse (Karang
-     * Tengah today) can never appear here — not merely relying on the
-     * fact that it has never been transacted (and so has no batch rows
-     * today), which would be a frontend-only guarantee. Same `is_active`
-     * convention every other live/reporting warehouse list in this
-     * codebase already uses (GET /warehouses for STOCK,
+     * Gudang" per-warehouse breakdown drawer). Starts from `warehouses`
+     * (filtered to is_active=1, so a PENDING_CUTOVER warehouse — Karang
+     * Tengah today — can never appear here) and LEFT JOINs this item's
+     * batch aggregate, so EVERY active warehouse is returned even when it
+     * has never held this item (qty_base=0, value=0) — required for V2.9
+     * per-warehouse minimum monitoring: a warehouse that has never
+     * stocked an item is a real HABIS, not something the breakdown may
+     * silently omit. This never creates an inventory_batches row; a
+     * warehouse with no batch simply aggregates to 0 via COALESCE. Same
+     * `is_active` convention every other live/reporting warehouse list in
+     * this codebase already uses (GET /warehouses for STOCK,
      * InventoryReconciliationReportService::resolveScopes()).
      */
     public static function currentStockAllWarehouses(PDO $pdo, int $itemId): array
     {
         $stmt = $pdo->prepare(
-            'SELECT b.warehouse_id, COALESCE(SUM(b.qty_base), 0) AS qty, COALESCE(SUM(b.qty_base * b.unit_cost_base), 0) AS value
-             FROM inventory_batches b
-             JOIN warehouses w ON w.id = b.warehouse_id AND w.is_active = 1
-             WHERE b.item_id = :item_id
-             GROUP BY b.warehouse_id'
+            'SELECT w.id AS warehouse_id, COALESCE(agg.qty, 0) AS qty, COALESCE(agg.value, 0) AS value
+             FROM warehouses w
+             LEFT JOIN (
+                 SELECT warehouse_id, SUM(qty_base) AS qty, SUM(qty_base * unit_cost_base) AS value
+                 FROM inventory_batches WHERE item_id = :item_id GROUP BY warehouse_id
+             ) agg ON agg.warehouse_id = w.id
+             WHERE w.is_active = 1
+             ORDER BY w.id'
         );
         $stmt->execute(['item_id' => $itemId]);
         $rows = $stmt->fetchAll();

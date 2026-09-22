@@ -52,7 +52,7 @@ final class ImportTemplateService
     // (services/ImportLiveTransactionService.php: validateRow()/postRow()).
     private const LIVE_TRANSACTION_HEADERS = [
         'transaction_date', 'transaction_type', 'warehouse_code', 'sku', 'input_qty', 'input_unit',
-        'unit_price_input', 'supplier_code', 'division_code', 'reference_no', 'notes',
+        'unit_price_input', 'supplier_code', 'division_code', 'bakery_destination_code', 'reference_no', 'notes',
         'line_discount_type', 'line_discount_value', 'invoice_discount_type', 'invoice_discount_value',
         'ppn_treatment', 'ppn_rate', 'ppn_creditable_pct', 'freight_treatment', 'freight_amount',
     ];
@@ -124,6 +124,7 @@ final class ImportTemplateService
                     'unit_price_input: WAJIB untuk baris IN (harga beli per satuan input, sebelum diskon/PPN/freight). Diabaikan untuk baris OUT.',
                     'supplier_code: opsional, hanya untuk IN (jika tidak ditemukan, baris tetap VALID/WARNING, hanya dikosongkan).',
                     'division_code: opsional, hanya untuk OUT (jika tidak ditemukan, baris tetap VALID/WARNING, hanya dikosongkan).',
+                    'bakery_destination_code: opsional, hanya untuk OUT. Jika diisi, HARUS berupa kode bakery tujuan yang AKTIF — jika tidak ditemukan/tidak aktif, baris DITOLAK (ERROR, bukan sekadar dikosongkan). Kosongkan jika OUT ini tidak menuju bakery tertentu. Diabaikan untuk baris IN.',
                     'reference_no, notes: opsional.',
                     'line_discount_type/line_discount_value, invoice_discount_type/invoice_discount_value: opsional, hanya untuk IN (PERCENT/AMOUNT/NONE — default NONE/0, sama seperti Purchase Costing manual).',
                     'ppn_treatment: opsional, hanya untuk IN (CREDITABLE/NON_CREDITABLE/PARTIALLY_CREDITABLE/NONE — default NONE).',

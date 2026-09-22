@@ -61,9 +61,19 @@ use PDO;
  * generated fresh by ImportTemplateService — never hand-maintained):
  * transaction_date, transaction_type, warehouse_code, sku, input_qty,
  * input_unit, unit_price_input, supplier_code, division_code,
- * reference_no, notes, line_discount_type, line_discount_value,
- * invoice_discount_type, invoice_discount_value, ppn_treatment, ppn_rate,
- * ppn_creditable_pct, freight_treatment, freight_amount
+ * bakery_destination_code, reference_no, notes, line_discount_type,
+ * line_discount_value, invoice_discount_type, invoice_discount_value,
+ * ppn_treatment, ppn_rate, ppn_creditable_pct, freight_treatment,
+ * freight_amount
+ *
+ * bakery_destination_code (V2.9 hardening) mirrors exactly what manual
+ * Transaksi Keluar already supports: optional, OUT-only (the DB-level
+ * chk_tx_bakery_destination_out_only constraint forbids it for IN/
+ * TRANSFER_OUT/PRODUCTION_IN — never set for an IN row here), resolved
+ * to the SAME bakery_destinations.id manual posting resolves to, passed
+ * into the SAME FifoService::postOut() call. Unlike supplier_code/
+ * division_code (soft WARNING, silently blanked if unresolved), an
+ * unresolved bakery_destination_code is a hard ERROR — see validateRow().
  */
 final class ImportLiveTransactionService
 {
@@ -184,6 +194,21 @@ final class ImportLiveTransactionService
                 $div->execute(['code' => $divisionCode]);
                 if ($div->fetchColumn() === false) {
                     $messages[] = "unknown division_code: {$divisionCode} — row will be posted without a division link";
+                }
+            }
+            // bakery_destination_code only applies to OUT (same
+            // chk_tx_bakery_destination_out_only constraint the manual
+            // wizard is bound by). Unlike supplier_code/division_code
+            // above (soft WARNING, silently left blank), an unresolved
+            // bakery destination is a hard ERROR — a distribution row
+            // that names a bakery must actually reach that bakery, never
+            // silently post with the destination dropped.
+            $bakeryCode = trim((string) ($row['bakery_destination_code'] ?? ''));
+            if ($bakeryCode !== '') {
+                $bd = $pdo->prepare('SELECT id FROM bakery_destinations WHERE code = :code AND is_active = 1');
+                $bd->execute(['code' => $bakeryCode]);
+                if ($bd->fetchColumn() === false) {
+                    return ['ERROR', ["unknown or inactive bakery_destination_code: {$bakeryCode}"]];
                 }
             }
         }
@@ -354,7 +379,25 @@ final class ImportLiveTransactionService
             $divStmt->execute(['code' => trim((string) $data['division_code'])]);
             $divisionId = $divStmt->fetchColumn() ?: null;
         }
-        $rowInput = $common + ['division_id' => $divisionId];
+        // bakery_destination_code -> bakery_destination_id, resolved and
+        // re-checked is_active=1 here too (defense-in-depth, same pattern
+        // as warehouse_code above) — commit fails loudly if the
+        // destination was deactivated between stage() and commit()
+        // rather than silently dropping it. Passed straight into the
+        // SAME FifoService::postOut() call manual Transaksi Keluar uses —
+        // never a parallel write path — so History/Trace/Distribusi per
+        // Bakery see it exactly like any manually-posted OUT.
+        $bakeryDestinationId = null;
+        if (!empty($data['bakery_destination_code'])) {
+            $bdStmt = $pdo->prepare('SELECT id FROM bakery_destinations WHERE code = :code AND is_active = 1');
+            $bdStmt->execute(['code' => trim((string) $data['bakery_destination_code'])]);
+            $bakeryDestinationId = $bdStmt->fetchColumn();
+            if ($bakeryDestinationId === false) {
+                throw new ValidationException(["row {$rowNo}: bakery_destination_code " . $data['bakery_destination_code'] . ' is unknown or no longer active']);
+            }
+            $bakeryDestinationId = (int) $bakeryDestinationId;
+        }
+        $rowInput = $common + ['division_id' => $divisionId, 'bakery_destination_id' => $bakeryDestinationId];
         $posted = FifoService::postOut($pdo, $rowInput);
         return (int) $posted['transaction_id'];
     }
