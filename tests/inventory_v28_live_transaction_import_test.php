@@ -229,6 +229,89 @@ $stockA6 = InventoryService::currentStock($pdo, $itemA6, $whId);
 check('A6 final stock = 20 IN - 15 OUT = 5', approx($stockA6['qty_base'], 5), (string) $stockA6['qty_base']);
 
 // ============================================================
+// A6b — SAME date/time tie-break: mandatory secondary sort key is the
+// source Excel row_number, ASC — original file row order must be
+// preserved exactly, never reordered by transaction_type or any other
+// heuristic. Regression added after the V2.8 gate report per an explicit
+// follow-up request. Both target rows sit at literal file rows 10/11
+// (9 harmless filler rows precede them) so the tie-break is proven at a
+// realistic mid-file position, not just rows 1 vs 2.
+// ============================================================
+echo "\n== A6b: same date/time tie-break preserves original file row order (row_no ASC) ==\n";
+
+function fillerRows(string $whCode, string $fillSku, int $count): string
+{
+    $lines = '';
+    for ($i = 1; $i <= $count; $i++) {
+        $lines .= "2026-07-01,IN,{$whCode},{$fillSku},1,KG,1000,,,REF-FILL-{$i},filler\n";
+    }
+    return $lines;
+}
+
+// A6b-1 — forward order: row 10 = IN +100, row 11 = OUT -50 (same
+// date/time). Expected: IN posts first (nothing to reorder — it's
+// already first in the file AND chronologically tied), OUT consumes
+// that stock, final qty = +50.
+[$itemFillFwd, $skuFillFwd] = makeItem($pdo, $kgUnitId, 'V28-A6B-FILL-FWD');
+[$itemTieFwd, $skuTieFwd] = makeItem($pdo, $kgUnitId, 'V28-A6B-TIE-FWD');
+$csvA6bFwd = tmpCsv(
+    "transaction_date,transaction_type,warehouse_code,sku,input_qty,input_unit,unit_price_input,supplier_code,division_code,reference_no,notes\n"
+    . fillerRows($whCode, $skuFillFwd, 9) // rows 1-9
+    . "2026-09-01 08:00:00,IN,{$whCode},{$skuTieFwd},100,KG,1000,,,REF-A6B-FWD-IN,\n"   // row 10
+    . "2026-09-01 08:00:00,OUT,{$whCode},{$skuTieFwd},50,KG,,,,REF-A6B-FWD-OUT,\n"      // row 11
+);
+$batchA6bFwd = ImportLiveTransactionService::stage($pdo, $csvA6bFwd, 'a6b-fwd.csv', $adminUserId);
+check('A6b-1 all 11 rows staged VALID (0 ERROR)', 0 === (int) $pdo->query("SELECT error_rows FROM import_batches WHERE id={$batchA6bFwd}")->fetchColumn());
+$resultA6bFwd = null;
+$failedA6bFwd = false;
+try {
+    $resultA6bFwd = Database::transaction(fn (PDO $tx) => ImportLiveTransactionService::commit($tx, $batchA6bFwd, $adminUserId));
+} catch (\Throwable $e) {
+    $failedA6bFwd = true;
+}
+check('A6b-1 forward order (row10=IN, row11=OUT, same date/time): commit succeeds, IN posts before OUT as filed', !$failedA6bFwd && $resultA6bFwd && $resultA6bFwd['imported'] === 11, $failedA6bFwd ? 'threw unexpectedly' : json_encode($resultA6bFwd));
+$stockA6bFwd = InventoryService::currentStock($pdo, $itemTieFwd, $whId);
+check('A6b-1 final stock = 100 IN - 50 OUT = 50 (IN really did post before OUT)', approx($stockA6bFwd['qty_base'], 50), (string) $stockA6bFwd['qty_base']);
+$txOutA6bFwd = $pdo->query("SELECT id FROM inventory_transactions WHERE reference_no='REF-A6B-FWD-OUT'")->fetch(PDO::FETCH_ASSOC);
+check('A6b-1 the OUT transaction was actually created (not skipped/rejected)', $txOutA6bFwd !== false);
+
+// A6b-2 — INVERSE file order: row 10 = OUT -50, row 11 = IN +100 (same
+// date/time, brand-new item with zero prior stock). The importer must
+// NOT silently reorder this into "IN before OUT" just because that
+// would make it succeed — it must preserve row 10's OUT running FIRST
+// (as filed), which is invalid at that chronological point (no stock
+// yet) and must be rejected by ordinary FIFO rules. The whole batch
+// (including the 9 filler rows and the later IN) rolls back atomically.
+[$itemFillInv, $skuFillInv] = makeItem($pdo, $kgUnitId, 'V28-A6B-FILL-INV');
+[$itemTieInv, $skuTieInv] = makeItem($pdo, $kgUnitId, 'V28-A6B-TIE-INV');
+$csvA6bInv = tmpCsv(
+    "transaction_date,transaction_type,warehouse_code,sku,input_qty,input_unit,unit_price_input,supplier_code,division_code,reference_no,notes\n"
+    . fillerRows($whCode, $skuFillInv, 9) // rows 1-9
+    . "2026-09-01 08:00:00,OUT,{$whCode},{$skuTieInv},50,KG,,,,REF-A6B-INV-OUT,\n"      // row 10
+    . "2026-09-01 08:00:00,IN,{$whCode},{$skuTieInv},100,KG,1000,,,REF-A6B-INV-IN,\n"   // row 11
+);
+$batchA6bInv = ImportLiveTransactionService::stage($pdo, $csvA6bInv, 'a6b-inv.csv', $adminUserId);
+check('A6b-2 all 11 rows staged VALID (stock sufficiency is never checked at staging — see the service docblock)', 0 === (int) $pdo->query("SELECT error_rows FROM import_batches WHERE id={$batchA6bInv}")->fetchColumn());
+$rejectedA6bInv = false;
+$exceptionClassA6bInv = null;
+try {
+    Database::transaction(fn (PDO $tx) => ImportLiveTransactionService::commit($tx, $batchA6bInv, $adminUserId));
+} catch (\Throwable $e) {
+    $rejectedA6bInv = true;
+    $exceptionClassA6bInv = get_class($e);
+}
+check('A6b-2 inverse order (row10=OUT, row11=IN, same date/time): commit is REJECTED, never silently reordered to make it succeed', $rejectedA6bInv);
+check('A6b-2 rejection is a genuine FIFO InsufficientStockException (row 10\'s OUT really did run before row 11\'s IN, exactly as filed)', $exceptionClassA6bInv === \App\Services\InsufficientStockException::class, (string) $exceptionClassA6bInv);
+$txCountA6bInv = (int) $pdo->query("SELECT COUNT(*) FROM inventory_transactions WHERE reference_no IN ('REF-A6B-INV-OUT','REF-A6B-INV-IN')")->fetchColumn();
+check('A6b-2 NEITHER the OUT nor the IN was committed — whole batch rolled back atomically', $txCountA6bInv === 0, "count={$txCountA6bInv}");
+$fillerCountA6bInv = (int) $pdo->query("SELECT COUNT(*) FROM inventory_transactions WHERE reference_no LIKE 'REF-FILL-%' AND warehouse_id = {$whId}")->fetchColumn();
+// The forward test (A6b-1) already committed 9 filler rows under the same
+// REF-FILL-N reference pattern — so this checks total filler rows across
+// BOTH batches equals exactly 9 (A6b-1's), never 18, proving A6b-2's 9
+// filler rows were rolled back too.
+check('A6b-2 filler rows from the FAILED batch were also rolled back (only A6b-1\'s 9 filler rows exist, not 18)', $fillerCountA6bInv === 9, "count={$fillerCountA6bInv}");
+
+// ============================================================
 // A7 — insufficient-stock OUT rolls back the WHOLE batch (atomicity).
 // ============================================================
 echo "\n== A7: insufficient stock OUT rolls back the whole batch ==\n";
