@@ -194,17 +194,19 @@ check('DO print NEVER contains the word "HPP"', !str_contains($doPrintHtml, 'HPP
 $doPrintBodyOnly = preg_replace('#<style>.*?</style>#s', '', $doPrintHtml);
 check('DO print body (excluding CSS spacing rules like "margin-top") NEVER mentions "margin"', !str_contains(strtolower($doPrintBodyOnly), 'margin'));
 check('DO print NEVER contains a Rupiah price figure (no "Rp " anywhere)', !str_contains($doPrintHtml, 'Rp '));
+check('DO print contains the official AMOR logo asset', str_contains($doPrintHtml, '/assets/images/amor-logo.jpg'));
 
 echo "\n== PRINT: Invoice — required fields present, NO HPP/reference cost/margin ==\n";
 $invPrintHtml = DistributionPrintService::renderInvoice($pdo, $invD);
 check('Invoice print contains "INVOICE"', str_contains($invPrintHtml, '>INVOICE<'), '');
 check('Invoice print contains the item SKU and selling price', str_contains($invPrintHtml, $skuD) && str_contains($invPrintHtml, 'Rp'));
-check('Invoice print contains Grand Total', str_contains($invPrintHtml, 'Grand Total'));
+check('Invoice print contains GRAND TOTAL', str_contains(strtoupper($invPrintHtml), 'GRAND TOTAL'));
 check('Invoice print NEVER contains the word "HPP"', !str_contains($invPrintHtml, 'HPP'));
 $invPrintBodyOnly = preg_replace('#<style>.*?</style>#s', '', $invPrintHtml);
 check('Invoice print body (excluding CSS spacing rules) NEVER mentions "margin"', !str_contains(strtolower($invPrintBodyOnly), 'margin'));
 check('Invoice print NEVER contains "referensi" (the internal reference purchase price label)', !str_contains(strtolower($invPrintHtml), 'referensi'));
 check('Invoice print NEVER contains the raw reference_purchase_price figure (100.0000)', !str_contains($invPrintHtml, '100.0000'));
+check('Invoice print contains the official AMOR logo asset', str_contains($invPrintHtml, '/assets/images/amor-logo.jpg'));
 
 $aSectionTotal = count($results);
 $aSectionPassed = count(array_filter($results));
@@ -282,6 +284,21 @@ try {
     echo "\n== HTTP: DO print route reachable and returns HTML, not JSON ==\n";
     $printResp = httpCall('GET', "{$base}/distribution-orders/{$doD}/print", null, $superJar);
     check('HTTP DO print returns 200 with real HTML content', $printResp['status'] === 200 && str_contains($printResp['raw'], '<!DOCTYPE html>'), substr($printResp['raw'], 0, 100));
+
+    echo "\n== HTTP: CSV export on the new distribution reports, formula-injection protection intact ==\n";
+    $pdo->prepare('INSERT INTO categories (code, name, is_active) VALUES (:c,:n,1)')->execute(['c' => uid('CAT-INJECT'), 'n' => '=2+2']);
+    $categoryInjectId = (int) $pdo->lastInsertId();
+    [$itemInject, $skuInject] = makeItem($pdo, $kgUnitId, 'V211C-CSVINJECT', $categoryInjectId);
+    postOpeningIn($pdo, $itemInject, $kgUnitId, $scmId, 20, 100, $adminUserId);
+    [$doInject, $invInject] = fullFlow($pdo, $itemInject, $kgUnitId, $scmId, $bakeryAId, 2, $adminUserId);
+    DistributionInvoiceService::issue($pdo, $invInject, ['created_by' => $adminUserId]);
+
+    $linesCsvResp = httpCall('GET', "{$base}/reports/distribution/lines?format=csv&date_from=2026-09-23&date_to=2026-09-23", null, $superJar);
+    check('HTTP lines CSV export returns 200 with text/csv content', $linesCsvResp['status'] === 200 && str_contains($linesCsvResp['raw'], $skuInject));
+    check('HTTP lines CSV export never contains a raw unescaped "=2+2" formula cell (starts with a leading single-quote guard)', str_contains($linesCsvResp['raw'], "'=2+2") && !preg_match('/(?<!\')=2\+2/', $linesCsvResp['raw']), $linesCsvResp['raw']);
+
+    $categoryCsvResp = httpCall('GET', "{$base}/reports/distribution/by-category?format=csv&date_from=2026-09-23&date_to=2026-09-23", null, $superJar);
+    check('HTTP by-category CSV export neutralizes the formula-shaped category name the same way', str_contains($categoryCsvResp['raw'], "'=2+2") && !preg_match('/(?<!\')=2\+2/', $categoryCsvResp['raw']), $categoryCsvResp['raw']);
 } finally {
     proc_terminate($process);
     proc_close($process);

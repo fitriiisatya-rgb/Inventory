@@ -2552,22 +2552,71 @@ $routes = [
     'GET /reports/distribution/lines' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'DISTRIBUTION_REPORT_VIEW');
-        inv_ok(DistributionReportService::lineDetail($pdo, $query), 'OK');
+        $result = DistributionReportService::lineDetail($pdo, $query);
+        if (($query['format'] ?? '') === 'csv') {
+            inv_export_csv(
+                ['laporan-distribusi-detail', $query['date_from'] ?? '', $query['date_to'] ?? ''],
+                ['No. DO', 'No. Invoice', 'Tanggal Invoice', 'Bakery', 'SKU', 'Nama Barang', 'Kategori', 'Qty', 'Satuan', 'Harga Jual', 'Revenue', 'Actual HPP', 'Actual Margin', 'Margin %'],
+                $result,
+                static fn (array $r) => [
+                    $r['do_number'], $r['invoice_number'], $r['invoice_date'], $r['bakery_name'],
+                    $r['sku_snapshot'], $r['item_name_snapshot'], $r['category_name'] ?? '-',
+                    $r['qty'], $r['unit_code'], $r['selling_unit_price'], $r['revenue'],
+                    $r['actual_hpp'], $r['actual_margin'], $r['actual_margin_pct'],
+                ]
+            );
+        }
+        inv_ok($result, 'OK');
     },
     'GET /reports/distribution/summary' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'DISTRIBUTION_REPORT_VIEW');
-        inv_ok(DistributionReportService::summary($pdo, $query), 'OK');
+        $result = DistributionReportService::summary($pdo, $query);
+        if (($query['format'] ?? '') === 'csv') {
+            inv_export_csv(
+                ['laporan-distribusi-summary', $query['date_from'] ?? '', $query['date_to'] ?? ''],
+                ['Metrik', 'Nilai'],
+                [
+                    ['Total Revenue', $result['total_revenue']], ['Total HPP', $result['total_hpp']],
+                    ['Total Margin', $result['total_margin']], ['Margin %', $result['margin_pct']],
+                    ['Total DO', $result['total_do']], ['Total Invoice', $result['total_invoice']],
+                    ['Total Bakery Dilayani', $result['total_bakery_served']], ['Jumlah Selisih (Discrepancy)', $result['discrepancy_count']],
+                ],
+                static fn (array $row) => $row
+            );
+        }
+        inv_ok($result, 'OK');
     },
     'GET /reports/distribution/by-category' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'DISTRIBUTION_REPORT_VIEW');
-        inv_ok(DistributionReportService::byCategory($pdo, $query), 'OK');
+        $result = DistributionReportService::byCategory($pdo, $query);
+        if (($query['format'] ?? '') === 'csv') {
+            inv_export_csv(
+                ['laporan-distribusi-per-kategori', $query['date_from'] ?? '', $query['date_to'] ?? ''],
+                ['Kategori', 'Qty Distribusi', 'Revenue', 'HPP', 'Margin', 'Margin %'],
+                $result,
+                static fn (array $r) => [$r['category_name'] ?? '-', $r['qty_distributed'], $r['revenue'], $r['hpp'], $r['margin'], $r['margin_pct']]
+            );
+        }
+        inv_ok($result, 'OK');
     },
     'GET /reports/distribution/by-bakery' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'DISTRIBUTION_REPORT_VIEW');
-        inv_ok(DistributionReportService::byBakery($pdo, $query), 'OK');
+        $result = DistributionReportService::byBakery($pdo, $query);
+        if (($query['format'] ?? '') === 'csv') {
+            inv_export_csv(
+                ['laporan-distribusi-per-bakery', $query['date_from'] ?? '', $query['date_to'] ?? ''],
+                ['Bakery', 'Jml DO', 'Jml Invoice', 'Qty Distribusi', 'Revenue', 'HPP', 'Margin', 'Margin %', 'Jumlah Selisih'],
+                $result,
+                static fn (array $r) => [
+                    $r['bakery_name'], $r['do_count'], $r['invoice_count'], $r['qty_distributed'],
+                    $r['revenue'], $r['hpp'], $r['margin'], $r['margin_pct'], $r['discrepancy_count'],
+                ]
+            );
+        }
+        inv_ok($result, 'OK');
     },
 
     // ---- PHASE V2.11C: print documents (clean A4 HTML, Section 18/19) ----

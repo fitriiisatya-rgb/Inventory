@@ -13,14 +13,15 @@ use PDO;
  * unnecessarily" instruction; the browser's own Print dialog produces the
  * PDF when the user wants one.
  *
- * NO COMPANY LOGO ASSET EXISTS in this repository (public/assets/images/
- * only has fa-mascot.png and login-bg.png) — the owner's instruction is
- * explicit: "Do NOT invent a new logo." The header therefore uses the
- * application's own existing text branding ("Inventory Pro") instead of a
- * fabricated image. Likewise, no company address/contact fields exist
- * anywhere in system_settings or config — only verified, already-stored
- * fields (warehouse name, bakery name/address) are printed; nothing about
- * a company address is invented.
+ * LOGO: the official AMOR logo, provided by the owner, is used exactly as
+ * supplied — public/assets/images/amor-logo.jpg — never redrawn,
+ * regenerated, or resized out of aspect ratio (only CSS max-width/height
+ * with width:auto/height:auto, which scales proportionally). No company
+ * address/contact fields exist anywhere in system_settings or config —
+ * only verified, already-stored fields (warehouse name, bakery name/
+ * address) are printed; nothing about a company address/phone/email/tax
+ * number is invented, and printing is never blocked merely because that
+ * profile doesn't exist.
  *
  * STRICT CONTENT SEPARATION (Part 18/19, safety-critical): the DO
  * document NEVER includes price/HPP/margin/pricing-policy data. The
@@ -95,19 +96,19 @@ final class DistributionPrintService
         $body = self::docHeader('DELIVERY ORDER / SURAT JALAN', [
             ['No. DO', $header['do_number']],
             ['Tanggal', $header['do_date']],
-            ['Dari', "{$header['from_warehouse_name']} ({$header['from_warehouse_code']})"],
+            ['Dari', "Gudang Besar / {$header['from_warehouse_code']} ({$header['from_warehouse_name']})"],
             ['Tujuan Bakery', $header['bakery_name']],
-            ['Alamat Bakery', $header['delivery_address_snapshot'] ?? $header['bakery_address'] ?? '-'],
+            ['Alamat Tujuan', $header['delivery_address_snapshot'] ?? $header['bakery_address'] ?? '-'],
             ['Referensi', $header['reference_no'] ?? '-'],
         ]);
         $body .= '<table class="doc-table"><thead><tr>'
             . '<th>No</th><th>SKU</th><th>Nama Barang</th><th>Kategori</th><th>Qty Kirim</th><th>Satuan</th><th>Qty Terima</th><th>Selisih</th><th>Catatan</th>'
             . '</tr></thead><tbody>' . $rows . '</tbody></table>';
-        $body .= '<div class="doc-notes"><b>Catatan Pengiriman:</b> ' . self::esc($header['delivery_notes'] ?? '-') . '</div>';
+        $body .= '<div class="doc-notes"><b>Catatan:</b> ' . self::esc($header['delivery_notes'] ?? '-') . '</div>';
         $body .= self::signatureBlock([
-            ['Prepared By', $header['created_by_name'] ?? '-'],
-            ['Dispatched By', $header['dispatched_by_name'] ?? '-'],
-            ['Received By Bakery', $header['received_by_name'] ?? '-'],
+            ['Disiapkan Oleh', $header['created_by_name'] ?? '-'],
+            ['Dikirim Oleh', $header['dispatched_by_name'] ?? '-'],
+            ['Diterima Bakery', $header['received_by_name'] ?? '-'],
         ]);
 
         return self::wrapDocument($title, $body);
@@ -166,19 +167,19 @@ final class DistributionPrintService
             ['No. Invoice', $header['invoice_number']],
             ['Tanggal Invoice', $header['invoice_date']],
             ['No. DO', $header['do_number']],
-            ['Dari', "{$header['from_warehouse_name']} ({$header['from_warehouse_code']})"],
+            ['Dari', "Gudang Besar / {$header['from_warehouse_code']} ({$header['from_warehouse_name']})"],
             ['Kepada', $header['bakery_name']],
-            ['Alamat Bakery', $header['bakery_address'] ?? '-'],
+            ['Alamat', $header['bakery_address'] ?? '-'],
         ]);
         $body .= '<table class="doc-table"><thead><tr>'
             . '<th>No</th><th>SKU</th><th>Nama Barang</th><th>Kategori</th><th>Qty</th><th>Satuan</th><th>Harga Jual</th><th>Subtotal</th>'
             . '</tr></thead><tbody>' . $rows . '</tbody></table>';
 
         $summaryRows = [['Subtotal', self::money((float) $header['subtotal'])]];
-        if ((float) $header['discount_amount'] > 0) { $summaryRows[] = ['Diskon', '-' . self::money((float) $header['discount_amount'])]; }
-        if ((float) $header['tax_amount'] > 0) { $summaryRows[] = ['Pajak', self::money((float) $header['tax_amount'])]; }
+        if ((float) $header['discount_amount'] > 0) { $summaryRows[] = ['Discount', '-' . self::money((float) $header['discount_amount'])]; }
+        if ((float) $header['tax_amount'] > 0) { $summaryRows[] = ['PPN', self::money((float) $header['tax_amount'])]; }
         if ((float) $header['shipping_amount'] > 0) { $summaryRows[] = ['Ongkos Kirim', self::money((float) $header['shipping_amount'])]; }
-        $summaryRows[] = ['Grand Total', self::money((float) $header['grand_total'])];
+        $summaryRows[] = ['GRAND TOTAL', self::money((float) $header['grand_total'])];
         $body .= '<table class="doc-summary">';
         foreach ($summaryRows as $i => [$label, $value]) {
             $bold = $i === count($summaryRows) - 1 ? ' class="total"' : '';
@@ -187,8 +188,9 @@ final class DistributionPrintService
         $body .= '</table>';
 
         $body .= self::signatureBlock([
-            ['Created By / Authorized By', $header['issued_by_name'] ?? $header['created_by_name'] ?? '-'],
-            ['Bakery Receiver', '-'],
+            ['Dibuat Oleh', $header['created_by_name'] ?? '-'],
+            ['Disetujui', $header['issued_by_name'] ?? '-'],
+            ['Diterima Bakery', '-'],
         ]);
 
         return self::wrapDocument($title, $body);
@@ -201,7 +203,7 @@ final class DistributionPrintService
         foreach ($infoRows as [$label, $value]) {
             $rows .= '<tr><td class="label">' . self::esc($label) . '</td><td>' . self::esc((string) ($value ?? '-')) . '</td></tr>';
         }
-        return '<div class="doc-brand">Inventory Pro</div>'
+        return '<img src="/assets/images/amor-logo.jpg" alt="AMOR Group" class="doc-logo">'
             . '<h1 class="doc-title">' . self::esc($title) . '</h1>'
             . '<table class="doc-info">' . $rows . '</table>';
     }
@@ -229,7 +231,7 @@ final class DistributionPrintService
     @page { size: A4 portrait; margin: 18mm 16mm; }
     * { box-sizing: border-box; }
     body { font-family: Arial, Helvetica, sans-serif; color: #1a1a1a; background: #fff; margin: 0; font-size: 12px; }
-    .doc-brand { font-weight: 700; font-size: 16px; letter-spacing: 0.04em; margin-bottom: 4px; }
+    .doc-logo { display: block; max-width: 140px; max-height: 70px; width: auto; height: auto; object-fit: contain; margin-bottom: 8px; }
     .doc-title { font-size: 18px; margin: 0 0 14px; letter-spacing: 0.03em; }
     .doc-info { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
     .doc-info td { padding: 2px 0; vertical-align: top; }

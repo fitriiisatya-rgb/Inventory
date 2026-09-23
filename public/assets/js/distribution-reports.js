@@ -97,8 +97,12 @@ const DistributionReports = (() => {
             UI.el('td', {}, UI.formatMoney(l.selling_unit_price)), UI.el('td', {}, UI.formatMoney(l.revenue)),
             UI.el('td', {}, UI.formatMoney(l.actual_hpp)), UI.el('td', {}, UI.formatMoney(l.actual_margin)), UI.el('td', {}, `${UI.formatNumber(l.actual_margin_pct)}%`),
         ]));
+        const exportBtn = UI.el('a', { class: 'btn btn-secondary btn-sm', href: InvApi.distributionReportLinesExportUrl(filters), target: '_blank' }, '⬇️ Export CSV');
         host.appendChild(UI.el('div', { class: 'card' }, [
-            UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, 'Detail per Baris')]),
+            UI.el('div', { class: 'card-header' }, [
+                UI.el('div', { class: 'card-title' }, 'Detail per Baris'),
+                exportBtn,
+            ]),
             UI.el('div', { class: 'table-wrapper' }, [
                 UI.el('table', {}, [
                     UI.el('thead', {}, [UI.el('tr', {}, ['Tanggal DO', 'No. DO', 'No. Invoice', 'Bakery', 'Kategori', 'Produk', 'Qty', 'Harga Jual', 'Revenue', 'HPP Aktual', 'Margin Aktual', 'Margin %'].map((h) => UI.el('th', {}, h)))]),

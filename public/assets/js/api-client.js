@@ -281,6 +281,7 @@ const InvApi = (() => {
         distributionReportSummary: (params = {}) => request('GET', `/reports/distribution/summary${qs(params)}`),
         distributionReportByCategory: (params = {}) => request('GET', `/reports/distribution/by-category${qs(params)}`),
         distributionReportByBakery: (params = {}) => request('GET', `/reports/distribution/by-bakery${qs(params)}`),
+        distributionReportLinesExportUrl: (params = {}) => `/api/reports/distribution/lines${qs(Object.assign({}, params, { format: 'csv' }))}`,
         distributionOrderPrintUrl: (id) => `/api/distribution-orders/${id}/print`,
         distributionInvoicePrintUrl: (id) => `/api/distribution-invoices/${id}/print`,
 
