@@ -225,6 +225,10 @@ const DistributionOrders = (() => {
 
         const reload = () => openDetail(detail.id);
 
+        const printBtn = UI.el('button', { class: 'btn btn-secondary' }, '🖨️ Print DO');
+        printBtn.addEventListener('click', () => window.open(InvApi.distributionOrderPrintUrl(detail.id), '_blank'));
+        wrap.appendChild(printBtn);
+
         if (detail.status === 'DRAFT') {
             actionBtn('Approve', 'DISTRIBUTION_APPROVE', () => runAction(() => InvApi.approveDistributionOrder(detail.id), 'DO disetujui.', reload));
             actionBtn('Batalkan', 'DISTRIBUTION_CREATE', () => runCancel(detail.id, reload), true);

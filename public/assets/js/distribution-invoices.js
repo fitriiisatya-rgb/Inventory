@@ -152,6 +152,10 @@ const DistributionInvoices = (() => {
 
     function buildActionPanel(detail) {
         const wrap = UI.el('div', { style: 'display:flex; gap:10px;' });
+        const printBtn = UI.el('button', { class: 'btn btn-secondary' }, '🖨️ Print Invoice');
+        printBtn.addEventListener('click', () => window.open(InvApi.distributionInvoicePrintUrl(detail.id), '_blank'));
+        wrap.appendChild(printBtn);
+
         if (detail.status === 'DRAFT' && Auth.hasPermission('DISTRIBUTION_CREATE')) {
             const issueBtn = UI.el('button', { class: 'btn btn-primary' }, 'Issue Invoice');
             issueBtn.addEventListener('click', async () => {

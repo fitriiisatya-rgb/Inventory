@@ -73,6 +73,8 @@ require_once __DIR__ . '/../services/NumberingService.php';
 require_once __DIR__ . '/../services/DistributionOrderService.php';
 require_once __DIR__ . '/../services/PricingPolicyService.php';
 require_once __DIR__ . '/../services/DistributionInvoiceService.php';
+require_once __DIR__ . '/../services/DistributionReportService.php';
+require_once __DIR__ . '/../services/DistributionPrintService.php';
 
 use App\Services\AuthService;
 use App\Services\Database;
@@ -138,6 +140,8 @@ use App\Services\ItemPriceService;
 use App\Services\DistributionOrderService;
 use App\Services\PricingPolicyService;
 use App\Services\DistributionInvoiceService;
+use App\Services\DistributionReportService;
+use App\Services\DistributionPrintService;
 
 $config = require __DIR__ . '/../config/config.php';
 
@@ -156,6 +160,14 @@ function inv_ok(mixed $data, string $message = 'OK', int $httpStatus = 200): nev
     http_response_code($httpStatus);
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode(['success' => true, 'data' => $data, 'message' => $message], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+/** PHASE V2.11C — raw print-friendly HTML response (DO/Invoice print), same non-JSON convention as inv_export_csv(). */
+function inv_html(string $html): never
+{
+    header('Content-Type: text/html; charset=utf-8');
+    echo $html;
     exit;
 }
 
@@ -2531,6 +2543,43 @@ $routes = [
         $input['username'] = $user['username'];
         $result = Database::transaction(fn (PDO $tx) => DistributionInvoiceService::overrideLinePrice($tx, (int) $params['id'], (int) $params['lineId'], $input));
         inv_ok($result, 'Invoice line price overridden');
+    },
+
+    // ---- PHASE V2.11C: Revenue/Margin/Category/Bakery reports ----
+    // Revenue/HPP/margin come only from ISSUED invoice lines joined to the
+    // REAL FIFO cost of the dispatch (DistributionReportService) — never
+    // estimated from the reference price or the configured policy margin.
+    'GET /reports/distribution/lines' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_REPORT_VIEW');
+        inv_ok(DistributionReportService::lineDetail($pdo, $query), 'OK');
+    },
+    'GET /reports/distribution/summary' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_REPORT_VIEW');
+        inv_ok(DistributionReportService::summary($pdo, $query), 'OK');
+    },
+    'GET /reports/distribution/by-category' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_REPORT_VIEW');
+        inv_ok(DistributionReportService::byCategory($pdo, $query), 'OK');
+    },
+    'GET /reports/distribution/by-bakery' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_REPORT_VIEW');
+        inv_ok(DistributionReportService::byBakery($pdo, $query), 'OK');
+    },
+
+    // ---- PHASE V2.11C: print documents (clean A4 HTML, Section 18/19) ----
+    'GET /distribution-orders/{id}/print' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_VIEW');
+        inv_html(DistributionPrintService::renderDeliveryOrder($pdo, (int) $params['id']));
+    },
+    'GET /distribution-invoices/{id}/print' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_VIEW');
+        inv_html(DistributionPrintService::renderInvoice($pdo, (int) $params['id']));
     },
 
     // ---- Stock Opname (PHASE C2 Section 2) ----

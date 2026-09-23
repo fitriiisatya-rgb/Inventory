@@ -276,6 +276,14 @@ const InvApi = (() => {
         cancelDistributionInvoice: (id, payload) => request('POST', `/distribution-invoices/${id}/cancel`, payload),
         overrideDistributionInvoiceLinePrice: (invoiceId, lineId, payload) => request('POST', `/distribution-invoices/${invoiceId}/lines/${lineId}/override-price`, payload),
 
+        // ---- PHASE V2.11C: reports + print ----
+        distributionReportLines: (params = {}) => request('GET', `/reports/distribution/lines${qs(params)}`),
+        distributionReportSummary: (params = {}) => request('GET', `/reports/distribution/summary${qs(params)}`),
+        distributionReportByCategory: (params = {}) => request('GET', `/reports/distribution/by-category${qs(params)}`),
+        distributionReportByBakery: (params = {}) => request('GET', `/reports/distribution/by-bakery${qs(params)}`),
+        distributionOrderPrintUrl: (id) => `/api/distribution-orders/${id}/print`,
+        distributionInvoicePrintUrl: (id) => `/api/distribution-invoices/${id}/print`,
+
         // ---- transfers ----
         transferDestinations: () => request('GET', '/transfer-destinations'),
         createTransfer: (payload) => request('POST', '/transfers', payload),

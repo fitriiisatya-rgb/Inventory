@@ -1246,7 +1246,11 @@ INSERT INTO permissions (code, description) VALUES
     -- PHASE V2.11B: pricing policy management + Invoice issue/override.
     -- ADMIN/SUPERADMIN inherit automatically; STOCK/DIVISION/VIEWER never
     -- get this, per the owner's explicit instruction.
-    ('DISTRIBUTION_PRICING_MANAGE', 'Manage SCM -> Bakery selling-price policy (company/category/SKU) and issue/override Invoices');
+    ('DISTRIBUTION_PRICING_MANAGE', 'Manage SCM -> Bakery selling-price policy (company/category/SKU) and issue/override Invoices'),
+    -- PHASE V2.11C: revenue/margin/category/bakery distribution reports.
+    -- ADMIN/SUPERADMIN inherit automatically; STOCK/DIVISION/VIEWER never
+    -- get this, per the owner's explicit instruction.
+    ('DISTRIBUTION_REPORT_VIEW', 'View SCM -> Bakery revenue/margin/category/bakery distribution reports');
 
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r CROSS JOIN permissions p WHERE r.code = 'SUPERADMIN';
