@@ -205,7 +205,36 @@ CREATE TABLE item_price_history (
     CONSTRAINT fk_iph_unit FOREIGN KEY (unit_id) REFERENCES units(id),
     INDEX idx_iph_item_date (item_id, effective_date)
 ) ENGINE=InnoDB
-COMMENT='Reference price series used by the anomaly-detection check (Section 9).';
+COMMENT='Reference price series used by the anomaly-detection check (Section 9). PHASE V2.10 also reads this as the Stock IN auto-fill purchase-price source (see services/ItemPriceService.php) — never repurposed, never confused with selling price or FIFO cost.';
+
+-- PHASE V2.10 — multi-unit barcode mappings (one SKU may have a different
+-- barcode per purchase unit, e.g. PCS vs BOX). Purely additive alongside
+-- the legacy single items.barcode column above, which stays untouched and
+-- keeps its existing consumers (ImportMasterItemService, StockReportService,
+-- master-items.js openEdit(), PUT /items/{id}).
+CREATE TABLE item_barcodes (
+    id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    item_id             INT UNSIGNED NOT NULL,
+    unit_id             INT UNSIGNED NULL,     -- NULL = barcode identifies the item regardless of unit
+    barcode             VARCHAR(64) NOT NULL,
+    is_active           TINYINT(1) NOT NULL DEFAULT 1,
+    -- Same generated-column active-window trick as item_unit_conversions'
+    -- open_marker/uq_iuc_one_open_version: makes "at most one ACTIVE
+    -- mapping per barcode value" a real DB constraint (Part C4).
+    active_marker       TINYINT GENERATED ALWAYS AS (IF(is_active = 1, 1, NULL)) STORED,
+    created_by          INT UNSIGNED NULL,
+    updated_by          INT UNSIGNED NULL,
+    created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_ib_item FOREIGN KEY (item_id) REFERENCES items(id),
+    CONSTRAINT fk_ib_unit FOREIGN KEY (unit_id) REFERENCES units(id),
+    CONSTRAINT fk_ib_created_by FOREIGN KEY (created_by) REFERENCES users(id),
+    CONSTRAINT fk_ib_updated_by FOREIGN KEY (updated_by) REFERENCES users(id),
+    UNIQUE KEY uq_item_barcodes_active (barcode, active_marker),
+    INDEX idx_item_barcodes_item (item_id),
+    INDEX idx_item_barcodes_barcode (barcode)
+) ENGINE=InnoDB
+COMMENT='PHASE V2.10 — multi-unit barcode mappings. Barcode is a selection mechanism only, never an authorization mechanism (Part I).';
 
 -- ============================================================================
 -- 3B. PHASE V2 MASTERS — stock policy and bakery distribution

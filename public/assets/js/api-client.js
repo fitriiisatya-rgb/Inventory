@@ -130,6 +130,11 @@ const InvApi = (() => {
         listDivisions: (params = {}) => request('GET', `/divisions${qs(params)}`),
         itemUnits: (itemId) => request('GET', `/items/${itemId}/units`),
 
+        // ---- PHASE V2.10: multi-unit barcode mappings (Transaction UX Upgrade) ----
+        listItemBarcodes: () => request('GET', '/item-barcodes'),
+        createItemBarcode: (payload) => request('POST', '/item-barcodes', payload),
+        updateItemBarcode: (id, payload) => request('PUT', `/item-barcodes/${id}`, payload),
+
         // ---- PHASE V2: category master ----
         listCategories: (params = {}) => request('GET', `/categories${qs(params)}`),
         createCategory: (payload) => request('POST', '/categories', payload),

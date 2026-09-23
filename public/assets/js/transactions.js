@@ -183,49 +183,93 @@ const Transactions = (() => {
         return wrap;
     }
 
+    // PHASE V2.10 — reference-vs-transaction price hint under the price
+    // field (Part B5). Never shown as an error: a price difference is
+    // informational only, and if there's no configured reference price at
+    // all we show the exact required string rather than a misleading Rp 0.
+    function priceReferenceHintNode(referencePrice, priceSource, currentPrice) {
+        if (priceSource === 'NONE' || referencePrice === null || referencePrice === undefined) {
+            return UI.el('div', { class: 'price-reference-hint' }, 'Harga default belum tersedia.');
+        }
+        const ref = Number(referencePrice);
+        const current = Number(currentPrice || 0);
+        const diff = current - ref;
+        if (Math.abs(diff) < 0.005) {
+            return UI.el('div', { class: 'price-reference-hint' }, `Harga referensi database: ${UI.formatMoney(ref)}`);
+        }
+        const pct = ref !== 0 ? (diff / ref) * 100 : 0;
+        const sign = diff > 0 ? '+' : '';
+        return UI.el('div', { class: 'price-reference-hint price-diff' },
+            `Harga referensi database: ${UI.formatMoney(ref)} / Perubahan harga: ${sign}${UI.formatMoney(diff)} (${sign}${pct.toFixed(2)}%)`);
+    }
+
     function inStep2Barang() {
         const s = state.in;
-        const itemOptions = Master.items().map((i) => `<option value="${i.id}" ${String(i.id) === String(s.itemId) ? 'selected' : ''}>${i.sku} — ${i.name}</option>`).join('');
+        const itemSelectorHost = UI.el('div');
+        const qtyInput = UI.el('input', { type: 'number', id: 'in-qty', min: '0', step: 'any', value: s.qty });
+        const priceInput = UI.el('input', { type: 'number', id: 'in-price', min: '0', step: 'any', value: s.price });
+        const priceHintHost = UI.el('div', { id: 'in-price-hint' });
 
-        const wrap = UI.el('div', {}, [
-            UI.el('div', { class: 'grid-3', html: `
-                <div class="form-group"><label>Barang</label><select id="in-item"><option value="">- pilih barang -</option>${itemOptions}</select></div>
-                <div class="form-group"><label>Satuan</label><select id="in-unit"></select></div>
-                <div class="form-group"><label>Jumlah</label><input type="number" id="in-qty" min="0" step="any" value="${s.qty}"></div>
-                <div class="form-group"><label>Harga Satuan / Gross (Rp)</label><input type="number" id="in-price" min="0" step="any" value="${s.price}"></div>
-            ` }),
-            purchaseCostingFields(s),
+        const grid = UI.el('div', { class: 'grid-3' }, [
+            itemSelectorHost,
+            UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Jumlah'), qtyInput]),
+            UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Harga Satuan / Gross (Rp)'), priceInput, priceHintHost]),
         ]);
-        setTimeout(() => {
-            const itemSel = document.getElementById('in-item');
-            const unitSel = document.getElementById('in-unit');
-            const loadUnits = async () => {
-                if (!itemSel.value) { unitSel.innerHTML = ''; return; }
-                unitSel.innerHTML = '<option>Memuat...</option>';
-                try {
-                    const units = await InvApi.itemUnits(itemSel.value);
-                    unitSel.innerHTML = units.map((u) => `<option value="${u.id}" data-factor="${u.conversion_to_base}">${u.code} (${u.name})</option>`).join('')
-                        || '<option value="">(belum ada satuan terdaftar)</option>';
-                    s.unitId = unitSel.value || null;
-                } catch (err) {
-                    UI.handleApiError(err);
-                    unitSel.innerHTML = '<option value="">Gagal memuat satuan</option>';
+        const wrap = UI.el('div', {}, [grid, purchaseCostingFields(s)]);
+
+        function refreshPriceHint(units, unitId) {
+            const unit = (units || []).find((u) => String(u.id) === String(unitId));
+            priceHintHost.innerHTML = '';
+            if (!unit) return;
+            priceHintHost.appendChild(priceReferenceHintNode(unit.reference_price, unit.price_source, s.price));
+        }
+
+        // PHASE V2.10 — Part A/B/C: ItemSelector owns search/barcode/unit
+        // selection. Every item OR unit change is a full replacement of
+        // item_id/unit_id/price (Part G — no stale value from a previous
+        // item ever survives) and, for Stock IN, re-derives the price from
+        // that unit's own reference price (Part B9 — a price is only ever
+        // shown/used for the unit it was actually resolved for).
+        const selector = ItemSelector.mount(itemSelectorHost, {
+            initialItemId: s.itemId,
+            initialUnitId: s.unitId,
+            onChange: ({ itemId, unitId, units }) => {
+                s.itemId = itemId;
+                s.unitId = unitId;
+                if (!itemId || !unitId) {
+                    s.price = '';
+                    priceInput.value = '';
+                    priceHintHost.innerHTML = '';
+                    return;
                 }
-            };
-            itemSel.addEventListener('change', () => { s.itemId = itemSel.value; loadUnits(); });
-            unitSel.addEventListener('change', () => { s.unitId = unitSel.value; });
-            document.getElementById('in-qty').addEventListener('input', (e) => { s.qty = e.target.value; });
-            document.getElementById('in-price').addEventListener('input', (e) => { s.price = e.target.value; });
-            bindPurchaseCostingFields(s);
-            if (itemSel.value) loadUnits();
-        }, 0);
+                const unit = units.find((u) => String(u.id) === String(unitId));
+                const referencePrice = unit && unit.reference_price !== null && unit.reference_price !== undefined
+                    ? String(unit.reference_price) : '';
+                s.price = referencePrice;
+                priceInput.value = referencePrice;
+                refreshPriceHint(units, unitId);
+            },
+        });
+
+        qtyInput.addEventListener('input', (e) => { s.qty = e.target.value; });
+        priceInput.addEventListener('input', (e) => {
+            s.price = e.target.value;
+            const { units, unitId } = selector.getState();
+            refreshPriceHint(units, unitId);
+        });
+        setTimeout(() => bindPurchaseCostingFields(s), 0);
+
         wrap.appendChild(navButtons('in', {
             backStep: 1,
             onNext: () => {
-                if (!s.itemId || !s.unitId || !(Number(s.qty) > 0) || !(Number(s.price) >= 0)) {
-                    UI.toast('Barang, satuan, jumlah (>0), dan harga wajib diisi dengan benar.', 'error');
+                const sel = selector.getState();
+                if (!sel.valid || !sel.itemId) {
+                    UI.toast(ItemSelector.MESSAGES.PICK_FROM_RESULTS, 'error');
                     return;
                 }
+                if (!s.unitId) { UI.toast('Satuan wajib dipilih.', 'error'); return; }
+                if (!(Number(s.qty) > 0)) { UI.toast('Jumlah harus lebih dari 0.', 'error'); return; }
+                if (!(Number(s.price) >= 0)) { UI.toast('Harga wajib diisi dengan benar.', 'error'); return; }
                 goToStep('in', 3);
             },
         }));
@@ -369,12 +413,21 @@ const Transactions = (() => {
             }
 
             let factor = 1;
+            let unit = null;
             try {
                 const units = await InvApi.itemUnits(s.itemId);
-                const unit = units.find((u) => String(u.id) === String(s.unitId));
+                unit = units.find((u) => String(u.id) === String(s.unitId));
                 if (unit) factor = Number(unit.conversion_to_base);
             } catch (err) { /* preview-only; POST will still validate authoritatively */ }
             const baseQtyPreview = Number(s.qty) * factor;
+
+            // PHASE V2.10 — Part B6: review screen shows both the database
+            // reference price and the actual transaction price side by
+            // side, in this exact order, so a price override is never
+            // silently hidden before POST.
+            const referenceRow = (unit && unit.price_source !== 'NONE' && unit.reference_price !== null && unit.reference_price !== undefined)
+                ? UI.formatMoney(unit.reference_price)
+                : 'Harga default belum tersedia.';
 
             wrap.innerHTML = '';
             wrap.appendChild(UI.el('div', { id: 'in-review-alert' }));
@@ -384,11 +437,16 @@ const Transactions = (() => {
                 ['Referensi', s.reference || '-'],
                 ['Tanggal Transaksi', s.date],
                 ['Barang', item ? `${item.sku} — ${item.name}` : '-'],
-                ['Jumlah Input', UI.formatNumber(Number(s.qty))],
+                ['Satuan', unit ? `${unit.code} (${unit.name})` : '-'],
+                ['Jumlah', UI.formatNumber(Number(s.qty))],
+                ['Harga Referensi Database', referenceRow],
+                ['Harga Transaksi / Gross', UI.formatMoney(Number(s.price))],
                 ['Konversi ke Base (preview)', UI.formatNumber(factor, 6)],
                 ['Qty Base (preview)', UI.formatNumber(baseQtyPreview)],
-                ['Harga Satuan / Gross', UI.formatMoney(Number(s.price))],
             ]));
+            if (unit && unit.price_source !== 'NONE' && unit.reference_price !== null && unit.reference_price !== undefined) {
+                wrap.appendChild(priceReferenceHintNode(unit.reference_price, unit.price_source, s.price));
+            }
 
             if (previewError) {
                 wrap.appendChild(UI.el('div', { class: 'alert alert-error', style: 'margin-top:10px;' }, `Gagal memuat Cost Preview: ${previewError}`));
@@ -487,49 +545,48 @@ const Transactions = (() => {
 
     function outStep2Barang() {
         const s = state.out;
-        const itemOptions = Master.items().map((i) => `<option value="${i.id}" ${String(i.id) === String(s.itemId) ? 'selected' : ''}>${i.sku} — ${i.name}</option>`).join('');
+        const itemSelectorHost = UI.el('div');
+        const qtyInput = UI.el('input', { type: 'number', id: 'out-qty', min: '0', step: 'any', value: s.qty });
 
         const wrap = UI.el('div', {}, [
-            UI.el('div', { class: 'grid-3', html: `
-                <div class="form-group"><label>Barang</label><select id="out-item"><option value="">- pilih barang -</option>${itemOptions}</select></div>
-                <div class="form-group"><label>Satuan</label><select id="out-unit"></select></div>
-                <div class="form-group"><label>Jumlah Diminta</label><input type="number" id="out-qty" min="0" step="any" value="${s.qty}"></div>
-            ` }),
+            UI.el('div', { class: 'grid-3' }, [
+                itemSelectorHost,
+                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Jumlah Diminta'), qtyInput]),
+            ]),
             UI.el('div', { class: 'form-group', html: `
                 <label style="display:flex; align-items:center; gap:8px; text-transform:none;"><input type="checkbox" id="out-allow-negative" ${s.allowNegative ? 'checked' : ''} style="width:auto;"> Izinkan stok negatif</label>
                 <input type="text" id="out-negative-reason" placeholder="Alasan stok negatif (wajib jika dicentang)" value="${s.negativeReason}" style="margin-top:6px;">
             ` }),
         ]);
+
+        // PHASE V2.10 — same reusable ItemSelector as Stock IN (Part D),
+        // without any purchase-price wiring: Stock OUT never gains
+        // Stock-IN-only fields, and stays governed entirely by the
+        // existing FIFO/stock validation on POST.
+        const selector = ItemSelector.mount(itemSelectorHost, {
+            initialItemId: s.itemId,
+            initialUnitId: s.unitId,
+            onChange: ({ itemId, unitId }) => {
+                s.itemId = itemId;
+                s.unitId = unitId;
+            },
+        });
+
+        qtyInput.addEventListener('input', (e) => { s.qty = e.target.value; });
         setTimeout(() => {
-            const itemSel = document.getElementById('out-item');
-            const unitSel = document.getElementById('out-unit');
-            const loadUnits = async () => {
-                if (!itemSel.value) { unitSel.innerHTML = ''; return; }
-                unitSel.innerHTML = '<option>Memuat...</option>';
-                try {
-                    const units = await InvApi.itemUnits(itemSel.value);
-                    unitSel.innerHTML = units.map((u) => `<option value="${u.id}" data-factor="${u.conversion_to_base}">${u.code} (${u.name})</option>`).join('')
-                        || '<option value="">(belum ada satuan terdaftar)</option>';
-                    s.unitId = unitSel.value || null;
-                } catch (err) {
-                    UI.handleApiError(err);
-                    unitSel.innerHTML = '<option value="">Gagal memuat satuan</option>';
-                }
-            };
-            itemSel.addEventListener('change', () => { s.itemId = itemSel.value; loadUnits(); });
-            unitSel.addEventListener('change', () => { s.unitId = unitSel.value; });
-            document.getElementById('out-qty').addEventListener('input', (e) => { s.qty = e.target.value; });
             document.getElementById('out-allow-negative').addEventListener('change', (e) => { s.allowNegative = e.target.checked; });
             document.getElementById('out-negative-reason').addEventListener('input', (e) => { s.negativeReason = e.target.value; });
-            if (itemSel.value) loadUnits();
         }, 0);
         wrap.appendChild(navButtons('out', {
             backStep: 1,
             onNext: () => {
-                if (!s.itemId || !s.unitId || !(Number(s.qty) > 0)) {
-                    UI.toast('Barang, satuan, dan jumlah (>0) wajib diisi dengan benar.', 'error');
+                const sel = selector.getState();
+                if (!sel.valid || !sel.itemId) {
+                    UI.toast(ItemSelector.MESSAGES.PICK_FROM_RESULTS, 'error');
                     return;
                 }
+                if (!s.unitId) { UI.toast('Satuan wajib dipilih.', 'error'); return; }
+                if (!(Number(s.qty) > 0)) { UI.toast('Jumlah harus lebih dari 0.', 'error'); return; }
                 goToStep('out', 3);
             },
         }));

@@ -67,6 +67,8 @@ require_once __DIR__ . '/../services/PurchaseCostingService.php';
 require_once __DIR__ . '/../services/PurchaseCostingGateway.php';
 require_once __DIR__ . '/../services/ImportLiveTransactionService.php';
 require_once __DIR__ . '/../services/ImportStockPolicyService.php';
+require_once __DIR__ . '/../services/ItemBarcodeService.php';
+require_once __DIR__ . '/../services/ItemPriceService.php';
 
 use App\Services\AuthService;
 use App\Services\Database;
@@ -127,6 +129,8 @@ use App\Services\PurchaseCostingGateway;
 use App\Services\UnitConversionService;
 use App\Services\ImportLiveTransactionService;
 use App\Services\ImportStockPolicyService;
+use App\Services\ItemBarcodeService;
+use App\Services\ItemPriceService;
 
 $config = require __DIR__ . '/../config/config.php';
 
@@ -906,16 +910,62 @@ $routes = [
     // Units this item may be transacted in (its base unit plus any configured
     // purchase/middle conversions) — Transaction IN/OUT forms need this to
     // offer only valid units rather than free-typed unit ids.
+    //
+    // PHASE V2.10: each row is extended (never replaced — reference_price/
+    // price_source are additive fields) with the Stock IN auto-fill
+    // reference price for that specific unit (Part B2/B9), reusing this
+    // existing round trip rather than adding a new endpoint. See
+    // ItemPriceService::resolveReferencePrice() for the exact-unit-first /
+    // derived-fallback resolution and its price-source audit rationale.
     'GET /items/{id}/units' => function (array $params) use ($pdo) {
         inv_require_auth();
+        $itemId = (int) $params['id'];
         $stmt = $pdo->prepare(
             'SELECT u.id, u.code, u.name, c.conversion_to_base, c.is_purchase_default
              FROM item_unit_conversions c JOIN units u ON u.id = c.unit_id
              WHERE c.item_id = :item_id AND c.valid_to IS NULL
              ORDER BY c.is_purchase_default DESC, c.conversion_to_base DESC'
         );
-        $stmt->execute(['item_id' => (int) $params['id']]);
-        inv_ok($stmt->fetchAll(), 'OK');
+        $stmt->execute(['item_id' => $itemId]);
+        $units = $stmt->fetchAll();
+
+        foreach ($units as &$unit) {
+            $price = ItemPriceService::resolveReferencePrice($pdo, $itemId, (int) $unit['id']);
+            $unit['reference_price'] = $price['reference_price'];
+            $unit['price_source'] = $price['price_source'];
+        }
+        unset($unit);
+
+        inv_ok($units, 'OK');
+    },
+
+    // ---- PHASE V2.10: multi-unit barcode mappings (Part C) ----
+    'GET /item-barcodes' => function () use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        // All rows (active + inactive) so the client can distinguish
+        // "unknown" from "known but inactive" (Part C8) without a
+        // per-scan round trip. Read-only exposure of mapping metadata —
+        // never a sensitive read, unlike create/edit below.
+        inv_ok(ItemBarcodeService::listAll($pdo), 'OK');
+    },
+
+    'POST /item-barcodes' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_ITEM_MANAGE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => ItemBarcodeService::create($tx, $input));
+        inv_ok($result, 'Barcode mapping created');
+    },
+
+    'PUT /item-barcodes/{id}' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_ITEM_MANAGE');
+        $input['updated_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => ItemBarcodeService::update($tx, (int) $params['id'], $input));
+        inv_ok($result, 'Barcode mapping updated');
     },
 
     // ---- PHASE V2: per-item-per-warehouse stock policy (min/buffer) ----

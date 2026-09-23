@@ -293,9 +293,44 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 .stepper-step.done { background: rgba(16,185,129,0.15); color: var(--green); }
 .stepper-sep { color: var(--text3); font-size: 0.75rem; }
 
+/* ============================================================
+   PHASE V2.10 — ItemSelector (searchable item/barcode component,
+   Stock IN/OUT "Barang" step). Reuses existing tokens/.form-group/
+   .modal conventions — no new color palette. Dropdown is absolutely
+   positioned inside a relatively-positioned input wrapper so it is
+   never clipped by the surrounding .card/.grid-3 (neither has
+   overflow:hidden) and sits above nearby fields via z-index.
+   ============================================================ */
+.item-selector-input-wrap { position: relative; display: flex; align-items: center; gap: 8px; }
+.item-selector-input { flex: 1; }
+.item-selector-scan-btn {
+    flex-shrink: 0; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center;
+    background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    color: var(--text); font-size: 1.1rem; cursor: pointer; padding: 0;
+}
+.item-selector-scan-btn:hover { border-color: var(--accent); }
+.item-selector-dropdown {
+    position: absolute; top: calc(100% + 6px); left: 0; right: 52px; z-index: 60;
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    max-height: 280px; overflow-y: auto; box-shadow: 0 12px 30px rgba(0,0,0,0.4);
+}
+.item-selector-option { display: flex; gap: 10px; align-items: baseline; padding: 9px 12px; cursor: pointer; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+.item-selector-option:last-child { border-bottom: none; }
+.item-selector-option:hover, .item-selector-option.active { background: rgba(59,130,246,0.14); }
+.item-selector-option-sku { font-weight: 700; color: var(--accent); white-space: nowrap; }
+.item-selector-option-name { color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item-selector-empty { padding: 12px; color: var(--text3); font-size: 0.82rem; text-align: center; }
+.item-selector-error { color: var(--red); font-size: 0.78rem; margin-top: 6px; }
+.item-selector-camera-modal { max-width: 420px; }
+.item-selector-camera-video { width: 100%; border-radius: var(--radius-sm); background: #000; max-height: 320px; object-fit: cover; }
+.item-selector-camera-status { color: var(--text3); font-size: 0.82rem; margin-top: 8px; text-align: center; }
+.price-reference-hint { font-size: 0.78rem; color: var(--text3); margin-top: 6px; }
+.price-reference-hint.price-diff { color: var(--orange); }
+
 @media (max-width: 640px) {
     .drawer { width: 100vw; }
     .app-main-v2 { padding: 14px 12px 30px; }
+    .item-selector-dropdown { right: 0; }
 }
 
 /* ============================================================

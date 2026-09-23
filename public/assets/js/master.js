@@ -7,6 +7,11 @@
  *
  * PHASE V2: extended with categories and bakery_destinations — same
  * read-only-cache convention, same loadAll() call.
+ *
+ * PHASE V2.10: extended with itemBarcodes (multi-unit barcode mappings) —
+ * loaded once here (ALL rows, active+inactive, same as every other list in
+ * this cache) so ItemSelector's client-side search/scan resolution never
+ * needs a per-keystroke or per-scan network round trip (Part A4).
  */
 const Master = (() => {
     let items = [];
@@ -15,17 +20,19 @@ const Master = (() => {
     let divisions = [];
     let categories = [];
     let bakeryDestinations = [];
+    let itemBarcodes = [];
 
     async function loadAll() {
-        [items, warehouses, suppliers, divisions, categories, bakeryDestinations] = await Promise.all([
+        [items, warehouses, suppliers, divisions, categories, bakeryDestinations, itemBarcodes] = await Promise.all([
             InvApi.listItems(),
             InvApi.listWarehouses(),
             InvApi.listSuppliers(),
             InvApi.listDivisions(),
             InvApi.listCategories(),
             InvApi.listBakeryDestinations(),
+            InvApi.listItemBarcodes(),
         ]);
-        return { items, warehouses, suppliers, divisions, categories, bakeryDestinations };
+        return { items, warehouses, suppliers, divisions, categories, bakeryDestinations, itemBarcodes };
     }
 
     const findById = (list, id) => list.find((row) => Number(row.id) === Number(id));
@@ -38,11 +45,18 @@ const Master = (() => {
         divisions: () => divisions,
         categories: () => categories,
         bakeryDestinations: () => bakeryDestinations,
+        itemBarcodes: () => itemBarcodes,
         itemById: (id) => findById(items, id),
         warehouseById: (id) => findById(warehouses, id),
         supplierById: (id) => findById(suppliers, id),
         divisionById: (id) => findById(divisions, id),
         categoryById: (id) => findById(categories, id),
         bakeryDestinationById: (id) => findById(bakeryDestinations, id),
+        // Re-fetch just the barcode list (after a create/edit in Master
+        // Barang's barcode manager) without re-loading every other cache.
+        async reloadItemBarcodes() {
+            itemBarcodes = await InvApi.listItemBarcodes();
+            return itemBarcodes;
+        },
     };
 })();

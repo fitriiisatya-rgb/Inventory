@@ -129,6 +129,7 @@ const MasterItems = (() => {
     }
 
     function openDetail(row) {
+        const canManage = Auth.hasPermission('MASTER_ITEM_MANAGE');
         Drawer.open({
             title: `${row.sku} — ${row.name}`,
             render: (body) => {
@@ -150,8 +151,114 @@ const MasterItems = (() => {
                     ['Terakhir Keluar', UI.formatDate(row.last_out)],
                     ['Terakhir Update', UI.formatDate(row.updated_at)],
                 ])));
+                body.appendChild(Drawer.section('📷 Barcode / Satuan', buildBarcodeSection(row, canManage)));
             },
         });
+    }
+
+    // ============================================================
+    // PHASE V2.10 — Part C5: Master Barang barcode maintenance
+    // (add/edit/activate-deactivate, choose-unit, duplicate-validation).
+    // Reads from the already-loaded Master.itemBarcodes() cache (Part A4
+    // convention); every mutation goes through POST/PUT /item-barcodes,
+    // gated on MASTER_ITEM_MANAGE (same permission this whole page's
+    // Edit/Aktifkan/Hapus actions already require), then reloads that one
+    // cache and fully re-renders the drawer — no separate barcode-list
+    // endpoint, no duplicate-validation logic on the frontend (the backend
+    // is the real guard; a duplicate submit here simply surfaces the
+    // server's ValidationException).
+    // ============================================================
+    function buildBarcodeSection(row, canManage) {
+        const wrap = UI.el('div', {});
+        const listHost = UI.el('div', { class: 'table-wrapper', style: 'margin-bottom:12px;' });
+        wrap.appendChild(listHost);
+        renderBarcodeList(listHost, row, canManage);
+
+        if (canManage) {
+            const addBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, '+ Tambah Barcode');
+            addBtn.addEventListener('click', () => openBarcodeForm(row, null));
+            wrap.appendChild(addBtn);
+        }
+        return wrap;
+    }
+
+    function renderBarcodeList(host, row, canManage) {
+        host.innerHTML = '';
+        const mappings = Master.itemBarcodes().filter((b) => Number(b.item_id) === Number(row.item_id));
+        if (mappings.length === 0) {
+            host.appendChild(UI.el('div', { style: 'color:var(--text3); font-size:0.82rem; padding:8px 0;' }, 'Belum ada barcode terdaftar untuk barang ini.'));
+            return;
+        }
+        const unitLabel = (b) => (b.unit_id ? `${b.unit_code || ''} ${b.unit_name ? `(${b.unit_name})` : ''}`.trim() : 'Semua Satuan');
+        const rows = mappings.map((b) => UI.el('tr', {}, [
+            UI.el('td', {}, b.barcode),
+            UI.el('td', {}, unitLabel(b)),
+            UI.el('td', {}, MasterCommon.statusBadge(!!b.is_active)),
+            UI.el('td', {}, canManage ? MasterCommon.actionsMenu([
+                { label: 'Edit', onClick: () => openBarcodeForm(row, b) },
+                { label: b.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleBarcodeActive(row, b) },
+            ]) : ''),
+        ]));
+        host.appendChild(UI.el('table', {}, [
+            UI.el('thead', {}, [UI.el('tr', {}, ['Barcode', 'Satuan', 'Status', canManage ? 'Aksi' : ''].map((h) => UI.el('th', {}, h)))]),
+            UI.el('tbody', {}, rows),
+        ]));
+    }
+
+    async function openBarcodeForm(row, existing) {
+        let units = [];
+        try {
+            units = await InvApi.itemUnits(row.item_id);
+        } catch (err) {
+            UI.handleApiError(err);
+            return;
+        }
+        const unitOptions = units.map((u) => ({ value: u.id, label: `${u.code} (${u.name})` }));
+
+        const values = await MasterCommon.formModal({
+            title: existing ? `✏️ Edit Barcode — ${row.sku}` : `+ Tambah Barcode — ${row.sku}`,
+            submitLabel: 'Simpan',
+            initial: {
+                barcode: existing ? existing.barcode : '',
+                unit_id: existing && existing.unit_id ? existing.unit_id : '',
+            },
+            fields: [
+                { key: 'barcode', label: 'Barcode', type: 'text', required: true },
+                { key: 'unit_id', label: 'Satuan (kosongkan = berlaku untuk semua satuan)', type: 'select', options: unitOptions, emptyLabel: 'Semua Satuan' },
+            ],
+        });
+        if (!values) return;
+
+        try {
+            const payload = { barcode: values.barcode, unit_id: values.unit_id !== null ? Number(values.unit_id) : null };
+            if (existing) {
+                await InvApi.updateItemBarcode(existing.id, payload);
+                UI.toast('Barcode berhasil diperbarui.', 'success');
+            } else {
+                await InvApi.createItemBarcode({ ...payload, item_id: row.item_id });
+                UI.toast('Barcode berhasil ditambahkan.', 'success');
+            }
+            await Master.reloadItemBarcodes();
+            openDetail(row);
+        } catch (err) {
+            UI.handleApiError(err);
+        }
+    }
+
+    async function toggleBarcodeActive(row, mapping) {
+        const isActive = !!mapping.is_active;
+        const confirmed = isActive
+            ? await MasterCommon.confirmDeactivate(`barcode "${mapping.barcode}"`)
+            : await MasterCommon.confirmActivate(`barcode "${mapping.barcode}"`);
+        if (!confirmed) return;
+        try {
+            await InvApi.updateItemBarcode(mapping.id, { is_active: !isActive });
+            UI.toast(`Barcode berhasil ${isActive ? 'dinonaktifkan' : 'diaktifkan'}.`, 'success');
+            await Master.reloadItemBarcodes();
+            openDetail(row);
+        } catch (err) {
+            UI.handleApiError(err);
+        }
     }
 
     async function openEdit(row) {
