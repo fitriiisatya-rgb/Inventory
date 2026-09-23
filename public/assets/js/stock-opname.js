@@ -331,6 +331,11 @@ const StockOpname = (() => {
             ['Total Item', s.total_items], ['Match', s.match], ['Mismatch', s.mismatch],
             ['Recounted', s.recounted], ['Belum Dihitung', s.not_counted], ['Dikecualikan', s.excluded],
         ];
+        // A legacy single-count session mixed into this same warehouse's
+        // history can carry lines counted via the old (pre-dual-count)
+        // flow — real data, just never compared, so it gets its own tile
+        // rather than silently vanishing from the total.
+        if (s.legacy_counted) kpis.push(['Hitung Lama (Single Count)', s.legacy_counted]);
         const kpiBox = UI.el('div', { class: 'grid-4', style: 'margin-bottom:12px;' });
         kpis.forEach(([label, value]) => {
             kpiBox.appendChild(UI.el('div', { class: 'kpi-card' }, [

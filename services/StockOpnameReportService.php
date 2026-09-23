@@ -62,6 +62,7 @@ final class StockOpnameReportService
                 COALESCE(lc.mismatch_count, 0) AS mismatch_count,
                 COALESCE(lc.recounted_count, 0) AS recounted_count,
                 COALESCE(lc.not_counted_count, 0) AS not_counted_count,
+                COALESCE(lc.legacy_counted_count, 0) AS legacy_counted_count,
                 COALESCE(lc.excluded_count, 0) AS excluded_count,
                 COALESCE(lc.adjustment_positive_value, 0) AS adjustment_positive_value,
                 COALESCE(lc.adjustment_negative_value, 0) AS adjustment_negative_value
@@ -82,7 +83,14 @@ final class StockOpnameReportService
                         SUM(match_status = 'MATCH') AS match_count,
                         SUM(match_status = 'MISMATCH') AS mismatch_count,
                         SUM(match_status = 'RECOUNTED') AS recounted_count,
-                        SUM(match_status = 'PENDING') AS not_counted_count,
+                        -- A legacy single-count line never touches match_status (stays its
+                        -- default PENDING even once counted/finalized/posted via the old
+                        -- count() path) — only a line that is BOTH still PENDING AND
+                        -- genuinely uncounted (is_counted=0) is really not-yet-counted;
+                        -- the legacy-counted case is its own bucket below so an old,
+                        -- already-POSTED session never misreports as having open items.
+                        SUM(match_status = 'PENDING' AND is_counted = 0) AS not_counted_count,
+                        SUM(match_status = 'PENDING' AND is_counted = 1) AS legacy_counted_count,
                         SUM(match_status = 'EXCLUDED') AS excluded_count,
                         SUM(CASE WHEN COALESCE(variance_qty_base, 0) > 0 THEN variance_qty_base * unit_cost_base ELSE 0 END) AS adjustment_positive_value,
                         SUM(CASE WHEN COALESCE(variance_qty_base, 0) < 0 THEN variance_qty_base * unit_cost_base ELSE 0 END) AS adjustment_negative_value
@@ -154,6 +162,7 @@ final class StockOpnameReportService
             'mismatch_count' => (int) $r['mismatch_count'],
             'recounted_count' => (int) $r['recounted_count'],
             'not_counted_count' => (int) $r['not_counted_count'],
+            'legacy_counted_count' => (int) $r['legacy_counted_count'],
             'excluded_count' => (int) $r['excluded_count'],
             'adjustment_positive_value' => round((float) $r['adjustment_positive_value'], 4),
             'adjustment_negative_value' => round((float) $r['adjustment_negative_value'], 4),

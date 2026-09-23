@@ -392,6 +392,30 @@ check('report list includes the session with its session_number, P1, P2, and mat
 $reportDetail = \App\Services\StockOpnameReportService::detail($pdo, $posSessionId);
 check('report detail exposes per-line SKU/system/P1/P2/final/difference', count($reportDetail['lines']) > 0 && array_key_exists('difference_qty_base', $reportDetail['lines'][0]));
 
+// ============================================================
+// FINAL RELEASE GATE regression: a legacy single-count session (never
+// assigned P1/P2, counted via the pre-V2.12 count() path) must NEVER be
+// misreported by the new dual-count-oriented report/review as "not
+// counted" just because its lines never touch match_status (they stay
+// PENDING forever under the legacy path, even once POSTED) — caught by a
+// fresh throwaway-DB migration gate against real 2c04d30-era data.
+// ============================================================
+echo "\n== FINAL GATE REGRESSION: legacy single-count session never misreports as not-counted ==\n";
+$itemLegacy = makeItem($pdo, $kgUnitId, 'V212-LEGACY');
+postOpeningIn($pdo, $itemLegacy, $kgUnitId, $scmId, 40, 3000, $adminUserId);
+$legacySessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemLegacy]));
+Database::transaction(fn (PDO $tx) => StockOpnameService::count($tx, $legacySessionId, [$itemLegacy => 38], $adminUserId));
+Database::transaction(fn (PDO $tx) => StockOpnameService::finalize($tx, $legacySessionId, $adminUserId));
+Database::transaction(fn (PDO $tx) => StockOpnameService::post($tx, $legacySessionId, $adminUserId));
+$legacyReportRow = array_values(array_filter(
+    \App\Services\StockOpnameReportService::list($pdo, ['warehouse_id' => $scmId])['rows'],
+    fn ($r) => $r['id'] === $legacySessionId
+))[0] ?? null;
+check('legacy POSTED session reports not_counted_count=0 (never misreported as having open items)', $legacyReportRow !== null && $legacyReportRow['not_counted_count'] === 0, json_encode($legacyReportRow));
+check('legacy POSTED session reports legacy_counted_count=1 (its own honest bucket, never folded into MATCH)', $legacyReportRow !== null && $legacyReportRow['legacy_counted_count'] === 1, json_encode($legacyReportRow));
+$legacyReview = StockOpnameService::review($pdo, $legacySessionId);
+check('review() summary agrees: not_counted=0, legacy_counted=1', $legacyReview['summary']['not_counted'] === 0 && $legacyReview['summary']['legacy_counted'] === 1, json_encode($legacyReview['summary']));
+
 $aTotal = count($results);
 $aPassed = count(array_filter($results));
 echo "\n-- Section (direct-service): {$aPassed} / {$aTotal} PASSED --\n";

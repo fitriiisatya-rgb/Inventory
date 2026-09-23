@@ -384,7 +384,7 @@ final class StockOpnameService
 
         $summary = [
             'total_items' => count($rows), 'match' => 0, 'mismatch' => 0, 'recounted' => 0,
-            'not_counted' => 0, 'excluded' => 0,
+            'not_counted' => 0, 'legacy_counted' => 0, 'excluded' => 0,
             'positive_difference_count' => 0, 'negative_difference_count' => 0,
             'estimated_adjustment_value' => 0.0,
         ];
@@ -394,7 +394,13 @@ final class StockOpnameService
                 case 'MISMATCH': $summary['mismatch']++; break;
                 case 'RECOUNTED': $summary['recounted']++; break;
                 case 'EXCLUDED': $summary['excluded']++; break;
-                default: $summary['not_counted']++; break;
+                // A legacy single-count line never touches match_status — it stays
+                // PENDING forever, even once counted/finalized/posted via the old
+                // count() path. Only a genuinely never-counted line (is_counted=0)
+                // belongs in "not_counted"; an already-counted legacy line gets its
+                // own bucket so review()/finalize() never misreport an old, already-
+                // resolved session as having open items (Section 10 semantics).
+                default: (int) $r['is_counted'] === 1 ? $summary['legacy_counted']++ : $summary['not_counted']++; break;
             }
             if ($r['counted_qty_base'] !== null) {
                 $diff = round((float) $r['counted_qty_base'] - (float) $r['system_qty_base'], 6);

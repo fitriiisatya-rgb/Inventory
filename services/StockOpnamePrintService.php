@@ -62,7 +62,9 @@ final class StockOpnamePrintService
             . '<td>Recounted</td><td class="num">' . (int) $summary['recounted'] . '</td>'
             . '<td>Belum Dihitung</td><td class="num">' . (int) $summary['not_counted'] . '</td>'
             . '<td>Dikecualikan</td><td class="num">' . (int) $summary['excluded'] . '</td>'
-            . '</tr></table>';
+            . '</tr>' . ((int) ($summary['legacy_counted'] ?? 0) > 0
+                ? '<tr><td>Hitung Lama (Single Count)</td><td class="num">' . (int) $summary['legacy_counted'] . '</td><td></td><td></td><td></td><td></td></tr>'
+                : '') . '</table>';
 
         $rows = '';
         foreach ($discrepancies as $l) {
