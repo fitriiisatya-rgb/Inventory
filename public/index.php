@@ -71,6 +71,8 @@ require_once __DIR__ . '/../services/ItemBarcodeService.php';
 require_once __DIR__ . '/../services/ItemPriceService.php';
 require_once __DIR__ . '/../services/NumberingService.php';
 require_once __DIR__ . '/../services/DistributionOrderService.php';
+require_once __DIR__ . '/../services/PricingPolicyService.php';
+require_once __DIR__ . '/../services/DistributionInvoiceService.php';
 
 use App\Services\AuthService;
 use App\Services\Database;
@@ -134,6 +136,8 @@ use App\Services\ImportStockPolicyService;
 use App\Services\ItemBarcodeService;
 use App\Services\ItemPriceService;
 use App\Services\DistributionOrderService;
+use App\Services\PricingPolicyService;
+use App\Services\DistributionInvoiceService;
 
 $config = require __DIR__ . '/../config/config.php';
 
@@ -2453,6 +2457,80 @@ $routes = [
         $input['username'] = $user['username'];
         $result = Database::transaction(fn (PDO $tx) => DistributionOrderService::reverse($tx, (int) $params['id'], $input));
         inv_ok($result, 'Delivery order reversed');
+    },
+
+    // ---- PHASE V2.11B: Pricing Policy (company/category/SKU) ----
+    'GET /distribution-pricing-policies' => function () use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_PRICING_MANAGE');
+        inv_ok(PricingPolicyService::listAll($pdo), 'OK');
+    },
+
+    'POST /distribution-pricing-policies' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_PRICING_MANAGE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => PricingPolicyService::upsert($tx, $input));
+        inv_ok($result, 'Pricing policy saved');
+    },
+
+    'POST /distribution-pricing-policies/{id}/deactivate' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_PRICING_MANAGE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => PricingPolicyService::deactivate($tx, (int) $params['id'], $input));
+        inv_ok($result, 'Pricing policy deactivated');
+    },
+
+    // ---- PHASE V2.11B: Invoices (generated from a dispatched DO) ----
+    'GET /distribution-invoices' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_VIEW');
+        inv_ok(DistributionInvoiceService::listAll($pdo, $query), 'OK');
+    },
+
+    'GET /distribution-invoices/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_VIEW');
+        inv_ok(DistributionInvoiceService::get($pdo, (int) $params['id']), 'OK');
+    },
+
+    'POST /distribution-invoices' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_CREATE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => DistributionInvoiceService::create($tx, $input));
+        inv_ok($result, 'Invoice created');
+    },
+
+    'POST /distribution-invoices/{id}/issue' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_CREATE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => DistributionInvoiceService::issue($tx, (int) $params['id'], $input));
+        inv_ok($result, 'Invoice issued');
+    },
+
+    'POST /distribution-invoices/{id}/cancel' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_CREATE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => DistributionInvoiceService::cancel($tx, (int) $params['id'], $input));
+        inv_ok($result, 'Invoice cancelled');
+    },
+
+    'POST /distribution-invoices/{id}/lines/{lineId}/override-price' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_PRICING_MANAGE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => DistributionInvoiceService::overrideLinePrice($tx, (int) $params['id'], (int) $params['lineId'], $input));
+        inv_ok($result, 'Invoice line price overridden');
     },
 
     // ---- Stock Opname (PHASE C2 Section 2) ----

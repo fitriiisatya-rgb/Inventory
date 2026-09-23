@@ -265,6 +265,17 @@ const InvApi = (() => {
         cancelDistributionOrder: (id, payload) => request('POST', `/distribution-orders/${id}/cancel`, payload),
         reverseDistributionOrder: (id, payload) => request('POST', `/distribution-orders/${id}/reverse`, payload),
 
+        // ---- PHASE V2.11B: Pricing Policy + Invoice ----
+        listPricingPolicies: () => request('GET', '/distribution-pricing-policies'),
+        savePricingPolicy: (payload) => request('POST', '/distribution-pricing-policies', payload),
+        deactivatePricingPolicy: (id) => request('POST', `/distribution-pricing-policies/${id}/deactivate`, {}),
+        listDistributionInvoices: (params = {}) => request('GET', `/distribution-invoices${qs(params)}`),
+        getDistributionInvoice: (id) => request('GET', `/distribution-invoices/${id}`),
+        createDistributionInvoice: (payload) => request('POST', '/distribution-invoices', payload),
+        issueDistributionInvoice: (id) => request('POST', `/distribution-invoices/${id}/issue`, {}),
+        cancelDistributionInvoice: (id, payload) => request('POST', `/distribution-invoices/${id}/cancel`, payload),
+        overrideDistributionInvoiceLinePrice: (invoiceId, lineId, payload) => request('POST', `/distribution-invoices/${invoiceId}/lines/${lineId}/override-price`, payload),
+
         // ---- transfers ----
         transferDestinations: () => request('GET', '/transfer-destinations'),
         createTransfer: (payload) => request('POST', '/transfers', payload),

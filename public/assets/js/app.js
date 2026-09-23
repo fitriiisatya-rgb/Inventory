@@ -65,7 +65,7 @@
         'master-vendor': 'Vendor / Supplier', 'master-bakery': 'Bakery Tujuan', 'master-category': 'Kategori',
         'trace-center': 'Trace Center',
         laporan: 'Mutasi Stok / Ledger', 'history-transaksi': 'History Transaksi', transaksi: 'Stock IN / OUT',
-        transfer: 'Transfer', 'distribusi-do': 'Delivery Order', produksi: 'Produksi', opname: 'Stock Opname', import: 'Import',
+        transfer: 'Transfer', 'distribusi-do': 'Delivery Order', 'distribusi-invoice': 'Invoice', 'distribusi-pricing': 'Pricing Distribusi', produksi: 'Produksi', opname: 'Stock Opname', import: 'Import',
         audit: 'Audit Log', closing: 'Tutup Buku', 'laporan-hpp': 'Laporan Nilai Stok & HPP',
         'laporan-ringkasan': 'Ringkasan Inventory',
         'laporan-pergerakan': 'Pergerakan Stok Harian', 'laporan-rekonsiliasi': 'Rekonsiliasi Arus Stok',
@@ -112,6 +112,10 @@
             Transfers.render(document.getElementById('tab-transfer'));
         } else if (name === 'distribusi-do') {
             DistributionOrders.render(document.getElementById('tab-distribusi-do'));
+        } else if (name === 'distribusi-invoice') {
+            DistributionInvoices.render(document.getElementById('tab-distribusi-invoice'));
+        } else if (name === 'distribusi-pricing') {
+            DistributionPricing.render(document.getElementById('tab-distribusi-pricing'));
         } else if (name === 'produksi') {
             Production.render(document.getElementById('tab-produksi'));
         } else if (name === 'opname') {

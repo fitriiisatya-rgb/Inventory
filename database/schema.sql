@@ -912,6 +912,111 @@ CREATE TABLE distribution_order_lines (
 COMMENT='PHASE V2.11A — one row per item on a Delivery Order. A genuine multi-line document — several rows may share the same do_id.';
 
 -- ============================================================================
+-- 7C. DISTRIBUTION PRICING + INVOICE — PHASE V2.11B
+--
+-- PRICE-SOURCE AUDIT: the reference purchase price used here is EXACTLY
+-- the same source V2.10's Stock IN auto-fill already uses —
+-- item_price_history.price_per_unit via ItemPriceService (the only
+-- legitimate existing price source). Never confused with FIFO/HPP cost or
+-- a selling price.
+-- ============================================================================
+
+CREATE TABLE distribution_pricing_policies (
+    id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    scope           ENUM('COMPANY','CATEGORY','SKU') NOT NULL,
+    category_id     INT UNSIGNED NULL,   -- set only when scope='CATEGORY'
+    item_id         INT UNSIGNED NULL,   -- set only when scope='SKU'
+    pricing_method  ENUM('AT_COST','COST_PLUS_PERCENT','COST_PLUS_AMOUNT') NOT NULL,
+    margin_value    DECIMAL(20,4) NOT NULL DEFAULT 0,
+    is_active       TINYINT(1) NOT NULL DEFAULT 1,
+    effective_from  DATE NULL,
+    notes           VARCHAR(255) NULL,
+    created_by      INT UNSIGNED NULL,
+    updated_by      INT UNSIGNED NULL,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    -- Same generated-column active-window trick used throughout this
+    -- project — makes "at most one ACTIVE policy per company/category/SKU"
+    -- a real DB constraint.
+    company_active_marker  TINYINT GENERATED ALWAYS AS (IF(scope = 'COMPANY' AND is_active = 1, 1, NULL)) STORED,
+    category_active_marker INT GENERATED ALWAYS AS (IF(scope = 'CATEGORY' AND is_active = 1, category_id, NULL)) STORED,
+    sku_active_marker      INT GENERATED ALWAYS AS (IF(scope = 'SKU' AND is_active = 1, item_id, NULL)) STORED,
+    CONSTRAINT fk_dpp_category FOREIGN KEY (category_id) REFERENCES categories(id),
+    CONSTRAINT fk_dpp_item FOREIGN KEY (item_id) REFERENCES items(id),
+    CONSTRAINT fk_dpp_created_by FOREIGN KEY (created_by) REFERENCES users(id),
+    CONSTRAINT fk_dpp_updated_by FOREIGN KEY (updated_by) REFERENCES users(id),
+    UNIQUE KEY uq_dpp_company_active (company_active_marker),
+    UNIQUE KEY uq_dpp_category_active (category_active_marker),
+    UNIQUE KEY uq_dpp_sku_active (sku_active_marker),
+    INDEX idx_dpp_scope (scope)
+) ENGINE=InnoDB
+COMMENT='PHASE V2.11B — company/category/SKU selling-price policy. Resolution order: SKU, then CATEGORY, then COMPANY.';
+
+CREATE TABLE distribution_invoices (
+    id                  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    invoice_number      VARCHAR(40) NOT NULL UNIQUE,
+    invoice_date        DATE NOT NULL,
+    do_id               INT UNSIGNED NOT NULL,
+    bakery_destination_id INT UNSIGNED NOT NULL,
+    subtotal            DECIMAL(20,4) NOT NULL DEFAULT 0,
+    discount_amount     DECIMAL(20,4) NOT NULL DEFAULT 0,
+    tax_amount          DECIMAL(20,4) NOT NULL DEFAULT 0,
+    shipping_amount     DECIMAL(20,4) NOT NULL DEFAULT 0,
+    grand_total         DECIMAL(20,4) NOT NULL DEFAULT 0,
+    status              ENUM('DRAFT','ISSUED','CANCELLED') NOT NULL DEFAULT 'DRAFT',
+    created_by          INT UNSIGNED NOT NULL,
+    issued_by           INT UNSIGNED NULL,
+    issued_at           DATETIME NULL,
+    cancelled_by        INT UNSIGNED NULL,
+    cancelled_at        DATETIME NULL,
+    cancel_reason       VARCHAR(255) NULL,
+    created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_di_do FOREIGN KEY (do_id) REFERENCES distribution_orders(id),
+    CONSTRAINT fk_di_bakery FOREIGN KEY (bakery_destination_id) REFERENCES bakery_destinations(id),
+    CONSTRAINT fk_di_created_by FOREIGN KEY (created_by) REFERENCES users(id),
+    CONSTRAINT fk_di_issued_by FOREIGN KEY (issued_by) REFERENCES users(id),
+    CONSTRAINT fk_di_cancelled_by FOREIGN KEY (cancelled_by) REFERENCES users(id),
+    UNIQUE KEY uq_di_do (do_id),
+    INDEX idx_di_status (status),
+    INDEX idx_di_bakery (bakery_destination_id)
+) ENGINE=InnoDB
+COMMENT='PHASE V2.11B — one Invoice per Delivery Order. Financial snapshot only; never recomputed from a later pricing policy change.';
+
+CREATE TABLE distribution_invoice_lines (
+    id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    invoice_id          INT UNSIGNED NOT NULL,
+    do_line_id          BIGINT UNSIGNED NOT NULL,
+    line_no             SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+    item_id             INT UNSIGNED NOT NULL,
+    sku_snapshot        VARCHAR(40)  NOT NULL,
+    item_name_snapshot  VARCHAR(200) NOT NULL,
+    category_id_snapshot INT UNSIGNED NULL,
+    qty                 DECIMAL(20,6) NOT NULL,
+    unit_id             INT UNSIGNED NOT NULL,
+    reference_purchase_price DECIMAL(20,4) NULL,
+    pricing_source      ENUM('COMPANY','CATEGORY','SKU') NOT NULL,
+    pricing_method      ENUM('AT_COST','COST_PLUS_PERCENT','COST_PLUS_AMOUNT') NOT NULL,
+    margin_value        DECIMAL(20,4) NOT NULL DEFAULT 0,
+    policy_calculated_price DECIMAL(20,4) NOT NULL,
+    selling_unit_price  DECIMAL(20,4) NOT NULL,
+    is_price_overridden TINYINT(1) NOT NULL DEFAULT 0,
+    override_reason     VARCHAR(255) NULL,
+    override_by         INT UNSIGNED NULL,
+    subtotal            DECIMAL(20,4) NOT NULL,
+    created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_dil_invoice FOREIGN KEY (invoice_id) REFERENCES distribution_invoices(id),
+    CONSTRAINT fk_dil_do_line FOREIGN KEY (do_line_id) REFERENCES distribution_order_lines(id),
+    CONSTRAINT fk_dil_item FOREIGN KEY (item_id) REFERENCES items(id),
+    CONSTRAINT fk_dil_category FOREIGN KEY (category_id_snapshot) REFERENCES categories(id),
+    CONSTRAINT fk_dil_unit FOREIGN KEY (unit_id) REFERENCES units(id),
+    CONSTRAINT fk_dil_override_by FOREIGN KEY (override_by) REFERENCES users(id),
+    INDEX idx_dil_invoice (invoice_id),
+    INDEX idx_dil_do_line (do_line_id)
+) ENGINE=InnoDB
+COMMENT='PHASE V2.11B — one row per invoiced item. Pricing fields are an immutable snapshot at invoice-creation time.';
+
+-- ============================================================================
 -- 8. PRODUCTION / RACIK
 -- ============================================================================
 
@@ -1137,7 +1242,11 @@ INSERT INTO permissions (code, description) VALUES
     ('DISTRIBUTION_APPROVE',  'Approve a DRAFT Delivery Order and start picking'),
     ('DISTRIBUTION_DISPATCH', 'Dispatch a Delivery Order — posts the real Stock OUT'),
     ('DISTRIBUTION_RECEIVE',  'Record Bakery receipt of a dispatched Delivery Order'),
-    ('DISTRIBUTION_REVERSE',  'Reverse a dispatched Delivery Order (restores FIFO) — privileged correction action');
+    ('DISTRIBUTION_REVERSE',  'Reverse a dispatched Delivery Order (restores FIFO) — privileged correction action'),
+    -- PHASE V2.11B: pricing policy management + Invoice issue/override.
+    -- ADMIN/SUPERADMIN inherit automatically; STOCK/DIVISION/VIEWER never
+    -- get this, per the owner's explicit instruction.
+    ('DISTRIBUTION_PRICING_MANAGE', 'Manage SCM -> Bakery selling-price policy (company/category/SKU) and issue/override Invoices');
 
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r CROSS JOIN permissions p WHERE r.code = 'SUPERADMIN';
