@@ -253,6 +253,18 @@ const InvApi = (() => {
         postTransactionOut: (payload) => request('POST', '/transactions/out', payload),
         voidTransaction: (transactionId, payload) => request('POST', `/transactions/${transactionId}/void`, payload),
 
+        // ---- PHASE V2.11A: Distribution Orders (SCM -> Bakery) ----
+        listDistributionOrders: (params = {}) => request('GET', `/distribution-orders${qs(params)}`),
+        getDistributionOrder: (id) => request('GET', `/distribution-orders/${id}`),
+        createDistributionOrder: (payload) => request('POST', '/distribution-orders', payload),
+        approveDistributionOrder: (id) => request('POST', `/distribution-orders/${id}/approve`, {}),
+        startPickingDistributionOrder: (id) => request('POST', `/distribution-orders/${id}/start-picking`, {}),
+        dispatchDistributionOrder: (id, payload) => request('POST', `/distribution-orders/${id}/dispatch`, payload),
+        receiveDistributionOrder: (id, payload) => request('POST', `/distribution-orders/${id}/receive`, payload),
+        completeDistributionOrder: (id) => request('POST', `/distribution-orders/${id}/complete`, {}),
+        cancelDistributionOrder: (id, payload) => request('POST', `/distribution-orders/${id}/cancel`, payload),
+        reverseDistributionOrder: (id, payload) => request('POST', `/distribution-orders/${id}/reverse`, payload),
+
         // ---- transfers ----
         transferDestinations: () => request('GET', '/transfer-destinations'),
         createTransfer: (payload) => request('POST', '/transfers', payload),

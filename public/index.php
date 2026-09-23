@@ -69,6 +69,8 @@ require_once __DIR__ . '/../services/ImportLiveTransactionService.php';
 require_once __DIR__ . '/../services/ImportStockPolicyService.php';
 require_once __DIR__ . '/../services/ItemBarcodeService.php';
 require_once __DIR__ . '/../services/ItemPriceService.php';
+require_once __DIR__ . '/../services/NumberingService.php';
+require_once __DIR__ . '/../services/DistributionOrderService.php';
 
 use App\Services\AuthService;
 use App\Services\Database;
@@ -131,6 +133,7 @@ use App\Services\ImportLiveTransactionService;
 use App\Services\ImportStockPolicyService;
 use App\Services\ItemBarcodeService;
 use App\Services\ItemPriceService;
+use App\Services\DistributionOrderService;
 
 $config = require __DIR__ . '/../config/config.php';
 
@@ -2358,6 +2361,98 @@ $routes = [
         }
 
         inv_ok($transfer, 'OK');
+    },
+
+    // ---- PHASE V2.11A: Distribution Orders (SCM -> Bakery) ----
+    // A genuinely different concept from Transfers above — this always
+    // names a bakery_destination_id, never a to_warehouse_id, and real
+    // stock only leaves inventory at dispatch() (Part 1/2/3 of the spec).
+    'POST /distribution-orders' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_CREATE');
+        if (isset($input['from_warehouse_id'])) { inv_require_warehouse_scope($user, (int) $input['from_warehouse_id']); }
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => DistributionOrderService::create($tx, $input));
+        inv_ok($result, 'Delivery order created');
+    },
+
+    'GET /distribution-orders' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_VIEW');
+        inv_ok(DistributionOrderService::listAll($pdo, $query), 'OK');
+    },
+
+    'GET /distribution-orders/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_VIEW');
+        inv_ok(DistributionOrderService::get($pdo, (int) $params['id']), 'OK');
+    },
+
+    'POST /distribution-orders/{id}/approve' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_APPROVE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => DistributionOrderService::approve($tx, (int) $params['id'], $input));
+        inv_ok($result, 'Delivery order approved');
+    },
+
+    'POST /distribution-orders/{id}/start-picking' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_APPROVE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => DistributionOrderService::startPicking($tx, (int) $params['id'], $input));
+        inv_ok($result, 'Delivery order moved to picking');
+    },
+
+    'POST /distribution-orders/{id}/dispatch' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_DISPATCH');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        if (!empty($input['allow_negative_stock'])) {
+            inv_require_permission($pdo, $user, 'STOCK_ALLOW_NEGATIVE');
+        }
+        $result = Database::transaction(fn (PDO $tx) => DistributionOrderService::dispatch($tx, (int) $params['id'], $input));
+        inv_ok($result, 'Delivery order dispatched');
+    },
+
+    'POST /distribution-orders/{id}/receive' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_RECEIVE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => DistributionOrderService::receive($tx, (int) $params['id'], $input));
+        inv_ok($result, 'Delivery order received');
+    },
+
+    'POST /distribution-orders/{id}/complete' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_RECEIVE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => DistributionOrderService::complete($tx, (int) $params['id'], $input));
+        inv_ok($result, 'Delivery order completed');
+    },
+
+    'POST /distribution-orders/{id}/cancel' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_CREATE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => DistributionOrderService::cancel($tx, (int) $params['id'], $input));
+        inv_ok($result, 'Delivery order cancelled');
+    },
+
+    'POST /distribution-orders/{id}/reverse' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'DISTRIBUTION_REVERSE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        $result = Database::transaction(fn (PDO $tx) => DistributionOrderService::reverse($tx, (int) $params['id'], $input));
+        inv_ok($result, 'Delivery order reversed');
     },
 
     // ---- Stock Opname (PHASE C2 Section 2) ----
