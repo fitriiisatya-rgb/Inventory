@@ -1,8 +1,11 @@
 /**
  * PHASE V2.6B — Report 8 "Laporan Stock Opname". Read-only over
- * StockOpnameReportService (existing session model, unchanged
- * start/count/finalize/post workflow). No P1/P2 dual-count — single
- * blind count only, matching the current opname implementation.
+ * StockOpnameReportService.
+ *
+ * PHASE V2.12C: now also shows the dual-count columns (session number,
+ * P1/P2/supervisor, match/mismatch) added in V2.12A/B — a legacy
+ * single-count session simply shows "-" for P1/P2/supervisor and 0 for
+ * match/mismatch, so nothing about an old session's row changes.
  */
 const ReportOpname = (() => {
     function render(container) {
@@ -14,7 +17,7 @@ const ReportOpname = (() => {
 
         ReportCommon.render(container, {
             title: 'Laporan Stock Opname',
-            subtitle: 'Riwayat sesi stock opname — sistem model saat ini (single count).',
+            subtitle: 'Riwayat sesi stock opname — termasuk dual-count P1/P2 (PHASE V2.12).',
             storageKey: 'dt-report-opname',
             exportUrl: (state) => InvApi.opnameReportExportUrl(state),
             filters: [
@@ -24,12 +27,15 @@ const ReportOpname = (() => {
                 { key: 'status', label: 'Status', type: 'select', options: statusOptions },
             ],
             columns: [
+                { key: 'session_number', label: 'No. Sesi', render: (r) => r.session_number || `OPN-${r.id}` },
                 { key: 'session_date', label: 'Tanggal Sesi', render: (r) => r.session_date },
                 { key: 'warehouse', label: 'Gudang', render: (r) => r.warehouse.name },
                 { key: 'status', label: 'Status', render: (r) => r.status },
-                { key: 'system_qty', label: 'Qty Sistem', render: (r) => UI.formatNumber(r.system_qty) },
-                { key: 'counted_qty', label: 'Qty Dihitung', render: (r) => UI.formatNumber(r.counted_qty) },
-                { key: 'variance_qty', label: 'Selisih Qty', render: (r) => varianceCell(r.variance_qty) },
+                { key: 'p1', label: 'P1', render: (r) => r.p1 || '-' },
+                { key: 'p2', label: 'P2', render: (r) => r.p2 || '-' },
+                { key: 'supervisor', label: 'Supervisor', render: (r) => r.supervisor || '-' },
+                { key: 'match_count', label: 'Match', render: (r) => UI.formatNumber(r.match_count, 0) },
+                { key: 'mismatch_count', label: 'Mismatch', render: (r) => UI.formatNumber(r.mismatch_count, 0) },
                 { key: 'variance_value', label: 'Selisih Nilai', render: (r) => varianceCell(r.variance_value, true) },
                 { key: 'created_by', label: 'Dibuat Oleh', render: (r) => r.created_by },
                 { key: 'finalized_at', label: 'Finalisasi', render: (r) => r.finalized_at || '-' },

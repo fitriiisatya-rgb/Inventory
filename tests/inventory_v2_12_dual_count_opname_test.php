@@ -297,8 +297,234 @@ check('POST created exactly one adjustment for the positive-variance item', coun
 $stockAfter = \App\Services\InventoryService::currentStock($pdo, $itemPos, $scmId);
 check('stock after posting reflects the physical count (25), via the real adjustment/FIFO path, not a direct write', abs($stockAfter['qty_base'] - 25.0) < 0.0001, (string) $stockAfter['qty_base']);
 
+// ============================================================
+// 21/22. negative adjustment, posted through the existing
+// StockAdjustmentService/FIFO path (never a raw batch rewrite)
+// ============================================================
+echo "\n== 21/22. negative adjustment, posted via the existing adjustment service ==\n";
+$itemNeg = makeItem($pdo, $kgUnitId, 'V212-NEG');
+postOpeningIn($pdo, $itemNeg, $kgUnitId, $scmId, 40, 1800, $adminUserId);
+$negSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemNeg]));
+Database::transaction(fn (PDO $tx) => StockOpnameService::assignCounters($tx, $negSessionId, ['p1_user_id' => $p1UserId, 'p2_user_id' => $p2UserId], $adminUserId));
+Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $negSessionId, 'p1', $itemNeg, 33.0, $p1UserId));
+Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $negSessionId, 'p2', $itemNeg, 33.0, $p2UserId));
+Database::transaction(fn (PDO $tx) => StockOpnameService::finalize($tx, $negSessionId, $adminUserId));
+$negPostResult = Database::transaction(fn (PDO $tx) => StockOpnameService::post($tx, $negSessionId, $adminUserId));
+check('POST created exactly one adjustment for the negative-variance item (40 -> 33)', count($negPostResult['adjustments']) === 1);
+$negAdjTxId = (int) $negPostResult['adjustments'][0]['transaction_id'];
+$negAdjTx = $pdo->prepare('SELECT transaction_type FROM inventory_transactions WHERE id = :id');
+$negAdjTx->execute(['id' => $negAdjTxId]);
+check('the negative variance was posted as transaction_type=ADJUSTMENT (never a raw session/line rewrite)', $negAdjTx->fetchColumn() === 'ADJUSTMENT');
+$negStockAfter = \App\Services\InventoryService::currentStock($pdo, $itemNeg, $scmId);
+check('stock after posting the negative adjustment reflects the lower physical count (33)', abs($negStockAfter['qty_base'] - 33.0) < 0.0001, (string) $negStockAfter['qty_base']);
+
+// ============================================================
+// 23. double POST blocked (idempotent, never a duplicate adjustment)
+// ============================================================
+echo "\n== 23. double POST blocked ==\n";
+$negPostReplay = Database::transaction(fn (PDO $tx) => StockOpnameService::post($tx, $negSessionId, $adminUserId));
+check('re-posting an already-POSTED session returns an idempotent replay, not an error', ($negPostReplay['idempotent_replay'] ?? false) === true);
+$adjCountStmt2 = $pdo->prepare("SELECT COUNT(*) FROM inventory_transactions WHERE transaction_uuid LIKE :prefix");
+$negSessionUuid = StockOpnameService::get($pdo, $negSessionId)['session_uuid'];
+$adjCountStmt2->execute(['prefix' => $negSessionUuid . ':%']);
+check('double-POST never created a second ADJUSTMENT transaction for the same session', (int) $adjCountStmt2->fetchColumn() === 1);
+
+// ============================================================
+// 24. period lock — POST is blocked by the EXISTING PeriodLockService,
+// exactly the same as every other posting endpoint (never a second
+// locking mechanism invented for opname)
+// ============================================================
+echo "\n== 24. period lock ==\n";
+$itemLocked = makeItem($pdo, $kgUnitId, 'V212-LOCK');
+postOpeningIn($pdo, $itemLocked, $kgUnitId, $scmId, 10, 1000, $adminUserId);
+$lockedSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemLocked]));
+Database::transaction(fn (PDO $tx) => StockOpnameService::assignCounters($tx, $lockedSessionId, ['p1_user_id' => $p1UserId, 'p2_user_id' => $p2UserId], $adminUserId));
+Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $lockedSessionId, 'p1', $itemLocked, 9.0, $p1UserId));
+Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $lockedSessionId, 'p2', $itemLocked, 9.0, $p2UserId));
+$lockedSessionDetail = Database::transaction(fn (PDO $tx) => StockOpnameService::finalize($tx, $lockedSessionId, $adminUserId));
+$lockedSessionDate = $lockedSessionDetail['session_date'];
+$pdo->prepare("INSERT INTO book_closings (period_start, period_end, status, locked_by, locked_at, created_by) VALUES (:s, :e, 'LOCKED', :by, NOW(), :by2)")
+    ->execute(['s' => $lockedSessionDate, 'e' => $lockedSessionDate, 'by' => $adminUserId, 'by2' => $adminUserId]);
+$periodLockErr = null;
+try {
+    Database::transaction(fn (PDO $tx) => StockOpnameService::post($tx, $lockedSessionId, $adminUserId));
+} catch (\App\Services\PeriodLockedException $e) { $periodLockErr = $e->getMessage(); }
+check('POST is blocked by the existing period-lock check when the session date falls inside a LOCKED book-closing period', $periodLockErr !== null, (string) $periodLockErr);
+$pdo->prepare("DELETE FROM book_closings WHERE period_start = :s AND period_end = :e")->execute(['s' => $lockedSessionDate, 'e' => $lockedSessionDate]);
+$lockedPostResult = Database::transaction(fn (PDO $tx) => StockOpnameService::post($tx, $lockedSessionId, $adminUserId));
+check('POST succeeds once the period lock is lifted', $lockedPostResult['status'] === 'POSTED');
+
+// ============================================================
+// 25. count date preserved (session_date is the PHYSICAL count date,
+// distinct from posted_at, the POSTING timestamp)
+// ============================================================
+echo "\n== 25. count date preserved ==\n";
+$lockedSessionFinal = StockOpnameService::get($pdo, $lockedSessionId);
+check('session_date (physical count date) is untouched by posting, still the original count date', $lockedSessionFinal['session_date'] === $lockedSessionDate);
+check('posted_at (a real timestamp) is a different concept entirely from session_date (a plain DATE)', $lockedSessionFinal['posted_at'] !== null && $lockedSessionFinal['posted_at'] !== $lockedSessionDate);
+
+// ============================================================
+// 26. audit log
+// ============================================================
+echo "\n== 26. audit log ==\n";
+$auditActions = $pdo->prepare("SELECT DISTINCT action_code FROM audit_logs WHERE entity_type IN ('stock_opname_sessions','stock_opname_lines') AND entity_id IN (
+    SELECT id FROM stock_opname_sessions WHERE id = :sid
+    UNION SELECT id FROM stock_opname_lines WHERE session_id = :sid2
+)");
+$auditActions->execute(['sid' => $posSessionId, 'sid2' => $posSessionId]);
+$actions = array_column($auditActions->fetchAll(), 'action_code');
+foreach (['STOCK_OPNAME_START', 'STOCK_OPNAME_ASSIGN_COUNTERS', 'STOCK_OPNAME_FINALIZE', 'STOCK_OPNAME_POST'] as $expected) {
+    check("audit log contains a {$expected} entry for the session", in_array($expected, $actions, true), implode(',', $actions));
+}
+$lineAuditActions = $pdo->prepare("SELECT DISTINCT action_code FROM audit_logs WHERE entity_type = 'stock_opname_lines' AND entity_id IN (SELECT id FROM stock_opname_lines WHERE session_id = :sid)");
+$lineAuditActions->execute(['sid' => $posSessionId]);
+$lineActions = array_column($lineAuditActions->fetchAll(), 'action_code');
+check('audit log contains STOCK_OPNAME_P1_COUNT / STOCK_OPNAME_P2_COUNT line-level entries', in_array('STOCK_OPNAME_P1_COUNT', $lineActions, true) && in_array('STOCK_OPNAME_P2_COUNT', $lineActions, true), implode(',', $lineActions));
+
+// ============================================================
+// 27. report
+// ============================================================
+echo "\n== 27. report ==\n";
+require_once __DIR__ . '/../services/StockOpnameReportService.php';
+$reportList = \App\Services\StockOpnameReportService::list($pdo, ['warehouse_id' => $scmId]);
+$reportRow = array_values(array_filter($reportList['rows'], fn ($r) => $r['id'] === $posSessionId))[0] ?? null;
+check('report list includes the session with its session_number, P1, P2, and match/mismatch counts', $reportRow !== null && $reportRow['session_number'] !== null && $reportRow['p1'] !== null && $reportRow['p2'] !== null, json_encode($reportRow));
+$reportDetail = \App\Services\StockOpnameReportService::detail($pdo, $posSessionId);
+check('report detail exposes per-line SKU/system/P1/P2/final/difference', count($reportDetail['lines']) > 0 && array_key_exists('difference_qty_base', $reportDetail['lines'][0]));
+
 $aTotal = count($results);
 $aPassed = count(array_filter($results));
+echo "\n-- Section (direct-service): {$aPassed} / {$aTotal} PASSED --\n";
+
+// ============================================================
+// HTTP — permission gating (STOCK_OPNAME_SUPERVISE vs STOCK_OPNAME_MANAGE),
+// warehouse isolation, CSV formula-injection protection
+// ============================================================
+$port = 8900 + random_int(2400, 2799);
+$docRoot = __DIR__ . '/../public';
+$descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+$process = proc_open(sprintf('php -S 127.0.0.1:%d -t %s', $port, escapeshellarg($docRoot)), $descriptors, $pipes, __DIR__ . '/..');
+if (!is_resource($process)) { fwrite(STDERR, "Failed to start php -S\n"); exit(1); }
+stream_set_blocking($pipes[1], false);
+stream_set_blocking($pipes[2], false);
+$base = "http://127.0.0.1:{$port}/api";
+$ready = false;
+for ($i = 0; $i < 50; $i++) {
+    usleep(100_000);
+    $ch = curl_init("{$base}/auth/me");
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT_MS, 500);
+    $res = curl_exec($ch);
+    $err = curl_errno($ch);
+    curl_close($ch);
+    if ($res !== false && $err === 0) { $ready = true; break; }
+}
+if (!$ready) { fwrite(STDERR, "Server did not become ready\n"); proc_terminate($process); exit(1); }
+
+function httpCall(string $method, string $url, ?array $body, string $cookieJar, ?string $csrfToken = null): array
+{
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST => $method, CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_COOKIEJAR => $cookieJar, CURLOPT_COOKIEFILE => $cookieJar, CURLOPT_TIMEOUT => 5,
+        CURLOPT_HEADER => true,
+    ]);
+    $headers = ['Content-Type: application/json'];
+    if ($csrfToken !== null) { $headers[] = "X-CSRF-Token: {$csrfToken}"; }
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    if ($body !== null) { curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body)); }
+    $raw = curl_exec($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $headerSize = (int) curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+    curl_close($ch);
+    $rawBody = substr((string) $raw, $headerSize);
+    $decoded = json_decode($rawBody, true);
+    return ['status' => $status, 'body' => is_array($decoded) ? $decoded : [], 'raw' => $rawBody];
+}
+
+try {
+    $superadminRoleId = $superRoleId;
+
+    $httpAdminUser = uid('v212httpadmin'); $httpAdminPass = 'V212HttpAdminPass123!';
+    $pdo->prepare('INSERT INTO users (username, password_hash, full_name, role_id, is_active) VALUES (:u,:h,:n,:r,1)')
+        ->execute(['u' => $httpAdminUser, 'h' => password_hash($httpAdminPass, PASSWORD_BCRYPT), 'n' => $httpAdminUser, 'r' => $superadminRoleId]);
+    $adminJar = tempnam(sys_get_temp_dir(), 'cookie_');
+    $adminLogin = httpCall('POST', "{$base}/auth/login", ['username' => $httpAdminUser, 'password' => $httpAdminPass], $adminJar);
+    $adminCsrf = $adminLogin['body']['data']['csrf_token'] ?? '';
+
+    $httpStockUser = uid('v212httpstock'); $httpStockPass = 'V212HttpStockPass123!';
+    $pdo->prepare('INSERT INTO users (username, password_hash, full_name, role_id, warehouse_id, is_active) VALUES (:u,:h,:n,:r,:w,1)')
+        ->execute(['u' => $httpStockUser, 'h' => password_hash($httpStockPass, PASSWORD_BCRYPT), 'n' => $httpStockUser, 'r' => $stockRoleId, 'w' => $scmId]);
+    $stockJar = tempnam(sys_get_temp_dir(), 'cookie_');
+    $stockLogin = httpCall('POST', "{$base}/auth/login", ['username' => $httpStockUser, 'password' => $httpStockPass], $stockJar);
+    $stockCsrf = $stockLogin['body']['data']['csrf_token'] ?? '';
+
+    $httpCbdUser = uid('v212httpcbd'); $httpCbdPass = 'V212HttpCbdPass123!';
+    $pdo->prepare('INSERT INTO users (username, password_hash, full_name, role_id, warehouse_id, is_active) VALUES (:u,:h,:n,:r,:w,1)')
+        ->execute(['u' => $httpCbdUser, 'h' => password_hash($httpCbdPass, PASSWORD_BCRYPT), 'n' => $httpCbdUser, 'r' => $stockRoleId, 'w' => $cibadakId]);
+    $cbdJar = tempnam(sys_get_temp_dir(), 'cookie_');
+    $cbdLogin = httpCall('POST', "{$base}/auth/login", ['username' => $httpCbdUser, 'password' => $httpCbdPass], $cbdJar);
+    $cbdCsrf = $cbdLogin['body']['data']['csrf_token'] ?? '';
+
+    // Open a fresh SCM session over HTTP for the permission/isolation checks.
+    $httpOpen = httpCall('POST', "{$base}/stock-opname", ['warehouse_id' => $scmId, 'item_ids' => [$itemA]], $adminJar, $adminCsrf);
+    $httpSessionId = $httpOpen['body']['data']['session_id'] ?? null;
+    check('HTTP: SUPERADMIN can open a new SCM session (previous ones are POSTED/CANCELLED, warehouse free)', $httpOpen['status'] === 200, json_encode($httpOpen['body']));
+
+    echo "\n== 29. STOCK warehouse isolation (HTTP) ==\n";
+    $cbdGetsScm = httpCall('GET', "{$base}/stock-opname/{$httpSessionId}", null, $cbdJar);
+    check('HTTP: a CIBADAK-scoped STOCK user is forbidden from a SCM opname session', $cbdGetsScm['status'] === 403, json_encode($cbdGetsScm['body']));
+    $cbdCountsScm = httpCall('POST', "{$base}/stock-opname/{$httpSessionId}/count/p1", ['item_id' => $itemA, 'counted_qty_base' => 5], $cbdJar, $cbdCsrf);
+    check('HTTP: a CIBADAK-scoped STOCK user cannot submit a P1 count on a SCM session', $cbdCountsScm['status'] === 403 && ($cbdCountsScm['body']['error']['code'] ?? '') === 'FORBIDDEN', json_encode($cbdCountsScm['body']));
+
+    echo "\n== 30. unauthorized finalization rejected ==\n";
+    $stockFinalize = httpCall('POST', "{$base}/stock-opname/{$httpSessionId}/finalize", [], $stockJar, $stockCsrf);
+    check('HTTP: a plain STOCK_OPNAME_MANAGE user (STOCK role, no SUPERVISE) is forbidden from finalize', $stockFinalize['status'] === 403, json_encode($stockFinalize['body']));
+    $stockPost = httpCall('POST', "{$base}/stock-opname/{$httpSessionId}/post", [], $stockJar, $stockCsrf);
+    check('HTTP: a plain STOCK_OPNAME_MANAGE user is forbidden from post', $stockPost['status'] === 403, json_encode($stockPost['body']));
+    $stockReview = httpCall('GET', "{$base}/stock-opname/{$httpSessionId}/review", null, $stockJar);
+    check('HTTP: a plain STOCK_OPNAME_MANAGE user is forbidden from the supervisor review dashboard', $stockReview['status'] === 403, json_encode($stockReview['body']));
+    $stockRecount = httpCall('POST', "{$base}/stock-opname/{$httpSessionId}/recount", ['item_id' => $itemA, 'counted_qty_base' => 1, 'reason' => 'x'], $stockJar, $stockCsrf);
+    check('HTTP: a plain STOCK_OPNAME_MANAGE user is forbidden from recount', $stockRecount['status'] === 403, json_encode($stockRecount['body']));
+    $stockExclude = httpCall('POST', "{$base}/stock-opname/{$httpSessionId}/exclude", ['item_id' => $itemA, 'reason' => 'x'], $stockJar, $stockCsrf);
+    check('HTTP: a plain STOCK_OPNAME_MANAGE user is forbidden from exclude', $stockExclude['status'] === 403, json_encode($stockExclude['body']));
+    $stockCancel = httpCall('POST', "{$base}/stock-opname/{$httpSessionId}/cancel", ['reason' => 'x'], $stockJar, $stockCsrf);
+    check('HTTP: a plain STOCK_OPNAME_MANAGE user is forbidden from cancel', $stockCancel['status'] === 403, json_encode($stockCancel['body']));
+
+    echo "\n== 28. CSV formula injection protection (report export) ==\n";
+    // Drive the HTTP session to a MISMATCH -> recount with a formula-shaped
+    // reason, finalize, post, then export both the summary and detail CSV
+    // and confirm the shared inv_csv_safe_cell() guard neutralizes it —
+    // exactly the same centralized helper every other CSV export in the
+    // app already relies on, no new escaping logic invented here.
+    httpCall('POST', "{$base}/stock-opname/{$httpSessionId}/assign-counters", ['p1_user_id' => $p1UserId, 'p2_user_id' => $p2UserId], $adminJar, $adminCsrf);
+    Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $httpSessionId, 'p1', $itemA, 11.0, $p1UserId));
+    Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $httpSessionId, 'p2', $itemA, 12.0, $p2UserId));
+    Database::transaction(fn (PDO $tx) => StockOpnameService::recount($tx, $httpSessionId, $itemA, 11.0, '=2+2 formula-shaped reason', $adminUserId));
+    httpCall('POST', "{$base}/stock-opname/{$httpSessionId}/finalize", [], $adminJar, $adminCsrf);
+
+    $detailCsv = httpCall('GET', "{$base}/reports/opname/{$httpSessionId}?format=csv", null, $adminJar);
+    check('HTTP detail CSV export returns 200 text/csv', $detailCsv['status'] === 200 && str_contains($detailCsv['raw'], 'SKU'));
+    check('HTTP detail CSV export never contains a raw unescaped "=2+2" formula cell', str_contains($detailCsv['raw'], "'=2+2") && !preg_match('/(?<!\')=2\+2/', $detailCsv['raw']), $detailCsv['raw']);
+
+    $summaryCsv = httpCall('GET', "{$base}/reports/opname?format=csv&warehouse_id={$scmId}", null, $adminJar);
+    check('HTTP summary CSV export returns 200 text/csv with a UTF-8 BOM', $summaryCsv['status'] === 200 && str_starts_with($summaryCsv['raw'], "\xEF\xBB\xBF"));
+
+    echo "\n== print route ==\n";
+    $printResp = httpCall('GET', "{$base}/stock-opname/{$httpSessionId}/print", null, $adminJar);
+    check('HTTP stock opname print returns 200 with real HTML content and the AMOR logo', $printResp['status'] === 200 && str_contains($printResp['raw'], '<!DOCTYPE html>') && str_contains($printResp['raw'], '/assets/images/amor-logo.jpg'), substr($printResp['raw'], 0, 120));
+    check('HTTP stock opname print shows STOCK OPNAME title', str_contains($printResp['raw'], 'STOCK OPNAME'));
+} finally {
+    proc_terminate($process);
+    proc_close($process);
+}
+
+$bTotal = count($results) - $aTotal;
+$bPassed = count(array_filter($results)) - $aPassed;
+echo "\n-- Section (HTTP): {$bPassed} / {$bTotal} PASSED --\n";
+
+$total = count($results);
+$passed = count(array_filter($results));
 echo "\n==============================\n";
-echo "TOTAL: {$aTotal}  PASSED: {$aPassed}  FAILED: " . ($aTotal - $aPassed) . "\n";
-if ($aPassed < $aTotal) { exit(1); }
+echo "TOTAL: {$total}  PASSED: {$passed}  FAILED: " . ($total - $passed) . "\n";
+if ($passed < $total) { exit(1); }

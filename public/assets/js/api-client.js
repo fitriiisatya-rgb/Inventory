@@ -306,6 +306,18 @@ const InvApi = (() => {
         finalizeOpname: (id) => request('POST', `/stock-opname/${id}/finalize`),
         postOpname: (id, costOverrides) => request('POST', `/stock-opname/${id}/post`, { cost_overrides: costOverrides || {} }),
 
+        // ---- PHASE V2.12: dual-count (P1/P2 blind) Stock Opname ----
+        opnameEligibleCounters: (warehouseId) => request('GET', `/stock-opname/eligible-counters?warehouse_id=${warehouseId}`),
+        assignOpnameCounters: (id, assignments) => request('POST', `/stock-opname/${id}/assign-counters`, assignments),
+        submitOpnameCount: (id, role, itemId, countedQtyBase) => request('POST', `/stock-opname/${id}/count/${role}`, { item_id: itemId, counted_qty_base: countedQtyBase }),
+        opnameReview: (id) => request('GET', `/stock-opname/${id}/review`),
+        recountOpname: (id, itemId, countedQtyBase, reason) => request('POST', `/stock-opname/${id}/recount`, { item_id: itemId, counted_qty_base: countedQtyBase, reason }),
+        excludeOpnameItem: (id, itemId, reason) => request('POST', `/stock-opname/${id}/exclude`, { item_id: itemId, reason }),
+        cancelOpname: (id, reason) => request('POST', `/stock-opname/${id}/cancel`, { reason }),
+        opnamePrintUrl: (id) => `/api/stock-opname/${id}/print`,
+        opnameReportDetail: (id) => request('GET', `/reports/opname/${id}`),
+        opnameReportDetailExportUrl: (id) => `/api/reports/opname/${id}?format=csv`,
+
         // ---- stock adjustments ----
         postAdjustment: (payload) => request('POST', '/stock-adjustments', payload),
 

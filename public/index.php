@@ -59,6 +59,7 @@ require_once __DIR__ . '/../services/InventoryReconciliationReportService.php';
 require_once __DIR__ . '/../services/InventorySummaryReportService.php';
 require_once __DIR__ . '/../services/TransferReportService.php';
 require_once __DIR__ . '/../services/StockOpnameReportService.php';
+require_once __DIR__ . '/../services/StockOpnamePrintService.php';
 require_once __DIR__ . '/../services/AdjustmentReportService.php';
 require_once __DIR__ . '/../services/ExpiryReportService.php';
 require_once __DIR__ . '/../services/SlowMovementReportService.php';
@@ -127,6 +128,7 @@ use App\Services\InventoryReconciliationReportService;
 use App\Services\InventorySummaryReportService;
 use App\Services\TransferReportService;
 use App\Services\StockOpnameReportService;
+use App\Services\StockOpnamePrintService;
 use App\Services\AdjustmentReportService;
 use App\Services\ExpiryReportService;
 use App\Services\SlowMovementReportService;
@@ -1763,16 +1765,53 @@ $routes = [
             $whLabel = $warehouseId !== null ? ($pdo->query("SELECT code FROM warehouses WHERE id = {$warehouseId}")->fetchColumn() ?: 'ALL') : 'ALL';
             inv_export_csv(
                 ['laporan-stock-opname', $whLabel, (string) ($query['date_from'] ?? 'all'), (string) ($query['date_to'] ?? 'all')],
-                ['Sesi', 'Gudang', 'Tanggal Sesi', 'Status', 'Qty Sistem', 'Qty Dihitung', 'Selisih Qty', 'Selisih Nilai', 'Dibuat Oleh', 'Finalisasi'],
+                ['Sesi', 'Gudang', 'Tanggal Sesi', 'Status', 'P1', 'P2', 'Supervisor', 'Total Item', 'Match', 'Mismatch', 'Adjustment +', 'Adjustment -', 'Selisih Nilai', 'Posted Ref', 'Dibuat Oleh', 'Finalisasi'],
                 $result['rows'],
                 static fn (array $r) => [
-                    "OPN-{$r['id']}", $r['warehouse']['name'], $r['session_date'], $r['status'],
-                    $r['system_qty'], $r['counted_qty'], $r['variance_qty'], $r['variance_value'], $r['created_by'], $r['finalized_at'] ?? '',
+                    $r['session_number'] ?? "OPN-{$r['id']}", $r['warehouse']['name'], $r['session_date'], $r['status'],
+                    $r['p1'] ?? '-', $r['p2'] ?? '-', $r['supervisor'] ?? '-',
+                    $r['item_count'], $r['match_count'], $r['mismatch_count'],
+                    $r['adjustment_positive_value'], $r['adjustment_negative_value'], $r['variance_value'],
+                    $r['posted_transaction_ref'], $r['created_by'], $r['finalized_at'] ?? '',
                 ]
             );
         }
 
         inv_ok($result, 'OK');
+    },
+
+    // PHASE V2.12C: per-session detail (Section 21) — same permission and
+    // CSV convention as the summary report above.
+    'GET /reports/opname/{id}' => function (array $params) use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $sessionId = (int) $params['id'];
+        $wh = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $wh->execute(['id' => $sessionId]);
+        $warehouseId = $wh->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_warehouse_scope($user, (int) $warehouseId);
+
+        $detail = StockOpnameReportService::detail($pdo, $sessionId);
+
+        if (($query['format'] ?? '') === 'csv') {
+            inv_export_csv(
+                ['laporan-stock-opname-detail', $detail['session']['session_number'] ?? "OPN-{$sessionId}"],
+                ['SKU', 'Nama Barang', 'Satuan', 'Qty Sistem', 'P1', 'P2', 'Recount', 'Qty Final', 'Selisih', 'Nilai Selisih', 'Status', 'Catatan'],
+                $detail['lines'],
+                static fn (array $l) => [
+                    $l['sku'], $l['name'], $l['unit_code'] ?? '-', $l['system_qty_base'],
+                    $l['p1_qty_base'] ?? '', $l['p2_qty_base'] ?? '', $l['recount_qty_base'] ?? '',
+                    $l['final_physical_qty_base'] ?? '', $l['difference_qty_base'] ?? '', $l['difference_value'] ?? '',
+                    $l['match_status'], $l['notes'] ?? ($l['recount_reason'] ?? ''),
+                ]
+            );
+        }
+
+        inv_ok($detail, 'OK');
     },
 
     // Report 9 — Adjustment / Selisih.
@@ -2689,6 +2728,34 @@ $routes = [
         inv_ok($stmt->fetchAll(), 'OK');
     },
 
+    // PHASE V2.12A: candidate P1/P2 users for a warehouse — anyone active,
+    // STOCK_OPNAME_MANAGE-holding, and either unscoped or scoped to this
+    // exact warehouse (the same rule StockOpnameService::assignCounters()
+    // itself enforces server-side; this route only helps the UI populate a
+    // dropdown, never the actual authorization decision).
+    'GET /stock-opname/eligible-counters' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
+        $warehouseId = (int) ($query['warehouse_id'] ?? 0);
+        if ($warehouseId <= 0) {
+            throw new ValidationException(['warehouse_id is required']);
+        }
+        inv_require_warehouse_scope($user, $warehouseId);
+
+        $stmt = $pdo->prepare(
+            "SELECT DISTINCT u.id, u.username, u.full_name, r.code AS role_code
+             FROM users u
+             JOIN roles r ON r.id = u.role_id
+             JOIN role_permissions rp ON rp.role_id = r.id
+             JOIN permissions p ON p.id = rp.permission_id
+             WHERE p.code = 'STOCK_OPNAME_MANAGE' AND u.is_active = 1
+               AND (u.warehouse_id IS NULL OR u.warehouse_id = :wh)
+             ORDER BY u.username"
+        );
+        $stmt->execute(['wh' => $warehouseId]);
+        inv_ok($stmt->fetchAll(), 'OK');
+    },
+
     // PHASE V2.12A: full detail (system qty, both P1/P2, match_status) is
     // only ever handed to a supervisor (STOCK_OPNAME_SUPERVISE) or to a
     // caller viewing a legacy/not-yet-assigned session. A caller who IS
@@ -2992,6 +3059,21 @@ $routes = [
         );
 
         inv_ok($result, 'Opname session cancelled');
+    },
+
+    // PHASE V2.12C: print documents (clean A4 discrepancy report, Section 22).
+    'GET /stock-opname/{id}/print' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
+        $sessionId = (int) $params['id'];
+        $wh = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $wh->execute(['id' => $sessionId]);
+        $warehouseId = $wh->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_warehouse_scope($user, (int) $warehouseId);
+        inv_html(StockOpnamePrintService::renderResult($pdo, $sessionId));
     },
 
     // ---- Stock Adjustments (PHASE C2 Section 3) ----
