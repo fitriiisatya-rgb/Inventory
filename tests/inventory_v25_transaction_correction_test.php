@@ -30,6 +30,7 @@ require_once __DIR__ . '/../services/FifoService.php';
 require_once __DIR__ . '/../services/PeriodLockService.php';
 require_once __DIR__ . '/../services/WarehouseLockService.php';
 require_once __DIR__ . '/../services/StockAdjustmentService.php';
+require_once __DIR__ . '/../services/NumberingService.php';
 require_once __DIR__ . '/../services/StockOpnameService.php';
 require_once __DIR__ . '/../services/TransferService.php';
 require_once __DIR__ . '/../services/VoidService.php';
@@ -301,9 +302,14 @@ $session13 = StockOpnameService::start($pdo, $whOpname, $superadmin, [$item13]);
 StockOpnameService::count($pdo, $session13, [$item13 => 44], $superadmin); // variance -6
 StockOpnameService::finalize($pdo, $session13, $superadmin);
 $reflection13 = new ReflectionClass(StockOpnameService::class);
-check('StockOpnameService exposes no direct "void/delete a FINALIZED session" method — correction is only via post()\'s ADJUSTMENT', !$reflection13->hasMethod('void') && !$reflection13->hasMethod('delete') && !$reflection13->hasMethod('cancel'));
+check('StockOpnameService exposes no direct "void/delete a session" method at all — even the PHASE V2.12 cancel() (pre-POST only, reason-required, audit-logged) never rewrites a POSTED session', !$reflection13->hasMethod('void') && !$reflection13->hasMethod('delete'));
 $postResult13 = StockOpnameService::post($pdo, $session13, $superadmin);
 check('Stock = 44kg after opname posts its variance as a real ADJUSTMENT', approx(InventoryService::currentStock($pdo, $item13, $whOpname)['qty_base'], 44));
+$cancelAfterPostRejected = null;
+try {
+    StockOpnameService::cancel($pdo, $session13, 'trying to cancel after POST', $superadmin);
+} catch (ValidationException $e) { $cancelAfterPostRejected = $e->getMessage(); }
+check('PHASE V2.12: cancel() explicitly refuses a POSTED session — correction is only via post()\'s ADJUSTMENT (Section 23)', $cancelAfterPostRejected !== null, (string) $cancelAfterPostRejected);
 $opnameAdjTxId13 = (int) $postResult13['adjustments'][0]['transaction_id'];
 $opnameAdjTx13 = $pdo->prepare('SELECT transaction_type FROM inventory_transactions WHERE id = :id');
 $opnameAdjTx13->execute(['id' => $opnameAdjTxId13]);

@@ -2631,7 +2631,10 @@ $routes = [
         inv_html(DistributionPrintService::renderInvoice($pdo, (int) $params['id']));
     },
 
-    // ---- Stock Opname (PHASE C2 Section 2) ----
+    // ---- Stock Opname (PHASE C2 Section 2 legacy single-count, PHASE
+    // V2.12 dual-count P1/P2 blind counting — see StockOpnameService's
+    // class docblock for how the two modes coexist on one schema without
+    // ever mixing on the same session) ----
     'POST /stock-opname' => function () use ($pdo, $input) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
@@ -2686,30 +2689,37 @@ $routes = [
         inv_ok($stmt->fetchAll(), 'OK');
     },
 
+    // PHASE V2.12A: full detail (system qty, both P1/P2, match_status) is
+    // only ever handed to a supervisor (STOCK_OPNAME_SUPERVISE) or to a
+    // caller viewing a legacy/not-yet-assigned session. A caller who IS
+    // this specific session's assigned P1 or P2 counter gets the blind
+    // view instead — the same identity that could otherwise call this
+    // exact route and see the other side's count (Section 4).
     'GET /stock-opname/{id}' => function (array $params) use ($pdo) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
 
         $sessionId = (int) $params['id'];
 
-        $scope = $pdo->prepare(
-            'SELECT warehouse_id
-             FROM stock_opname_sessions
-             WHERE id = :id'
-        );
+        $scope = $pdo->prepare('SELECT warehouse_id, p1_user_id, p2_user_id FROM stock_opname_sessions WHERE id = :id');
         $scope->execute(['id' => $sessionId]);
-        $warehouseId = $scope->fetchColumn();
+        $sessionRow = $scope->fetch();
 
-        if ($warehouseId === false) {
+        if ($sessionRow === false) {
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
 
-        inv_require_warehouse_scope($user, (int) $warehouseId);
+        inv_require_warehouse_scope($user, (int) $sessionRow['warehouse_id']);
 
-        inv_ok(
-            StockOpnameService::get($pdo, $sessionId),
-            'OK'
-        );
+        $canSupervise = AuthService::hasPermission($pdo, $user['role_code'], 'STOCK_OPNAME_SUPERVISE');
+        if (!$canSupervise && $sessionRow['p1_user_id'] !== null && (int) $sessionRow['p1_user_id'] === (int) $user['id']) {
+            inv_ok(StockOpnameService::getForCounter($pdo, $sessionId, 'p1'), 'OK');
+        }
+        if (!$canSupervise && $sessionRow['p2_user_id'] !== null && (int) $sessionRow['p2_user_id'] === (int) $user['id']) {
+            inv_ok(StockOpnameService::getForCounter($pdo, $sessionId, 'p2'), 'OK');
+        }
+
+        inv_ok(StockOpnameService::get($pdo, $sessionId), 'OK');
     },
 
     'POST /stock-opname/{id}/count' => function (array $params) use ($pdo, $input) {
@@ -2753,9 +2763,149 @@ $routes = [
         );
     },
 
-    'POST /stock-opname/{id}/finalize' => function (array $params) use ($pdo) {
+    // PHASE V2.12A: assign the two independent blind counters. Warehouse-
+    // scoped the same as every other opname route; STOCK_OPNAME_MANAGE is
+    // enough (the creator/any operational warehouse user can set up the
+    // pairing) — StockOpnameService::assignCounters() itself re-validates
+    // that each candidate is actually authorized and warehouse-scoped.
+    'POST /stock-opname/{id}/assign-counters' => function (array $params) use ($pdo, $input) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
+
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_warehouse_scope($user, (int) $warehouseId);
+
+        $assignments = [];
+        if (array_key_exists('p1_user_id', $input)) { $assignments['p1_user_id'] = $input['p1_user_id'] !== null ? (int) $input['p1_user_id'] : null; }
+        if (array_key_exists('p2_user_id', $input)) { $assignments['p2_user_id'] = $input['p2_user_id'] !== null ? (int) $input['p2_user_id'] : null; }
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::assignCounters($tx, $sessionId, $assignments, $user['id'])
+        );
+
+        inv_ok($result, 'Counters assigned');
+    },
+
+    // PHASE V2.12A: blind, one-item-at-a-time submission (Section 6/16 —
+    // barcode-scan friendly). {role} is 'p1' or 'p2'; the service itself
+    // enforces that the caller IS that session's assigned counter.
+    'POST /stock-opname/{id}/count/{role}' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
+
+        $sessionId = (int) $params['id'];
+        $role = (string) $params['role'];
+        if (!in_array($role, ['p1', 'p2'], true)) {
+            inv_error(404, 'NOT_FOUND', 'unknown counting role');
+        }
+
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_warehouse_scope($user, (int) $warehouseId);
+
+        $itemId = (int) ($input['item_id'] ?? 0);
+        if ($itemId <= 0) {
+            throw new ValidationException(['item_id is required']);
+        }
+        if (!isset($input['counted_qty_base'])) {
+            throw new ValidationException(['counted_qty_base is required']);
+        }
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::submitCount($tx, $sessionId, $role, $itemId, (float) $input['counted_qty_base'], $user['id'])
+        );
+
+        inv_ok($result, 'Count recorded');
+    },
+
+    // PHASE V2.12B: supervisor comparison/review dashboard (Section 11).
+    'GET /stock-opname/{id}/review' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_warehouse_scope($user, (int) $warehouseId);
+
+        inv_ok(StockOpnameService::review($pdo, $sessionId), 'OK');
+    },
+
+    // PHASE V2.12B: recount a MISMATCH item — supervisor-only (Section 9,
+    // "preferably supervisor").
+    'POST /stock-opname/{id}/recount' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_warehouse_scope($user, (int) $warehouseId);
+
+        $itemId = (int) ($input['item_id'] ?? 0);
+        if ($itemId <= 0) {
+            throw new ValidationException(['item_id is required']);
+        }
+        if (!isset($input['counted_qty_base'])) {
+            throw new ValidationException(['counted_qty_base is required']);
+        }
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::recount($tx, $sessionId, $itemId, (float) $input['counted_qty_base'], (string) ($input['reason'] ?? ''), $user['id'])
+        );
+
+        inv_ok($result, 'Recount recorded');
+    },
+
+    // PHASE V2.12B: supervisor excuses a still-unresolved item from
+    // blocking finalize (Section 10).
+    'POST /stock-opname/{id}/exclude' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_warehouse_scope($user, (int) $warehouseId);
+
+        $itemId = (int) ($input['item_id'] ?? 0);
+        if ($itemId <= 0) {
+            throw new ValidationException(['item_id is required']);
+        }
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::excludeUncounted($tx, $sessionId, $itemId, (string) ($input['reason'] ?? ''), $user['id'])
+        );
+
+        inv_ok($result, 'Item excluded');
+    },
+
+    // PHASE V2.12B: FINALIZE is a supervisory action (Section 11/19).
+    'POST /stock-opname/{id}/finalize' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
 
         $sessionId = (int) $params['id'];
 
@@ -2784,9 +2934,10 @@ $routes = [
         inv_ok($result, 'Opname finalized');
     },
 
+    // PHASE V2.12B: POST is a supervisory action (Section 12/19).
     'POST /stock-opname/{id}/post' => function (array $params) use ($pdo, $input) {
         $user = inv_require_auth();
-        inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
 
         $sessionId = (int) $params['id'];
 
@@ -2819,6 +2970,28 @@ $routes = [
         );
 
         inv_ok($result, 'Opname posted');
+    },
+
+    // PHASE V2.12B: cancellation before POST — supervisory action
+    // (Section 23).
+    'POST /stock-opname/{id}/cancel' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_warehouse_scope($user, (int) $warehouseId);
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::cancel($tx, $sessionId, (string) ($input['reason'] ?? ''), $user['id'])
+        );
+
+        inv_ok($result, 'Opname session cancelled');
     },
 
     // ---- Stock Adjustments (PHASE C2 Section 3) ----

@@ -673,11 +673,27 @@ CREATE TABLE stock_opname_sessions (
     warehouse_id    INT UNSIGNED NOT NULL,
     session_date    DATE NOT NULL,
     session_uuid    CHAR(36) NOT NULL UNIQUE,
+    -- PHASE V2.12A: SO-YYYYMMDD-#### via NumberingService, nullable only
+    -- because a pre-V2.12A row never had one.
+    session_number  VARCHAR(30) NULL,
+    -- PHASE V2.12A: ALL_ACTIVE_STOCK mirrors the legacy start($itemIds=null)
+    -- behavior (every non-zero batch scanned in); SELECTED_ITEMS mirrors an
+    -- explicit item_ids list.
+    scope           ENUM('ALL_ACTIVE_STOCK','SELECTED_ITEMS') NOT NULL DEFAULT 'ALL_ACTIVE_STOCK',
     -- OPEN: counting in progress: FINALIZED: counts locked, variance computed,
     -- awaiting review/post; POSTED: adjustments created, session closed.
     -- Movement in `warehouse_id` is blocked while status IN ('OPEN','FINALIZED').
+    -- PHASE V2.12A: OPEN now also covers the dual-count P1/P2/compare/
+    -- recount continuum — see StockOpnameService docblock for why no extra
+    -- session-level status was added for that (the per-line match_status
+    -- below carries that granularity instead).
     status          ENUM('OPEN','FINALIZED','POSTED','CANCELLED') NOT NULL DEFAULT 'OPEN',
     created_by      INT UNSIGNED NOT NULL,
+    -- PHASE V2.12A: independent blind counters — enforced distinct by
+    -- chk_sos_p1_p2_different below AND by the service layer (Section 3).
+    p1_user_id      INT UNSIGNED NULL,
+    p2_user_id      INT UNSIGNED NULL,
+    supervisor_id   INT UNSIGNED NULL,
     finalized_by    INT UNSIGNED NULL,
     finalized_at    DATETIME NULL,
     posted_by       INT UNSIGNED NULL,
@@ -687,9 +703,14 @@ CREATE TABLE stock_opname_sessions (
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_sos_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
     CONSTRAINT fk_sos_creator FOREIGN KEY (created_by) REFERENCES users(id),
+    CONSTRAINT fk_sos_p1_user FOREIGN KEY (p1_user_id) REFERENCES users(id),
+    CONSTRAINT fk_sos_p2_user FOREIGN KEY (p2_user_id) REFERENCES users(id),
+    CONSTRAINT fk_sos_supervisor FOREIGN KEY (supervisor_id) REFERENCES users(id),
     CONSTRAINT fk_sos_finalizer FOREIGN KEY (finalized_by) REFERENCES users(id),
     CONSTRAINT fk_sos_poster FOREIGN KEY (posted_by) REFERENCES users(id),
     CONSTRAINT fk_sos_canceller FOREIGN KEY (cancelled_by) REFERENCES users(id),
+    CONSTRAINT chk_sos_p1_p2_different CHECK (p1_user_id IS NULL OR p2_user_id IS NULL OR p1_user_id <> p2_user_id),
+    UNIQUE KEY uq_sos_session_number (session_number),
     INDEX idx_sos_active_warehouse (warehouse_id, status)
 ) ENGINE=InnoDB
 COMMENT='Only one OPEN/FINALIZED session per warehouse should exist at a time — enforced in StockOpnameService, not by a DB constraint (a partial-uniqueness need MySQL cannot express directly without the same generated-column trick as item_unit_conversions; left to the service layer here since it also has to explain itself in the API error).';
@@ -699,17 +720,47 @@ CREATE TABLE stock_opname_lines (
     session_id          INT UNSIGNED NOT NULL,
     item_id             INT UNSIGNED NOT NULL,
     system_qty_base     DECIMAL(20,6) NOT NULL,          -- snapshotted at session start (StockOpnameService::start)
-    counted_qty_base    DECIMAL(20,6) NULL,              -- NULL until /count submits a physical count
+    -- PHASE V2.12A: independent blind entries. NULL = NOT_COUNTED,
+    -- 0.000000 = COUNTED_ZERO — never conflated (Section 10).
+    p1_qty_base          DECIMAL(20,6) NULL,
+    p1_user_id           INT UNSIGNED NULL,
+    p1_submitted_at       DATETIME NULL,
+    p2_qty_base          DECIMAL(20,6) NULL,
+    p2_user_id           INT UNSIGNED NULL,
+    p2_submitted_at       DATETIME NULL,
+    -- PHASE V2.12A: only ever populated for a MISMATCH line, by an
+    -- authorized recount user (Section 9) — original P1/P2 above are never
+    -- overwritten.
+    recount_qty_base      DECIMAL(20,6) NULL,
+    recount_user_id       INT UNSIGNED NULL,
+    recount_submitted_at   DATETIME NULL,
+    recount_reason        VARCHAR(255) NULL,
+    -- counted_qty_base is the RESOLVED final physical quantity (P1/P2 once
+    -- MATCH, else the recount result once RECOUNTED) — legacy finalize()/
+    -- post() below read only this column and variance_qty_base, unchanged
+    -- since before V2.12A.
+    counted_qty_base    DECIMAL(20,6) NULL,              -- NULL until resolved (legacy: NULL until /count submits a physical count)
+    -- PHASE V2.12A: PENDING (not both counted) / MATCH / MISMATCH (needs
+    -- recount) / RECOUNTED / EXCLUDED (supervisor excused, Section 10).
+    match_status         ENUM('PENDING','MATCH','MISMATCH','RECOUNTED','EXCLUDED') NOT NULL DEFAULT 'PENDING',
+    is_excluded          TINYINT(1) NOT NULL DEFAULT 0,
+    excluded_by           INT UNSIGNED NULL,
+    excluded_at           DATETIME NULL,
     is_counted          TINYINT(1) NOT NULL DEFAULT 0,
     variance_qty_base   DECIMAL(20,6) NULL,              -- counted - system, computed at /finalize
     unit_cost_base      DECIMAL(20,4) NOT NULL,           -- system cost at session start (used for OUT variance)
     adjustment_id       BIGINT UNSIGNED NULL,             -- link once variance is posted as a stock_adjustment
     cost_required       TINYINT(1) NOT NULL DEFAULT 0,    -- true when variance is IN and no reliable cost exists yet
     override_cost_base  DECIMAL(20,4) NULL,               -- admin-supplied cost when cost_required was flagged
-    notes               VARCHAR(255) NULL,
+    notes               VARCHAR(255) NULL,                -- also holds the exclusion reason when is_excluded=1
     CONSTRAINT fk_sol2_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
     CONSTRAINT fk_sol2_item FOREIGN KEY (item_id) REFERENCES items(id),
-    UNIQUE KEY uq_sol2_session_item (session_id, item_id)
+    CONSTRAINT fk_sol_p1_user FOREIGN KEY (p1_user_id) REFERENCES users(id),
+    CONSTRAINT fk_sol_p2_user FOREIGN KEY (p2_user_id) REFERENCES users(id),
+    CONSTRAINT fk_sol_recount_user FOREIGN KEY (recount_user_id) REFERENCES users(id),
+    CONSTRAINT fk_sol_excluded_by FOREIGN KEY (excluded_by) REFERENCES users(id),
+    UNIQUE KEY uq_sol2_session_item (session_id, item_id),
+    INDEX idx_sol_match_status (session_id, match_status)
 ) ENGINE=InnoDB;
 
 CREATE TABLE stock_adjustments (
@@ -1250,7 +1301,15 @@ INSERT INTO permissions (code, description) VALUES
     -- PHASE V2.11C: revenue/margin/category/bakery distribution reports.
     -- ADMIN/SUPERADMIN inherit automatically; STOCK/DIVISION/VIEWER never
     -- get this, per the owner's explicit instruction.
-    ('DISTRIBUTION_REPORT_VIEW', 'View SCM -> Bakery revenue/margin/category/bakery distribution reports');
+    ('DISTRIBUTION_REPORT_VIEW', 'View SCM -> Bakery revenue/margin/category/bakery distribution reports'),
+    -- PHASE V2.12A: dual-count Stock Opname supervisory tier (review the
+    -- P1/P2 comparison, exclude an uncounted item, finalize, post, cancel).
+    -- STOCK_OPNAME_MANAGE (existing) stays the operational tier — open a
+    -- session, assign P1/P2, submit P1/P2/recount counts. ADMIN/SUPERADMIN
+    -- inherit automatically; STOCK never gets this, matching the
+    -- DISTRIBUTION_DISPATCH-vs-DISTRIBUTION_APPROVE split already
+    -- established in V2.11A.
+    ('STOCK_OPNAME_SUPERVISE', 'Review dual-count comparison, exclude uncounted items, finalize and post stock opname sessions');
 
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r CROSS JOIN permissions p WHERE r.code = 'SUPERADMIN';
