@@ -4,13 +4,25 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Inventory Pro</title>
-<!-- PHASE V2.2: deterministic cache-busting — every CSS/JS tag below shares
-     this same ?v= value, bumped once per release (not per file). A new
-     deploy that bumps this forces a fresh fetch of every asset in the same
-     request wave, so Chrome/Safari never mix an old JS file with new CSS
-     (or vice versa) after a deployment; leaving it unchanged between
-     deploys still lets the browser cache normally. -->
-<link rel="stylesheet" href="assets/css/app.css?v=20260923">
+<!-- PHASE V2.2 (HOTFIX post-274dc78, Section D): deterministic cache-busting
+     — every CSS/JS/image tag below shares this SAME ?v= value, bumped once
+     per RELEASE (not per file, not per calendar day). A new deploy that
+     bumps this forces a fresh fetch of every asset in the same request
+     wave, so Chrome/Safari never mix an old JS file with new CSS (or vice
+     versa) after a deployment; leaving it unchanged between deploys still
+     lets the browser cache normally.
+
+     ROOT-CAUSE HOTFIX: this value used to be a bare YYYYMMDD date
+     (e.g. "20260923"). Several releases shipped on the SAME calendar date
+     during V2.10-V2.12 development, so a browser that had already cached
+     an earlier same-day deploy's CSS/JS never re-fetched a later same-day
+     deploy — stale sidebar/item-selector CSS kept being served after the
+     fix for it had already shipped. The format is now YYYYMMDD-NN, where
+     NN is a per-day release sequence number (01 for the first release on
+     a date, 02 for a second release the SAME day, etc.) — NEVER leave
+     this as a bare date, and NEVER reuse a value that has already been
+     shipped once, even earlier the same day. -->
+<link rel="stylesheet" href="assets/css/app.css?v=20260924-01">
 </head>
 <body>
 
@@ -48,7 +60,7 @@
              fixed 1672:941 composition doesn't stay legible or tappable
              once scaled down to phone width. -->
         <div class="login-image-frame" aria-hidden="true">
-            <img src="assets/images/login-bg.png?v=20260923" class="login-bg-image" alt="">
+            <img src="assets/images/login-bg.png?v=20260924-01" class="login-bg-image" alt="">
         </div>
         <div class="login-card" id="login-card">
             <div class="login-card-logo">📦</div>
@@ -76,7 +88,7 @@
             </div>
         </div>
         <div class="login-mascot-wrap">
-            <img src="assets/images/fa-mascot.png?v=20260923" class="login-mascot" alt="Maskot FA Inventory Pro" width="420" height="420">
+            <img src="assets/images/fa-mascot.png?v=20260924-01" class="login-mascot" alt="Maskot FA Inventory Pro" width="420" height="420">
             <div class="login-speech-bubble">Halo!<br><small>Siap kelola Inventory hari ini?</small></div>
         </div>
     </div>
@@ -298,57 +310,57 @@
     </div>
 </div>
 
-<script src="assets/js/api-client.js?v=20260923"></script>
-<script src="assets/js/ui.js?v=20260923"></script>
-<script src="assets/js/modal.js?v=20260923"></script>
-<script src="assets/js/drawer.js?v=20260923"></script>
-<script src="assets/js/data-table.js?v=20260923"></script>
-<script src="assets/js/auth.js?v=20260923"></script>
-<script src="assets/js/master.js?v=20260923"></script>
-<script src="assets/js/item-selector.js?v=20260923"></script>
-<script src="assets/js/dashboard.js?v=20260923"></script>
-<script src="assets/js/stock-report.js?v=20260923"></script>
-<script src="assets/js/reports.js?v=20260923"></script>
-<script src="assets/js/transactions.js?v=20260923"></script>
-<script src="assets/js/transaction-history.js?v=20260923"></script>
-<script src="assets/js/transfers.js?v=20260923"></script>
-<script src="assets/js/distribution-orders.js?v=20260923"></script>
-<script src="assets/js/distribution-pricing.js?v=20260923"></script>
-<script src="assets/js/distribution-invoices.js?v=20260923"></script>
-<script src="assets/js/distribution-reports.js?v=20260923"></script>
-<script src="assets/js/production.js?v=20260923"></script>
-<script src="assets/js/stock-opname.js?v=20260923"></script>
-<script src="assets/js/adjustments.js?v=20260923"></script>
-<script src="assets/js/closing.js?v=20260923"></script>
-<script src="assets/js/imports.js?v=20260923"></script>
-<script src="assets/js/audit.js?v=20260923"></script>
-<script src="assets/js/master-common.js?v=20260923"></script>
-<script src="assets/js/master-categories.js?v=20260923"></script>
-<script src="assets/js/master-vendors.js?v=20260923"></script>
-<script src="assets/js/master-bakery-destinations.js?v=20260923"></script>
-<script src="assets/js/master-items.js?v=20260923"></script>
-<script src="assets/js/master-warehouses.js?v=20260923"></script>
-<script src="assets/js/master-divisions.js?v=20260923"></script>
-<script src="assets/js/trace-drawer.js?v=20260923"></script>
-<script src="assets/js/trace-center.js?v=20260923"></script>
-<script src="assets/js/stock-card.js?v=20260923"></script>
-<script src="assets/js/report-common.js?v=20260923"></script>
-<script src="assets/js/report-hpp.js?v=20260923"></script>
-<script src="assets/js/report-summary.js?v=20260923"></script>
-<script src="assets/js/report-movement.js?v=20260923"></script>
-<script src="assets/js/report-reconciliation.js?v=20260923"></script>
-<script src="assets/js/report-stock.js?v=20260923"></script>
-<script src="assets/js/report-purchase.js?v=20260923"></script>
-<script src="assets/js/report-supplier.js?v=20260923"></script>
-<script src="assets/js/report-inout.js?v=20260923"></script>
-<script src="assets/js/report-bakery.js?v=20260923"></script>
-<script src="assets/js/report-transfer.js?v=20260923"></script>
-<script src="assets/js/report-opname.js?v=20260923"></script>
-<script src="assets/js/report-adjustment.js?v=20260923"></script>
-<script src="assets/js/report-expiry.js?v=20260923"></script>
-<script src="assets/js/report-slow-movement.js?v=20260923"></script>
-<script src="assets/js/report-audit.js?v=20260923"></script>
-<script src="assets/js/sidebar.js?v=20260923"></script>
-<script src="assets/js/app.js?v=20260923"></script>
+<script src="assets/js/api-client.js?v=20260924-01"></script>
+<script src="assets/js/ui.js?v=20260924-01"></script>
+<script src="assets/js/modal.js?v=20260924-01"></script>
+<script src="assets/js/drawer.js?v=20260924-01"></script>
+<script src="assets/js/data-table.js?v=20260924-01"></script>
+<script src="assets/js/auth.js?v=20260924-01"></script>
+<script src="assets/js/master.js?v=20260924-01"></script>
+<script src="assets/js/item-selector.js?v=20260924-01"></script>
+<script src="assets/js/dashboard.js?v=20260924-01"></script>
+<script src="assets/js/stock-report.js?v=20260924-01"></script>
+<script src="assets/js/reports.js?v=20260924-01"></script>
+<script src="assets/js/transactions.js?v=20260924-01"></script>
+<script src="assets/js/transaction-history.js?v=20260924-01"></script>
+<script src="assets/js/transfers.js?v=20260924-01"></script>
+<script src="assets/js/distribution-orders.js?v=20260924-01"></script>
+<script src="assets/js/distribution-pricing.js?v=20260924-01"></script>
+<script src="assets/js/distribution-invoices.js?v=20260924-01"></script>
+<script src="assets/js/distribution-reports.js?v=20260924-01"></script>
+<script src="assets/js/production.js?v=20260924-01"></script>
+<script src="assets/js/stock-opname.js?v=20260924-01"></script>
+<script src="assets/js/adjustments.js?v=20260924-01"></script>
+<script src="assets/js/closing.js?v=20260924-01"></script>
+<script src="assets/js/imports.js?v=20260924-01"></script>
+<script src="assets/js/audit.js?v=20260924-01"></script>
+<script src="assets/js/master-common.js?v=20260924-01"></script>
+<script src="assets/js/master-categories.js?v=20260924-01"></script>
+<script src="assets/js/master-vendors.js?v=20260924-01"></script>
+<script src="assets/js/master-bakery-destinations.js?v=20260924-01"></script>
+<script src="assets/js/master-items.js?v=20260924-01"></script>
+<script src="assets/js/master-warehouses.js?v=20260924-01"></script>
+<script src="assets/js/master-divisions.js?v=20260924-01"></script>
+<script src="assets/js/trace-drawer.js?v=20260924-01"></script>
+<script src="assets/js/trace-center.js?v=20260924-01"></script>
+<script src="assets/js/stock-card.js?v=20260924-01"></script>
+<script src="assets/js/report-common.js?v=20260924-01"></script>
+<script src="assets/js/report-hpp.js?v=20260924-01"></script>
+<script src="assets/js/report-summary.js?v=20260924-01"></script>
+<script src="assets/js/report-movement.js?v=20260924-01"></script>
+<script src="assets/js/report-reconciliation.js?v=20260924-01"></script>
+<script src="assets/js/report-stock.js?v=20260924-01"></script>
+<script src="assets/js/report-purchase.js?v=20260924-01"></script>
+<script src="assets/js/report-supplier.js?v=20260924-01"></script>
+<script src="assets/js/report-inout.js?v=20260924-01"></script>
+<script src="assets/js/report-bakery.js?v=20260924-01"></script>
+<script src="assets/js/report-transfer.js?v=20260924-01"></script>
+<script src="assets/js/report-opname.js?v=20260924-01"></script>
+<script src="assets/js/report-adjustment.js?v=20260924-01"></script>
+<script src="assets/js/report-expiry.js?v=20260924-01"></script>
+<script src="assets/js/report-slow-movement.js?v=20260924-01"></script>
+<script src="assets/js/report-audit.js?v=20260924-01"></script>
+<script src="assets/js/sidebar.js?v=20260924-01"></script>
+<script src="assets/js/app.js?v=20260924-01"></script>
 </body>
 </html>

@@ -98,8 +98,23 @@ const StockOpname = (() => {
             }
 
             if (session.status === 'OPEN') {
-                body.appendChild(await buildAssignCountersCard(session));
-                if (!session.p1_user_id || !session.p2_user_id) {
+                // HOTFIX (post-274dc78): workflow_mode is an explicit,
+                // server-derived field (session_number !== null => a real
+                // V2.12+ session, ALWAYS dual-count) — never inferred from
+                // whether P1/P2 happen to be assigned yet. A brand-new
+                // dual-count session starts with both null, which used to
+                // be misread as "legacy" and rendered the single-count
+                // form by mistake.
+                if (session.workflow_mode === 'DUAL_COUNT') {
+                    body.appendChild(await buildAssignCountersCard(session));
+                    if (canSupervise()) {
+                        body.appendChild(await buildSupervisorReviewCard(session));
+                    } else {
+                        body.appendChild(UI.el('div', { class: 'card' }, [
+                            UI.el('div', { class: 'alert alert-info' }, 'P1 dan P2 sedang menghitung fisik. Hubungi supervisor untuk melihat perbandingan hasil hitung.'),
+                        ]));
+                    }
+                } else {
                     body.appendChild(buildCountForm(session));
                     setTimeout(() => {
                         const saveBtn = document.getElementById('opname-save-count-btn');
@@ -107,12 +122,6 @@ const StockOpname = (() => {
                         if (saveBtn) saveBtn.addEventListener('click', saveCounts);
                         if (finBtn) finBtn.addEventListener('click', finalizeOpname);
                     }, 0);
-                } else if (canSupervise()) {
-                    body.appendChild(await buildSupervisorReviewCard(session));
-                } else {
-                    body.appendChild(UI.el('div', { class: 'card' }, [
-                        UI.el('div', { class: 'alert alert-info' }, 'P1 dan P2 sedang menghitung fisik. Hubungi supervisor untuk melihat perbandingan hasil hitung.'),
-                    ]));
                 }
             } else if (session.status === 'FINALIZED') {
                 body.appendChild(buildFinalizedView(session));
@@ -346,21 +355,25 @@ const StockOpname = (() => {
         wrap.appendChild(kpiBox);
 
         const rows = review.lines.map((l) => {
+            const diffP1P2 = (l.p1_qty_base !== null && l.p2_qty_base !== null)
+                ? UI.formatNumber(Number(l.p1_qty_base) - Number(l.p2_qty_base))
+                : '-';
             const cells = [
                 UI.el('td', {}, `${l.sku} — ${l.name}`),
                 UI.el('td', {}, UI.formatNumber(l.system_qty_base)),
                 UI.el('td', {}, l.p1_qty_base !== null ? UI.formatNumber(l.p1_qty_base) : '-'),
                 UI.el('td', {}, l.p2_qty_base !== null ? UI.formatNumber(l.p2_qty_base) : '-'),
-                UI.el('td', {}, [UI.el('span', { class: `badge ${badgeClassFor(l.match_status)}` }, l.match_status)]),
+                UI.el('td', {}, diffP1P2),
+                UI.el('td', {}, [UI.el('span', { class: `badge ${badgeClassFor(l.match_status, l.is_excluded)}` }, keteranganFor(l))]),
                 UI.el('td', {}, l.final_physical_qty_base !== null ? UI.formatNumber(l.final_physical_qty_base) : '-'),
             ];
             const actionCell = UI.el('td', {});
-            if (l.match_status === 'MISMATCH') {
+            if (!l.is_excluded && l.match_status === 'MISMATCH') {
                 const recountBtn = UI.el('button', { class: 'btn btn-warning btn-sm' }, 'Recount');
                 recountBtn.addEventListener('click', () => recountItem(session.id, l));
                 actionCell.appendChild(recountBtn);
             }
-            if (l.match_status === 'PENDING' || l.match_status === 'MISMATCH') {
+            if (!l.is_excluded && (l.match_status === 'PENDING' || l.match_status === 'MISMATCH')) {
                 const excludeBtn = UI.el('button', { class: 'btn btn-secondary btn-sm', style: 'margin-left:6px;' }, 'Kecualikan');
                 excludeBtn.addEventListener('click', () => excludeItem(session.id, l));
                 actionCell.appendChild(excludeBtn);
@@ -369,12 +382,18 @@ const StockOpname = (() => {
             return UI.el('tr', {}, cells);
         });
 
+        const cancelBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Batalkan Sesi');
+        cancelBtn.addEventListener('click', cancelOpname);
+
         wrap.appendChild(UI.el('div', { class: 'card' }, [
-            UI.el('div', { class: 'card-title' }, 'Perbandingan P1 vs P2'),
+            UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center;' }, [
+                UI.el('div', { class: 'card-title' }, 'Perbandingan P1 vs P2'),
+                cancelBtn,
+            ]),
             UI.el('div', { class: 'table-wrapper' }, [
                 UI.el('table', {}, [
-                    UI.el('thead', {}, [UI.el('tr', {}, ['Barang', 'Sistem', 'P1', 'P2', 'Status', 'Final', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
-                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '7' }, '-')])]),
+                    UI.el('thead', {}, [UI.el('tr', {}, ['Barang', 'Stok Sistem', 'Hasil P1', 'Hasil P2', 'Selisih P1-P2', 'Keterangan', 'Hasil Final/Recount', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
+                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '8' }, '-')])]),
                 ]),
             ]),
         ]));
@@ -397,10 +416,36 @@ const StockOpname = (() => {
         return wrap;
     }
 
-    function badgeClassFor(status) {
+    /**
+     * HOTFIX (post-274dc78) — exact per-state Keterangan text for the
+     * DUAL_COUNT supervisor comparison table, shown from OPEN status
+     * onward (even before P1/P2 are assigned or have counted anything —
+     * every session line already exists from start()). match_status stays
+     * PENDING both when NEITHER counter has submitted yet and when only
+     * ONE has (StockOpnameService::resolveMatchStatus never distinguishes
+     * those two at the DB level), so this reads p1_qty_base/p2_qty_base
+     * directly to tell them apart for display only — never touches
+     * server-side match resolution.
+     */
+    function keteranganFor(l) {
+        if (l.is_excluded) return 'Dikecualikan oleh supervisor';
+        switch (l.match_status) {
+            case 'MATCH': return 'Sesuai (Hasil P1 = Hasil P2)';
+            case 'MISMATCH': return 'Selisih P1 ≠ P2 — perlu recount';
+            case 'RECOUNTED': return 'Sudah direcount oleh supervisor';
+            case 'EXCLUDED': return 'Dikecualikan oleh supervisor';
+            default:
+                if (l.p1_qty_base === null && l.p2_qty_base === null) return 'Belum dihitung';
+                if (l.p1_qty_base === null) return 'Menunggu hasil P1';
+                if (l.p2_qty_base === null) return 'Menunggu hasil P2';
+                return 'Belum dihitung';
+        }
+    }
+
+    function badgeClassFor(status, isExcluded) {
+        if (isExcluded || status === 'EXCLUDED') return 'badge-cancelled';
         if (status === 'MATCH' || status === 'RECOUNTED') return 'badge-pass';
         if (status === 'MISMATCH') return 'badge-void';
-        if (status === 'EXCLUDED') return 'badge-cancelled';
         return 'badge-warning';
     }
 

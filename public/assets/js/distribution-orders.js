@@ -7,8 +7,11 @@
  * This module never computes/mutates inventory itself — every number
  * shown after an action comes straight from what the API returned.
  *
- * Create form reuses ItemSelector (searchable item + barcode, same
- * component as Stock IN/OUT) for each line — never a giant item dropdown.
+ * Create form (HOTFIX, post-274dc78): a compact header + a single Quick
+ * Add bar (one ItemSelector instance — searchable item + barcode, same
+ * component as Stock IN/OUT — re-mounted fresh after every add) feeding
+ * an Order Lines table, so adding dozens of real bakery-delivery items
+ * never renders one full form block per line.
  *
  * Pricing/Invoice (Phase V2.11B) and the polished receiving UI/discrepancy
  * workflow/print documents (Phase V2.11C) are NOT part of this module yet
@@ -17,8 +20,21 @@
  */
 const DistributionOrders = (() => {
     let dtHandle = null;
-    const lineSelectors = new Map(); // idx -> ItemSelector controller
-    let lineCount = 0;
+    // HOTFIX (post-274dc78) — Quick Add + Order Lines Table (Section C):
+    // one single ItemSelector instance backs the Quick Add bar (re-mounted
+    // fresh after every add), never one ItemSelector per already-added
+    // line. `quickAddLines` holds the collected rows; DistributionOrderService
+    // itself is untouched — this is purely how the frontend collects lines
+    // before calling create().
+    let quickAddSelectorCtl = null;
+    let quickAddSelectorHost = null;
+    let quickAddQtyInput = null;
+    let quickAddWasValid = false;
+    let quickAddLines = []; // [{ itemId, unitId, sku, name, unitCode, qty, stockBaseQty }]
+    let quickAddLinesHost = null;
+    let quickAddSummaryHost = null;
+    let scmWarehouseId = null;
+    const stockCache = new Map(); // itemId -> qty_base at SCM (best-effort, display only)
 
     function canManage(permission) {
         return Auth.hasPermission(permission);
@@ -41,10 +57,20 @@ const DistributionOrders = (() => {
     // Create form
     // ============================================================
     function buildCreateForm() {
-        lineSelectors.clear();
-        lineCount = 0;
+        quickAddLines = [];
+        quickAddWasValid = false;
+        stockCache.clear();
+        const scm = Master.warehouses().find((w) => w.code === 'SCM');
+        scmWarehouseId = scm ? Number(scm.id) : null;
+
         const bakeryOptions = Master.bakeryDestinations().filter((b) => b.is_active)
             .map((b) => `<option value="${b.id}">${b.name}</option>`).join('');
+
+        quickAddSelectorHost = UI.el('div', { style: 'flex:1 1 320px; min-width:220px;' });
+        quickAddQtyInput = UI.el('input', { type: 'number', min: '0', step: 'any', placeholder: 'Qty', style: 'width:120px;' });
+        const addBtn = UI.el('button', { class: 'btn btn-primary btn-sm', type: 'button' }, 'Tambah');
+        quickAddLinesHost = UI.el('div');
+        quickAddSummaryHost = UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center; margin-top:12px;' });
 
         const card = UI.el('div', { class: 'card' }, [
             UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '🚛 Buat Delivery Order Baru (SCM → Bakery)')]),
@@ -59,33 +85,129 @@ const DistributionOrders = (() => {
                 <div class="form-group"><label>No. Kendaraan (opsional)</label><input type="text" id="do-vehicle"></div>
                 <div class="form-group"><label>Catatan Pengiriman (opsional)</label><input type="text" id="do-delivery-notes"></div>
             ` }),
-            UI.el('div', { id: 'do-lines' }),
-            UI.el('button', { class: 'btn btn-secondary btn-sm', id: 'do-add-line' }, '+ Tambah Barang'),
-            UI.el('div', { style: 'margin-top:14px;' }, [
-                UI.el('button', { class: 'btn btn-primary', id: 'do-submit-btn' }, 'Simpan Delivery Order (Draft)'),
+            UI.el('div', { class: 'card', style: 'padding:10px; margin-top:10px; display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;' }, [
+                quickAddSelectorHost,
+                UI.el('div', { class: 'form-group', style: 'margin:0;' }, [UI.el('label', {}, 'Qty'), quickAddQtyInput]),
+                addBtn,
             ]),
+            quickAddLinesHost,
+            quickAddSummaryHost,
         ]);
-        setTimeout(() => {
-            addLine();
-            document.getElementById('do-add-line').addEventListener('click', addLine);
-            document.getElementById('do-submit-btn').addEventListener('click', () => submitCreate(card));
-        }, 0);
+
+        addBtn.addEventListener('click', () => addFromQuickAdd());
+        quickAddQtyInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); addFromQuickAdd(); }
+        });
+
+        remountQuickAddSelector();
+        renderQuickAddLines();
         return card;
     }
 
-    function addLine() {
-        const idx = lineCount++;
-        const itemSelectorHost = UI.el('div');
-        const qtyInput = UI.el('input', { type: 'number', min: '0', step: 'any' });
-        const row = UI.el('div', { class: 'grid-3', id: `do-line-${idx}` }, [
-            itemSelectorHost,
-            UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Jumlah'), qtyInput]),
-        ]);
-        document.getElementById('do-lines').appendChild(row);
-        const selector = ItemSelector.mount(itemSelectorHost, {
-            onChange: () => { /* state read directly from selector.getState() at submit time */ },
+    // Re-mounts a fresh ItemSelector into the Quick Add bar's host — this
+    // is the ONE selector instance the whole create form ever has, reset
+    // after every successful add so the search box is empty and ready for
+    // the next scan/type, with focus back on it (Section C's fast-entry
+    // loop: scan -> Enter selects -> unit auto-fills -> focus jumps to Qty
+    // -> Enter on Qty adds the row and resets focus back to search).
+    function remountQuickAddSelector() {
+        if (quickAddSelectorCtl) quickAddSelectorCtl.destroy();
+        quickAddWasValid = false;
+        quickAddSelectorCtl = ItemSelector.mount(quickAddSelectorHost, {
+            onChange: (state) => {
+                if (!quickAddWasValid && state.valid && state.itemId) {
+                    quickAddQtyInput.value = '';
+                    quickAddQtyInput.focus();
+                }
+                quickAddWasValid = state.valid;
+            },
         });
-        lineSelectors.set(idx, { selector, qtyInput });
+    }
+
+    function addFromQuickAdd() {
+        const state = quickAddSelectorCtl.getState();
+        if (!state.valid || !state.itemId) { UI.toast(ItemSelector.MESSAGES.PICK_FROM_RESULTS, 'error'); quickAddSelectorCtl.focus(); return; }
+        if (!state.unitId) { UI.toast('Satuan wajib dipilih.', 'error'); return; }
+        const qty = Number(quickAddQtyInput.value);
+        if (!(qty > 0)) { UI.toast('Jumlah harus lebih dari 0.', 'error'); quickAddQtyInput.focus(); return; }
+
+        const item = state.item || Master.itemById(state.itemId);
+        const unit = (state.units || []).find((u) => String(u.id) === String(state.unitId));
+
+        // Duplicate item+unit: merge into the existing row instead of
+        // silently adding a second row for the same thing.
+        const existing = quickAddLines.find((l) => l.itemId === state.itemId && l.unitId === state.unitId);
+        if (existing) {
+            existing.qty += qty;
+            UI.toast(`Qty digabung ke baris ${existing.sku} yang sudah ada (total ${UI.formatNumber(existing.qty)}).`, 'info');
+        } else {
+            quickAddLines.push({
+                itemId: state.itemId, unitId: state.unitId,
+                sku: item ? item.sku : '', name: item ? item.name : '',
+                unitCode: unit ? unit.code : '', qty,
+                stockBaseQty: stockCache.has(state.itemId) ? stockCache.get(state.itemId) : undefined,
+            });
+            loadStockFor(state.itemId);
+        }
+
+        renderQuickAddLines();
+        remountQuickAddSelector();
+        quickAddSelectorCtl.focus();
+    }
+
+    async function loadStockFor(itemId) {
+        if (stockCache.has(itemId) || !scmWarehouseId) return;
+        try {
+            const stock = await InvApi.currentStock(itemId, scmWarehouseId);
+            stockCache.set(itemId, Number(stock.qty_base));
+        } catch (err) {
+            stockCache.set(itemId, null); // fetch failed — show '-' rather than retrying forever
+        }
+        quickAddLines.forEach((l) => { if (l.itemId === itemId) l.stockBaseQty = stockCache.get(itemId); });
+        renderQuickAddLines();
+    }
+
+    function renderQuickAddLines() {
+        quickAddLinesHost.innerHTML = '';
+        quickAddSummaryHost.innerHTML = '';
+        if (quickAddLines.length === 0) {
+            quickAddLinesHost.appendChild(UI.el('div', { class: 'alert alert-info', style: 'margin-top:10px;' }, 'Belum ada barang. Cari/scan barang di atas untuk menambahkan.'));
+        } else {
+            const rows = quickAddLines.map((l, idx) => {
+                const qtyInput = UI.el('input', { type: 'number', min: '0', step: 'any', value: String(l.qty), style: 'width:100px;' });
+                qtyInput.addEventListener('change', () => {
+                    const v = Number(qtyInput.value);
+                    l.qty = v > 0 ? v : l.qty;
+                    qtyInput.value = String(l.qty);
+                    renderQuickAddLines();
+                });
+                const removeBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, '✕');
+                removeBtn.addEventListener('click', () => {
+                    quickAddLines.splice(idx, 1);
+                    renderQuickAddLines();
+                });
+                return UI.el('tr', {}, [
+                    UI.el('td', {}, String(idx + 1)),
+                    UI.el('td', {}, l.sku),
+                    UI.el('td', {}, l.name),
+                    UI.el('td', {}, l.unitCode),
+                    UI.el('td', {}, qtyInput),
+                    UI.el('td', {}, l.stockBaseQty === undefined ? 'Memuat...' : (l.stockBaseQty === null ? '-' : UI.formatNumber(l.stockBaseQty))),
+                    UI.el('td', {}, removeBtn),
+                ]);
+            });
+            quickAddLinesHost.appendChild(UI.el('div', { class: 'table-wrapper', style: 'margin-top:10px;' }, [
+                UI.el('table', {}, [
+                    UI.el('thead', {}, [UI.el('tr', {}, ['No.', 'SKU', 'Nama Barang', 'Satuan', 'Qty', 'Stok SCM', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
+                    UI.el('tbody', {}, rows),
+                ]),
+            ]));
+        }
+
+        quickAddSummaryHost.appendChild(UI.el('div', { style: 'color:var(--text3); font-size:0.9rem;' }, `${quickAddLines.length} jenis barang`));
+        const saveBtn = UI.el('button', { class: 'btn btn-primary', id: 'do-submit-btn' }, 'Simpan Delivery Order (Draft)');
+        saveBtn.addEventListener('click', () => submitCreate(saveBtn.closest('.card')));
+        quickAddSummaryHost.appendChild(saveBtn);
     }
 
     async function submitCreate(card) {
@@ -94,21 +216,15 @@ const DistributionOrders = (() => {
         const doDate = document.getElementById('do-date').value;
         const bakeryId = document.getElementById('do-bakery').value;
         if (!bakeryId) { UI.toast('Bakery tujuan wajib dipilih.', 'error'); return; }
-
-        const lines = [];
-        for (const [, entry] of lineSelectors) {
-            const state = entry.selector.getState();
-            const qty = Number(entry.qtyInput.value);
-            if (!state.itemId && !qty) continue; // an untouched extra row is simply skipped
-            if (!state.valid || !state.itemId) { UI.toast(ItemSelector.MESSAGES.PICK_FROM_RESULTS, 'error'); return; }
-            if (!state.unitId) { UI.toast('Satuan wajib dipilih untuk setiap baris.', 'error'); return; }
-            if (!(qty > 0)) { UI.toast('Jumlah setiap baris harus lebih dari 0.', 'error'); return; }
-            lines.push({ item_id: state.itemId, input_qty: qty, input_unit_id: state.unitId });
+        if (quickAddLines.length === 0) { UI.toast('Minimal satu baris barang wajib diisi.', 'error'); return; }
+        for (const l of quickAddLines) {
+            if (!(l.qty > 0)) { UI.toast(`Jumlah untuk ${l.sku} harus lebih dari 0.`, 'error'); return; }
         }
-        if (lines.length === 0) { UI.toast('Minimal satu baris barang wajib diisi.', 'error'); return; }
 
         const scm = Master.warehouses().find((w) => w.code === 'SCM');
         if (!scm) { UI.toast('Gudang SCM tidak ditemukan pada master data.', 'error'); return; }
+
+        const lines = quickAddLines.map((l) => ({ item_id: l.itemId, input_qty: l.qty, input_unit_id: l.unitId }));
 
         try {
             const result = await InvApi.createDistributionOrder({

@@ -96,7 +96,27 @@ final class StockOpnameService
         );
         $lines->execute(['id' => $sessionId]);
         $session['lines'] = $lines->fetchAll();
+        self::attachWorkflowMode($session);
         return $session;
+    }
+
+    /**
+     * HOTFIX (post-274dc78) — a session's dual-count/legacy nature must
+     * never be inferred from whether P1/P2 happen to be assigned yet: a
+     * brand-new V2.12+ session starts with both NULL, which is
+     * indistinguishable from a pre-V2.12 legacy session on that signal
+     * alone. session_number is only ever populated by start() from
+     * V2.12A onward (via NumberingService) and is never backfilled onto
+     * pre-existing rows, so it is the correct, permanent discriminator:
+     * NULL = genuinely legacy (created before dual-count existed), never
+     * NULL = a real V2.12+ session, always DUAL_COUNT regardless of
+     * whether P1/P2 have been assigned or have counted yet.
+     */
+    private static function attachWorkflowMode(array &$session): void
+    {
+        $isLegacy = $session['session_number'] === null;
+        $session['is_legacy'] = $isLegacy;
+        $session['workflow_mode'] = $isLegacy ? 'LEGACY_SINGLE' : 'DUAL_COUNT';
     }
 
     /**
@@ -410,6 +430,8 @@ final class StockOpnameService
             }
         }
         $summary['estimated_adjustment_value'] = round($summary['estimated_adjustment_value'], 4);
+
+        self::attachWorkflowMode($session);
 
         return [
             'session' => $session,
