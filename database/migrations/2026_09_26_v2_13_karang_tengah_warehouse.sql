@@ -1,8 +1,8 @@
 -- ============================================================================
--- Inventory FIFO Pro — V2.13 Karang Tengah: add the warehouse master record
--- ONLY. This migration adds a single row to `warehouses` and touches
--- NOTHING else — no inventory_batches, no item_unit_conversions, no
--- opening stock, no historical transactions, no FIFO layers.
+-- Inventory FIFO Pro — V2.13 Karang Tengah: add the warehouse master record,
+-- plus a GENERIC activation-lock column on `warehouses`. Touches NOTHING
+-- else — no inventory_batches, no item_unit_conversions, no opening stock,
+-- no historical transactions, no FIFO layers.
 --
 -- Karang Tengah is modeled exactly like Cibadak: warehouse_type = TRANSIT,
 -- receiving from GUDANG_BESAR (a.k.a. SCM) via the existing, fully generic
@@ -14,8 +14,26 @@
 -- level restriction). Inventing a second, parallel relationship model for
 -- Karang Tengah alone would contradict "treat Karang Tengah like Cibadak."
 --
--- is_active = 0 (INACTIVE) on insert, matching the explicit "do not
--- activate production yet" requirement:
+-- V2.13.1 SAFETY PATCH: `activation_locked` is a GENERIC warehouses column,
+-- not a Karang-Tengah-only field. It exists to make an accidental
+-- activation of a warehouse whose cutover has not been approved a hard,
+-- server-enforced impossibility — not merely a UI convention. Any warehouse
+-- with activation_locked = 1 cannot have is_active flipped 0 -> 1 through
+-- PUT /warehouses/{id} (see public/index.php), whatever permission the
+-- caller holds; see services/WarehouseGuardService.php's
+-- WAREHOUSE_ACTIVATION_LOCKED behavior. There is no unlock endpoint or UI
+-- action in this release — unlocking is a separate, later, explicitly-
+-- approved controlled-cutover change.
+--
+-- ADD COLUMN IF NOT EXISTS is idempotent and safe to re-run on a database
+-- that already has the column. DEFAULT 0 means every existing warehouse
+-- row (GUDANG_BESAR/SCM, CIBADAK, and any other pre-existing warehouse) is
+-- populated with activation_locked = 0 automatically the moment the column
+-- is added — no separate UPDATE is required, and none is safer than
+-- relying on the column DEFAULT applying to all pre-existing rows.
+--
+-- is_active = 0 (INACTIVE) and activation_locked = 1 on insert, matching
+-- the explicit "do not activate production yet" requirement:
 --   - every read path in this codebase that lists warehouses for
 --     reporting/reconciliation already filters `is_active = 1`
 --     (InventoryService::currentStockAllWarehouses(),
@@ -28,24 +46,45 @@
 --     Master.warehouses() — filter `is_active = 1` for every role, not
 --     only STOCK-scoped ones, and makes every stock-mutating service
 --     path (FifoService::postIn/postOut, TransferService::create(),
---     StockOpnameService::start()) reject an inactive warehouse
---     outright. Karang Tengah therefore cannot appear in an operational
---     dropdown or accept any stock mutation until a human flips
---     is_active to 1 in a separate, later, explicitly-approved step.
+--     StockOpnameService::start(), StockAdjustmentService::post()) reject
+--     an inactive warehouse outright. Karang Tengah therefore cannot
+--     appear in an operational dropdown or accept any stock mutation
+--     until a human flips is_active to 1 in a separate, later, explicitly
+--     approved step — and, as of this patch, that flip is itself refused
+--     server-side by PUT /warehouses/{id} while activation_locked = 1.
 --   - Master Gudang (the admin warehouse-management screen) reads
 --     GET /warehouses/report, which already supports listing inactive
 --     rows (it has its own explicit "INACTIVE" status filter) — so this
 --     new row IS visible there immediately, as required ("Read-only
---     Master Warehouse may still display it").
+--     Master Warehouse may still display it"), now additionally labeled
+--     "CUTOVER LOCKED".
 --
--- Idempotent: INSERT IGNORE against warehouses.code (UNIQUE) — safe to
--- re-run, and safe on a database that already has this row.
+-- Idempotent: ADD COLUMN IF NOT EXISTS + INSERT IGNORE against
+-- warehouses.code (UNIQUE) — safe to re-run, and safe on a database that
+-- already has this column and/or this row.
+--
+-- IMPORTANT — PRODUCTION DEPLOY PREFLIGHT (not a runtime check in this
+-- SQL file, but a mandatory manual step before running it — see
+-- _DEPLOY_META/PRODUCTION_DEPLOY_STEPS.txt): before applying this
+-- migration, run
+--   SELECT * FROM warehouses WHERE code = 'KARANG_TENGAH';
+-- against the production database. If this UNEXPECTEDLY already returns a
+-- row, STOP — do not run this migration until that existing row's
+-- attributes (name, warehouse_type, is_active, activation_locked) have
+-- been manually inspected and confirmed to be what this release expects.
+-- INSERT IGNORE alone is not treated as sufficient correctness proof for a
+-- pre-existing, unexpected row — it silently keeps whatever is already
+-- there rather than asserting it matches.
 --
 -- Changes ZERO inventory quantity, ZERO inventory value. No
 -- inventory_batches row is created by this migration; company-wide
 -- inventory qty/value is provably unchanged (see
--- tests/inventory_v2_13_karang_tengah_test.php Section B).
+-- tests/inventory_v2_13_karang_tengah_test.php Section A/A0 and the new
+-- tests/inventory_v2_13_1_activation_lock_test.php).
 -- ============================================================================
 
-INSERT IGNORE INTO warehouses (code, name, warehouse_type, is_active)
-VALUES ('KARANG_TENGAH', 'Gudang Karang Tengah', 'TRANSIT', 0);
+ALTER TABLE warehouses
+    ADD COLUMN IF NOT EXISTS activation_locked TINYINT(1) NOT NULL DEFAULT 0 AFTER is_active;
+
+INSERT IGNORE INTO warehouses (code, name, warehouse_type, is_active, activation_locked)
+VALUES ('KARANG_TENGAH', 'Gudang Karang Tengah', 'TRANSIT', 0, 1);

@@ -86,6 +86,8 @@ use App\Services\PriceAnomalyException;
 use App\Services\PeriodLockedException;
 use App\Services\WarehouseLockedException;
 use App\Services\WarehouseInactiveException;
+use App\Services\WarehouseActivationLockedException;
+use App\Services\WarehouseGuardService;
 use App\Services\CostRequiredException;
 use App\Services\UnitConversionNotApprovedException;
 use App\Services\NegativeMigrationStockRequiresAdjustmentException;
@@ -327,6 +329,7 @@ set_exception_handler(function (Throwable $e) use ($path) {
         PeriodLockedException::class              => ['code' => 423, 'label' => 'PERIOD_LOCKED'],
         WarehouseLockedException::class           => ['code' => 423, 'label' => 'OPNAME_ACTIVE'],
         WarehouseInactiveException::class         => ['code' => 422, 'label' => 'WAREHOUSE_INACTIVE'],
+        WarehouseActivationLockedException::class => ['code' => 422, 'label' => 'WAREHOUSE_ACTIVATION_LOCKED'],
         CostRequiredException::class              => ['code' => 422, 'label' => 'COST_REQUIRED'],
         UnitConversionNotApprovedException::class => ['code' => 422, 'label' => 'UNIT_CONVERSION_NOT_APPROVED'],
         NegativeMigrationStockRequiresAdjustmentException::class => ['code' => 422, 'label' => 'NEGATIVE_MIGRATION_STOCK_REQUIRES_ADJUSTMENT'],
@@ -3743,6 +3746,16 @@ $routes = [
             throw new ValidationException(['name cannot be blank']);
         }
         $isActive = array_key_exists('is_active', $input) ? (int) (bool) $input['is_active'] : (int) $before['is_active'];
+
+        // PHASE V2.13.1: generic, server-side activation lock — enforced
+        // here regardless of the caller's MASTER_WAREHOUSE_MANAGE
+        // permission, and regardless of what the UI does or doesn't show.
+        WarehouseGuardService::assertActivationAllowed(
+            $whId,
+            (int) $before['is_active'],
+            (int) $before['activation_locked'],
+            $isActive
+        );
 
         $pdo->prepare('UPDATE warehouses SET name = :n, is_active = :a WHERE id = :id')
             ->execute(['n' => $name, 'a' => $isActive, 'id' => $whId]);

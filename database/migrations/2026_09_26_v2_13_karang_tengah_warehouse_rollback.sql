@@ -11,7 +11,18 @@
 -- warehouse master row is no longer a schema-only operation and this
 -- rollback must not be used (restore a database backup instead, per the
 -- same convention documented in the 2c04d30->274dc78 release's own
--- ROLLBACK_PLAN.txt).
+-- ROLLBACK_PLAN.txt). Empirically verified against a real dependent
+-- inventory_batches fixture (see the V2.13 release package's
+-- ROLLBACK_PLAN.txt for the exact test performed).
+--
+-- V2.13.1: this rollback intentionally does NOT drop the `activation_locked`
+-- column added by the forward migration. That column is now a generic,
+-- reusable warehouses attribute (not Karang-Tengah-specific) — every other
+-- warehouse already has activation_locked = 0 via the column's own
+-- DEFAULT, so leaving the column in place after removing the KARANG_TENGAH
+-- row is inert and harmless. Dropping a column is a materially different,
+-- more invasive operation than deleting one row and is out of scope for
+-- this rollback.
 --
 -- Safe to run multiple times (a row that's already gone is simply not
 -- matched again).

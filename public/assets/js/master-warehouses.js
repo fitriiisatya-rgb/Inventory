@@ -11,9 +11,24 @@
  * which only ever returns is_active=1 rows).
  * Edit is limited to name/is_active — code and warehouse_type are
  * immutable master data.
+ *
+ * PHASE V2.13.1: a warehouse can also be activation_locked (a GENERIC
+ * flag, not Karang-Tengah-specific). This is a UI convenience only — the
+ * real enforcement is server-side in PUT /warehouses/{id} — so this file
+ * just avoids presenting an "Aktifkan" action that the server would
+ * refuse anyway, and explains why. There is no unlock action anywhere in
+ * this UI; unlocking is a separate, later, explicitly-approved change.
  */
 const MasterWarehouses = (() => {
     let dtHandle = null;
+
+    /** row.is_active / row.activation_locked -> a small status badge. */
+    function statusDisplay(row) {
+        if (!row.is_active && row.activation_locked) {
+            return UI.el('span', { class: 'badge badge-cancelled', title: 'Gudang belum dapat diaktifkan karena proses cutover belum selesai.' }, 'Tidak Aktif — Cutover Terkunci');
+        }
+        return MasterCommon.statusBadge(row.is_active);
+    }
 
     function render(container) {
         container.innerHTML = '';
@@ -42,7 +57,7 @@ const MasterWarehouses = (() => {
                 { key: 'sku_count', label: 'Active SKU', sortable: true, render: (r) => UI.formatNumber(r.sku_count, 0) },
                 { key: 'qty', label: 'Qty on Hand', sortable: true, render: (r) => UI.formatNumber(r.qty_on_hand) },
                 { key: 'value', label: 'Inventory Value', sortable: true, render: (r) => UI.formatMoney(r.inventory_value) },
-                { key: 'is_active', label: 'Status', render: (r) => MasterCommon.statusBadge(r.is_active) },
+                { key: 'is_active', label: 'Status', render: (r) => statusDisplay(r) },
                 { key: 'actions', label: 'Aksi', render: (r) => buildActions(r, canManage) },
             ],
             fetchPage: async ({ page, perPage, sort, dir, filters: f }) => {
@@ -70,7 +85,11 @@ const MasterWarehouses = (() => {
             { label: 'Detail', onClick: () => openDetail(row) },
             { label: 'Lihat Jejak', onClick: () => TraceDrawer.openEntity('warehouse', row.id) },
             canManage ? { label: 'Edit', onClick: () => openEdit(row) } : null,
-            canManage ? { label: row.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(row) } : null,
+            canManage ? (
+                !row.is_active && row.activation_locked
+                    ? { label: 'Aktifkan (Cutover Terkunci)', disabled: true }
+                    : { label: row.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(row) }
+            ) : null,
             canManage ? { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(row) } : null,
         ]);
     }
@@ -86,20 +105,29 @@ const MasterWarehouses = (() => {
                     ['Active SKU', UI.formatNumber(row.sku_count, 0)],
                     ['Qty on Hand', UI.formatNumber(row.qty_on_hand)],
                     ['Inventory Value', UI.formatMoney(row.inventory_value)],
-                    ['Status', MasterCommon.statusBadge(row.is_active)],
+                    ['Status', statusDisplay(row)],
+                    ['Cutover Locked', row.activation_locked ? 'Ya' : 'Tidak'],
                 ])));
             },
         });
     }
 
     async function openEdit(row) {
+        // A locked+inactive warehouse can still be renamed — only the
+        // ACTIVE choice is withheld here (the server would refuse it
+        // anyway; this just avoids a round-trip error for an action the
+        // UI already knows is impossible).
+        const locked = !row.is_active && row.activation_locked;
+        const statusOptions = locked
+            ? [{ value: 'INACTIVE', label: 'Tidak Aktif — Cutover Terkunci' }]
+            : [{ value: 'ACTIVE', label: 'Aktif' }, { value: 'INACTIVE', label: 'Tidak Aktif' }];
         const values = await MasterCommon.formModal({
             title: `✏️ Edit Gudang: ${row.name}`,
             submitLabel: 'Simpan',
             initial: { name: row.name, is_active: row.is_active ? 'ACTIVE' : 'INACTIVE' },
             fields: [
                 { key: 'name', label: 'Nama Gudang', type: 'text', required: true },
-                { key: 'is_active', label: 'Status', type: 'select', allowEmpty: false, options: [{ value: 'ACTIVE', label: 'Aktif' }, { value: 'INACTIVE', label: 'Tidak Aktif' }] },
+                { key: 'is_active', label: 'Status', type: 'select', allowEmpty: false, options: statusOptions },
             ],
         });
         if (!values) return;

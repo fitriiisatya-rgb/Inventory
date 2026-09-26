@@ -90,6 +90,12 @@ CREATE TABLE warehouses (
     -- transfer behavior, which is driven by explicit transfer records.
     warehouse_type  ENUM('MAIN','TRANSIT') NOT NULL DEFAULT 'MAIN',
     is_active       TINYINT(1)   NOT NULL DEFAULT 1,
+    -- PHASE V2.13.1: generic activation lock — independent of is_active.
+    -- A warehouse with activation_locked = 1 can never have is_active
+    -- flipped 0 -> 1 via PUT /warehouses/{id}, however permissioned the
+    -- caller is (see services/WarehouseGuardService.php). Not tied to any
+    -- specific warehouse; a fresh install has every row at the default 0.
+    activation_locked TINYINT(1) NOT NULL DEFAULT 0,
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;

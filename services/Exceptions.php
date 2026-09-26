@@ -137,6 +137,22 @@ final class WarehouseInactiveException extends RuntimeException
     }
 }
 
+/**
+ * PHASE V2.13.1: a generic, server-enforced activation lock — the target
+ * warehouse has activation_locked = 1, so PUT /warehouses/{id} refuses an
+ * is_active 0 -> 1 transition regardless of the caller's permissions.
+ * Not Karang-Tengah-specific: any warehouse can carry this flag. Unlocking
+ * is not exposed through any endpoint in this release. Error code:
+ * WAREHOUSE_ACTIVATION_LOCKED.
+ */
+final class WarehouseActivationLockedException extends RuntimeException
+{
+    public function __construct(public readonly int $warehouseId)
+    {
+        parent::__construct('Gudang belum dapat diaktifkan karena proses cutover belum selesai.');
+    }
+}
+
 /** PHASE C3: too many recent failed logins for this username/IP. */
 final class RateLimitedException extends RuntimeException
 {
