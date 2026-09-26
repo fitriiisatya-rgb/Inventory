@@ -3893,11 +3893,22 @@ $routes = [
     // codebase's existing pattern for irreversible/high-risk actions
     // (System Health, User/Role trace, TRANSACTION_VOID_LOCKED_PERIOD,
     // etc.). Development/staging use only — see this section's docblock.
-    'POST /warehouse-cutovers/{id}/load' => function (array $params) use ($pdo) {
+    'POST /warehouse-cutovers/{id}/load' => function (array $params) use ($pdo, $config) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'WAREHOUSE_CUTOVER_MANAGE');
         if ($user['role_code'] !== 'SUPERADMIN') {
             inv_error(403, 'FORBIDDEN', 'Loading a cutover opening balance is restricted to SUPERADMIN');
+        }
+        // PHASE V2.14.2 — pre-deploy safety hotfix: a hard, backend-
+        // authoritative block on posting a real opening balance while
+        // APP_ENV=production (the config default when unset — i.e. this
+        // fails closed, not open), checked BEFORE loadOpening() ever runs.
+        // SUPERADMIN cannot bypass this. Local/test/trial/staging
+        // environments (any APP_ENV other than the literal string
+        // 'production') are unaffected. Lifted only by an explicit future
+        // release once the organization approves a real production cutover.
+        if (($config['app']['env'] ?? 'production') === 'production') {
+            inv_error(422, 'CUTOVER_LOAD_DISABLED', 'Load opening production belum diaktifkan. Gunakan release cutover yang telah disetujui.');
         }
         $result = WarehouseCutoverService::loadOpening($pdo, (int) $params['id'], $user['id'], $user['username']);
         inv_ok($result, 'Opening balance loaded');
