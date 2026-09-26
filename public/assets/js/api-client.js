@@ -162,6 +162,17 @@ const InvApi = (() => {
         updateDivision: (id, payload) => request('PUT', `/divisions/${id}`, payload),
         deleteDivision: (id) => request('DELETE', `/divisions/${id}`),
 
+        // ---- PHASE V2.14: generic warehouse cutover workflow ----
+        createWarehouseCutover: (payload) => request('POST', '/warehouse-cutovers', payload),
+        getWarehouseCutover: (id) => request('GET', `/warehouse-cutovers/${id}`),
+        warehouseCutoverLines: (id, params = {}) => request('GET', `/warehouse-cutovers/${id}/lines${qs(params)}`),
+        importWarehouseCutover: (id, filePath) => request('POST', `/warehouse-cutovers/${id}/import`, { file_path: filePath }),
+        matchWarehouseCutoverItems: (id) => request('POST', `/warehouse-cutovers/${id}/match-items`),
+        resolveWarehouseCutoverLine: (id, lineId, payload) => request('PUT', `/warehouse-cutovers/${id}/lines/${lineId}`, payload),
+        approveWarehouseCutover: (id) => request('POST', `/warehouse-cutovers/${id}/approve`),
+        previewWarehouseCutoverOpening: (id) => request('GET', `/warehouse-cutovers/${id}/preview`),
+        loadWarehouseCutoverOpening: (id) => request('POST', `/warehouse-cutovers/${id}/load`),
+
         // ---- PHASE V2.2: Trace Center (read-only) ----
         traceSearch: (q, type) => request('GET', `/trace/search${qs({ q, type })}`),
         traceEvents: (params = {}) => request('GET', `/trace/events${qs(params)}`),

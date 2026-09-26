@@ -61,7 +61,7 @@
 
     const TAB_LABELS = {
         dashboard: 'Dashboard', 'stok-barang': 'Stok Barang',
-        'master-item': 'Master Barang', 'master-warehouse': 'Master Gudang', 'master-division': 'Master Divisi',
+        'master-item': 'Master Barang', 'master-warehouse': 'Master Gudang', 'warehouse-cutover': 'Karang Tengah Cutover', 'master-division': 'Master Divisi',
         'master-vendor': 'Vendor / Supplier', 'master-bakery': 'Bakery Tujuan', 'master-category': 'Kategori',
         'trace-center': 'Trace Center',
         laporan: 'Mutasi Stok / Ledger', 'history-transaksi': 'History Transaksi', transaksi: 'Stock IN / OUT',
@@ -92,6 +92,8 @@
             MasterItems.render(document.getElementById('tab-master-item'));
         } else if (name === 'master-warehouse') {
             MasterWarehouses.render(document.getElementById('tab-master-warehouse'));
+        } else if (name === 'warehouse-cutover') {
+            WarehouseCutover.render(document.getElementById('tab-warehouse-cutover'));
         } else if (name === 'master-division') {
             MasterDivisions.render(document.getElementById('tab-master-division'));
         } else if (name === 'master-vendor') {

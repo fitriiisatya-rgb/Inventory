@@ -22,7 +22,25 @@ final class FifoService
      * previously-created one if $transactionUuid was already posted
      * (Section 12 idempotency).
      */
-    public static function postIn(PDO $pdo, array $p): array
+    /**
+     * @param bool $bypassInactiveWarehouseGuard PHASE V2.14 — a genuine
+     *   typed parameter, never an array key: every route in this codebase
+     *   that reaches postIn() from a raw HTTP request forwards its $input
+     *   array close to verbatim (e.g. POST /transactions/in), so any
+     *   bypass keyed off $p[...] would be directly settable by an
+     *   authenticated client's own JSON body — unlike bypass_warehouse_lock
+     *   above (a narrower, lower-stakes concern), this guard is the one
+     *   thing standing between "warehouse not yet live" and a real posted
+     *   transaction, so it must be structurally unreachable from request
+     *   input. Only WarehouseCutoverService::loadOpening() ever passes
+     *   true here, and only after independently re-verifying the target
+     *   warehouse is_active=0 AND activation_locked=1 immediately before
+     *   the call — i.e. this bypass only ever fires for a warehouse that
+     *   has already been confirmed not-yet-live, loading a human-approved
+     *   opening balance into it, never a warehouse anyone could still
+     *   mistake for a normal operational target.
+     */
+    public static function postIn(PDO $pdo, array $p, bool $bypassInactiveWarehouseGuard = false): array
     {
         assert_required_fields($p, ['transaction_uuid', 'item_id', 'warehouse_id', 'input_qty', 'input_unit_id', 'unit_price_input', 'transaction_date', 'created_by']);
 
@@ -40,11 +58,17 @@ final class FifoService
         if (empty($p['bypass_warehouse_lock'])) {
             WarehouseLockService::assertNotLocked($pdo, $p['warehouse_id']);
         }
-        // PHASE V2.13: unconditional, never bypassed — an inactive warehouse
-        // (e.g. Karang Tengah before go-live) can never be a stock-mutating
-        // source or destination, regardless of bypass_warehouse_lock (which
-        // only ever concerns the opname lock above, a different concern).
-        WarehouseGuardService::assertActive($pdo, $p['warehouse_id']);
+        // PHASE V2.13: unconditional for every ordinary caller, regardless
+        // of bypass_warehouse_lock (which only ever concerns the opname
+        // lock above, a different concern) — an inactive warehouse (e.g.
+        // Karang Tengah before go-live) can never be a stock-mutating
+        // source or destination. PHASE V2.14: the one narrow, structurally
+        // request-unreachable exception is $bypassInactiveWarehouseGuard
+        // (see this method's own docblock) for a controlled cutover
+        // opening load.
+        if (!$bypassInactiveWarehouseGuard) {
+            WarehouseGuardService::assertActive($pdo, $p['warehouse_id']);
+        }
 
         // A real purchase must have price > 0 (Section 9). The one documented exception is a
         // reviewed, explicitly-flagged zero-cost Opening Stock line (ImportOpeningStockService) —

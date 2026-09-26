@@ -1230,6 +1230,79 @@ CREATE TABLE import_rows (
     INDEX idx_ir_batch (import_batch_id, row_status)
 ) ENGINE=InnoDB;
 
+-- PHASE V2.14: generic (not warehouse-specific) controlled cutover
+-- mechanism — see database/migrations/2026_09_26_v2_14_karang_tengah_cutover.sql
+-- for the full design rationale.
+CREATE TABLE warehouse_cutovers (
+    id                   INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    warehouse_id         INT UNSIGNED NOT NULL,
+    status               ENUM('DRAFT','VALIDATED','REVIEW_REQUIRED','RECONCILED','APPROVED','LOADED','ACTIVATED') NOT NULL DEFAULT 'DRAFT',
+    source_name          VARCHAR(255) NOT NULL,
+    source_period_start  DATE NULL,
+    source_period_end    DATE NULL,
+    opening_as_of        DATE NOT NULL,
+    total_rows           INT UNSIGNED NOT NULL DEFAULT 0,
+    pass_rows            INT UNSIGNED NOT NULL DEFAULT 0,
+    review_rows          INT UNSIGNED NOT NULL DEFAULT 0,
+    critical_rows        INT UNSIGNED NOT NULL DEFAULT 0,
+    no_activity_rows     INT UNSIGNED NOT NULL DEFAULT 0,
+    created_by           INT UNSIGNED NOT NULL,
+    approved_by          INT UNSIGNED NULL,
+    approved_at          DATETIME NULL,
+    loaded_by            INT UNSIGNED NULL,
+    loaded_at            DATETIME NULL,
+    activated_by         INT UNSIGNED NULL,
+    activated_at         DATETIME NULL,
+    notes                VARCHAR(1000) NULL,
+    created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_wc_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id),
+    CONSTRAINT fk_wc_creator   FOREIGN KEY (created_by)   REFERENCES users(id),
+    CONSTRAINT fk_wc_approver  FOREIGN KEY (approved_by)  REFERENCES users(id),
+    CONSTRAINT fk_wc_loader    FOREIGN KEY (loaded_by)    REFERENCES users(id),
+    CONSTRAINT fk_wc_activator FOREIGN KEY (activated_by) REFERENCES users(id),
+    INDEX idx_wc_warehouse (warehouse_id, status)
+) ENGINE=InnoDB;
+
+CREATE TABLE warehouse_cutover_lines (
+    id                        BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    cutover_id                INT UNSIGNED NOT NULL,
+    item_id                   INT UNSIGNED NULL,
+    source_sku                VARCHAR(60) NOT NULL,
+    source_name               VARCHAR(255) NOT NULL,
+    source_unit               VARCHAR(30) NOT NULL,
+    opening_qty               DECIMAL(20,6) NOT NULL DEFAULT 0,
+    opening_value             DECIMAL(20,4) NOT NULL DEFAULT 0,
+    in_qty                    DECIMAL(20,6) NOT NULL DEFAULT 0,
+    in_value                  DECIMAL(20,4) NOT NULL DEFAULT 0,
+    out_qty                   DECIMAL(20,6) NOT NULL DEFAULT 0,
+    out_value                 DECIMAL(20,4) NOT NULL DEFAULT 0,
+    theoretical_closing_qty   DECIMAL(20,6) NOT NULL DEFAULT 0,
+    theoretical_closing_value DECIMAL(20,4) NOT NULL DEFAULT 0,
+    source_price              DECIMAL(20,4) NULL,
+    reconciliation_status     ENUM('PASS','REVIEW','CRITICAL','NO_ACTIVITY') NOT NULL,
+    exception_codes           VARCHAR(500) NULL,
+    record_type               VARCHAR(30) NULL,
+    activity_class            VARCHAR(60) NULL,
+    mapping_status            ENUM('NOT_FOUND','MATCHED','NAME_MISMATCH','UNIT_MISMATCH','MULTIPLE_MATCH') NOT NULL DEFAULT 'NOT_FOUND',
+    decision                  ENUM('PENDING','ACCEPT_SOURCE','BUSINESS_OVERRIDE','EXCLUDE') NOT NULL DEFAULT 'PENDING',
+    approved_qty              DECIMAL(20,6) NULL,
+    approved_unit_cost        DECIMAL(20,4) NULL,
+    approved_by               INT UNSIGNED NULL,
+    approved_at               DATETIME NULL,
+    notes                     VARCHAR(1000) NULL,
+    source_row_reference      INT UNSIGNED NOT NULL,
+    created_batch_id          BIGINT UNSIGNED NULL,
+    created_at                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_wcl_cutover  FOREIGN KEY (cutover_id) REFERENCES warehouse_cutovers(id),
+    CONSTRAINT fk_wcl_item     FOREIGN KEY (item_id) REFERENCES items(id),
+    CONSTRAINT fk_wcl_approver FOREIGN KEY (approved_by) REFERENCES users(id),
+    CONSTRAINT fk_wcl_batch    FOREIGN KEY (created_batch_id) REFERENCES inventory_batches(id),
+    INDEX idx_wcl_cutover_status (cutover_id, reconciliation_status),
+    INDEX idx_wcl_cutover_sku (cutover_id, source_sku)
+) ENGINE=InnoDB;
+
 -- Deferred FK: book_closings is only defined above, well after
 -- inventory_transactions — added here instead of as a forward reference.
 ALTER TABLE inventory_transactions
@@ -1315,7 +1388,12 @@ INSERT INTO permissions (code, description) VALUES
     -- inherit automatically; STOCK never gets this, matching the
     -- DISTRIBUTION_DISPATCH-vs-DISTRIBUTION_APPROVE split already
     -- established in V2.11A.
-    ('STOCK_OPNAME_SUPERVISE', 'Review dual-count comparison, exclude uncounted items, finalize and post stock opname sessions');
+    ('STOCK_OPNAME_SUPERVISE', 'Review dual-count comparison, exclude uncounted items, finalize and post stock opname sessions'),
+    -- PHASE V2.14: import/resolve/approve a warehouse cutover. loadOpening()
+    -- is additionally restricted to SUPERADMIN only (role_code check in the
+    -- route, not a permission) — ADMIN/SUPERADMIN both inherit this
+    -- permission automatically; STOCK/DIVISION/VIEWER never get it.
+    ('WAREHOUSE_CUTOVER_MANAGE', 'Import reconciliation workbooks, resolve cutover lines, and approve a warehouse cutover');
 
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r CROSS JOIN permissions p WHERE r.code = 'SUPERADMIN';

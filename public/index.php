@@ -30,6 +30,8 @@ require_once __DIR__ . '/../services/SupplierService.php';
 require_once __DIR__ . '/../services/BakeryDestinationService.php';
 require_once __DIR__ . '/../services/MasterDataSafetyService.php';
 require_once __DIR__ . '/../services/WarehouseReportService.php';
+require_once __DIR__ . '/../services/WarehouseCutoverService.php';
+require_once __DIR__ . '/../services/WarehouseCutoverImportService.php';
 require_once __DIR__ . '/../services/TraceService.php';
 require_once __DIR__ . '/../services/InventoryService.php';
 require_once __DIR__ . '/../services/FifoService.php';
@@ -100,6 +102,8 @@ use App\Services\SupplierService;
 use App\Services\BakeryDestinationService;
 use App\Services\MasterDataSafetyService;
 use App\Services\WarehouseReportService;
+use App\Services\WarehouseCutoverService;
+use App\Services\WarehouseCutoverImportService;
 use App\Services\TraceService;
 use App\Services\InventoryHppReportService;
 use App\Services\ExcelWriterService;
@@ -3801,6 +3805,88 @@ $routes = [
         $pdo->prepare('DELETE FROM warehouses WHERE id = :id')->execute(['id' => $whId]);
         AuditService::log($pdo, $user['id'], $user['username'], 'WAREHOUSE_DELETE_SUCCESS', 'warehouses', $whId, ['code' => $wh['code'], 'name' => $wh['name']], null, null);
         inv_ok(['success' => true], 'Warehouse permanently deleted');
+    },
+
+    // ============================================================
+    // PHASE V2.14 — GENERIC controlled warehouse cutover workflow (not
+    // Karang-Tengah-specific). Development/staging use only in this
+    // phase: nothing here activates a warehouse or is invoked by any
+    // other part of this application against production.
+    // ============================================================
+    'POST /warehouse-cutovers' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_CUTOVER_MANAGE');
+        $id = WarehouseCutoverService::create($pdo, $input + ['created_by' => $user['id'], 'username' => $user['username']]);
+        inv_ok(['cutover_id' => $id], 'Cutover created', 201);
+    },
+
+    'GET /warehouse-cutovers/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_CUTOVER_MANAGE');
+        $cutover = WarehouseCutoverService::get($pdo, (int) $params['id']);
+        $unresolved = WarehouseCutoverService::unresolvedCounts($pdo, (int) $params['id']);
+        $summary = WarehouseCutoverService::summary($pdo, (int) $params['id']);
+        inv_ok(['cutover' => $cutover, 'unresolved' => $unresolved, 'summary' => $summary], 'OK');
+    },
+
+    'GET /warehouse-cutovers/{id}/lines' => function (array $params) use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_CUTOVER_MANAGE');
+        $lines = WarehouseCutoverService::listLines($pdo, (int) $params['id'], $query);
+        inv_ok(['rows' => $lines, 'total' => count($lines)], 'OK');
+    },
+
+    'POST /warehouse-cutovers/{id}/import' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_CUTOVER_MANAGE');
+        if (empty($input['file_path'])) {
+            inv_error(422, 'VALIDATION_ERROR', 'file_path is required (upload via POST /import/upload first)');
+        }
+        $summary = WarehouseCutoverImportService::import($pdo, (int) $params['id'], $input['file_path']);
+        AuditService::log($pdo, $user['id'], $user['username'], 'CUTOVER_IMPORT', 'warehouse_cutovers', (int) $params['id'], null, $summary, null);
+        inv_ok($summary, 'Reconciliation workbook imported');
+    },
+
+    'POST /warehouse-cutovers/{id}/match-items' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_CUTOVER_MANAGE');
+        $counts = WarehouseCutoverService::matchItems($pdo, (int) $params['id']);
+        AuditService::log($pdo, $user['id'], $user['username'], 'CUTOVER_MATCH_ITEMS', 'warehouse_cutovers', (int) $params['id'], null, $counts, null);
+        inv_ok($counts, 'Item matching complete');
+    },
+
+    'PUT /warehouse-cutovers/{id}/lines/{lineId}' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_CUTOVER_MANAGE');
+        WarehouseCutoverService::resolveLine($pdo, (int) $params['id'], (int) $params['lineId'], $input + ['actor_id' => $user['id'], 'actor_username' => $user['username']]);
+        inv_ok(['success' => true], 'Cutover line resolved');
+    },
+
+    'POST /warehouse-cutovers/{id}/approve' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_CUTOVER_MANAGE');
+        WarehouseCutoverService::approve($pdo, (int) $params['id'], $user['id'], $user['username']);
+        inv_ok(['success' => true], 'Cutover approved');
+    },
+
+    'GET /warehouse-cutovers/{id}/preview' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_CUTOVER_MANAGE');
+        inv_ok(WarehouseCutoverService::previewApprovedOpening($pdo, (int) $params['id']), 'OK');
+    },
+
+    // SUPERADMIN only — not merely permission-gated, matching this
+    // codebase's existing pattern for irreversible/high-risk actions
+    // (System Health, User/Role trace, TRANSACTION_VOID_LOCKED_PERIOD,
+    // etc.). Development/staging use only — see this section's docblock.
+    'POST /warehouse-cutovers/{id}/load' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_CUTOVER_MANAGE');
+        if ($user['role_code'] !== 'SUPERADMIN') {
+            inv_error(403, 'FORBIDDEN', 'Loading a cutover opening balance is restricted to SUPERADMIN');
+        }
+        $result = WarehouseCutoverService::loadOpening($pdo, (int) $params['id'], $user['id'], $user['username']);
+        inv_ok($result, 'Opening balance loaded');
     },
 ];
 

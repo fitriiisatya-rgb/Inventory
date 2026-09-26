@@ -23,7 +23,14 @@ namespace App\Services;
  */
 final class XlsxReaderService
 {
-    public static function read(string $path): array
+    /**
+     * @param ?string $preferredSheetName PHASE V2.14: when given, that exact
+     *   sheet name (case-insensitive) is preferred over the Template/Data/
+     *   last-sheet fallback below — for a workbook whose target sheet isn't
+     *   the last one (e.g. a multi-sheet reconciliation report where the
+     *   data sheet comes first and later sheets are summaries/notes).
+     */
+    public static function read(string $path, ?string $preferredSheetName = null): array
     {
         $zip = new \ZipArchive();
         if ($zip->open($path) !== true) {
@@ -62,7 +69,10 @@ final class XlsxReaderService
                 }
                 $target = str_starts_with($target, 'xl/') ? $target : ('xl/' . $target);
                 $lastTarget = $target;
-                if (in_array(strtolower((string) $sheetEl['name']), ['template', 'data'], true)) {
+                $sheetName = strtolower((string) $sheetEl['name']);
+                if ($preferredSheetName !== null && $sheetName === strtolower($preferredSheetName)) {
+                    $chosenTarget = $target;
+                } elseif ($preferredSheetName === null && in_array($sheetName, ['template', 'data'], true)) {
                     $chosenTarget = $target;
                 }
             }
