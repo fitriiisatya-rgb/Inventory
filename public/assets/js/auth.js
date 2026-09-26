@@ -9,34 +9,24 @@
 const Auth = (() => {
     let currentUser = null;
 
-    // Cosmetic-only mirror of docs/API_CONTRACT.md's role->permission table,
-    // used purely to hide buttons the server would reject anyway. The real
-    // gate is always the backend's role_permissions check on every request.
-    const ROLE_PERMISSIONS = {
-        VIEWER: ['INVENTORY_VIEW', 'AUDIT_LOG_VIEW', 'RECONCILIATION_VIEW'],
-        STOCK: ['INVENTORY_VIEW', 'TRANSACTION_IN_CREATE', 'TRANSACTION_OUT_CREATE', 'WAREHOUSE_TRANSFER_MANAGE', 'STOCK_OPNAME_MANAGE', 'STOCK_ADJUSTMENT_CREATE'],
-        DIVISION: ['INVENTORY_VIEW', 'TRANSACTION_OUT_CREATE', 'PRODUCTION_MANAGE'],
-        ADMIN: ['*'],
-        SUPERADMIN: ['*'],
-    };
-
-    // PHASE V2.5A: ADMIN's '*' above is a blanket cosmetic shorthand, but the
-    // backend's own ADMIN grant (database/schema.sql) is actually "everything
-    // EXCEPT this list" — mirrored here exactly so the button-hiding logic
-    // never over-promises what the server will accept. Correction actions
-    // (void a posted transaction, reverse a RECEIVED transfer) are
-    // SUPERADMIN-only; ADMIN is deliberately not equivalent for these two.
-    const ADMIN_EXCLUDED_PERMISSIONS = ['SYSTEM_SETTINGS_MANAGE', 'USER_MANAGE', 'TRANSACTION_VOID_LOCKED_PERIOD', 'TRANSACTION_VOID', 'TRANSFER_REVERSE'];
-
     function user() {
         return currentUser;
     }
 
+    // PHASE V2.14.3 — hasPermission() now reads currentUser.permissions,
+    // the exact list of permission codes the backend returned for this
+    // role (POST /auth/login / GET /auth/me, hydrated fresh from
+    // role_permissions on every call — see AuthService::permissionsForRole()).
+    // There is deliberately no second, hard-coded role->permission map here
+    // any more: this hiding logic is cosmetic convenience only, and it must
+    // read the SAME current DB grants the backend's own
+    // inv_require_permission()/AuthService::hasPermission() enforce, or it
+    // silently drifts out of sync (exactly the bug this phase fixes). The
+    // backend remains the only real authorization boundary regardless.
     function hasPermission(permCode) {
         if (!currentUser) return false;
-        if (currentUser.role_code === 'ADMIN' && ADMIN_EXCLUDED_PERMISSIONS.includes(permCode)) return false;
-        const granted = ROLE_PERMISSIONS[currentUser.role_code] || [];
-        return granted.includes('*') || granted.includes(permCode);
+        const granted = currentUser.permissions || [];
+        return granted.includes(permCode);
     }
 
     function hasRole(...roles) {

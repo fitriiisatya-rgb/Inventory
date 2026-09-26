@@ -564,16 +564,26 @@ $routes = [
             'username' => $user['username'], 'role' => $user['role_code'],
             'must_change_password' => (bool) $user['must_change_password'],
             'csrf_token' => AuthService::csrfToken(),
+            // PHASE V2.14.3 — read fresh from role_permissions on every
+            // login, never cached in $_SESSION, so frontend visibility
+            // (Auth.applyRoleVisibility()) always matches the backend's
+            // own current authorization state for this role.
+            'permissions' => AuthService::permissionsForRole($pdo, $user['role_code']),
         ], 'Logged in');
     },
     'POST /auth/logout' => function () {
         AuthService::logout();
         inv_ok(null, 'Logged out');
     },
-    'GET /auth/me' => function () {
+    'GET /auth/me' => function () use ($pdo) {
         $user = AuthService::currentUser();
         if ($user) {
             $user['csrf_token'] = AuthService::csrfToken();
+            // PHASE V2.14.3 — same as POST /auth/login: read fresh from the
+            // DB on every call, never from session state, so a permission
+            // grant/revoke is visible on the very next /auth/me without a
+            // new login.
+            $user['permissions'] = AuthService::permissionsForRole($pdo, $user['role_code']);
         }
         inv_ok($user, 'OK');
     },

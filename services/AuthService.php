@@ -155,6 +155,29 @@ final class AuthService
     }
 
     /**
+     * PHASE V2.14.3 — read the CURRENT set of permission codes granted to a
+     * role straight from role_permissions/roles/permissions, the exact same
+     * tables hasPermission() itself queries. Used only to HYDRATE the
+     * login/auth-me response for frontend visibility (Auth.applyRoleVisibility())
+     * — never stored in $_SESSION, so a grant or revoke made in the DB is
+     * reflected on the very next /auth/me call, no re-login required, and
+     * this can never drift out of sync with the backend's own authority.
+     *
+     * @return string[] unique permission codes, in no particular order
+     */
+    public static function permissionsForRole(PDO $pdo, string $roleCode): array
+    {
+        $stmt = $pdo->prepare(
+            'SELECT DISTINCT p.code FROM role_permissions rp
+             JOIN roles r ON r.id = rp.role_id
+             JOIN permissions p ON p.id = rp.permission_id
+             WHERE r.code = :role_code'
+        );
+        $stmt->execute(['role_code' => $roleCode]);
+        return array_map('strval', $stmt->fetchAll(PDO::FETCH_COLUMN));
+    }
+
+    /**
      * Section: STOCK is scoped to its own warehouse, DIVISION to its own
      * division. A user with warehouse_id/division_id = NULL is unscoped
      * (an ADMIN/SUPERADMIN acting in either role, or a STOCK/DIVISION user
