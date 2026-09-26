@@ -49,6 +49,7 @@ require_once __DIR__ . '/../services/InventoryService.php';
 require_once __DIR__ . '/../services/FifoService.php';
 require_once __DIR__ . '/../services/PeriodLockService.php';
 require_once __DIR__ . '/../services/WarehouseLockService.php';
+require_once __DIR__ . '/../services/WarehouseGuardService.php';
 require_once __DIR__ . '/../services/StockAdjustmentService.php';
 require_once __DIR__ . '/../services/VoidService.php';
 require_once __DIR__ . '/../services/TransferService.php';

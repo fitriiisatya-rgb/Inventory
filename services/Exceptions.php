@@ -128,6 +128,15 @@ final class WarehouseLockedException extends RuntimeException
     }
 }
 
+/** PHASE V2.13 (Karang Tengah): the target warehouse exists but is_active = 0 — not yet live. */
+final class WarehouseInactiveException extends RuntimeException
+{
+    public function __construct(public readonly int $warehouseId)
+    {
+        parent::__construct("WAREHOUSE_INACTIVE: warehouse {$warehouseId} is not active and cannot be a source or destination of any stock-mutating operation");
+    }
+}
+
 /** PHASE C3: too many recent failed logins for this username/IP. */
 final class RateLimitedException extends RuntimeException
 {

@@ -1,0 +1,51 @@
+-- ============================================================================
+-- Inventory FIFO Pro — V2.13 Karang Tengah: add the warehouse master record
+-- ONLY. This migration adds a single row to `warehouses` and touches
+-- NOTHING else — no inventory_batches, no item_unit_conversions, no
+-- opening stock, no historical transactions, no FIFO layers.
+--
+-- Karang Tengah is modeled exactly like Cibadak: warehouse_type = TRANSIT,
+-- receiving from GUDANG_BESAR (a.k.a. SCM) via the existing, fully generic
+-- warehouse_transfers mechanism — the same mechanism Cibadak already uses.
+-- No new "receives_from" column or relationship table is introduced: no
+-- such column exists for Cibadak either (a transfer's from/to warehouse
+-- pair is just two foreign keys on warehouse_transfers, enforced by
+-- business process — which pairs are actually used — never by a schema-
+-- level restriction). Inventing a second, parallel relationship model for
+-- Karang Tengah alone would contradict "treat Karang Tengah like Cibadak."
+--
+-- is_active = 0 (INACTIVE) on insert, matching the explicit "do not
+-- activate production yet" requirement:
+--   - every read path in this codebase that lists warehouses for
+--     reporting/reconciliation already filters `is_active = 1`
+--     (InventoryService::currentStockAllWarehouses(),
+--     InventoryReconciliationReportService::resolveScopes(), the STOCK-
+--     scoped branch of GET /warehouses), so an inactive Karang Tengah
+--     row is invisible to those aggregates from the moment it exists.
+--   - the companion code change in this same release (see
+--     services/WarehouseGuardService.php) makes GET /warehouses — the
+--     route that populates every OPERATIONAL warehouse dropdown via
+--     Master.warehouses() — filter `is_active = 1` for every role, not
+--     only STOCK-scoped ones, and makes every stock-mutating service
+--     path (FifoService::postIn/postOut, TransferService::create(),
+--     StockOpnameService::start()) reject an inactive warehouse
+--     outright. Karang Tengah therefore cannot appear in an operational
+--     dropdown or accept any stock mutation until a human flips
+--     is_active to 1 in a separate, later, explicitly-approved step.
+--   - Master Gudang (the admin warehouse-management screen) reads
+--     GET /warehouses/report, which already supports listing inactive
+--     rows (it has its own explicit "INACTIVE" status filter) — so this
+--     new row IS visible there immediately, as required ("Read-only
+--     Master Warehouse may still display it").
+--
+-- Idempotent: INSERT IGNORE against warehouses.code (UNIQUE) — safe to
+-- re-run, and safe on a database that already has this row.
+--
+-- Changes ZERO inventory quantity, ZERO inventory value. No
+-- inventory_batches row is created by this migration; company-wide
+-- inventory qty/value is provably unchanged (see
+-- tests/inventory_v2_13_karang_tengah_test.php Section B).
+-- ============================================================================
+
+INSERT IGNORE INTO warehouses (code, name, warehouse_type, is_active)
+VALUES ('KARANG_TENGAH', 'Gudang Karang Tengah', 'TRANSIT', 0);

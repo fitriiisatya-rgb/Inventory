@@ -1,10 +1,16 @@
 /**
  * PHASE V2.1 — Master Gudang: enhanced warehouse-master list (search code/
  * name, active filter, sort by name/SKU-count/qty/value, Detail/Edit/
- * Aktifkan-Nonaktifkan/Hapus Permanen). Never creates or lists Karang
- * Tengah — this only reads whatever warehouses already exist (GET
- * /warehouses/report), same as every other warehouse read in the app.
- * Edit is limited to name/is_active — code is immutable master data.
+ * Aktifkan-Nonaktifkan/Hapus Permanen). Never creates a warehouse itself —
+ * this only reads and manages whatever warehouses already exist (GET
+ * /warehouses/report, which lists both active and inactive rows), same as
+ * every other warehouse read in the app. PHASE V2.13: this is exactly why
+ * Karang Tengah — inserted INACTIVE by its own migration — appears here
+ * for admin visibility while staying invisible to every OPERATIONAL
+ * warehouse dropdown (Master.warehouses(), backed by GET /warehouses,
+ * which only ever returns is_active=1 rows).
+ * Edit is limited to name/is_active — code and warehouse_type are
+ * immutable master data.
  */
 const MasterWarehouses = (() => {
     let dtHandle = null;
@@ -32,6 +38,7 @@ const MasterWarehouses = (() => {
             columns: [
                 { key: 'code', label: 'Code', render: (r) => r.code },
                 { key: 'name', label: 'Warehouse', sortable: true, render: (r) => r.name },
+                { key: 'warehouse_type', label: 'Type', render: (r) => r.warehouse_type },
                 { key: 'sku_count', label: 'Active SKU', sortable: true, render: (r) => UI.formatNumber(r.sku_count, 0) },
                 { key: 'qty', label: 'Qty on Hand', sortable: true, render: (r) => UI.formatNumber(r.qty_on_hand) },
                 { key: 'value', label: 'Inventory Value', sortable: true, render: (r) => UI.formatMoney(r.inventory_value) },
@@ -75,6 +82,7 @@ const MasterWarehouses = (() => {
                 body.appendChild(Drawer.section('Ringkasan', Drawer.kv([
                     ['Code', row.code],
                     ['Warehouse', row.name],
+                    ['Type', row.warehouse_type],
                     ['Active SKU', UI.formatNumber(row.sku_count, 0)],
                     ['Qty on Hand', UI.formatNumber(row.qty_on_hand)],
                     ['Inventory Value', UI.formatMoney(row.inventory_value)],

@@ -33,6 +33,13 @@ final class TransferService
         if (empty($p['lines'])) {
             throw new ValidationException(['at least one line is required']);
         }
+        // PHASE V2.13: fail fast on BOTH ends before any stock leaves the
+        // source — FifoService::postOut() below would also reject an
+        // inactive from_warehouse_id, but only failing there would still
+        // leave an inactive to_warehouse_id undetected until receive()
+        // (potentially days later, with goods already sitting in transit).
+        WarehouseGuardService::assertActive($pdo, (int) $p['from_warehouse_id']);
+        WarehouseGuardService::assertActive($pdo, (int) $p['to_warehouse_id']);
 
         $now = date('Y-m-d H:i:s');
         $header = $pdo->prepare(

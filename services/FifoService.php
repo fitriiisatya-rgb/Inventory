@@ -40,6 +40,11 @@ final class FifoService
         if (empty($p['bypass_warehouse_lock'])) {
             WarehouseLockService::assertNotLocked($pdo, $p['warehouse_id']);
         }
+        // PHASE V2.13: unconditional, never bypassed — an inactive warehouse
+        // (e.g. Karang Tengah before go-live) can never be a stock-mutating
+        // source or destination, regardless of bypass_warehouse_lock (which
+        // only ever concerns the opname lock above, a different concern).
+        WarehouseGuardService::assertActive($pdo, $p['warehouse_id']);
 
         // A real purchase must have price > 0 (Section 9). The one documented exception is a
         // reviewed, explicitly-flagged zero-cost Opening Stock line (ImportOpeningStockService) —
@@ -180,6 +185,8 @@ final class FifoService
         if (empty($p['bypass_warehouse_lock'])) {
             WarehouseLockService::assertNotLocked($pdo, $p['warehouse_id']);
         }
+        // PHASE V2.13: unconditional, never bypassed — see postIn() above.
+        WarehouseGuardService::assertActive($pdo, $p['warehouse_id']);
 
         if (!($p['input_qty'] > 0)) {
             throw new ValidationException(['input_qty must be > 0']);

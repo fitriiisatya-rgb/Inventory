@@ -35,6 +35,7 @@ require_once __DIR__ . '/../services/InventoryService.php';
 require_once __DIR__ . '/../services/FifoService.php';
 require_once __DIR__ . '/../services/PeriodLockService.php';
 require_once __DIR__ . '/../services/WarehouseLockService.php';
+require_once __DIR__ . '/../services/WarehouseGuardService.php';
 require_once __DIR__ . '/../services/StockAdjustmentService.php';
 require_once __DIR__ . '/../services/StockOpnameService.php';
 require_once __DIR__ . '/../services/TransferService.php';
@@ -84,6 +85,7 @@ use App\Services\NegativeStockException;
 use App\Services\PriceAnomalyException;
 use App\Services\PeriodLockedException;
 use App\Services\WarehouseLockedException;
+use App\Services\WarehouseInactiveException;
 use App\Services\CostRequiredException;
 use App\Services\UnitConversionNotApprovedException;
 use App\Services\NegativeMigrationStockRequiresAdjustmentException;
@@ -324,6 +326,7 @@ set_exception_handler(function (Throwable $e) use ($path) {
         PriceAnomalyException::class              => ['code' => 422, 'label' => 'PRICE_ANOMALY'],
         PeriodLockedException::class              => ['code' => 423, 'label' => 'PERIOD_LOCKED'],
         WarehouseLockedException::class           => ['code' => 423, 'label' => 'OPNAME_ACTIVE'],
+        WarehouseInactiveException::class         => ['code' => 422, 'label' => 'WAREHOUSE_INACTIVE'],
         CostRequiredException::class              => ['code' => 422, 'label' => 'COST_REQUIRED'],
         UnitConversionNotApprovedException::class => ['code' => 422, 'label' => 'UNIT_CONVERSION_NOT_APPROVED'],
         NegativeMigrationStockRequiresAdjustmentException::class => ['code' => 422, 'label' => 'NEGATIVE_MIGRATION_STOCK_REQUIRES_ADJUSTMENT'],
@@ -587,8 +590,19 @@ $routes = [
             inv_ok($stmt->fetchAll(), 'OK');
         }
 
+        // PHASE V2.13: this route is the sole source for Master.warehouses()
+        // — the shared cache every OPERATIONAL warehouse dropdown across the
+        // whole app reads from (Stock IN/OUT, Transfers, Opname, etc.). An
+        // inactive warehouse (e.g. Karang Tengah pre-go-live) must never
+        // appear here for ANY role, not only STOCK-scoped ones — this is a
+        // generic rule, so the same is_active=1 filter this endpoint already
+        // applied to STOCK users now applies unconditionally. The Master
+        // Gudang admin screen intentionally does NOT use this route — it
+        // reads GET /warehouses/report, which already supports listing
+        // inactive rows (its own explicit "INACTIVE" status filter), so
+        // admins can still see and manage an inactive warehouse there.
         inv_ok(
-            $pdo->query('SELECT * FROM warehouses ORDER BY name')->fetchAll(),
+            $pdo->query('SELECT * FROM warehouses WHERE is_active = 1 ORDER BY name')->fetchAll(),
             'OK'
         );
     },

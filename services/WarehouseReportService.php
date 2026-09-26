@@ -54,7 +54,7 @@ final class WarehouseReportService
 
         $sql = "
             SELECT
-                w.id, w.code, w.name, w.is_active,
+                w.id, w.code, w.name, w.warehouse_type, w.is_active,
                 COALESCE(sku.sku_count, 0) AS sku_count,
                 COALESCE(bal.qty_on_hand, 0) AS qty_on_hand,
                 COALESCE(bal.inventory_value, 0) AS inventory_value
@@ -81,6 +81,7 @@ final class WarehouseReportService
             'id' => (int) $r['id'],
             'code' => $r['code'],
             'name' => $r['name'],
+            'warehouse_type' => $r['warehouse_type'],
             'is_active' => (bool) $r['is_active'],
             'sku_count' => (int) $r['sku_count'],
             'qty_on_hand' => round((float) $r['qty_on_hand'], 6),

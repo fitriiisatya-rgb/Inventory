@@ -44,7 +44,7 @@ const ReportMovement = (() => {
 
         container.appendChild(UI.el('div', { class: 'hpp-legend' },
             'Klik salah satu baris untuk melihat rincian kategori pergerakan pada tanggal tersebut. ' +
-            'Saat "Semua Gudang" dipilih, transfer antar gudang internal (SCM ⇄ CIBADAK) dieliminasi dari Barang Masuk/Keluar — ' +
+            'Saat "Semua Gudang" dipilih, transfer antar gudang internal (mis. SCM ⇄ Cibadak, SCM ⇄ Karang Tengah) dieliminasi dari Barang Masuk/Keluar — ' +
             'lihat "Transfer Internal (Eliminasi)" pada panel rincian.'));
 
         renderBreakdownEmpty();

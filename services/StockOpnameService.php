@@ -44,6 +44,10 @@ final class StockOpnameService
 
     public static function start(PDO $pdo, int $warehouseId, int $createdBy, ?array $itemIds = null): int
     {
+        // PHASE V2.13: start() never posts a FIFO transaction itself, so it
+        // is not covered by FifoService's own guard — an inactive warehouse
+        // must not be allowed to begin a physical-count workflow either.
+        WarehouseGuardService::assertActive($pdo, $warehouseId);
         if (WarehouseLockService::isLocked($pdo, $warehouseId)) {
             throw new ValidationException(["warehouse {$warehouseId} already has an active opname session"]);
         }
