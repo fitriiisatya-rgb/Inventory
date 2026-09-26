@@ -22,6 +22,32 @@ use PDO;
  * APPROVED/LOADED are explicit human/actor actions (approve()/
  * loadOpening()) and ACTIVATED is never set by this service at all — see
  * loadOpening()'s docblock for why activation stays fully separate.
+ *
+ * PHASE V2.14.1, Section B — REQUIRED INVARIANT FOR A FUTURE ACTIVATION
+ * RELEASE (not built here; no activation exists anywhere in this codebase
+ * yet — PUT /warehouses/{id} still unconditionally refuses is_active
+ * 0->1 while activation_locked=1, per V2.13.1, with no exception for a
+ * LOADED cutover). Whenever that future release is built, activation MUST
+ * be exactly ONE atomic, transactional operation — never a two-step
+ * "unlock, then separately activate" — enforcing ALL of:
+ *   1. warehouse_cutovers.status = LOADED (the ONLY valid starting state)
+ *   2. zero unresolved blockers (unresolvedCounts() both counts already 0
+ *      by construction once LOADED, but must be re-verified, not assumed)
+ *   3. the cutover's own opening reconciliation is PASS (i.e. the
+ *      approved-opening preview's totals still tie out against what was
+ *      actually loaded — re-verified at activation time, not just at
+ *      load time, in case anything changed in between)
+ *   4. warehouses.activation_locked: 1 -> 0
+ *   5. warehouses.is_active: 0 -> 1
+ *   6. warehouse_cutovers.status: LOADED -> ACTIVATED
+ *   7. actor + timestamp audited (AuditService, same pattern as every
+ *      other action in this class)
+ *   8. all seven of the above inside ONE Database::transaction() — if any
+ *      step fails, NONE of them apply (activation_locked must never be
+ *      left at 0 while is_active is still 0, or vice versa)
+ * A human must never be able to unlock activation_locked as a standalone
+ * action and separately flip is_active later — that reintroduces exactly
+ * the accidental-activation window V2.13.1/V2.13.2 exist to close.
  */
 final class WarehouseCutoverService
 {
@@ -196,6 +222,151 @@ final class WarehouseCutoverService
         );
 
         self::recomputeStatus($pdo, $cutoverId);
+    }
+
+    /**
+     * PHASE V2.14.1, Section F — bulk decision import (e.g. from the
+     * Business Decision workbook), one row per SKU. Deliberately a
+     * SEPARATE, STRICTER entry point from resolveLine() above rather than
+     * a shared code path: resolveLine() is the flexible, interactive
+     * single-line UI action (a decision-in-progress can legitimately be
+     * incomplete there, with loadOpening() as the final safety net —
+     * exactly what tests/inventory_v2_14_karang_tengah_cutover_test.php
+     * Section B deliberately exercises). A bulk import of FINALIZED
+     * business decisions is held to the full bar up front instead, so a
+     * bad row is caught here, not silently deferred to load time.
+     *
+     * Every row is validated independently; one bad row never blocks the
+     * others (each result is either 'applied', 'unchanged' — same
+     * decision/item/qty/cost/notes already stored, a true no-op, so a
+     * repeat import of the same workbook is deterministic — or
+     * 'rejected' with the exact reason). Never creates a new line, never
+     * touches source_sku/source_name/source_unit/opening_qty/in_qty/
+     * out_qty/theoretical_closing_qty/source_price/reconciliation_status/
+     * exception_codes — only ever routes into the SAME resolveLine()
+     * above for the actual write, so every applied row still gets a full
+     * audit trail (actor/time/old/new).
+     *
+     * @param list<array{source_sku:string, decision:string, item_id?:int|string|null, approved_qty?:float|string|null, approved_unit_cost?:float|string|null, notes?:string|null, reason?:string|null}> $decisions
+     * @return array<string, array{status:string, error?:string}> keyed by source_sku
+     */
+    public static function importDecisions(PDO $pdo, int $cutoverId, array $decisions, int $actorId, string $actorUsername): array
+    {
+        $cutover = self::loadCutover($pdo, $cutoverId);
+        self::assertNotLoadedOrActivated($cutover);
+
+        $lineStmt = $pdo->prepare('SELECT * FROM warehouse_cutover_lines WHERE cutover_id = :cid AND source_sku = :sku');
+        $itemExistsStmt = $pdo->prepare('SELECT COUNT(*) FROM items WHERE id = :id');
+
+        $results = [];
+        foreach ($decisions as $row) {
+            $sku = trim((string) ($row['source_sku'] ?? ''));
+            if ($sku === '') {
+                $results['(missing SKU)'] = ['status' => 'rejected', 'error' => 'row has no source_sku'];
+                continue;
+            }
+            try {
+                $lineStmt->execute(['cid' => $cutoverId, 'sku' => $sku]);
+                $line = $lineStmt->fetch();
+                if ($line === false) {
+                    throw new ValidationException(["SKU {$sku} does not match any line on this cutover"]);
+                }
+
+                $decision = (string) ($row['decision'] ?? '');
+                if (!in_array($decision, ['PENDING', 'ACCEPT_SOURCE', 'BUSINESS_OVERRIDE', 'EXCLUDE'], true)) {
+                    throw new ValidationException(["SKU {$sku}: unknown decision '{$decision}'"]);
+                }
+
+                $itemId = array_key_exists('item_id', $row) && $row['item_id'] !== null && $row['item_id'] !== ''
+                    ? (int) $row['item_id']
+                    : ($line['item_id'] !== null ? (int) $line['item_id'] : null);
+                if ($itemId !== null) {
+                    $itemExistsStmt->execute(['id' => $itemId]);
+                    if ((int) $itemExistsStmt->fetchColumn() === 0) {
+                        throw new ValidationException(["SKU {$sku}: item_id {$itemId} does not exist"]);
+                    }
+                }
+
+                $reason = trim((string) ($row['reason'] ?? ''));
+                if (in_array($decision, ['EXCLUDE', 'BUSINESS_OVERRIDE'], true) && $reason === '') {
+                    throw new ValidationException(["SKU {$sku}: decision '{$decision}' requires a reason / source document"]);
+                }
+
+                // Pre-validate exactly what resolveLine() below would
+                // derive, so a rejected row throws BEFORE any write —
+                // mirrors resolveLine()'s own ACCEPT_SOURCE/BUSINESS_OVERRIDE
+                // derivation formulas exactly (kept in sync deliberately;
+                // this method never re-derives differently).
+                $previewQty = null;
+                $previewCost = null;
+                if ($decision === 'ACCEPT_SOURCE') {
+                    if ($itemId !== (int) ($line['item_id'] ?? 0) && $line['item_id'] !== null) {
+                        // caller tried to change the mapping AND accept the
+                        // source figures in the same row — ambiguous, must
+                        // be an explicit BUSINESS_OVERRIDE instead.
+                        throw new ValidationException(["SKU {$sku}: ACCEPT_SOURCE cannot itself change item mapping — use BUSINESS_OVERRIDE or run item matching first"]);
+                    }
+                    if ($itemId === null) {
+                        throw new ValidationException(["SKU {$sku}: ACCEPT_SOURCE requires a mapped item_id (ambiguous mapping)"]);
+                    }
+                    if ($line['mapping_status'] !== 'MATCHED') {
+                        throw new ValidationException(["SKU {$sku}: mapping_status is '{$line['mapping_status']}', not MATCHED — ambiguous unit/name mapping requires BUSINESS_OVERRIDE, not ACCEPT_SOURCE"]);
+                    }
+                    $previewQty = (float) $line['theoretical_closing_qty'];
+                    $previewCost = $line['source_price'] !== null ? (float) $line['source_price'] : null;
+                } elseif ($decision === 'BUSINESS_OVERRIDE') {
+                    if (!array_key_exists('approved_qty', $row) || $row['approved_qty'] === null || $row['approved_qty'] === '') {
+                        throw new ValidationException(["SKU {$sku}: BUSINESS_OVERRIDE requires approved_qty"]);
+                    }
+                    $previewQty = (float) $row['approved_qty'];
+                    $previewCost = array_key_exists('approved_unit_cost', $row) && $row['approved_unit_cost'] !== null && $row['approved_unit_cost'] !== ''
+                        ? (float) $row['approved_unit_cost']
+                        : ($line['source_price'] !== null ? (float) $line['source_price'] : null);
+                }
+                if (in_array($decision, ['ACCEPT_SOURCE', 'BUSINESS_OVERRIDE'], true)) {
+                    if ($previewQty === null || $previewQty <= 0) {
+                        throw new ValidationException(["SKU {$sku}: approved_qty must be > 0 for an included row"]);
+                    }
+                    if ($previewCost === null) {
+                        throw new ValidationException(["SKU {$sku}: approved_unit_cost is required (cost required) for an included row"]);
+                    }
+                }
+
+                $newNotes = array_key_exists('notes', $row) ? $row['notes'] : $line['notes'];
+                $unchanged = (int) ($line['item_id'] ?? -1) === ($itemId ?? -1)
+                    && $line['decision'] === $decision
+                    && self::floatEquals($line['approved_qty'], $previewQty)
+                    && self::floatEquals($line['approved_unit_cost'], $previewCost)
+                    && (string) $line['notes'] === (string) $newNotes;
+                if ($unchanged) {
+                    $results[$sku] = ['status' => 'unchanged'];
+                    continue;
+                }
+
+                self::resolveLine($pdo, $cutoverId, (int) $line['id'], [
+                    'decision' => $decision,
+                    'item_id' => $itemId,
+                    'approved_qty' => $decision === 'BUSINESS_OVERRIDE' ? $previewQty : null,
+                    'approved_unit_cost' => $decision === 'BUSINESS_OVERRIDE' ? $previewCost : null,
+                    'notes' => $newNotes,
+                    'actor_id' => $actorId,
+                    'actor_username' => $actorUsername,
+                    'reason' => $reason !== '' ? $reason : null,
+                ]);
+                $results[$sku] = ['status' => 'applied'];
+            } catch (\Throwable $e) {
+                $results[$sku] = ['status' => 'rejected', 'error' => $e->getMessage()];
+            }
+        }
+        return $results;
+    }
+
+    private static function floatEquals(mixed $a, mixed $b): bool
+    {
+        if ($a === null || $b === null) {
+            return $a === null && $b === null;
+        }
+        return abs((float) $a - (float) $b) < 0.000001;
     }
 
     /** Section 7's summary-card counts, computed live from the lines. */

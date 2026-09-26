@@ -351,10 +351,23 @@ check('transaction history records warehouse_id correctly for Karang Tengah', co
 
 // F. Daily IN/OUT report — warehouse-generic
 echo "\n== F. Daily report ==\n";
+// PHASE V2.14.1: this section proves ordinary operational Stock IN shows up
+// as Barang Masuk, so it must post real 'IN' transactions — never the
+// shared postIn() helper above, which (like every other caller in this
+// file) tags 'OPENING' for its own unrelated setup purposes and is now
+// correctly excluded from Barang Masuk by the V2.14.1 report fix.
+function postInReal(PDO $pdo, int $itemId, int $whId, int $unitId, float $qty, float $price, int $by, string $date): array
+{
+    return Database::transaction(fn (PDO $tx) => FifoService::postIn($tx, [
+        'transaction_uuid' => uid('v213-realin'), 'item_id' => $itemId, 'warehouse_id' => $whId,
+        'input_qty' => $qty, 'input_unit_id' => $unitId, 'unit_price_input' => $price,
+        'transaction_date' => $date, 'created_by' => $by, 'username' => 'v213', 'transaction_type' => 'IN',
+    ]));
+}
 $itemF1 = makeItem($pdo, $kgUnitId, 'V213-F1');
-postIn($pdo, $itemF1, $karangTengahId, $kgUnitId, 100, 1000, $adminUserId, '2026-09-01 08:00:00'); // Day 1 IN
+postInReal($pdo, $itemF1, $karangTengahId, $kgUnitId, 100, 1000, $adminUserId, '2026-09-01 08:00:00'); // Day 1 IN
 postOut($pdo, $itemF1, $karangTengahId, $kgUnitId, 10, $adminUserId, '2026-09-01 15:00:00');       // Day 1 OUT
-postIn($pdo, $itemF1, $karangTengahId, $kgUnitId, 50, 1000, $adminUserId, '2026-09-02 08:00:00');  // Day 2 IN
+postInReal($pdo, $itemF1, $karangTengahId, $kgUnitId, 50, 1000, $adminUserId, '2026-09-02 08:00:00');  // Day 2 IN
 postOut($pdo, $itemF1, $karangTengahId, $kgUnitId, 20, $adminUserId, '2026-09-02 15:00:00');       // Day 2 OUT
 
 $daily = InventoryMovementReportService::dailyMovement($pdo, '2026-09-01', '2026-09-02', $karangTengahId);

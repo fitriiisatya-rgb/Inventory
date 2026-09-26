@@ -3862,6 +3862,20 @@ $routes = [
         inv_ok(['success' => true], 'Cutover line resolved');
     },
 
+    // PHASE V2.14.1 — bulk decision import (e.g. from the Business Decision
+    // workbook, converted to JSON rows client-side or by a future importer).
+    // Never applies to production data — same dev/staging-only scope as the
+    // rest of this workflow.
+    'POST /warehouse-cutovers/{id}/import-decisions' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'WAREHOUSE_CUTOVER_MANAGE');
+        if (empty($input['decisions']) || !is_array($input['decisions'])) {
+            inv_error(422, 'VALIDATION_ERROR', 'decisions (a non-empty array) is required');
+        }
+        $results = WarehouseCutoverService::importDecisions($pdo, (int) $params['id'], $input['decisions'], $user['id'], $user['username']);
+        inv_ok(['results' => $results], 'Decision import processed');
+    },
+
     'POST /warehouse-cutovers/{id}/approve' => function (array $params) use ($pdo) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'WAREHOUSE_CUTOVER_MANAGE');

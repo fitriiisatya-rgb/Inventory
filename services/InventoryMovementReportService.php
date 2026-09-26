@@ -74,6 +74,17 @@ final class InventoryMovementReportService
         'out_usage' => 'OUT / Pemakaian',
         'adjustment_positive' => 'Adjustment Positif',
         'adjustment_negative' => 'Adjustment Negatif',
+        // PHASE V2.14.1: a mid-period OPENING (e.g. a controlled warehouse
+        // cutover's approved opening balance, posted after the company's
+        // own go-live date) is a STARTING BALANCE, not a movement that
+        // happened that day — GENERIC across every warehouse, never a
+        // Karang-Tengah-only rule. Disclosed as its own named category,
+        // deliberately never folded into external_purchase/adjustment/
+        // other_in, so it can never inflate ordinary Barang Masuk. See
+        // bucketsByDate()/deriveDisplayBuckets() below for the exact
+        // mechanism (net/stok_akhir is unaffected — only the category
+        // ATTRIBUTION changes, never the true balance).
+        'opening_in' => 'Saldo Awal Baru (Opening)',
         'other_in' => 'Lainnya (Masuk)',
         'other_out' => 'Lainnya (Keluar)',
         'transfer_elimination' => 'Transfer Internal (Eliminasi Konsolidasi)',
@@ -169,7 +180,15 @@ final class InventoryMovementReportService
         if ($cutover['is_pre_go_live_period']) {
             return self::emptyBreakdown($date, $warehouseId, $cutover);
         }
-        $byDate = self::bucketsByDate($pdo, $date, $date, $warehouseId);
+        // PHASE V2.14.1: excludeBoundaryOpening=false — unlike dailyMovement()
+        // below, dayBreakdown() never seeds a running balance from
+        // signedValueBefore(), so there is no separate anchor this would
+        // otherwise double-count against. Without this, drilling into the
+        // EXACT day an OPENING was posted (any warehouse, not just a
+        // multi-day report's own start date) would invisibly exclude that
+        // OPENING from its own day's breakdown — the opposite of the
+        // disclosure this method exists for.
+        $byDate = self::bucketsByDate($pdo, $date, $date, $warehouseId, excludeBoundaryOpening: false);
         $b = $byDate[$date] ?? self::emptyBuckets();
         $derived = self::deriveDisplayBuckets($b, $warehouseId);
 
@@ -180,6 +199,10 @@ final class InventoryMovementReportService
             $categories[] = ['key' => 'transfer_in', 'label' => self::CATEGORY_LABELS['transfer_in'], 'value' => round($b['transfer_in_raw'], 4), 'direction' => 'IN'];
         }
         $categories[] = ['key' => 'adjustment_positive', 'label' => self::CATEGORY_LABELS['adjustment_positive'], 'value' => round($b['adjustment_positive'], 4), 'direction' => 'IN'];
+        $categories[] = [
+            'key' => 'opening_in', 'label' => self::CATEGORY_LABELS['opening_in'], 'value' => round($derived['opening_in'], 4), 'direction' => 'IN',
+            'note' => 'Saldo awal gudang (mis. hasil controlled cutover) — bukan pembelian/transaksi operasional, tidak termasuk dalam Barang Masuk.',
+        ];
         $categories[] = ['key' => 'other_in', 'label' => self::CATEGORY_LABELS['other_in'], 'value' => round($derived['other_in_display'], 4), 'direction' => 'IN'];
 
         $categories[] = ['key' => 'out_usage', 'label' => self::CATEGORY_LABELS['out_usage'], 'value' => round($b['out_usage'], 4), 'direction' => 'OUT'];
@@ -311,6 +334,7 @@ final class InventoryMovementReportService
         return [
             'external_purchase' => 0.0, 'transfer_in_raw' => 0.0, 'transfer_out_raw' => 0.0,
             'out_usage' => 0.0, 'adjustment_positive' => 0.0, 'adjustment_negative' => 0.0,
+            'opening_signed' => 0.0,
             'in_value_total' => 0.0, 'out_value_total' => 0.0,
         ];
     }
@@ -373,19 +397,30 @@ final class InventoryMovementReportService
     }
 
     /** @return array<string, array<string,float>> keyed by 'Y-m-d' */
-    private static function bucketsByDate(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId): array
+    /**
+     * @param bool $excludeBoundaryOpening true (the only mode before
+     *   V2.14.1) for a caller that separately seeds a running balance from
+     *   InventoryHppReportService::signedValueBefore() at $startDate — that
+     *   anchor already includes a boundary-exact OPENING, so this query
+     *   must not also count it (dailyMovement()). false for a caller with
+     *   no such separate anchor (dayBreakdown()), where excluding it would
+     *   just make that OPENING invisible for no reason.
+     */
+    private static function bucketsByDate(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, bool $excludeBoundaryOpening = true): array
     {
         $signed = InventoryHppReportService::SIGNED_VALUE_SQL;
         $where = [
             "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1',
             't.transaction_date >= :start', 't.transaction_date < :end_excl',
-            "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :start_boundary)",
         ];
         $bind = [
             'start' => $startDate . ' 00:00:00',
             'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00',
-            'start_boundary' => $startDate . ' 00:00:00',
         ];
+        if ($excludeBoundaryOpening) {
+            $where[] = "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :start_boundary)";
+            $bind['start_boundary'] = $startDate . ' 00:00:00';
+        }
         if ($warehouseId !== null) {
             $where[] = 'l.warehouse_id = :wh';
             $bind['wh'] = $warehouseId;
@@ -400,6 +435,14 @@ final class InventoryMovementReportService
                 SUM(CASE WHEN t.transaction_type = 'OUT' THEN ABS(l.subtotal) ELSE 0 END) AS out_usage,
                 SUM(CASE WHEN t.transaction_type = 'ADJUSTMENT' AND l.subtotal > 0 THEN l.subtotal ELSE 0 END) AS adjustment_positive,
                 SUM(CASE WHEN t.transaction_type = 'ADJUSTMENT' AND l.subtotal < 0 THEN -l.subtotal ELSE 0 END) AS adjustment_negative,
+                -- PHASE V2.14.1: a mid-period OPENING's own signed value —
+                -- the boundary-exact company go-live OPENING is already
+                -- excluded from this whole query above, so this only ever
+                -- captures a LATER onboarding (e.g. a warehouse cutover).
+                -- Kept inside in_value_total/out_value_total too (below),
+                -- so net/stok_akhir is never affected — only which named
+                -- category it's ATTRIBUTED to changes (see deriveDisplayBuckets()).
+                SUM(CASE WHEN t.transaction_type = 'OPENING' THEN {$signed} ELSE 0 END) AS opening_signed,
                 SUM(CASE WHEN {$signed} > 0 THEN {$signed} ELSE 0 END) AS in_value_total,
                 SUM(CASE WHEN {$signed} < 0 THEN -({$signed}) ELSE 0 END) AS out_value_total
              FROM inventory_transaction_lines l
@@ -418,6 +461,7 @@ final class InventoryMovementReportService
                 'out_usage' => (float) $r['out_usage'],
                 'adjustment_positive' => (float) $r['adjustment_positive'],
                 'adjustment_negative' => (float) $r['adjustment_negative'],
+                'opening_signed' => (float) $r['opening_signed'],
                 'in_value_total' => (float) $r['in_value_total'],
                 'out_value_total' => (float) $r['out_value_total'],
             ];
@@ -433,8 +477,18 @@ final class InventoryMovementReportService
      */
     private static function deriveDisplayBuckets(array $b, ?int $warehouseId): array
     {
-        $otherInResidual = max(0.0, $b['in_value_total'] - $b['external_purchase'] - $b['adjustment_positive'] - $b['transfer_in_raw']);
-        $otherOutResidual = max(0.0, $b['out_value_total'] - $b['out_usage'] - $b['adjustment_negative'] - $b['transfer_out_raw']);
+        // PHASE V2.14.1: a mid-period OPENING (any warehouse, not just
+        // Karang Tengah) is subtracted out of the residual BEFORE it ever
+        // reaches barang_masuk/barang_keluar — it is a starting balance,
+        // never an operational movement. It stays inside in_value_total/
+        // out_value_total (below), so `net` — and therefore stok_akhir and
+        // every later day's stok_awal — is exactly unaffected. OPENING
+        // only ever posts via FifoService::postIn(), so openingOut is
+        // always 0 in practice; computed anyway for symmetry/defensiveness.
+        $openingIn = max(0.0, $b['opening_signed']);
+        $openingOut = max(0.0, -$b['opening_signed']);
+        $otherInResidual = max(0.0, $b['in_value_total'] - $b['external_purchase'] - $b['adjustment_positive'] - $b['transfer_in_raw'] - $openingIn);
+        $otherOutResidual = max(0.0, $b['out_value_total'] - $b['out_usage'] - $b['adjustment_negative'] - $b['transfer_out_raw'] - $openingOut);
         $net = $b['in_value_total'] - $b['out_value_total'];
 
         if ($warehouseId === null) {
@@ -446,6 +500,7 @@ final class InventoryMovementReportService
             return [
                 'barang_masuk' => $barangMasuk, 'barang_keluar' => $barangKeluar, 'net' => $net,
                 'other_in_display' => $otherInDisplay, 'other_out_display' => $otherOutDisplay,
+                'opening_in' => $openingIn, 'opening_out' => $openingOut,
                 'transfer_elimination' => $elimination,
             ];
         }
@@ -455,6 +510,7 @@ final class InventoryMovementReportService
         return [
             'barang_masuk' => $barangMasuk, 'barang_keluar' => $barangKeluar, 'net' => $net,
             'other_in_display' => $otherInResidual, 'other_out_display' => $otherOutResidual,
+            'opening_in' => $openingIn, 'opening_out' => $openingOut,
             'transfer_elimination' => 0.0,
         ];
     }
@@ -491,14 +547,21 @@ final class InventoryMovementReportService
             'out_usage' => "t.transaction_type = 'OUT' AND t.status IN ('POSTED','VOID')",
             'adjustment_positive' => "t.transaction_type = 'ADJUSTMENT' AND l.subtotal > 0",
             'adjustment_negative' => "t.transaction_type = 'ADJUSTMENT' AND l.subtotal < 0",
+            // PHASE V2.14.1: a mid-period OPENING's own drill-down — the
+            // boundary-exact company go-live OPENING is excluded from the
+            // day-scoped bucket query entirely (see bucketsByDate()), so
+            // this can only ever surface a later onboarding.
+            'opening_in' => "t.transaction_type = 'OPENING' AND {$signed} > 0",
             'other_in' => "t.status IN ('POSTED','VOID') AND {$signed} > 0
                 AND NOT (t.transaction_type = 'IN' AND t.status = 'POSTED')
                 AND NOT (t.transaction_type = 'TRANSFER_IN')
-                AND NOT (t.transaction_type = 'ADJUSTMENT' AND l.subtotal > 0)",
+                AND NOT (t.transaction_type = 'ADJUSTMENT' AND l.subtotal > 0)
+                AND NOT (t.transaction_type = 'OPENING')",
             'other_out' => "t.status IN ('POSTED','VOID') AND {$signed} < 0
                 AND NOT (t.transaction_type = 'TRANSFER_OUT')
                 AND NOT (t.transaction_type = 'OUT')
-                AND NOT (t.transaction_type = 'ADJUSTMENT' AND l.subtotal < 0)",
+                AND NOT (t.transaction_type = 'ADJUSTMENT' AND l.subtotal < 0)
+                AND NOT (t.transaction_type = 'OPENING')",
             'transfer_elimination' => "t.transaction_type IN ('TRANSFER_IN','TRANSFER_OUT')",
             default => throw new ValidationException("Unknown movement report category: {$category}"),
         };

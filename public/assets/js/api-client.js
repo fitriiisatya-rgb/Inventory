@@ -169,6 +169,7 @@ const InvApi = (() => {
         importWarehouseCutover: (id, filePath) => request('POST', `/warehouse-cutovers/${id}/import`, { file_path: filePath }),
         matchWarehouseCutoverItems: (id) => request('POST', `/warehouse-cutovers/${id}/match-items`),
         resolveWarehouseCutoverLine: (id, lineId, payload) => request('PUT', `/warehouse-cutovers/${id}/lines/${lineId}`, payload),
+        importWarehouseCutoverDecisions: (id, decisions) => request('POST', `/warehouse-cutovers/${id}/import-decisions`, { decisions }),
         approveWarehouseCutover: (id) => request('POST', `/warehouse-cutovers/${id}/approve`),
         previewWarehouseCutoverOpening: (id) => request('GET', `/warehouse-cutovers/${id}/preview`),
         loadWarehouseCutoverOpening: (id) => request('POST', `/warehouse-cutovers/${id}/load`),

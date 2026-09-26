@@ -452,7 +452,19 @@ check('H. Stock OUT still works unaffected', $outResult['success'] === true, jso
 $movementReport = InventoryMovementReportService::dailyMovement($pdo, '2026-09-01', '2026-09-30', $karangTengahId);
 $reportByDate = [];
 foreach ($movementReport['rows'] as $row) { $reportByDate[$row['date']] = $row; }
-check('H. Daily movement report shows real IN value on 2026-09-18 (the real opening_as_of date)', ($reportByDate['2026-09-18']['barang_masuk'] ?? 0) > 0, json_encode($reportByDate['2026-09-18'] ?? null));
+// PHASE V2.14.1: the opening load must NOT contaminate ordinary Barang
+// Masuk — it is a starting balance, not an operational movement. stok_akhir
+// still correctly reflects it (net/running-balance is untouched); only the
+// CATEGORY attribution changes.
+check('H. Daily movement report does NOT count the opening load as Barang Masuk on 2026-09-18', ($reportByDate['2026-09-18']['barang_masuk'] ?? -1) === 0.0, json_encode($reportByDate['2026-09-18'] ?? null));
+check('H. Daily movement report stok_akhir on 2026-09-18 still correctly reflects the loaded value (net/running balance unaffected)', abs(($reportByDate['2026-09-18']['stok_akhir'] ?? 0) - $loadResult['total_value']) < 0.01, json_encode($reportByDate['2026-09-18'] ?? null));
+$breakdown = InventoryMovementReportService::dayBreakdown($pdo, '2026-09-18', $karangTengahId);
+$openingCategory = null;
+foreach ($breakdown['categories'] as $cat) { if ($cat['key'] === 'opening_in') { $openingCategory = $cat; } }
+check('H. dayBreakdown discloses the opening load in its own distinct "opening_in" category, not folded into other_in', $openingCategory !== null && abs($openingCategory['value'] - $loadResult['total_value']) < 0.01, json_encode($openingCategory));
+$otherInCategory = null;
+foreach ($breakdown['categories'] as $cat) { if ($cat['key'] === 'other_in') { $otherInCategory = $cat; } }
+check('H. dayBreakdown "other_in" (Lainnya/Masuk) is zero — the opening is not double-counted there either', $otherInCategory !== null && (float) $otherInCategory['value'] === 0.0, json_encode($otherInCategory));
 $preCutoverDays = ['2026-09-01', '2026-09-05', '2026-09-10', '2026-09-17'];
 $anyFabricatedMovement = false;
 foreach ($preCutoverDays as $d) {
