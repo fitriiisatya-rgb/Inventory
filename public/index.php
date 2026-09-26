@@ -87,6 +87,7 @@ use App\Services\PeriodLockedException;
 use App\Services\WarehouseLockedException;
 use App\Services\WarehouseInactiveException;
 use App\Services\WarehouseActivationLockedException;
+use App\Services\WarehouseCutoverLockedException;
 use App\Services\WarehouseGuardService;
 use App\Services\CostRequiredException;
 use App\Services\UnitConversionNotApprovedException;
@@ -330,6 +331,7 @@ set_exception_handler(function (Throwable $e) use ($path) {
         WarehouseLockedException::class           => ['code' => 423, 'label' => 'OPNAME_ACTIVE'],
         WarehouseInactiveException::class         => ['code' => 422, 'label' => 'WAREHOUSE_INACTIVE'],
         WarehouseActivationLockedException::class => ['code' => 422, 'label' => 'WAREHOUSE_ACTIVATION_LOCKED'],
+        WarehouseCutoverLockedException::class    => ['code' => 422, 'label' => 'WAREHOUSE_CUTOVER_LOCKED'],
         CostRequiredException::class              => ['code' => 422, 'label' => 'COST_REQUIRED'],
         UnitConversionNotApprovedException::class => ['code' => 422, 'label' => 'UNIT_CONVERSION_NOT_APPROVED'],
         NegativeMigrationStockRequiresAdjustmentException::class => ['code' => 422, 'label' => 'NEGATIVE_MIGRATION_STOCK_REQUIRES_ADJUSTMENT'],
@@ -3783,6 +3785,12 @@ $routes = [
         if ($wh === false) {
             inv_error(404, 'NOT_FOUND', 'warehouse not found');
         }
+
+        // PHASE V2.13.2: a locked warehouse's incomplete cutover is itself
+        // the reason it must not be permanently removed — checked BEFORE
+        // the reference/FK safety check below, since a locked warehouse
+        // with zero dependent rows would otherwise pass that check.
+        WarehouseGuardService::assertDeletionAllowed($whId, (int) $wh['activation_locked']);
 
         $refs = MasterDataSafetyService::checkWarehouseReferences($pdo, $whId);
         if ($refs['blocked']) {

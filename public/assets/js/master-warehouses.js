@@ -18,6 +18,13 @@
  * just avoids presenting an "Aktifkan" action that the server would
  * refuse anyway, and explains why. There is no unlock action anywhere in
  * this UI; unlocking is a separate, later, explicitly-approved change.
+ *
+ * PHASE V2.13.2: activation_locked also withholds "Hapus Permanen" (shown
+ * disabled instead) — a locked warehouse's incomplete cutover is reason
+ * enough to refuse permanent deletion even when it currently has zero
+ * dependent rows, which the ordinary FK/reference safety check alone
+ * would not catch. Real enforcement is again server-side, in the same
+ * DELETE /warehouses/{id} route.
  */
 const MasterWarehouses = (() => {
     let dtHandle = null;
@@ -90,7 +97,11 @@ const MasterWarehouses = (() => {
                     ? { label: 'Aktifkan (Cutover Terkunci)', disabled: true }
                     : { label: row.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(row) }
             ) : null,
-            canManage ? { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(row) } : null,
+            canManage ? (
+                row.activation_locked
+                    ? { label: 'Hapus Permanen (Cutover Terkunci)', danger: true, disabled: true }
+                    : { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(row) }
+            ) : null,
         ]);
     }
 

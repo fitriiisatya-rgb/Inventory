@@ -31,6 +31,14 @@ use PDO;
  * locked warehouse is refused activation; an inactive warehouse is refused
  * stock mutation) — a warehouse could in principle be locked while already
  * active, though this release only ever creates locked+inactive rows.
+ *
+ * PHASE V2.13.2 — a third, independent GENERIC rule: activation_locked = 1
+ * also refuses DELETE /warehouses/{id} outright, regardless of whether the
+ * warehouse currently has zero dependent rows (which is exactly the state
+ * that would otherwise make MasterDataSafetyService::checkWarehouseReferences()
+ * allow the delete). A locked warehouse's cutover being incomplete is
+ * itself the reason it must not be permanently removed — that has nothing
+ * to do with whether data already references it yet.
  */
 final class WarehouseGuardService
 {
@@ -58,6 +66,14 @@ final class WarehouseGuardService
     {
         if ($currentIsActive === 0 && $requestedIsActive === 1 && $currentActivationLocked === 1) {
             throw new WarehouseActivationLockedException($warehouseId);
+        }
+    }
+
+    /** Refuses permanent deletion outright when the warehouse is activation_locked. */
+    public static function assertDeletionAllowed(int $warehouseId, int $activationLocked): void
+    {
+        if ($activationLocked === 1) {
+            throw new WarehouseCutoverLockedException($warehouseId);
         }
     }
 }

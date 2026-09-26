@@ -153,6 +153,23 @@ final class WarehouseActivationLockedException extends RuntimeException
     }
 }
 
+/**
+ * PHASE V2.13.2: a generic, server-enforced deletion lock — the target
+ * warehouse has activation_locked = 1, so DELETE /warehouses/{id} refuses
+ * to permanently remove it, regardless of the caller's permissions and
+ * regardless of whether it currently has zero dependent rows (a locked
+ * warehouse's zero-dependency state is exactly what makes it otherwise
+ * deletable, which is the gap this closes). Not Karang-Tengah-specific:
+ * any warehouse can carry this flag. Error code: WAREHOUSE_CUTOVER_LOCKED.
+ */
+final class WarehouseCutoverLockedException extends RuntimeException
+{
+    public function __construct(public readonly int $warehouseId)
+    {
+        parent::__construct('Gudang tidak dapat dihapus selama proses cutover masih terkunci.');
+    }
+}
+
 /** PHASE C3: too many recent failed logins for this username/IP. */
 final class RateLimitedException extends RuntimeException
 {
