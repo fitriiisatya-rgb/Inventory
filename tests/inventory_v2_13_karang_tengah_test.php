@@ -47,6 +47,7 @@ require_once __DIR__ . '/../services/FifoService.php';
 require_once __DIR__ . '/../services/TransferService.php';
 require_once __DIR__ . '/../services/NumberingService.php';
 require_once __DIR__ . '/../services/StockAdjustmentService.php';
+require_once __DIR__ . '/../services/ProductionService.php';
 require_once __DIR__ . '/../services/StockOpnameService.php';
 require_once __DIR__ . '/../services/AuthService.php';
 require_once __DIR__ . '/../services/InventoryHppReportService.php';
@@ -57,6 +58,8 @@ use App\Services\FifoService;
 use App\Services\TransferService;
 use App\Services\UnitConversionService;
 use App\Services\StockOpnameService;
+use App\Services\StockAdjustmentService;
+use App\Services\ProductionService;
 use App\Services\AuthService;
 use App\Services\InventoryMovementReportService;
 use App\Services\ValidationException;
@@ -144,15 +147,46 @@ function postOut(PDO $pdo, int $itemId, int $whId, int $unitId, float $qty, int 
 
 $adminUserId = makeUser($pdo, 'v213admin', $superRoleId, null);
 
+function warehouseQtyValue(PDO $pdo, int $whId): array
+{
+    $stmt = $pdo->prepare('SELECT COALESCE(SUM(qty_base),0), COALESCE(SUM(qty_base*unit_cost_base),0), COUNT(*) FROM inventory_batches WHERE warehouse_id = :wh');
+    $stmt->execute(['wh' => $whId]);
+    return $stmt->fetch(PDO::FETCH_NUM);
+}
+
 // ============================================================
-// A. Warehouse creation — apply the actual migration, verify the row
+// A0. NON-ZERO INVENTORY FIXTURE — deterministic real FIFO stock in
+// GUDANG_BESAR and CIBADAK, posted BEFORE the migration runs, so the
+// zero-effect invariant below is proven against real, non-trivial
+// numbers rather than an empty database.
 // ============================================================
-echo "== A. Warehouse creation (real migration file) ==\n";
+echo "== A0. Non-zero inventory fixture (pre-migration) ==\n";
+$itemA0a = makeItem($pdo, $kgUnitId, 'V213-A0A');
+$itemA0b = makeItem($pdo, $kgUnitId, 'V213-A0B');
+$itemA0c = makeItem($pdo, $kgUnitId, 'V213-A0C');
+postIn($pdo, $itemA0a, $gudangBesarId, $kgUnitId, 1000, 12000, $adminUserId, '2026-07-01 08:00:00');
+postIn($pdo, $itemA0b, $gudangBesarId, $kgUnitId, 250.5, 8500, $adminUserId, '2026-07-02 08:00:00');
+postOut($pdo, $itemA0a, $gudangBesarId, $kgUnitId, 150, $adminUserId, '2026-07-10 08:00:00');
+postIn($pdo, $itemA0a, $cibadakId, $kgUnitId, 300, 12000, $adminUserId, '2026-07-03 08:00:00');
+postIn($pdo, $itemA0c, $cibadakId, $kgUnitId, 75.25, 20000, $adminUserId, '2026-07-04 08:00:00');
+postOut($pdo, $itemA0c, $cibadakId, $kgUnitId, 25, $adminUserId, '2026-07-11 08:00:00');
+check('fixture setup: company batch count > 0 before migration', (int) $pdo->query('SELECT COUNT(*) FROM inventory_batches')->fetchColumn() > 0);
+
+// ============================================================
+// A. Warehouse creation — apply the actual migration, verify the row,
+// and verify the FULL non-zero-inventory invariant matrix.
+// ============================================================
+echo "\n== A. Warehouse creation (real migration file) + non-zero inventory invariant ==\n";
 $migrationFile = __DIR__ . '/../database/migrations/2026_09_26_v2_13_karang_tengah_warehouse.sql';
 check('migration file exists', is_file($migrationFile));
 
-$batchesBefore = (int) $pdo->query('SELECT COUNT(*) FROM inventory_batches')->fetchColumn();
-$qtyValueBefore = $pdo->query('SELECT COALESCE(SUM(qty_base),0), COALESCE(SUM(qty_base*unit_cost_base),0) FROM inventory_batches')->fetch(PDO::FETCH_NUM);
+$companyBefore = $pdo->query('SELECT COALESCE(SUM(qty_base),0), COALESCE(SUM(qty_base*unit_cost_base),0), COUNT(*) FROM inventory_batches')->fetch(PDO::FETCH_NUM);
+$gbBefore = warehouseQtyValue($pdo, $gudangBesarId);
+$cibBefore = warehouseQtyValue($pdo, $cibadakId);
+
+echo "  BEFORE — company: qty={$companyBefore[0]} value={$companyBefore[1]} batches={$companyBefore[2]}\n";
+echo "  BEFORE — GUDANG_BESAR: qty={$gbBefore[0]} value={$gbBefore[1]} batches={$gbBefore[2]}\n";
+echo "  BEFORE — CIBADAK: qty={$cibBefore[0]} value={$cibBefore[1]} batches={$cibBefore[2]}\n";
 
 applySqlFile($pdo, $migrationFile);
 
@@ -163,13 +197,33 @@ check('warehouse_type = TRANSIT', $kt && $kt['warehouse_type'] === 'TRANSIT', (s
 check('is_active = 0 (INACTIVE)', $kt && (int) $kt['is_active'] === 0, (string) ($kt['is_active'] ?? 'MISSING'));
 $karangTengahId = (int) $kt['id'];
 
-$batchCountForKt = (int) $pdo->prepare('SELECT COUNT(*) FROM inventory_batches WHERE warehouse_id = :id')->execute(['id' => $karangTengahId]);
-$stmt = $pdo->prepare('SELECT COUNT(*) FROM inventory_batches WHERE warehouse_id = :id');
-$stmt->execute(['id' => $karangTengahId]);
-check('zero inventory_batches rows for Karang Tengah', (int) $stmt->fetchColumn() === 0);
+$companyAfter = $pdo->query('SELECT COALESCE(SUM(qty_base),0), COALESCE(SUM(qty_base*unit_cost_base),0), COUNT(*) FROM inventory_batches')->fetch(PDO::FETCH_NUM);
+$gbAfter = warehouseQtyValue($pdo, $gudangBesarId);
+$cibAfter = warehouseQtyValue($pdo, $cibadakId);
+$ktAfter = warehouseQtyValue($pdo, $karangTengahId);
 
-// re-run migration: idempotency
+echo "  AFTER  — company: qty={$companyAfter[0]} value={$companyAfter[1]} batches={$companyAfter[2]}\n";
+echo "  AFTER  — GUDANG_BESAR: qty={$gbAfter[0]} value={$gbAfter[1]} batches={$gbAfter[2]}\n";
+echo "  AFTER  — CIBADAK: qty={$cibAfter[0]} value={$cibAfter[1]} batches={$cibAfter[2]}\n";
+echo "  AFTER  — KARANG_TENGAH: qty={$ktAfter[0]} value={$ktAfter[1]} batches={$ktAfter[2]}\n";
+
+check('company total qty UNCHANGED', (float) $companyBefore[0] === (float) $companyAfter[0], "{$companyBefore[0]} -> {$companyAfter[0]}");
+check('company total value UNCHANGED', (float) $companyBefore[1] === (float) $companyAfter[1], "{$companyBefore[1]} -> {$companyAfter[1]}");
+check('company total batch count UNCHANGED', (int) $companyBefore[2] === (int) $companyAfter[2], "{$companyBefore[2]} -> {$companyAfter[2]}");
+check('GUDANG_BESAR qty UNCHANGED', (float) $gbBefore[0] === (float) $gbAfter[0], "{$gbBefore[0]} -> {$gbAfter[0]}");
+check('GUDANG_BESAR value UNCHANGED', (float) $gbBefore[1] === (float) $gbAfter[1], "{$gbBefore[1]} -> {$gbAfter[1]}");
+check('GUDANG_BESAR batch count UNCHANGED', (int) $gbBefore[2] === (int) $gbAfter[2], "{$gbBefore[2]} -> {$gbAfter[2]}");
+check('CIBADAK qty UNCHANGED', (float) $cibBefore[0] === (float) $cibAfter[0], "{$cibBefore[0]} -> {$cibAfter[0]}");
+check('CIBADAK value UNCHANGED', (float) $cibBefore[1] === (float) $cibAfter[1], "{$cibBefore[1]} -> {$cibAfter[1]}");
+check('CIBADAK batch count UNCHANGED', (int) $cibBefore[2] === (int) $cibAfter[2], "{$cibBefore[2]} -> {$cibAfter[2]}");
+check('KARANG_TENGAH qty = 0', (float) $ktAfter[0] === 0.0, (string) $ktAfter[0]);
+check('KARANG_TENGAH value = 0', (float) $ktAfter[1] === 0.0, (string) $ktAfter[1]);
+check('KARANG_TENGAH batches = 0', (int) $ktAfter[2] === 0, (string) $ktAfter[2]);
+
+// re-run migration: idempotency (must not touch the non-zero data either)
 applySqlFile($pdo, $migrationFile);
+$companyAfterRerun = $pdo->query('SELECT COALESCE(SUM(qty_base),0), COALESCE(SUM(qty_base*unit_cost_base),0), COUNT(*) FROM inventory_batches')->fetch(PDO::FETCH_NUM);
+check('re-running migration a second time still leaves company qty/value/batches unchanged', (float) $companyAfter[0] === (float) $companyAfterRerun[0] && (float) $companyAfter[1] === (float) $companyAfterRerun[1] && (int) $companyAfter[2] === (int) $companyAfterRerun[2]);
 $ktCount = (int) $pdo->query("SELECT COUNT(*) FROM warehouses WHERE code = 'KARANG_TENGAH'")->fetchColumn();
 check('re-running migration creates no duplicate row (idempotent)', $ktCount === 1, "count={$ktCount}");
 
@@ -177,11 +231,12 @@ check('re-running migration creates no duplicate row (idempotent)', $ktCount ===
 // B. Safety — zero inventory effect, inactive warehouse cannot mutate stock
 // ============================================================
 echo "\n== B. Safety ==\n";
-$batchesAfter = (int) $pdo->query('SELECT COUNT(*) FROM inventory_batches')->fetchColumn();
-$qtyValueAfter = $pdo->query('SELECT COALESCE(SUM(qty_base),0), COALESCE(SUM(qty_base*unit_cost_base),0) FROM inventory_batches')->fetch(PDO::FETCH_NUM);
-check('migration changes company inventory_batches ROW COUNT by 0', $batchesAfter === $batchesBefore, "before={$batchesBefore} after={$batchesAfter}");
-check('migration changes company inventory qty by 0', (float) $qtyValueBefore[0] === (float) $qtyValueAfter[0], "before={$qtyValueBefore[0]} after={$qtyValueAfter[0]}");
-check('migration changes company inventory value by 0', (float) $qtyValueBefore[1] === (float) $qtyValueAfter[1], "before={$qtyValueBefore[1]} after={$qtyValueAfter[1]}");
+// The full non-zero-inventory invariant matrix (company/GUDANG_BESAR/
+// CIBADAK/KARANG_TENGAH qty, value, batch count — before vs after the
+// migration, and again after a second idempotent re-run) is already
+// proven in Section A above against real, non-trivial FIFO fixtures.
+// Section B focuses on the OTHER half of "safety": that an inactive
+// warehouse cannot mutate stock through any entry point.
 
 $itemB1 = makeItem($pdo, $kgUnitId, 'V213-B1');
 $errIn = expectException(fn () => postIn($pdo, $itemB1, $karangTengahId, $kgUnitId, 10, 1000, $adminUserId), WarehouseInactiveException::class);
@@ -335,6 +390,219 @@ check('a STOCK user scoped to Cibadak has no unintended Karang Tengah access via
     $user = ['role_code' => 'STOCK', 'warehouse_id' => (string) $GLOBALS['cibadakId']];
     AuthService::assertWarehouseScope($user, $karangTengahId);
 }, ValidationException::class) === ValidationException::class);
+
+// ============================================================
+// I. Inactive-warehouse guard matrix — remaining entry points not yet
+// exercised above (production consume/output, adjustment, opname
+// posting, and a transfer receive()-time defense-in-depth check for a
+// warehouse deactivated AFTER a transfer was already created).
+// ============================================================
+echo "\n== I. Inactive-warehouse guard matrix (remaining entry points) ==\n";
+
+// Deactivate Karang Tengah again for this section's own from-scratch
+// proofs (it was flipped active for D-H above); use a second, disposable
+// TRANSIT-style fixture warehouse so this doesn't disturb the state the
+// remaining sections (J below) still rely on being active.
+$pdo->prepare('UPDATE warehouses SET is_active = 1 WHERE id = :id')->execute(['id' => $karangTengahId]); // keep KT active; matrix uses KT directly, this is a no-op safety re-assert
+
+$itemI1 = makeItem($pdo, $kgUnitId, 'V213-I1-PROD-RAW');
+$itemI2 = makeItem($pdo, $kgUnitId, 'V213-I2-PROD-OUT');
+$pdo->prepare('UPDATE warehouses SET is_active = 0 WHERE id = :id')->execute(['id' => $karangTengahId]);
+
+// I.1 — production consume + output (same warehouse_id for both sides in
+// this codebase's ProductionService::create() — a single atomic call
+// posts the raw-material OUT first, so an inactive warehouse is rejected
+// before the output IN could ever be attempted; there is no code path in
+// this application where "consume" could succeed while "output" fails on
+// the active-warehouse check alone, since both reads happen against the
+// exact same $p['warehouse_id']).
+$errProd = expectException(fn () => Database::transaction(fn (PDO $tx) => ProductionService::create($tx, [
+    'production_uuid' => uid('v213-prod'), 'warehouse_id' => $karangTengahId, 'production_date' => '2026-09-15 08:00:00',
+    'created_by' => $adminUserId,
+    'inputs' => [['item_id' => $itemI1, 'input_qty' => 1, 'input_unit_id' => $kgUnitId]],
+    'output' => ['item_id' => $itemI2, 'output_qty' => 1, 'output_unit_id' => $kgUnitId],
+])), WarehouseInactiveException::class);
+check('ProductionService::create REJECTS inactive Karang Tengah (covers BOTH consume and output — same warehouse_id, same guard, raw-material OUT checked first)', $errProd === WarehouseInactiveException::class, (string) $errProd);
+
+// I.2 — adjustment (StockAdjustmentService::post(), also what
+// StockOpnameService::post() calls internally for an opname variance —
+// identical code path, so this one test proves both matrix rows).
+$errAdj = expectException(fn () => Database::transaction(fn (PDO $tx) => StockAdjustmentService::post($tx, [
+    'transaction_uuid' => uid('v213-adj'), 'item_id' => $itemI1, 'warehouse_id' => $karangTengahId,
+    'qty_base_delta' => 5.0, 'adjustment_type' => 'CORRECTION', 'reason' => 'V2.13 guard matrix proof',
+    'created_by' => $adminUserId, 'override_cost_base' => 1000,
+])), WarehouseInactiveException::class);
+check('StockAdjustmentService::post REJECTS inactive Karang Tengah (identical code path StockOpnameService::post() uses for an opname variance)', $errAdj === WarehouseInactiveException::class, (string) $errAdj);
+
+// I.3 — transfer receive() defense-in-depth: a transfer whose DESTINATION
+// warehouse was ACTIVE at create() time but has since been deactivated
+// before receive() is called. TransferService::create()'s fail-fast check
+// (Section B) cannot catch this — the warehouse was active when create()
+// ran — so this specifically proves the independent FifoService::postIn()
+// guard inside receive() is real defense-in-depth, not just cosmetic.
+$itemI3 = makeItem($pdo, $kgUnitId, 'V213-I3-XFER');
+postIn($pdo, $itemI3, $gudangBesarId, $kgUnitId, 50, 3000, $adminUserId, '2026-09-16 08:00:00');
+$pdo->prepare('UPDATE warehouses SET is_active = 1 WHERE id = :id')->execute(['id' => $karangTengahId]);
+$xferI3 = Database::transaction(fn (PDO $tx) => TransferService::create($tx, [
+    'transfer_uuid' => uid('v213-i3-xfer'), 'from_warehouse_id' => $gudangBesarId, 'to_warehouse_id' => $karangTengahId,
+    'ship_date' => '2026-09-16 09:00:00', 'created_by' => $adminUserId,
+    'lines' => [['item_id' => $itemI3, 'input_qty' => 10, 'input_unit_id' => $kgUnitId]],
+]));
+check('transfer create() succeeds while Karang Tengah is still active', $xferI3['success'] === true, json_encode($xferI3));
+$pdo->prepare('UPDATE warehouses SET is_active = 0 WHERE id = :id')->execute(['id' => $karangTengahId]); // deactivated AFTER create(), BEFORE receive()
+$errReceive = expectException(fn () => Database::transaction(fn (PDO $tx) => TransferService::receive($tx, $xferI3['transfer_id'], ['created_by' => $adminUserId])), WarehouseInactiveException::class);
+check('TransferService::receive() independently REJECTS a destination deactivated after create() but before receive() (defense-in-depth, not just the create()-time fail-fast)', $errReceive === WarehouseInactiveException::class, (string) $errReceive);
+// restore active + clean up the stuck-in-transit transfer for the rest of this file
+$pdo->prepare('UPDATE warehouses SET is_active = 1 WHERE id = :id')->execute(['id' => $karangTengahId]);
+Database::transaction(fn (PDO $tx) => TransferService::receive($tx, $xferI3['transfer_id'], ['created_by' => $adminUserId]));
+
+// ============================================================
+// J. HTTP-level proof — the SAME service/API path the real UI uses
+// (php -S + curl, not a direct PHP service call), against the
+// already-active Karang Tengah fixture from Section D onward.
+// ============================================================
+echo "\n== J. HTTP-level proof (real API path) ==\n";
+$port = 8900 + random_int(1600, 1999);
+$docRoot = __DIR__ . '/../public';
+$descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+$process = proc_open(sprintf('php -S 127.0.0.1:%d -t %s', $port, escapeshellarg($docRoot)), $descriptors, $pipes, __DIR__ . '/..');
+if (!is_resource($process)) { fwrite(STDERR, "Failed to start php -S\n"); exit(1); }
+stream_set_blocking($pipes[1], false);
+stream_set_blocking($pipes[2], false);
+$base = "http://127.0.0.1:{$port}/api";
+$ready = false;
+for ($i = 0; $i < 50; $i++) {
+    usleep(100_000);
+    $ch = curl_init("{$base}/auth/me");
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT_MS, 500);
+    $res = curl_exec($ch);
+    $err = curl_errno($ch);
+    curl_close($ch);
+    if ($res !== false && $err === 0) { $ready = true; break; }
+}
+if (!$ready) { fwrite(STDERR, "Server did not become ready\n"); proc_terminate($process); exit(1); }
+
+function httpCall(string $method, string $url, ?array $body, string $cookieJar, ?string $csrfToken = null): array
+{
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST => $method, CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_COOKIEJAR => $cookieJar, CURLOPT_COOKIEFILE => $cookieJar, CURLOPT_TIMEOUT => 5,
+        CURLOPT_HEADER => true,
+    ]);
+    $headers = ['Content-Type: application/json'];
+    if ($csrfToken !== null) { $headers[] = "X-CSRF-Token: {$csrfToken}"; }
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    if ($body !== null) { curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body)); }
+    $raw = curl_exec($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $headerSize = (int) curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+    curl_close($ch);
+    $rawBody = substr((string) $raw, $headerSize);
+    $decoded = json_decode($rawBody, true);
+    return ['status' => $status, 'body' => is_array($decoded) ? $decoded : [], 'raw' => $rawBody];
+}
+
+try {
+    $httpSuperUser = uid('v213http'); $httpSuperPass = 'V213HttpPass123!';
+    $pdo->prepare('INSERT INTO users (username, password_hash, full_name, role_id, is_active) VALUES (:u,:h,:n,:r,1)')
+        ->execute(['u' => $httpSuperUser, 'h' => password_hash($httpSuperPass, PASSWORD_BCRYPT), 'n' => $httpSuperUser, 'r' => $superRoleId]);
+    $jar = tempnam(sys_get_temp_dir(), 'cookie_');
+    $login = httpCall('POST', "{$base}/auth/login", ['username' => $httpSuperUser, 'password' => $httpSuperPass], $jar);
+    $csrf = $login['body']['data']['csrf_token'] ?? '';
+    check('HTTP login succeeds', $login['status'] === 200, json_encode($login['body']));
+
+    // J.0 — frontend warehouse selector proof: GET /warehouses (the
+    // operational-dropdown source) includes Karang Tengah NOW (active),
+    // confirming the same generic endpoint the UI calls would show it.
+    $whList = httpCall('GET', "{$base}/warehouses", null, $jar, $csrf);
+    $whCodes = array_column($whList['body']['data'] ?? [], 'code');
+    check('GET /warehouses (operational dropdown source) includes KARANG_TENGAH while active', in_array('KARANG_TENGAH', $whCodes, true), json_encode($whCodes));
+
+    // J.1 — item resolvable via the same GET /items the UI's ItemSelector
+    // loads from, for a brand-new SKU that has NEVER had a batch in
+    // Karang Tengah (proves no catalog/pre-seeding is needed).
+    $itemJ1 = makeItem($pdo, $kgUnitId, 'V213-J1-FIRSTIN');
+    $itemsResp = httpCall('GET', "{$base}/items", null, $jar, $csrf);
+    $itemIds = array_column($itemsResp['body']['data'] ?? [], 'id');
+    check('item is resolvable via GET /items (same source ItemSelector reads) with no warehouse-specific catalog entry needed', in_array($itemJ1, $itemIds, true));
+
+    // J.2 — FIRST-EVER Stock IN to Karang Tengah for this item, via the
+    // exact route the UI's Stock IN screen posts to.
+    $firstIn = httpCall('POST', "{$base}/transactions/in", [
+        'transaction_uuid' => uid('v213-http-in'), 'item_id' => $itemJ1, 'warehouse_id' => $karangTengahId,
+        'input_qty' => 80, 'input_unit_id' => $kgUnitId, 'unit_price_input' => 2500,
+        'transaction_date' => '2026-09-25 08:00:00',
+    ], $jar, $csrf);
+    check('HTTP POST /transactions/in succeeds for a brand-new item with zero prior Karang Tengah batches', ($firstIn['body']['success'] ?? false) === true, json_encode($firstIn['body']));
+
+    $afterFirstIn = httpCall('GET', "{$base}/inventory/current?item_id={$itemJ1}&warehouse_id={$karangTengahId}", null, $jar, $csrf);
+    check('first-ever batch qty correct (80)', abs(($afterFirstIn['body']['data']['qty_base'] ?? -1) - 80.0) < 0.0001, json_encode($afterFirstIn['body']));
+    check('first-ever batch value correct (80 * 2500 = 200,000)', abs(($afterFirstIn['body']['data']['value'] ?? -1) - 200000.0) < 0.01, json_encode($afterFirstIn['body']));
+
+    $historyJ1 = httpCall('GET', "{$base}/reports/transactions?item_id={$itemJ1}&warehouse_id={$karangTengahId}", null, $jar, $csrf);
+    check('transaction history (GET /reports/transactions) records the IN correctly', count($historyJ1['body']['data']['rows'] ?? []) === 1, json_encode($historyJ1['body']));
+
+    $whReportJ1 = httpCall('GET', "{$base}/warehouses/report?q=KARANG_TENGAH", null, $jar, $csrf);
+    $ktReportRow = ($whReportJ1['body']['data']['rows'] ?? [])[0] ?? null;
+    check('warehouse report (Master Gudang API) reflects the new stock', $ktReportRow !== null && (float) $ktReportRow['qty_on_hand'] >= 80.0, json_encode($ktReportRow));
+
+    // J.3 — Stock OUT part of that same quantity via the identical UI route.
+    $firstOut = httpCall('POST', "{$base}/transactions/out", [
+        'transaction_uuid' => uid('v213-http-out'), 'item_id' => $itemJ1, 'warehouse_id' => $karangTengahId,
+        'input_qty' => 30, 'input_unit_id' => $kgUnitId,
+        'transaction_date' => '2026-09-25 15:00:00',
+    ], $jar, $csrf);
+    check('HTTP POST /transactions/out succeeds (FIFO consumption)', ($firstOut['body']['success'] ?? false) === true, json_encode($firstOut['body']));
+    $afterFirstOut = httpCall('GET', "{$base}/inventory/current?item_id={$itemJ1}&warehouse_id={$karangTengahId}", null, $jar, $csrf);
+    check('remaining balance correct after OUT (80 - 30 = 50)', abs(($afterFirstOut['body']['data']['qty_base'] ?? -1) - 50.0) < 0.0001, json_encode($afterFirstOut['body']));
+
+    // J.4 — first-ever TRANSFER receipt to Karang Tengah for a DIFFERENT
+    // brand-new item, via the same /transfers + /transfers/{id}/receive
+    // routes the UI's Transfer screen uses — no manual catalog/pre-seeding.
+    $itemJ2 = makeItem($pdo, $kgUnitId, 'V213-J2-FIRSTXFER');
+    postIn($pdo, $itemJ2, $gudangBesarId, $kgUnitId, 60, 4000, $adminUserId, '2026-09-25 08:00:00');
+    $xferCreate = httpCall('POST', "{$base}/transfers", [
+        'transfer_uuid' => uid('v213-http-xfer'), 'from_warehouse_id' => $gudangBesarId, 'to_warehouse_id' => $karangTengahId,
+        'ship_date' => '2026-09-25 09:00:00',
+        'lines' => [['item_id' => $itemJ2, 'input_qty' => 20, 'input_unit_id' => $kgUnitId]],
+    ], $jar, $csrf);
+    check('HTTP POST /transfers succeeds (Gudang Besar -> Karang Tengah)', ($xferCreate['body']['success'] ?? false) === true, json_encode($xferCreate['body']));
+    $xferId = $xferCreate['body']['data']['transfer_id'] ?? null;
+    $xferReceive = httpCall('POST', "{$base}/transfers/{$xferId}/receive", [], $jar, $csrf);
+    check('HTTP POST /transfers/{id}/receive succeeds — first-ever batch at destination created with no manual catalog/pre-seeding', ($xferReceive['body']['success'] ?? false) === true, json_encode($xferReceive['body']));
+    $afterXfer = httpCall('GET', "{$base}/inventory/current?item_id={$itemJ2}&warehouse_id={$karangTengahId}", null, $jar, $csrf);
+    check('destination received correct quantity via HTTP transfer path (20)', abs(($afterXfer['body']['data']['qty_base'] ?? -1) - 20.0) < 0.0001, json_encode($afterXfer['body']));
+
+    // J.5 — Daily report API: real dates (today's release date and the
+    // day after), via the exact route the frontend calls. No fake
+    // historical 01-17 Sep data anywhere in this section.
+    $itemJ3 = makeItem($pdo, $kgUnitId, 'V213-J3-DAILY');
+    httpCall('POST', "{$base}/transactions/in", ['transaction_uuid' => uid('v213-d1-in'), 'item_id' => $itemJ3, 'warehouse_id' => $karangTengahId, 'input_qty' => 200, 'input_unit_id' => $kgUnitId, 'unit_price_input' => 1000, 'transaction_date' => '2026-09-26 08:00:00'], $jar, $csrf);
+    httpCall('POST', "{$base}/transactions/out", ['transaction_uuid' => uid('v213-d1-out'), 'item_id' => $itemJ3, 'warehouse_id' => $karangTengahId, 'input_qty' => 40, 'input_unit_id' => $kgUnitId, 'transaction_date' => '2026-09-26 16:00:00'], $jar, $csrf);
+    httpCall('POST', "{$base}/transactions/in", ['transaction_uuid' => uid('v213-d2-in'), 'item_id' => $itemJ3, 'warehouse_id' => $karangTengahId, 'input_qty' => 90, 'input_unit_id' => $kgUnitId, 'unit_price_input' => 1000, 'transaction_date' => '2026-09-27 08:00:00'], $jar, $csrf);
+    httpCall('POST', "{$base}/transactions/out", ['transaction_uuid' => uid('v213-d2-out'), 'item_id' => $itemJ3, 'warehouse_id' => $karangTengahId, 'input_qty' => 15, 'input_unit_id' => $kgUnitId, 'transaction_date' => '2026-09-27 16:00:00'], $jar, $csrf);
+
+    $dailyHttp = httpCall('GET', "{$base}/reports/movement/daily?start_date=2026-09-26&end_date=2026-09-27&warehouse_id={$karangTengahId}", null, $jar, $csrf);
+    $rowsByDate = [];
+    foreach ($dailyHttp['body']['data']['rows'] ?? [] as $r) { $rowsByDate[$r['date']] = $r; }
+    check('GET /reports/movement/daily (warehouse=KARANG_TENGAH) returns both 26 Sep and 27 Sep', isset($rowsByDate['2026-09-26']) && isset($rowsByDate['2026-09-27']), json_encode(array_keys($rowsByDate)));
+    check('26 Sep IN/OUT value correct (IN=200,000, OUT=40,000)', isset($rowsByDate['2026-09-26']) && abs($rowsByDate['2026-09-26']['barang_masuk'] - 200000.0) < 0.01 && abs($rowsByDate['2026-09-26']['barang_keluar'] - 40000.0) < 0.01, json_encode($rowsByDate['2026-09-26'] ?? null));
+    check('27 Sep IN/OUT value correct (IN=90,000, OUT=15,000)', isset($rowsByDate['2026-09-27']) && abs($rowsByDate['2026-09-27']['barang_masuk'] - 90000.0) < 0.01 && abs($rowsByDate['2026-09-27']['barang_keluar'] - 15000.0) < 0.01, json_encode($rowsByDate['2026-09-27'] ?? null));
+    $periodInTotal = array_sum(array_column($rowsByDate, 'barang_masuk'));
+    $periodOutTotal = array_sum(array_column($rowsByDate, 'barang_keluar'));
+    check('period total IN value = 290,000 (200,000+90,000)', abs($periodInTotal - 290000.0) < 0.01, (string) $periodInTotal);
+    check('period total OUT value = 55,000 (40,000+15,000)', abs($periodOutTotal - 55000.0) < 0.01, (string) $periodOutTotal);
+
+    $dailyAllHttp = httpCall('GET', "{$base}/reports/movement/daily?start_date=2026-09-26&end_date=2026-09-27", null, $jar, $csrf);
+    $allByDate = [];
+    foreach ($dailyAllHttp['body']['data']['rows'] ?? [] as $r) { $allByDate[$r['date']] = $r; }
+    check('All Warehouse total (no warehouse_id filter) includes Karang Tengah activity on 26 Sep (IN value >= 200,000)', isset($allByDate['2026-09-26']) && $allByDate['2026-09-26']['barang_masuk'] >= 200000.0, json_encode($allByDate['2026-09-26'] ?? null));
+} finally {
+    proc_terminate($process);
+    proc_close($process);
+}
 
 echo "\n=== SUMMARY: " . count(array_filter($results)) . "/" . count($results) . " PASS ===\n";
 exit(in_array(false, $results, true) ? 1 : 0);

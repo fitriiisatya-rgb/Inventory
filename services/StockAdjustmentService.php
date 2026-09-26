@@ -54,6 +54,14 @@ final class StockAdjustmentService
         if (empty($p['bypass_warehouse_lock'])) {
             WarehouseLockService::assertNotLocked($pdo, $p['warehouse_id']);
         }
+        // PHASE V2.13: unconditional, never bypassed (like FifoService's own
+        // check) — this method does its OWN inventory_batches/
+        // inventory_transaction_lines write, it never calls FifoService, so
+        // it is NOT covered by the guard there. An inactive warehouse must
+        // still be rejected here, whether reached directly (POST /stock-
+        // adjustments) or via StockOpnameService::post()'s opname-variance
+        // resolution.
+        WarehouseGuardService::assertActive($pdo, (int) $p['warehouse_id']);
 
         $before = InventoryService::currentStock($pdo, $p['item_id'], $p['warehouse_id']);
         $beforeQty = $before['qty_base'];
