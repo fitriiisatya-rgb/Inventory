@@ -378,10 +378,8 @@ const DistributionOrders = (() => {
     // — never invented), Selisih is a LIVE display-only calculation
     // mirroring DistributionOrderService::receive()'s own
     // `$diff = round($received - $sent, 6)` sign convention, and the
-    // discrepancy reason enum/values are completely unchanged. "Catatan"
-    // maps to the already-existing, already-accepted discrepancy_notes
-    // column (schema + receive() both already support it — it was simply
-    // never exposed in the UI before now, so no schema/backend change).
+    // discrepancy reason enum/values and submit payload are unchanged
+    // from V2.14.7 ({do_line_id, qty_received, discrepancy_reason} only).
     function buildReceiveForm(detail, onDone) {
         const wrap = UI.el('div', { class: 'card', style: 'padding:12px;' }, [
             UI.el('div', { style: 'font-weight:700; margin-bottom:8px;' }, 'Konfirmasi Penerimaan Bakery'),
@@ -415,7 +413,6 @@ const DistributionOrders = (() => {
                 <option value="SALAH_BARANG">Salah Barang</option>
                 <option value="LAINNYA">Lainnya</option>
             ` });
-            const notesInput = UI.el('input', { type: 'text', placeholder: 'Catatan (opsional)' });
             const row = UI.el('tr', {}, [
                 UI.el('td', { class: 'compact-col-no' }, String(idx + 1)),
                 UI.el('td', { class: 'compact-col-item' }, `${l.sku_snapshot} — ${l.item_name_snapshot}`),
@@ -423,7 +420,6 @@ const DistributionOrders = (() => {
                 UI.el('td', { class: 'compact-col-qty' }, [qtyInput]),
                 selisihCell,
                 UI.el('td', {}, [reasonSelect]),
-                UI.el('td', {}, [notesInput]),
             ]);
 
             function recompute() {
@@ -451,12 +447,12 @@ const DistributionOrders = (() => {
             });
             recompute();
             tbody.appendChild(row);
-            rowInputs.push({ doLineId: l.id, qtyInput, reasonSelect, notesInput, sentQty });
+            rowInputs.push({ doLineId: l.id, qtyInput, reasonSelect, sentQty });
         });
 
         wrap.appendChild(UI.el('div', { class: 'compact-table-wrap' }, [
             UI.el('table', { class: 'compact-table' }, [
-                UI.el('thead', {}, [UI.el('tr', {}, ['No', 'SKU / Barang', 'Qty Kirim', 'Qty Diterima', 'Selisih', 'Alasan', 'Catatan'].map((h) => UI.el('th', {}, h)))]),
+                UI.el('thead', {}, [UI.el('tr', {}, ['No', 'SKU / Barang', 'Qty Kirim', 'Qty Diterima', 'Selisih', 'Alasan'].map((h) => UI.el('th', {}, h)))]),
                 tbody,
             ]),
         ]));
@@ -478,7 +474,6 @@ const DistributionOrders = (() => {
             const lines = rowInputs.map((r) => ({
                 do_line_id: r.doLineId, qty_received: Number(r.qtyInput.value),
                 discrepancy_reason: r.reasonSelect.value || null,
-                discrepancy_notes: r.notesInput.value || null,
             }));
             try {
                 const result = await InvApi.receiveDistributionOrder(detail.id, { lines });
