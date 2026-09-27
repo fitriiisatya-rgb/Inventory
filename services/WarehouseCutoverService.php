@@ -119,22 +119,47 @@ final class WarehouseCutoverService
      *
      * PHASE V2.14.5 — unit compatibility is no longer "source_unit string
      * equals base unit code, case-insensitively": a source unit is now
-     * considered compatible when it normalizes (via the project's existing
-     * UnitNormalizationService — case/whitespace-insensitive alias
-     * resolution, never an invented conversion) to EITHER the item's own
-     * base_unit_id OR any unit_id that already has a real row in
-     * item_unit_conversions for that item (any version, not just the
-     * currently-open one — the question here is only "has this unit ever
-     * been genuinely configured for this item", not "what is its current
-     * factor"). This never invents a KG<->Gram/Liter<->ml-style conversion
-     * that doesn't already exist in the master data, and it never touches
-     * reconciliation_status/exception_codes — those are a separate,
-     * already-computed historical fact from the original import, not
-     * recomputed here, so a SOURCE_UNIT_CONFLICT-flagged line (e.g. the
-     * opening file and movement file disagreeing on this SKU's own unit)
-     * stays CRITICAL regardless of whether the master item separately has
-     * a valid conversion for one of those units. mapping_status and
-     * reconciliation_status remain two independent concepts.
+     * resolved via the project's existing UnitNormalizationService —
+     * case/whitespace-insensitive alias resolution, never an invented
+     * conversion (e.g. "Gram"/"gram"/"Gr" all resolve to the same
+     * canonical GR unit as "KG"/"kg"/"Kg" resolve to KG).
+     *
+     * PHASE V2.14.6 — SAFETY CORRECTION: V2.14.6 discovered that treating
+     * an existing (possibly non-base) item_unit_conversions row as
+     * "compatible" was unsafe with the current cutover data model.
+     * resolveLine()'s ACCEPT_SOURCE takes theoretical_closing_qty/
+     * source_price AS-IS into approved_qty/approved_unit_cost, and
+     * loadOpening() later posts approved_qty as a quantity IN THE ITEM'S
+     * BASE UNIT (input_unit_id = the item's base unit) — there is no
+     * source-unit-to-base-unit conversion step anywhere in that path. So
+     * a line whose source_unit is a genuine but NON-base unit (e.g. Gram
+     * on a KG-base item, even with a real, correctly-configured 1 GR =
+     * 0.001 KG conversion on file) must NEVER auto-classify MATCHED: doing
+     * so would let ACCEPT_SOURCE silently post the source's Gram quantity
+     * as though it were that many base-unit KG — a 1000x error, not a
+     * unit-alias false positive. "This unit is a known, valid alternate
+     * unit for the item" and "this row is safe to accept as a base-unit
+     * quantity" are different questions, and only the second one is what
+     * mapping_status=MATCHED is allowed to assert.
+     *
+     * Therefore: a source unit is compatible (may become MATCHED) ONLY
+     * when its normalized unit_id equals the item's own base_unit_id.
+     * Any other resolved unit — even one with a real, currently-open
+     * item_unit_conversions row — stays UNIT_MISMATCH: item_id may still
+     * be set (the SKU itself is a real match), but the line requires an
+     * explicit human BUSINESS_OVERRIDE (with its own approved_qty/
+     * approved_unit_cost, never auto-derived from the source's non-base
+     * figures) before it can ever be accepted. No schema change, no new
+     * mapping_status value, and no automatic source-to-base conversion is
+     * introduced here — that remains a future, explicitly-designed
+     * feature, not something this matcher silently assumes.
+     *
+     * This never touches reconciliation_status/exception_codes — those
+     * are a separate, already-computed historical fact from the original
+     * import, not recomputed here, so a SOURCE_UNIT_CONFLICT-flagged line
+     * (e.g. the opening file and movement file disagreeing on this SKU's
+     * own unit) stays CRITICAL regardless of mapping_status. mapping_status
+     * and reconciliation_status remain two independent concepts.
      */
     public static function matchItems(PDO $pdo, int $cutoverId): array
     {
@@ -146,7 +171,6 @@ final class WarehouseCutoverService
         $lines = $lines->fetchAll();
 
         $itemStmt = $pdo->prepare('SELECT id, name, base_unit_id FROM items WHERE sku = :sku');
-        $conversionUnitsStmt = $pdo->prepare('SELECT DISTINCT unit_id FROM item_unit_conversions WHERE item_id = :item_id');
         $update = $pdo->prepare('UPDATE warehouse_cutover_lines SET item_id = :item_id, mapping_status = :status WHERE id = :id');
 
         $counts = ['MATCHED' => 0, 'NOT_FOUND' => 0, 'NAME_MISMATCH' => 0, 'UNIT_MISMATCH' => 0];
@@ -159,17 +183,12 @@ final class WarehouseCutoverService
                 continue;
             }
 
+            // Compatible ONLY when the normalized source unit IS the
+            // item's base unit — a non-base unit, even with a real
+            // item_unit_conversions row, is deliberately NOT elevated to
+            // MATCHED here (see this method's docblock: PHASE V2.14.6).
             $sourceUnitId = UnitNormalizationService::resolveUnitId($pdo, (string) $line['source_unit']);
-            $unitMatches = false;
-            if ($sourceUnitId !== null) {
-                if ($sourceUnitId === (int) $item['base_unit_id']) {
-                    $unitMatches = true;
-                } else {
-                    $conversionUnitsStmt->execute(['item_id' => $item['id']]);
-                    $validUnitIds = array_map('intval', $conversionUnitsStmt->fetchAll(PDO::FETCH_COLUMN));
-                    $unitMatches = in_array($sourceUnitId, $validUnitIds, true);
-                }
-            }
+            $unitMatches = $sourceUnitId !== null && $sourceUnitId === (int) $item['base_unit_id'];
             $nameMatches = strcasecmp(trim((string) $item['name']), trim((string) $line['source_name'])) === 0;
             $status = !$unitMatches ? 'UNIT_MISMATCH' : (!$nameMatches ? 'NAME_MISMATCH' : 'MATCHED');
             $update->execute(['item_id' => $item['id'], 'status' => $status, 'id' => $line['id']]);

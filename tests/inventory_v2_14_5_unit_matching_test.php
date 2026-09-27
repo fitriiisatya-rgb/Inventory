@@ -128,7 +128,14 @@ makeCutoverLine($pdo, $cutoverId, $sku2, 'Item Two', 'gram', 3);
 $sku3 = uid('V2145-3'); $item3 = makeItemWithBase($pdo, $sku3, 'Item Three', $ltrId);
 makeCutoverLine($pdo, $cutoverId, $sku3, 'Item Three', 'liter', 4);
 
-// 4. source unit valid through a NON-base item_unit_conversions row -> MATCHED
+// 4. source unit valid through a NON-base item_unit_conversions row.
+// SUPERSEDED BY V2.14.6 (services/WarehouseCutoverService.php): this was
+// originally asserted MATCHED under V2.14.5's rule (base_unit_id OR any
+// item_unit_conversions row). That rule was found unsafe — ACCEPT_SOURCE
+// takes theoretical_closing_qty as-is into approved_qty, and loadOpening()
+// posts it in the item's BASE unit with no conversion step, so a genuine
+// non-base unit like this must stay UNIT_MISMATCH and require an explicit
+// BUSINESS_OVERRIDE. See tests/inventory_v2_14_6_base_unit_safe_matching_test.php.
 $sku4 = uid('V2145-4'); $item4 = makeItemWithBase($pdo, $sku4, 'Item Four', $kgId);
 addNonBaseConversion($pdo, $item4, $grId, 0.001, 'purchase unit: 1 Gram = 0.001 KG');
 makeCutoverLine($pdo, $cutoverId, $sku4, 'Item Four', 'Gram', 5);
@@ -162,7 +169,7 @@ function statusFor(PDO $pdo, int $cutoverId, string $sku): array
 check('1. source "Gram" vs valid GR base conversion -> MATCHED', statusFor($pdo, $cutoverId, $sku1)['mapping_status'] === 'MATCHED', json_encode(statusFor($pdo, $cutoverId, $sku1)));
 check('2. source "gram" (lowercase) vs valid GR/base identity -> MATCHED', statusFor($pdo, $cutoverId, $sku2)['mapping_status'] === 'MATCHED', json_encode(statusFor($pdo, $cutoverId, $sku2)));
 check('3. source "liter" vs valid liter (base) conversion -> MATCHED', statusFor($pdo, $cutoverId, $sku3)['mapping_status'] === 'MATCHED', json_encode(statusFor($pdo, $cutoverId, $sku3)));
-check('4. source unit valid through a NON-base item_unit_conversions row -> MATCHED', statusFor($pdo, $cutoverId, $sku4)['mapping_status'] === 'MATCHED', json_encode(statusFor($pdo, $cutoverId, $sku4)));
+check('4. source unit valid ONLY through a NON-base item_unit_conversions row -> UNIT_MISMATCH (V2.14.6 safety correction; item_id still mapped)', statusFor($pdo, $cutoverId, $sku4)['mapping_status'] === 'UNIT_MISMATCH' && (int) statusFor($pdo, $cutoverId, $sku4)['item_id'] === $item4, json_encode(statusFor($pdo, $cutoverId, $sku4)));
 check('5. no matching conversion at all -> UNIT_MISMATCH', statusFor($pdo, $cutoverId, $sku5)['mapping_status'] === 'UNIT_MISMATCH', json_encode(statusFor($pdo, $cutoverId, $sku5)));
 check('6. case-only difference ("GRAM" vs GR) does not create UNIT_MISMATCH', statusFor($pdo, $cutoverId, $sku6)['mapping_status'] === 'MATCHED', json_encode(statusFor($pdo, $cutoverId, $sku6)));
 check('8. NOT_FOUND unchanged for a SKU with no master item at all', statusFor($pdo, $cutoverId, $sku8)['mapping_status'] === 'NOT_FOUND', json_encode(statusFor($pdo, $cutoverId, $sku8)));
@@ -346,9 +353,15 @@ if ($deliberateNameMismatch !== null) {
     $row = $pdo->query("SELECT mapping_status FROM warehouse_cutover_lines WHERE cutover_id={$cutover2Id} AND source_sku='{$deliberateNameMismatch}'")->fetch(PDO::FETCH_ASSOC);
     check('9. NAME_MISMATCH control SKU (renamed master) is still NAME_MISMATCH after the fix', $row['mapping_status'] === 'NAME_MISMATCH', json_encode($row));
 }
+// SUPERSEDED BY V2.14.6: these SKUs were originally asserted MATCHED (or
+// better) under V2.14.5's unsafe "base OR any conversion row" rule. They
+// now correctly stay UNIT_MISMATCH — see
+// tests/inventory_v2_14_6_base_unit_safe_matching_test.php for the full
+// safety proof (item_id stays mapped; ACCEPT_SOURCE is rejected by
+// loadOpening(); BUSINESS_OVERRIDE is required to load such a line).
 foreach ($deliberateNonBaseConversion as $sku) {
     $row = $pdo->query("SELECT mapping_status FROM warehouse_cutover_lines WHERE cutover_id={$cutover2Id} AND source_sku='{$sku}'")->fetch(PDO::FETCH_ASSOC);
-    check("Non-base-conversion control SKU {$sku} is MATCHED (or better) after the fix", in_array($row['mapping_status'], ['MATCHED', 'NAME_MISMATCH'], true), json_encode($row));
+    check("Non-base-conversion control SKU {$sku} correctly stays UNIT_MISMATCH after the V2.14.6 safety correction", $row['mapping_status'] === 'UNIT_MISMATCH', json_encode($row));
 }
 
 // Rerun on the full fixture cutover too, confirming idempotence at scale
