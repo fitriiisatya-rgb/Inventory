@@ -249,7 +249,15 @@ const WarehouseCutover = (() => {
             },
             fields: [
                 { key: 'decision', label: 'Decision', type: 'select', allowEmpty: false, options: [{ value: 'PENDING', label: 'PENDING' }, { value: 'ACCEPT_SOURCE', label: 'Accept Source' }, { value: 'BUSINESS_OVERRIDE', label: 'Business Decision (Correct Qty/Cost)' }, { value: 'EXCLUDE', label: 'Exclude from Opening' }] },
-                { key: 'item_id', label: 'Map to Item ID (kosongkan jika tidak berubah)', type: 'text' },
+                // PHASE V2.14.7 — was a raw numeric item_id text box (the
+                // admin had to memorize/type it); now a searchable
+                // SKU/name/barcode picker, same as everywhere else in the
+                // app, showing the resolved item's base unit for
+                // confirmation. Still submits a plain item_id underneath —
+                // "kosongkan jika tidak berubah" (leave blank to keep the
+                // current mapping) is preserved via the empty-string value
+                // the itemSelector field type emits when nothing is picked.
+                { key: 'item_id', label: 'Map to Item (kosongkan jika tidak berubah)', type: 'itemSelector', showBaseUnit: true },
                 { key: 'approved_qty', label: 'Approved Qty (wajib untuk Business Decision)', type: 'text' },
                 { key: 'approved_unit_cost', label: 'Approved Unit Cost', type: 'text' },
                 { key: 'notes', label: 'Catatan (alasan keputusan)', type: 'text' },

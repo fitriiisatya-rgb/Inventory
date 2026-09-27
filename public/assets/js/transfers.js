@@ -9,6 +9,16 @@ const Transfers = (() => {
     let lineCount = 0;
     let transferWarehouses = [];
     let sourceWarehouseId = null;
+    // PHASE V2.14.7 — idx -> { ctl, qtyInput, rowEl }. Each line gets its
+    // own independent ItemSelector instance (unlike Distribution Order's
+    // single re-mounted Quick Add bar) because Transfer lets the admin
+    // fill in several rows simultaneously, search/select on each
+    // independently, and remove any one of them without disturbing the
+    // others — ctl.destroy() is always called before a row's DOM is
+    // removed. ItemSelector owns unit selection internally (showUnit
+    // defaults true), so there is no separate .transfer-line-unit select
+    // anymore.
+    let lineSelectors = new Map();
 
     const receiveUuids = new Map();
     const cancelUuids = new Map();
@@ -63,6 +73,8 @@ const Transfers = (() => {
             sourceWarehouseId !== null ? ' disabled' : '';
 
         lineCount = 0;
+        lineSelectors.forEach((l) => l.ctl.destroy());
+        lineSelectors = new Map();
         const card = UI.el('div', { class: 'card' }, [
             UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '🚚 Buat Transfer Baru')]),
             UI.el('div', { id: 'transfer-create-alert' }),
@@ -87,26 +99,37 @@ const Transfers = (() => {
 
     function addLine() {
         const idx = lineCount++;
-        const itemOptions = Master.items().map((i) => `<option value="${i.id}">${i.sku} — ${i.name}</option>`).join('');
+        const itemSelectorHost = UI.el('div');
+        const qtyInput = UI.el('input', { type: 'number', class: 'transfer-line-qty', min: '0', step: 'any' });
+        const removeBtn = UI.el('button', { type: 'button', class: 'btn btn-secondary btn-sm', title: 'Hapus baris ini' }, '✕ Hapus');
         const row = UI.el('div', { class: 'grid-3', id: `transfer-line-${idx}` }, [
-            UI.el('div', { class: 'form-group', html: `<label>Barang</label><select class="transfer-line-item" data-idx="${idx}">${itemOptions}</select>` }),
-            UI.el('div', { class: 'form-group', html: `<label>Satuan</label><select class="transfer-line-unit" data-idx="${idx}"></select>` }),
-            UI.el('div', { class: 'form-group', html: `<label>Jumlah</label><input type="number" class="transfer-line-qty" data-idx="${idx}" min="0" step="any">` }),
+            itemSelectorHost,
+            UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Jumlah'), qtyInput]),
+            UI.el('div', { class: 'form-group', style: 'align-self:flex-end;' }, [removeBtn]),
         ]);
         document.getElementById('transfer-lines').appendChild(row);
-        const itemSel = row.querySelector('.transfer-line-item');
-        const unitSel = row.querySelector('.transfer-line-unit');
-        const loadUnits = async () => {
-            unitSel.innerHTML = '<option>Memuat...</option>';
-            try {
-                const units = await InvApi.itemUnits(itemSel.value);
-                unitSel.innerHTML = units.map((u) => `<option value="${u.id}">${u.code}</option>`).join('') || '<option value="">-</option>';
-            } catch (err) {
-                unitSel.innerHTML = '<option value="">Gagal memuat</option>';
-            }
-        };
-        itemSel.addEventListener('change', loadUnits);
-        if (itemSel.value) loadUnits();
+
+        const ctl = ItemSelector.mount(itemSelectorHost, { onChange: () => {} });
+        lineSelectors.set(idx, { ctl, qtyInput, rowEl: row });
+
+        removeBtn.addEventListener('click', () => removeLine(idx));
+    }
+
+    // PHASE V2.14.7 — destroys this line's ItemSelector instance BEFORE
+    // removing its DOM (never after), then removes the row. Other lines'
+    // selectors are untouched (each is fully independent — see the
+    // lineSelectors Map). If this was the last remaining line, a fresh
+    // blank line is added automatically rather than letting the form sit
+    // at zero lines (Transfer always requires at least one line to submit;
+    // this is simpler and more consistent with the existing UX than a
+    // conditionally-disabled remove button).
+    function removeLine(idx) {
+        const entry = lineSelectors.get(idx);
+        if (!entry) return;
+        entry.ctl.destroy();
+        entry.rowEl.remove();
+        lineSelectors.delete(idx);
+        if (lineSelectors.size === 0) addLine();
     }
 
     let transferUuid = null;
@@ -133,12 +156,11 @@ const Transfers = (() => {
             return;
         }
         const lines = [];
-        document.querySelectorAll('.transfer-line-item').forEach((sel) => {
-            const idx = sel.dataset.idx;
-            const qty = document.querySelector(`.transfer-line-qty[data-idx="${idx}"]`).value;
-            const unit = document.querySelector(`.transfer-line-unit[data-idx="${idx}"]`).value;
-            if (sel.value && qty && unit) {
-                lines.push({ item_id: Number(sel.value), input_qty: Number(qty), input_unit_id: Number(unit) });
+        lineSelectors.forEach((entry) => {
+            const state = entry.ctl.getState();
+            const qty = entry.qtyInput.value;
+            if (state.valid && state.itemId && state.unitId && qty) {
+                lines.push({ item_id: Number(state.itemId), input_qty: Number(qty), input_unit_id: Number(state.unitId) });
             }
         });
         if (!lines.length) {
@@ -158,6 +180,8 @@ const Transfers = (() => {
             });
             alertBox.appendChild(UI.el('div', { class: 'alert alert-success' }, 'Transfer berhasil dikirim (status PENDING).'));
             transferUuid = null;
+            lineSelectors.forEach((l) => l.ctl.destroy());
+            lineSelectors = new Map();
             document.getElementById('transfer-lines').innerHTML = '';
             lineCount = 0;
             addLine();

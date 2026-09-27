@@ -8,14 +8,28 @@
 const Production = (() => {
     let inputCount = 0;
     let productionUuid = null;
+    // PHASE V2.14.7 — idx -> { ctl, qtyInput, rowEl }, one independent
+    // ItemSelector per input-material line (same rationale as Transfer).
+    // outputSelectorCtl is a single separate instance for "Barang Hasil" —
+    // fully independent of every input line's own selector/state.
+    let inputSelectors = new Map();
+    let outputSelectorCtl = null;
+    let outputSelectorHost = null;
+    let outputQtyInput = null;
 
     function render(container) {
         container.innerHTML = '';
         inputCount = 0;
         productionUuid = null;
+        inputSelectors.forEach((l) => l.ctl.destroy());
+        inputSelectors = new Map();
+        if (outputSelectorCtl) outputSelectorCtl.destroy();
+        outputSelectorCtl = null;
         const whOptions = Master.warehouses().map((w) => `<option value="${w.id}">${w.name}</option>`).join('');
         const divisionOptions = Master.divisions().map((d) => `<option value="${d.id}">${d.name}</option>`).join('');
-        const itemOptions = Master.items().map((i) => `<option value="${i.id}">${i.sku} — ${i.name}</option>`).join('');
+
+        outputSelectorHost = UI.el('div');
+        outputQtyInput = UI.el('input', { type: 'number', id: 'production-output-qty', min: '0', step: 'any' });
 
         const card = UI.el('div', { class: 'card' }, [
             UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '🏭 Produksi / Racik (Barang Setengah Jadi)')]),
@@ -29,47 +43,50 @@ const Production = (() => {
             UI.el('div', { id: 'production-inputs' }),
             UI.el('button', { class: 'btn btn-secondary btn-sm', id: 'production-add-input' }, '+ Tambah Bahan'),
             UI.el('div', { class: 'card-title', style: 'font-size:0.85rem; margin-top:16px;' }, 'Hasil Produksi (Output)'),
-            UI.el('div', { class: 'grid-3', html: `
-                <div class="form-group"><label>Barang Hasil</label><select id="production-output-item">${itemOptions}</select></div>
-                <div class="form-group"><label>Satuan</label><select id="production-output-unit"></select></div>
-                <div class="form-group"><label>Jumlah Hasil</label><input type="number" id="production-output-qty" min="0" step="any"></div>
-            ` }),
+            UI.el('div', { class: 'grid-3' }, [
+                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Barang Hasil'), outputSelectorHost]),
+                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Jumlah Hasil'), outputQtyInput]),
+            ]),
             UI.el('div', { class: 'form-group', html: '<label>Catatan (opsional)</label><input type="text" id="production-notes">' }),
             UI.el('button', { class: 'btn btn-success', id: 'production-submit-btn' }, '✅ Proses Produksi'),
             UI.el('div', { id: 'production-result' }),
         ]);
         container.appendChild(card);
 
+        outputSelectorCtl = ItemSelector.mount(outputSelectorHost, { onChange: () => {} });
         addInputRow();
         document.getElementById('production-add-input').addEventListener('click', addInputRow);
         document.getElementById('production-submit-btn').addEventListener('click', submitProduction);
-        wireUnitLoader(document.getElementById('production-output-item'), document.getElementById('production-output-unit'));
-    }
-
-    function wireUnitLoader(itemSel, unitSel) {
-        const load = async () => {
-            unitSel.innerHTML = '<option>Memuat...</option>';
-            try {
-                const units = await InvApi.itemUnits(itemSel.value);
-                unitSel.innerHTML = units.map((u) => `<option value="${u.id}">${u.code}</option>`).join('') || '<option value="">-</option>';
-            } catch (e) {
-                unitSel.innerHTML = '<option value="">Gagal memuat</option>';
-            }
-        };
-        itemSel.addEventListener('change', load);
-        if (itemSel.value) load();
     }
 
     function addInputRow() {
         const idx = inputCount++;
-        const itemOptions = Master.items().map((i) => `<option value="${i.id}">${i.sku} — ${i.name}</option>`).join('');
+        const itemSelectorHost = UI.el('div');
+        const qtyInput = UI.el('input', { type: 'number', class: 'production-input-qty', min: '0', step: 'any' });
+        const removeBtn = UI.el('button', { type: 'button', class: 'btn btn-secondary btn-sm', title: 'Hapus bahan ini' }, '✕ Hapus');
         const row = UI.el('div', { class: 'grid-3', id: `production-input-${idx}` }, [
-            UI.el('div', { class: 'form-group', html: `<label>Bahan</label><select class="production-input-item" data-idx="${idx}">${itemOptions}</select>` }),
-            UI.el('div', { class: 'form-group', html: `<label>Satuan</label><select class="production-input-unit" data-idx="${idx}"></select>` }),
-            UI.el('div', { class: 'form-group', html: `<label>Jumlah</label><input type="number" class="production-input-qty" data-idx="${idx}" min="0" step="any">` }),
+            itemSelectorHost,
+            UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Jumlah'), qtyInput]),
+            UI.el('div', { class: 'form-group', style: 'align-self:flex-end;' }, [removeBtn]),
         ]);
         document.getElementById('production-inputs').appendChild(row);
-        wireUnitLoader(row.querySelector('.production-input-item'), row.querySelector('.production-input-unit'));
+
+        const ctl = ItemSelector.mount(itemSelectorHost, { onChange: () => {} });
+        inputSelectors.set(idx, { ctl, qtyInput, rowEl: row });
+
+        removeBtn.addEventListener('click', () => removeInputRow(idx));
+    }
+
+    // See Transfers.removeLine() — same destroy-before-remove discipline,
+    // same auto-refill-when-empty rule (production always requires at
+    // least one input material).
+    function removeInputRow(idx) {
+        const entry = inputSelectors.get(idx);
+        if (!entry) return;
+        entry.ctl.destroy();
+        entry.rowEl.remove();
+        inputSelectors.delete(idx);
+        if (inputSelectors.size === 0) addInputRow();
     }
 
     async function submitProduction() {
@@ -80,23 +97,21 @@ const Production = (() => {
         resultBox.innerHTML = '';
 
         const inputs = [];
-        document.querySelectorAll('.production-input-item').forEach((sel) => {
-            const idx = sel.dataset.idx;
-            const qty = document.querySelector(`.production-input-qty[data-idx="${idx}"]`).value;
-            const unit = document.querySelector(`.production-input-unit[data-idx="${idx}"]`).value;
-            if (sel.value && qty && unit) {
-                inputs.push({ item_id: Number(sel.value), input_qty: Number(qty), input_unit_id: Number(unit) });
+        inputSelectors.forEach((entry) => {
+            const state = entry.ctl.getState();
+            const qty = entry.qtyInput.value;
+            if (state.valid && state.itemId && state.unitId && qty) {
+                inputs.push({ item_id: Number(state.itemId), input_qty: Number(qty), input_unit_id: Number(state.unitId) });
             }
         });
-        const outputItem = document.getElementById('production-output-item').value;
-        const outputUnit = document.getElementById('production-output-unit').value;
-        const outputQty = document.getElementById('production-output-qty').value;
+        const outputState = outputSelectorCtl.getState();
+        const outputQty = outputQtyInput.value;
 
         if (!inputs.length) {
             alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Tambahkan minimal satu bahan baku.'));
             return;
         }
-        if (!outputItem || !outputUnit || !outputQty) {
+        if (!outputState.valid || !outputState.itemId || !outputState.unitId || !outputQty) {
             alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Lengkapi barang hasil, satuan, dan jumlah hasil.'));
             return;
         }
@@ -111,7 +126,7 @@ const Production = (() => {
                 production_date: document.getElementById('production-date').value,
                 notes: document.getElementById('production-notes').value || null,
                 inputs,
-                output: { item_id: Number(outputItem), output_unit_id: Number(outputUnit), output_qty: Number(outputQty) },
+                output: { item_id: Number(outputState.itemId), output_unit_id: Number(outputState.unitId), output_qty: Number(outputQty) },
             });
             resultBox.appendChild(UI.el('div', { class: 'alert alert-success' }, [
                 `Produksi #${result.production_id} berhasil diproses. `,
@@ -127,10 +142,14 @@ const Production = (() => {
                 document.getElementById('production-trace-btn').addEventListener('click', () => TraceDrawer.openProduction(result.production_id));
             }
             productionUuid = null;
+            inputSelectors.forEach((l) => l.ctl.destroy());
+            inputSelectors = new Map();
             document.getElementById('production-inputs').innerHTML = '';
             inputCount = 0;
             addInputRow();
-            document.getElementById('production-output-qty').value = '';
+            outputSelectorCtl.destroy();
+            outputSelectorCtl = ItemSelector.mount(outputSelectorHost, { onChange: () => {} });
+            outputQtyInput.value = '';
         } catch (err) {
             if (err && err.code === 'NETWORK_ERROR') {
                 UI.handleApiError(err);

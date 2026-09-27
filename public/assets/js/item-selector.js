@@ -109,11 +109,17 @@ const ItemSelector = (() => {
 
     /**
      * @param {HTMLElement} hostEl container to render into (emptied first)
-     * @param {{initialItemId?:number, initialUnitId?:number,
+     * @param {{initialItemId?:number, initialUnitId?:number, showUnit?:boolean,
      *          onChange:(state:{itemId:?number, unitId:?number, item:?object, units:list, valid:boolean})=>void}} opts
+     *   showUnit (default true) — when false, no "Satuan" sub-selector is
+     *   rendered and InvApi.itemUnits() is never called for this instance;
+     *   for callers (Stock Adjustment, Kartu Stok filter) that only ever
+     *   need item_id and have no unit concept of their own. unitId/units in
+     *   the emitted state stay null/[] in that mode.
      */
     function mount(hostEl, opts) {
         const idPrefix = `isel-${Math.random().toString(36).slice(2, 9)}`;
+        const showUnit = opts.showUnit !== false;
         let itemId = opts.initialItemId || null;
         let unitId = opts.initialUnitId || null;
         let units = [];
@@ -143,14 +149,18 @@ const ItemSelector = (() => {
         const errorNode = UI.el('div', { class: 'item-selector-error' });
         errorNode.style.display = 'none';
 
-        const unitGroup = UI.el('div', { class: 'form-group' }, [
-            UI.el('label', {}, 'Satuan'),
-        ]);
-        const unitSelect = UI.el('select', { class: 'item-selector-unit' });
-        unitGroup.appendChild(unitSelect);
+        let unitGroup = null;
+        let unitSelect = null;
+        if (showUnit) {
+            unitGroup = UI.el('div', { class: 'form-group' }, [
+                UI.el('label', {}, 'Satuan'),
+            ]);
+            unitSelect = UI.el('select', { class: 'item-selector-unit' });
+            unitGroup.appendChild(unitSelect);
+        }
 
         wrap.appendChild(UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Barang'), inputWrap, errorNode]));
-        wrap.appendChild(unitGroup);
+        if (unitGroup) wrap.appendChild(unitGroup);
         hostEl.appendChild(wrap);
 
         function emitChange() {
@@ -195,6 +205,7 @@ const ItemSelector = (() => {
         }
 
         async function loadUnitsForItem(preferredUnitId) {
+            if (!showUnit) { units = []; unitId = null; return; }
             unitSelect.innerHTML = '<option>Memuat...</option>';
             try {
                 units = await InvApi.itemUnits(itemId);
@@ -229,7 +240,7 @@ const ItemSelector = (() => {
             unitId = null;
             units = [];
             valid = false;
-            unitSelect.innerHTML = '';
+            if (unitSelect) unitSelect.innerHTML = '';
             emitChange();
         }
 
@@ -313,15 +324,18 @@ const ItemSelector = (() => {
             }
         });
 
-        document.addEventListener('mousedown', (e) => {
+        function onDocumentMousedown(e) {
             if (destroyed) return;
             if (!wrap.contains(e.target)) closeDropdown();
-        });
+        }
+        document.addEventListener('mousedown', onDocumentMousedown);
 
-        unitSelect.addEventListener('change', () => {
-            unitId = unitSelect.value || null;
-            emitChange();
-        });
+        if (unitSelect) {
+            unitSelect.addEventListener('change', () => {
+                unitId = unitSelect.value || null;
+                emitChange();
+            });
+        }
 
         scanBtn.addEventListener('click', () => openCameraModal());
 
@@ -408,9 +422,26 @@ const ItemSelector = (() => {
             getState: () => ({ itemId, unitId, item: itemId ? Master.itemById(itemId) : null, units, valid }),
             invalidate: invalidateSelection,
             focus: () => input.focus(),
+            // Every mount() must be independently disposable: removes the
+            // document-level outside-click listener (the one leak that
+            // outlives this instance's own DOM, since it's registered on
+            // `document`, not on `wrap`), stops any in-progress camera
+            // stream, closes any open dropdown, and clears result/highlight
+            // state. Input/keydown/unit-change listeners are all bound
+            // directly to elements inside `wrap` — once the caller removes
+            // hostEl/wrap from the document (which every caller does
+            // immediately after calling destroy(), same as
+            // DistributionOrders' remountQuickAddSelector() already
+            // established), those die with the DOM node and need no
+            // separate teardown. Safe to call multiple times.
             destroy: () => {
+                if (destroyed) return;
                 destroyed = true;
                 if (cameraStop) cameraStop();
+                document.removeEventListener('mousedown', onDocumentMousedown);
+                closeDropdown();
+                results = [];
+                hostEl.innerHTML = '';
             },
         };
     }

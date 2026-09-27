@@ -88,13 +88,43 @@ const MasterCommon = (() => {
      * (Master Barang has 1000+ rows). Reuses the same .modal/.modal-content
      * CSS as modal.js rather than introducing another dialog convention.
      *
-     * @param {{title:string, submitLabel?:string, fields:{key:string,label:string,type?:'text'|'select',options?:{value,label}[],emptyLabel?:string,allowEmpty?:boolean,required?:boolean}[], initial?:object}} opts
+     * PHASE V2.14.7 — added type:'itemSelector': mounts a searchable
+     * ItemSelector (SKU/name/barcode) instead of a plain text/numeric-id
+     * input — first use is Warehouse Cutover's "Map to Item ID" field,
+     * which used to require typing a raw numeric item_id. Never submits a
+     * unit (showUnit:false) since none of this form's current callers need
+     * one; set showBaseUnit:true on the field spec to also display the
+     * selected item's base unit as read-only text (resolved via the
+     * existing GET /items/{id}/units, never a new endpoint).
+     *
+     * @param {{title:string, submitLabel?:string, fields:{key:string,label:string,type?:'text'|'select'|'itemSelector',options?:{value,label}[],emptyLabel?:string,allowEmpty?:boolean,required?:boolean,showBaseUnit?:boolean}[], initial?:object}} opts
      * @returns {Promise<object|null>} field values keyed by field.key, or null if cancelled
      */
     function formModal({ title, submitLabel = 'Simpan', fields, initial = {} }) {
         return new Promise((resolve) => {
             const inputs = {};
+            const itemSelectors = {}; // f.key -> { ctl, getItemId: () => number|null }
             const rows = fields.map((f) => {
+                if (f.type === 'itemSelector') {
+                    const host = UI.el('div');
+                    const baseUnitNode = f.showBaseUnit ? UI.el('div', { style: 'font-size:0.8rem; color:var(--text3); margin-top:4px;' }, '') : null;
+                    const initialItemId = initial[f.key] !== undefined && initial[f.key] !== null && initial[f.key] !== ''
+                        ? Number(initial[f.key]) : null;
+                    let currentItemId = initialItemId;
+                    const ctl = ItemSelector.mount(host, {
+                        initialItemId,
+                        showUnit: false,
+                        onChange: (state) => {
+                            currentItemId = state.valid ? state.itemId : null;
+                            if (baseUnitNode) updateBaseUnitNode(baseUnitNode, state);
+                        },
+                    });
+                    if (baseUnitNode && initialItemId) {
+                        updateBaseUnitNode(baseUnitNode, { valid: true, itemId: initialItemId, item: Master.itemById(initialItemId) });
+                    }
+                    itemSelectors[f.key] = { ctl, getItemId: () => currentItemId };
+                    return UI.el('div', { class: 'form-group' }, [UI.el('label', {}, f.label), host, baseUnitNode].filter(Boolean));
+                }
                 let input;
                 if (f.type === 'select') {
                     const optionsHtml = (f.allowEmpty !== false ? `<option value="">${f.emptyLabel || '—'}</option>` : '')
@@ -120,11 +150,28 @@ const MasterCommon = (() => {
             overlay.appendChild(content);
             document.body.appendChild(overlay);
 
-            const close = () => overlay.remove();
+            // Every mounted ItemSelector must be destroyed exactly once,
+            // whichever way the modal closes (cancel or submit) — never
+            // left as a stale document-level listener after the overlay
+            // itself is removed.
+            const close = () => {
+                Object.values(itemSelectors).forEach((s) => s.ctl.destroy());
+                overlay.remove();
+            };
             cancelBtn.addEventListener('click', () => { close(); resolve(null); });
             submitBtn.addEventListener('click', () => {
                 const values = {};
                 for (const f of fields) {
+                    if (f.type === 'itemSelector') {
+                        const itemId = itemSelectors[f.key].getItemId();
+                        if (f.required && itemId === null) {
+                            errorNode.textContent = `${f.label} wajib diisi.`;
+                            errorNode.style.display = 'block';
+                            return;
+                        }
+                        values[f.key] = itemId !== null ? String(itemId) : '';
+                        continue;
+                    }
                     const input = inputs[f.key];
                     let v = input.value.trim();
                     if (f.type === 'select' && v === '') v = null;
@@ -139,6 +186,18 @@ const MasterCommon = (() => {
                 resolve(values);
             });
         });
+    }
+
+    async function updateBaseUnitNode(node, state) {
+        if (!state.valid || !state.itemId || !state.item) { node.textContent = ''; return; }
+        node.textContent = 'Memuat satuan dasar...';
+        try {
+            const units = await InvApi.itemUnits(state.itemId);
+            const baseUnit = units.find((u) => Number(u.id) === Number(state.item.base_unit_id));
+            node.textContent = `Satuan Dasar: ${baseUnit ? baseUnit.code : '-'}`;
+        } catch (err) {
+            node.textContent = 'Satuan Dasar: -';
+        }
     }
 
     return {

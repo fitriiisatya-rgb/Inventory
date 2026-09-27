@@ -7,8 +7,147 @@
  */
 const DistributionInvoices = (() => {
     let dtHandle = null;
+    let doSelectorCtl = null;
 
     function canManage() { return Auth.hasPermission('DISTRIBUTION_PRICING_MANAGE'); }
+
+    // PHASE V2.14.7 — searchable Delivery Order picker for the Invoice
+    // create form, replacing a plain <select> that rendered every eligible
+    // DO as a native option (fine today, but the eligible-DO set only ever
+    // grows over time — never pruned — so this was flagged for
+    // conversion ahead of it becoming genuinely large). Deliberately a
+    // small, self-contained component here rather than a generalized
+    // ItemSelector — a Delivery Order is not an item/SKU, has no
+    // barcode/unit concept, and is not reused anywhere else in the app.
+    // Ranking (per spec): exact do_number, then do_number contains, then
+    // bakery_name contains, then other display metadata (status/date).
+    // Reuses the exact eligibleDos array already fetched below — no new
+    // endpoint, no change to invoice eligibility rules.
+    function mountDoSelector(hostEl, dos) {
+        let selectedId = null;
+        let results = [];
+        let highlightIndex = -1;
+        let destroyed = false;
+
+        hostEl.innerHTML = '';
+        const wrap = UI.el('div', { class: 'item-selector' });
+        const inputWrap = UI.el('div', { class: 'item-selector-input-wrap' });
+        const input = UI.el('input', {
+            type: 'text', class: 'item-selector-input', autocomplete: 'off',
+            placeholder: 'Cari No. DO, Bakery, atau status...',
+        });
+        const dropdown = UI.el('div', { class: 'item-selector-dropdown' });
+        dropdown.style.display = 'none';
+        inputWrap.appendChild(input);
+        inputWrap.appendChild(dropdown);
+        wrap.appendChild(inputWrap);
+        hostEl.appendChild(wrap);
+
+        function search(query) {
+            const q = String(query || '').trim().toLowerCase();
+            if (!q) return [];
+            const scored = [];
+            dos.forEach((d) => {
+                const num = String(d.do_number || '').toLowerCase();
+                const bakery = String(d.bakery_name || '').toLowerCase();
+                const other = `${d.status || ''} ${d.do_date || ''}`.toLowerCase();
+                let rank;
+                if (num === q) rank = 0;
+                else if (num.includes(q)) rank = 1;
+                else if (bakery.includes(q)) rank = 2;
+                else if (other.includes(q)) rank = 3;
+                else return;
+                scored.push([rank, d]);
+            });
+            return scored
+                .sort((a, b) => (a[0] !== b[0] ? a[0] - b[0] : String(a[1].do_number).localeCompare(String(b[1].do_number))))
+                .slice(0, 20)
+                .map(([, d]) => d);
+        }
+
+        function closeDropdown() {
+            dropdown.style.display = 'none';
+            dropdown.innerHTML = '';
+            highlightIndex = -1;
+        }
+
+        function renderDropdown() {
+            dropdown.innerHTML = '';
+            if (results.length === 0) {
+                dropdown.appendChild(UI.el('div', { class: 'item-selector-empty' }, 'Tidak ditemukan.'));
+            } else {
+                results.forEach((d, idx) => {
+                    const row = UI.el('div', {
+                        class: `item-selector-option${idx === highlightIndex ? ' active' : ''}`,
+                    }, [
+                        UI.el('span', { class: 'item-selector-option-sku' }, d.do_number),
+                        UI.el('span', { class: 'item-selector-option-name' }, `${d.bakery_name} — ${d.status}${d.do_date ? ` (${d.do_date})` : ''}`),
+                    ]);
+                    row.addEventListener('mousedown', (e) => { e.preventDefault(); selectDo(d); });
+                    dropdown.appendChild(row);
+                });
+            }
+            dropdown.style.display = 'block';
+        }
+
+        function selectDo(d) {
+            selectedId = d.id;
+            input.value = `${d.do_number} — ${d.bakery_name} (${d.status})`;
+            closeDropdown();
+            emitChange();
+        }
+
+        function emitChange() {
+            if (destroyed) return;
+        }
+
+        input.addEventListener('input', () => {
+            if (selectedId !== null) { selectedId = null; }
+            results = search(input.value);
+            highlightIndex = -1;
+            if (input.value.trim()) renderDropdown();
+            else closeDropdown();
+        });
+
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (dropdown.style.display === 'none' && input.value.trim()) { results = search(input.value); renderDropdown(); }
+                if (results.length === 0) return;
+                highlightIndex = Math.min(highlightIndex + 1, results.length - 1);
+                renderDropdown();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (results.length === 0) return;
+                highlightIndex = Math.max(highlightIndex - 1, 0);
+                renderDropdown();
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                if (highlightIndex >= 0 && results[highlightIndex]) selectDo(results[highlightIndex]);
+                else if (results.length === 1) selectDo(results[0]);
+            } else if (e.key === 'Escape') {
+                closeDropdown();
+            }
+        });
+
+        function onDocumentMousedown(e) {
+            if (destroyed) return;
+            if (!wrap.contains(e.target)) closeDropdown();
+        }
+        document.addEventListener('mousedown', onDocumentMousedown);
+
+        return {
+            getState: () => ({ doId: selectedId, valid: !!selectedId }),
+            destroy: () => {
+                if (destroyed) return;
+                destroyed = true;
+                document.removeEventListener('mousedown', onDocumentMousedown);
+                closeDropdown();
+                results = [];
+                hostEl.innerHTML = '';
+            },
+        };
+    }
 
     async function render(container) {
         container.innerHTML = '';
@@ -38,16 +177,18 @@ const DistributionInvoices = (() => {
             eligibleDos = [...dispatched, ...received, ...discrepancy, ...completed];
         } catch (err) { UI.handleApiError(err); }
 
-        const doOptions = eligibleDos.map((d) => `<option value="${d.id}">${d.do_number} — ${d.bakery_name} (${d.status})</option>`).join('');
-        const doSel = UI.el('select', { html: `<option value="">- pilih Delivery Order -</option>${doOptions}` });
+        const doSelectorHost = UI.el('div');
         const dateInput = UI.el('input', { type: 'date', value: new Date().toISOString().slice(0, 10) });
         const createBtn = UI.el('button', { class: 'btn btn-primary btn-sm' }, 'Buat Invoice');
         const alertBox = UI.el('div');
+        if (doSelectorCtl) doSelectorCtl.destroy();
+        doSelectorCtl = mountDoSelector(doSelectorHost, eligibleDos);
         createBtn.addEventListener('click', async () => {
-            if (!doSel.value) { UI.toast('Pilih Delivery Order terlebih dahulu.', 'error'); return; }
+            const doState = doSelectorCtl.getState();
+            if (!doState.valid || !doState.doId) { UI.toast('Cari dan pilih Delivery Order terlebih dahulu.', 'error'); return; }
             alertBox.innerHTML = '';
             try {
-                const result = await InvApi.createDistributionInvoice({ do_id: Number(doSel.value), invoice_date: dateInput.value });
+                const result = await InvApi.createDistributionInvoice({ do_id: Number(doState.doId), invoice_date: dateInput.value });
                 UI.toast(`Invoice ${result.invoice_number} berhasil dibuat (Draft).`, 'success');
                 if (dtHandle) dtHandle.reload();
                 openDetail(result.invoice_id);
@@ -56,7 +197,7 @@ const DistributionInvoices = (() => {
             }
         });
         card.appendChild(UI.el('div', { class: 'grid-3' }, [
-            UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Delivery Order (sudah Dispatch)'), doSel]),
+            UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Delivery Order (sudah Dispatch)'), doSelectorHost]),
             UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Tanggal Invoice'), dateInput]),
             UI.el('div', { style: 'align-self:flex-end;' }, [createBtn]),
         ]));

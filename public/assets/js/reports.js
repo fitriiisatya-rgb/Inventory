@@ -5,33 +5,45 @@
  * returns per line.
  */
 const Reports = (() => {
+    // PHASE V2.14.7 — this filter never needs a unit (currentStock/ledger
+    // are keyed by item_id + warehouse_id only), so showUnit:false.
+    let itemSelectorCtl = null;
+
     function render(container) {
         container.innerHTML = '';
-        const itemOptions = Master.items().map((i) => `<option value="${i.id}">${i.sku} — ${i.name}</option>`).join('');
+        if (itemSelectorCtl) itemSelectorCtl.destroy();
         const whOptions = Master.warehouses().map((w) => `<option value="${w.id}">${w.name}</option>`).join('');
+        const itemSelectorHost = UI.el('div');
 
         const card = UI.el('div', { class: 'card' }, [
             UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '📊 Histori Barang / Kartu Stok')]),
-            UI.el('div', { class: 'grid-3', html: `
-                <div class="form-group"><label>Barang</label><select id="report-item">${itemOptions}</select></div>
-                <div class="form-group"><label>Gudang</label><select id="report-warehouse">${whOptions}</select></div>
-                <div class="form-group" style="display:flex; align-items:flex-end;"><button class="btn btn-primary" id="report-load-btn">Tampilkan Histori</button></div>
-            ` }),
+            UI.el('div', { class: 'grid-3' }, [
+                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Barang'), itemSelectorHost]),
+                UI.el('div', { class: 'form-group', html: `<label>Gudang</label><select id="report-warehouse">${whOptions}</select>` }),
+                UI.el('div', { class: 'form-group', style: 'display:flex; align-items:flex-end;' }, [
+                    UI.el('button', { class: 'btn btn-primary', id: 'report-load-btn' }, 'Tampilkan Histori'),
+                ]),
+            ]),
             UI.el('div', { id: 'report-current' }),
             UI.el('div', { id: 'report-ledger' }),
         ]);
         container.appendChild(card);
 
+        itemSelectorCtl = ItemSelector.mount(itemSelectorHost, { showUnit: false, onChange: () => {} });
         document.getElementById('report-load-btn').addEventListener('click', loadReport);
-        if (Master.items().length && Master.warehouses().length) {
-            loadReport();
-        }
+        // No auto-load on open anymore — ItemSelector starts with no item
+        // picked (unlike the old <select>'s implicit alphabetically-first
+        // default), so the admin always searches/picks explicitly first.
     }
 
     async function loadReport() {
-        const itemId = document.getElementById('report-item').value;
+        const itemState = itemSelectorCtl.getState();
+        const itemId = itemState.valid ? itemState.itemId : null;
         const warehouseId = document.getElementById('report-warehouse').value;
-        if (!itemId || !warehouseId) return;
+        if (!itemId || !warehouseId) {
+            UI.toast(ItemSelector.MESSAGES.PICK_FROM_RESULTS, 'error');
+            return;
+        }
 
         const currentBox = document.getElementById('report-current');
         const ledgerBox = document.getElementById('report-ledger');
