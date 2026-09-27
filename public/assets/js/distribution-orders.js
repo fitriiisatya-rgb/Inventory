@@ -20,21 +20,24 @@
  */
 const DistributionOrders = (() => {
     let dtHandle = null;
-    // HOTFIX (post-274dc78) — Quick Add + Order Lines Table (Section C):
-    // one single ItemSelector instance backs the Quick Add bar (re-mounted
-    // fresh after every add), never one ItemSelector per already-added
-    // line. `quickAddLines` holds the collected rows; DistributionOrderService
-    // itself is untouched — this is purely how the frontend collects lines
-    // before calling create().
-    let quickAddSelectorCtl = null;
-    let quickAddSelectorHost = null;
-    let quickAddQtyInput = null;
-    let quickAddWasValid = false;
-    let quickAddLines = []; // [{ itemId, unitId, sku, name, unitCode, qty, stockBaseQty }]
-    let quickAddLinesHost = null;
-    let quickAddSummaryHost = null;
+    // PHASE V2.14.9 — compact bulk table (was the post-274dc78 Quick Add
+    // bar: one item added at a time, then appended to a read-only table
+    // below). A 20-50+ item DO is now filled the same way Transfer/
+    // Production/DO-Receive already are (V2.14.8): N independent,
+    // pre-rendered rows, each with its own ItemSelector (compact,
+    // externalUnitHost) so Barang/Satuan land in their own columns, live
+    // "Stok Tersedia" at SCM, +5/+10 fast-entry, and a duplicate-item
+    // guard that WARNS AND BLOCKS submit — never silently merges, unlike
+    // the old Quick Add bar's merge-on-duplicate behavior; nothing in
+    // DistributionOrderService documents a merge guarantee, so this
+    // matches the same "never invent a merge" rule already applied to
+    // Transfer/Production. DistributionOrderService::create() and its
+    // payload shape ({item_id, input_qty, input_unit_id} per line, plus
+    // the unchanged header fields) are completely untouched — only how
+    // the frontend collects `lines` before calling create() changed.
+    let lineCount = 0;
+    let lineSelectors = new Map(); // idx -> { ctl, qtyInput, unitHost, rowEl, noCell, stockCell, qtyWarn, stockBase, itemId }
     let scmWarehouseId = null;
-    const stockCache = new Map(); // itemId -> qty_base at SCM (best-effort, display only)
 
     function canManage(permission) {
         return Auth.hasPermission(permission);
@@ -54,24 +57,19 @@ const DistributionOrders = (() => {
     }
 
     // ============================================================
-    // Create form
+    // Create form — compact bulk table (V2.14.9)
     // ============================================================
     function buildCreateForm() {
-        quickAddLines = [];
-        quickAddWasValid = false;
-        stockCache.clear();
+        lineCount = 0;
+        lineSelectors.forEach((l) => l.ctl.destroy());
+        lineSelectors = new Map();
         const scm = Master.warehouses().find((w) => w.code === 'SCM');
         scmWarehouseId = scm ? Number(scm.id) : null;
 
         const bakeryOptions = Master.bakeryDestinations().filter((b) => b.is_active)
             .map((b) => `<option value="${b.id}">${b.name}</option>`).join('');
 
-        quickAddSelectorHost = UI.el('div', { style: 'flex:1 1 320px; min-width:220px;' });
-        quickAddQtyInput = UI.el('input', { type: 'number', min: '0', step: 'any', placeholder: 'Qty', style: 'width:120px;' });
-        const addBtn = UI.el('button', { class: 'btn btn-primary btn-sm', type: 'button' }, 'Tambah');
-        quickAddLinesHost = UI.el('div');
-        quickAddSummaryHost = UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center; margin-top:12px;' });
-
+        const tbody = UI.el('tbody', { id: 'do-create-lines-tbody' });
         const card = UI.el('div', { class: 'card' }, [
             UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '🚛 Buat Delivery Order Baru (SCM → Bakery)')]),
             UI.el('div', { id: 'do-create-alert' }),
@@ -85,129 +83,163 @@ const DistributionOrders = (() => {
                 <div class="form-group"><label>No. Kendaraan (opsional)</label><input type="text" id="do-vehicle"></div>
                 <div class="form-group"><label>Catatan Pengiriman (opsional)</label><input type="text" id="do-delivery-notes"></div>
             ` }),
-            UI.el('div', { class: 'card', style: 'padding:10px; margin-top:10px; display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;' }, [
-                quickAddSelectorHost,
-                UI.el('div', { class: 'form-group', style: 'margin:0;' }, [UI.el('label', {}, 'Qty'), quickAddQtyInput]),
-                addBtn,
+            UI.el('div', { class: 'compact-table-toolbar' }, [
+                UI.el('button', { class: 'btn btn-secondary btn-sm', id: 'do-create-add-line' }, '+ Tambah Barang'),
+                UI.el('button', { class: 'btn btn-secondary btn-sm', id: 'do-create-add-5' }, '+ 5 Baris'),
+                UI.el('button', { class: 'btn btn-secondary btn-sm', id: 'do-create-add-10' }, '+ 10 Baris'),
             ]),
-            quickAddLinesHost,
-            quickAddSummaryHost,
+            UI.el('div', { class: 'compact-table-wrap' }, [
+                UI.el('table', { class: 'compact-table' }, [
+                    UI.el('thead', {}, [UI.el('tr', {}, ['No', 'Barang / SKU', 'Satuan', 'Qty Kirim', 'Stok Tersedia', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
+                    tbody,
+                ]),
+            ]),
+            UI.el('div', { class: 'compact-summary', id: 'do-create-summary' }),
+            UI.el('div', { style: 'margin-top:14px;' }, [
+                UI.el('button', { class: 'btn btn-primary', id: 'do-submit-btn' }, 'Simpan Delivery Order (Draft)'),
+            ]),
         ]);
-
-        addBtn.addEventListener('click', () => addFromQuickAdd());
-        quickAddQtyInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') { e.preventDefault(); addFromQuickAdd(); }
-        });
-
-        remountQuickAddSelector();
-        renderQuickAddLines();
+        setTimeout(() => {
+            addCreateLine();
+            document.getElementById('do-create-add-line').addEventListener('click', () => addCreateLine());
+            document.getElementById('do-create-add-5').addEventListener('click', () => { for (let i = 0; i < 5; i++) addCreateLine(); });
+            document.getElementById('do-create-add-10').addEventListener('click', () => { for (let i = 0; i < 10; i++) addCreateLine(); });
+            document.getElementById('do-submit-btn').addEventListener('click', () => submitCreate(card));
+        }, 0);
         return card;
     }
 
-    // Re-mounts a fresh ItemSelector into the Quick Add bar's host — this
-    // is the ONE selector instance the whole create form ever has, reset
-    // after every successful add so the search box is empty and ready for
-    // the next scan/type, with focus back on it (Section C's fast-entry
-    // loop: scan -> Enter selects -> unit auto-fills -> focus jumps to Qty
-    // -> Enter on Qty adds the row and resets focus back to search).
-    function remountQuickAddSelector() {
-        if (quickAddSelectorCtl) quickAddSelectorCtl.destroy();
-        quickAddWasValid = false;
-        quickAddSelectorCtl = ItemSelector.mount(quickAddSelectorHost, {
+    function addCreateLine() {
+        const idx = lineCount++;
+        const itemSelectorHost = UI.el('div');
+        const unitHost = UI.el('td', {});
+        const qtyInput = UI.el('input', { type: 'number', class: 'do-create-line-qty', min: '0', step: 'any' });
+        const qtyWarn = UI.el('div', { class: 'compact-inline-warning', style: 'display:none;' });
+        const stockCell = UI.el('td', { class: 'compact-col-stock' }, '-');
+        const noCell = UI.el('td', { class: 'compact-col-no' }, String(lineSelectors.size + 1));
+        const removeBtn = UI.el('button', { type: 'button', class: 'btn btn-secondary btn-sm compact-row-btn', title: 'Hapus baris ini' }, '✕');
+        const itemCell = UI.el('td', { class: 'compact-col-item' }, [itemSelectorHost]);
+        const qtyCell = UI.el('td', { class: 'compact-col-qty' }, [qtyInput, qtyWarn]);
+        const row = UI.el('tr', { id: `do-create-line-${idx}` }, [
+            noCell, itemCell, unitHost, qtyCell, stockCell,
+            UI.el('td', { class: 'compact-col-action' }, [removeBtn]),
+        ]);
+        document.getElementById('do-create-lines-tbody').appendChild(row);
+
+        const entry = { qtyInput, unitHost, rowEl: row, noCell, stockCell, qtyWarn, stockBase: null, itemId: null };
+        const ctl = ItemSelector.mount(itemSelectorHost, {
+            showLabel: false, compact: true, externalUnitHost: unitHost,
             onChange: (state) => {
-                if (!quickAddWasValid && state.valid && state.itemId) {
-                    quickAddQtyInput.value = '';
-                    quickAddQtyInput.focus();
-                }
-                quickAddWasValid = state.valid;
+                entry.itemId = state.valid ? state.itemId : null;
+                refreshCreateStockFor(idx);
+                checkCreateDuplicates();
             },
         });
+        entry.ctl = ctl;
+        lineSelectors.set(idx, entry);
+        qtyInput.addEventListener('input', () => checkCreateQtyWarning(idx));
+
+        removeBtn.addEventListener('click', () => removeCreateLine(idx));
+        renumberCreateRows();
+        updateCreateSummary();
     }
 
-    function addFromQuickAdd() {
-        const state = quickAddSelectorCtl.getState();
-        if (!state.valid || !state.itemId) { UI.toast(ItemSelector.MESSAGES.PICK_FROM_RESULTS, 'error'); quickAddSelectorCtl.focus(); return; }
-        if (!state.unitId) { UI.toast('Satuan wajib dipilih.', 'error'); return; }
-        const qty = Number(quickAddQtyInput.value);
-        if (!(qty > 0)) { UI.toast('Jumlah harus lebih dari 0.', 'error'); quickAddQtyInput.focus(); return; }
-
-        const item = state.item || Master.itemById(state.itemId);
-        const unit = (state.units || []).find((u) => String(u.id) === String(state.unitId));
-
-        // Duplicate item+unit: merge into the existing row instead of
-        // silently adding a second row for the same thing.
-        const existing = quickAddLines.find((l) => l.itemId === state.itemId && l.unitId === state.unitId);
-        if (existing) {
-            existing.qty += qty;
-            UI.toast(`Qty digabung ke baris ${existing.sku} yang sudah ada (total ${UI.formatNumber(existing.qty)}).`, 'info');
-        } else {
-            quickAddLines.push({
-                itemId: state.itemId, unitId: state.unitId,
-                sku: item ? item.sku : '', name: item ? item.name : '',
-                unitCode: unit ? unit.code : '', qty,
-                stockBaseQty: stockCache.has(state.itemId) ? stockCache.get(state.itemId) : undefined,
-            });
-            loadStockFor(state.itemId);
-        }
-
-        renderQuickAddLines();
-        remountQuickAddSelector();
-        quickAddSelectorCtl.focus();
+    // Same "never leave the form at zero lines" convention as Transfer/
+    // Production: destroys this row's ItemSelector before removing its
+    // DOM (others untouched), auto-refilling one blank row if it was the
+    // last one.
+    function removeCreateLine(idx) {
+        const entry = lineSelectors.get(idx);
+        if (!entry) return;
+        entry.ctl.destroy();
+        entry.rowEl.remove();
+        lineSelectors.delete(idx);
+        if (lineSelectors.size === 0) addCreateLine();
+        renumberCreateRows();
+        checkCreateDuplicates();
+        updateCreateSummary();
     }
 
-    async function loadStockFor(itemId) {
-        if (stockCache.has(itemId) || !scmWarehouseId) return;
+    function renumberCreateRows() {
+        let n = 1;
+        lineSelectors.forEach((entry) => { entry.noCell.textContent = String(n++); });
+    }
+
+    // "Stok Tersedia" is always SCM stock (the only source warehouse a DO
+    // can ever ship from — assertIsScmWarehouse() enforces this
+    // server-side too), reusing the same InvApi.currentStock() endpoint
+    // Transfer/Production already use — no new endpoint.
+    async function refreshCreateStockFor(idx) {
+        const entry = lineSelectors.get(idx);
+        if (!entry) return;
+        if (!entry.itemId || !scmWarehouseId) { entry.stockBase = null; entry.stockCell.textContent = '-'; return; }
+        entry.stockCell.textContent = '...';
         try {
-            const stock = await InvApi.currentStock(itemId, scmWarehouseId);
-            stockCache.set(itemId, Number(stock.qty_base));
+            const stock = await InvApi.currentStock(entry.itemId, scmWarehouseId);
+            const current = lineSelectors.get(idx);
+            if (!current || current.itemId !== entry.itemId) return; // selection changed while awaiting
+            current.stockBase = Number(stock.qty_base);
+            current.stockCell.textContent = UI.formatNumber(current.stockBase);
+            checkCreateQtyWarning(idx);
         } catch (err) {
-            stockCache.set(itemId, null); // fetch failed — show '-' rather than retrying forever
+            entry.stockCell.textContent = '-';
         }
-        quickAddLines.forEach((l) => { if (l.itemId === itemId) l.stockBaseQty = stockCache.get(itemId); });
-        renderQuickAddLines();
     }
 
-    function renderQuickAddLines() {
-        quickAddLinesHost.innerHTML = '';
-        quickAddSummaryHost.innerHTML = '';
-        if (quickAddLines.length === 0) {
-            quickAddLinesHost.appendChild(UI.el('div', { class: 'alert alert-info', style: 'margin-top:10px;' }, 'Belum ada barang. Cari/scan barang di atas untuk menambahkan.'));
+    // Inline-only warning — DistributionOrderService::create() has no
+    // stock-availability check at create time (only dispatch() actually
+    // consumes FIFO stock), so this never blocks submit, only informs.
+    function checkCreateQtyWarning(idx) {
+        const entry = lineSelectors.get(idx);
+        if (!entry) return;
+        const qty = Number(entry.qtyInput.value);
+        if (!qty || entry.stockBase === null) { entry.qtyWarn.style.display = 'none'; return; }
+        const state = entry.ctl.getState();
+        const unit = (state.units || []).find((u) => String(u.id) === String(state.unitId));
+        const factor = unit ? Number(unit.conversion_to_base) : 1;
+        const qtyBaseEquivalent = qty * factor;
+        if (qtyBaseEquivalent > entry.stockBase) {
+            entry.qtyWarn.textContent = `⚠ Melebihi stok tersedia (${UI.formatNumber(entry.stockBase)})`;
+            entry.qtyWarn.style.display = 'block';
         } else {
-            const rows = quickAddLines.map((l, idx) => {
-                const qtyInput = UI.el('input', { type: 'number', min: '0', step: 'any', value: String(l.qty), style: 'width:100px;' });
-                qtyInput.addEventListener('change', () => {
-                    const v = Number(qtyInput.value);
-                    l.qty = v > 0 ? v : l.qty;
-                    qtyInput.value = String(l.qty);
-                    renderQuickAddLines();
-                });
-                const removeBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, '✕');
-                removeBtn.addEventListener('click', () => {
-                    quickAddLines.splice(idx, 1);
-                    renderQuickAddLines();
-                });
-                return UI.el('tr', {}, [
-                    UI.el('td', {}, String(idx + 1)),
-                    UI.el('td', {}, l.sku),
-                    UI.el('td', {}, l.name),
-                    UI.el('td', {}, l.unitCode),
-                    UI.el('td', {}, qtyInput),
-                    UI.el('td', {}, l.stockBaseQty === undefined ? 'Memuat...' : (l.stockBaseQty === null ? '-' : UI.formatNumber(l.stockBaseQty))),
-                    UI.el('td', {}, removeBtn),
-                ]);
-            });
-            quickAddLinesHost.appendChild(UI.el('div', { class: 'table-wrapper', style: 'margin-top:10px;' }, [
-                UI.el('table', {}, [
-                    UI.el('thead', {}, [UI.el('tr', {}, ['No.', 'SKU', 'Nama Barang', 'Satuan', 'Qty', 'Stok SCM', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
-                    UI.el('tbody', {}, rows),
-                ]),
-            ]));
+            entry.qtyWarn.style.display = 'none';
         }
+        updateCreateSummary();
+    }
 
-        quickAddSummaryHost.appendChild(UI.el('div', { style: 'color:var(--text3); font-size:0.9rem;' }, `${quickAddLines.length} jenis barang`));
-        const saveBtn = UI.el('button', { class: 'btn btn-primary', id: 'do-submit-btn' }, 'Simpan Delivery Order (Draft)');
-        saveBtn.addEventListener('click', () => submitCreate(saveBtn.closest('.card')));
-        quickAddSummaryHost.appendChild(saveBtn);
+    // Warn AND block submit rather than silently merge — matches the
+    // Transfer/Production bulk-table convention; DistributionOrderService
+    // ::create() documents no same-item-line merge guarantee, so two rows
+    // picking the same item must be corrected by the admin, not
+    // auto-combined (a change from the old Quick Add bar's merge-on-
+    // duplicate behavior, deliberate per this redesign).
+    function checkCreateDuplicates() {
+        const seen = new Map();
+        lineSelectors.forEach((entry, idx) => {
+            if (!entry.itemId) return;
+            if (!seen.has(entry.itemId)) seen.set(entry.itemId, []);
+            seen.get(entry.itemId).push(idx);
+        });
+        const duplicateIdxs = new Set();
+        seen.forEach((idxs) => { if (idxs.length > 1) idxs.forEach((i) => duplicateIdxs.add(i)); });
+        lineSelectors.forEach((entry, idx) => {
+            entry.rowEl.classList.toggle('compact-row-duplicate', duplicateIdxs.has(idx));
+        });
+        return duplicateIdxs.size > 0;
+    }
+
+    function updateCreateSummary() {
+        const box = document.getElementById('do-create-summary');
+        if (!box) return;
+        let totalItem = 0;
+        let totalQty = 0;
+        lineSelectors.forEach((entry) => {
+            const qty = Number(entry.qtyInput.value);
+            if (entry.itemId && qty > 0) { totalItem++; totalQty += qty; }
+        });
+        box.innerHTML = '';
+        box.appendChild(UI.el('div', {}, ['Total Item: ', UI.el('b', {}, String(totalItem))]));
+        box.appendChild(UI.el('div', {}, ['Total Qty: ', UI.el('b', {}, UI.formatNumber(totalQty))]));
     }
 
     async function submitCreate(card) {
@@ -216,16 +248,30 @@ const DistributionOrders = (() => {
         const doDate = document.getElementById('do-date').value;
         const bakeryId = document.getElementById('do-bakery').value;
         if (!bakeryId) { UI.toast('Bakery tujuan wajib dipilih.', 'error'); return; }
-        if (quickAddLines.length === 0) { UI.toast('Minimal satu baris barang wajib diisi.', 'error'); return; }
-        for (const l of quickAddLines) {
-            if (!(l.qty > 0)) { UI.toast(`Jumlah untuk ${l.sku} harus lebih dari 0.`, 'error'); return; }
+
+        if (checkCreateDuplicates()) {
+            alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Barang yang sama dipilih di lebih dari satu baris (ditandai merah) — gabungkan menjadi satu baris atau ganti barangnya sebelum menyimpan.'));
+            return;
         }
 
         const scm = Master.warehouses().find((w) => w.code === 'SCM');
         if (!scm) { UI.toast('Gudang SCM tidak ditemukan pada master data.', 'error'); return; }
 
-        const lines = quickAddLines.map((l) => ({ item_id: l.itemId, input_qty: l.qty, input_unit_id: l.unitId }));
+        // Payload shape is byte-identical to the prior Quick Add
+        // implementation and to DistributionOrderService::create()'s
+        // expectations — only how these rows were collected changed.
+        const lines = [];
+        lineSelectors.forEach((entry) => {
+            const state = entry.ctl.getState();
+            const qty = entry.qtyInput.value;
+            if (state.valid && state.itemId && state.unitId && qty) {
+                lines.push({ item_id: Number(state.itemId), input_qty: Number(qty), input_unit_id: Number(state.unitId) });
+            }
+        });
+        if (!lines.length) { UI.toast('Tambahkan minimal satu barang dengan jumlah dan satuan.', 'error'); return; }
 
+        const btn = document.getElementById('do-submit-btn');
+        btn.disabled = true;
         try {
             const result = await InvApi.createDistributionOrder({
                 do_date: doDate, bakery_destination_id: Number(bakeryId), from_warehouse_id: Number(scm.id),
@@ -241,6 +287,8 @@ const DistributionOrders = (() => {
             if (dtHandle) dtHandle.reload();
         } catch (err) {
             alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal membuat Delivery Order.'));
+        } finally {
+            btn.disabled = false;
         }
     }
 

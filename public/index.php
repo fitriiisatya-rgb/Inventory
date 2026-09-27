@@ -2921,8 +2921,19 @@ $routes = [
             throw new ValidationException(['counted_qty_base is required']);
         }
 
+        // PHASE V2.14.9 — optional physical-condition classification,
+        // submitted together with the qty in this same write-once call.
+        // StockOpnameService::submitCount()/validateConditions() does the
+        // actual >=0 / <=qty validation; this route only passes through
+        // whatever the client sent.
+        $conditions = [];
+        if (array_key_exists('rusak_qty', $input)) { $conditions['rusak_qty'] = $input['rusak_qty']; }
+        if (array_key_exists('expired_qty', $input)) { $conditions['expired_qty'] = $input['expired_qty']; }
+        if (array_key_exists('deadstock_qty', $input)) { $conditions['deadstock_qty'] = $input['deadstock_qty']; }
+        if (array_key_exists('notes', $input)) { $conditions['notes'] = $input['notes']; }
+
         $result = Database::transaction(
-            fn (PDO $tx) => StockOpnameService::submitCount($tx, $sessionId, $role, $itemId, (float) $input['counted_qty_base'], $user['id'])
+            fn (PDO $tx) => StockOpnameService::submitCount($tx, $sessionId, $role, $itemId, (float) $input['counted_qty_base'], $user['id'], $conditions)
         );
 
         inv_ok($result, 'Count recorded');

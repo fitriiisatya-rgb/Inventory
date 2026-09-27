@@ -146,22 +146,42 @@ final class StockOpnameService
 
         $myQtyCol = "{$role}_qty_base";
         $mySubmittedCol = "{$role}_submitted_at";
+        $myRusakCol = "{$role}_rusak_qty";
+        $myExpiredCol = "{$role}_expired_qty";
+        $myDeadstockCol = "{$role}_deadstock_qty";
+        $myNotesCol = "{$role}_notes";
         $lines = $pdo->prepare(
-            "SELECT sol.id, sol.item_id, i.sku, i.name, sol.{$myQtyCol} AS my_qty_base, sol.{$mySubmittedCol} AS my_submitted_at, sol.is_excluded
+            "SELECT sol.id, sol.item_id, i.sku, i.name, i.category_id, i.status AS item_status,
+                    sol.{$myQtyCol} AS my_qty_base, sol.{$mySubmittedCol} AS my_submitted_at,
+                    sol.{$myRusakCol} AS my_rusak_qty, sol.{$myExpiredCol} AS my_expired_qty,
+                    sol.{$myDeadstockCol} AS my_deadstock_qty, sol.{$myNotesCol} AS my_notes,
+                    sol.is_excluded
              FROM stock_opname_lines sol JOIN items i ON i.id = sol.item_id
              WHERE sol.session_id = :id ORDER BY i.name"
         );
         $lines->execute(['id' => $sessionId]);
         $rows = $lines->fetchAll();
 
+        // PHASE V2.14.9 — item_id/sku/name/category_id/item_status were
+        // already exchanged with the client for read-only search/filter
+        // display (never a system/theoretical STOCK figure); the new
+        // my_rusak_qty/my_expired_qty/my_deadstock_qty/my_notes columns
+        // follow the exact same "own side only" rule as my_qty_base —
+        // never the other counter's values, never system_qty_base.
         $formatted = array_map(static function (array $r): array {
             return [
                 'id' => (int) $r['id'],
                 'item_id' => (int) $r['item_id'],
                 'sku' => $r['sku'],
                 'name' => $r['name'],
+                'category_id' => $r['category_id'] !== null ? (int) $r['category_id'] : null,
+                'item_status' => $r['item_status'],
                 'my_qty_base' => $r['my_qty_base'],
                 'my_submitted_at' => $r['my_submitted_at'],
+                'my_rusak_qty' => $r['my_rusak_qty'],
+                'my_expired_qty' => $r['my_expired_qty'],
+                'my_deadstock_qty' => $r['my_deadstock_qty'],
+                'my_notes' => $r['my_notes'],
                 'is_counted_by_me' => $r['my_qty_base'] !== null,
                 'is_excluded' => (bool) $r['is_excluded'],
             ];
@@ -263,9 +283,19 @@ final class StockOpnameService
      * overwrite"); an identical resubmission is a no-op (Section 24,
      * idempotent double-submit protection).
      *
+     * PHASE V2.14.9 — $conditions optionally carries this SAME submission's
+     * Rusak/Expired/Deadstock classification + a free-text note (all
+     * saved together with the qty, in this one write-once call — never a
+     * separately-mutable field). Each condition quantity must be >= 0 and
+     * <= $qtyBase (a classification is always a SUBSET of what this
+     * counter physically found — the "preferred safe model", since no
+     * prior business rule existed). None of this is ever summed into
+     * inventory — finalize()/post() never read these columns.
+     *
      * @param string $role 'p1'|'p2'
+     * @param array{rusak_qty?:float,expired_qty?:float,deadstock_qty?:float,notes?:string} $conditions
      */
-    public static function submitCount(PDO $pdo, int $sessionId, string $role, int $itemId, float $qtyBase, int $userId): array
+    public static function submitCount(PDO $pdo, int $sessionId, string $role, int $itemId, float $qtyBase, int $userId, array $conditions = []): array
     {
         if (!in_array($role, ['p1', 'p2'], true)) {
             throw new ValidationException(['role must be p1 or p2']);
@@ -273,6 +303,8 @@ final class StockOpnameService
         if ($qtyBase < 0) {
             throw new ValidationException(['counted quantity cannot be negative']);
         }
+        [$rusakQty, $expiredQty, $deadstockQty, $notes] = self::validateConditions($conditions, $qtyBase);
+
         $session = self::requireStatus($pdo, $sessionId, 'OPEN');
 
         $assignedCol = "{$role}_user_id";
@@ -305,14 +337,87 @@ final class StockOpnameService
         }
 
         $now = date('Y-m-d H:i:s');
-        $pdo->prepare("UPDATE stock_opname_lines SET {$qtyCol} = :qty, {$userCol} = :user, {$tsCol} = :now WHERE id = :id")
-            ->execute(['qty' => $qtyBase, 'user' => $userId, 'now' => $now, 'id' => $line['id']]);
+        $pdo->prepare(
+            "UPDATE stock_opname_lines
+             SET {$qtyCol} = :qty, {$userCol} = :user, {$tsCol} = :now,
+                 {$role}_rusak_qty = :rusak, {$role}_expired_qty = :expired, {$role}_deadstock_qty = :deadstock, {$role}_notes = :notes
+             WHERE id = :id"
+        )->execute([
+            'qty' => $qtyBase, 'user' => $userId, 'now' => $now,
+            'rusak' => $rusakQty, 'expired' => $expiredQty, 'deadstock' => $deadstockQty, 'notes' => $notes,
+            'id' => $line['id'],
+        ]);
 
         self::resolveMatchStatus($pdo, (int) $line['id']);
+        self::resolveConditionAgreement($pdo, (int) $line['id']);
 
-        AuditService::log($pdo, $userId, 'system', $role === 'p1' ? 'STOCK_OPNAME_P1_COUNT' : 'STOCK_OPNAME_P2_COUNT', 'stock_opname_lines', (int) $line['id'], null, ['item_id' => $itemId, 'qty_base' => $qtyBase], null);
+        AuditService::log($pdo, $userId, 'system', $role === 'p1' ? 'STOCK_OPNAME_P1_COUNT' : 'STOCK_OPNAME_P2_COUNT', 'stock_opname_lines', (int) $line['id'], null, ['item_id' => $itemId, 'qty_base' => $qtyBase, 'rusak_qty' => $rusakQty, 'expired_qty' => $expiredQty, 'deadstock_qty' => $deadstockQty], null);
 
         return self::get($pdo, $sessionId);
+    }
+
+    /**
+     * @param array{rusak_qty?:mixed,expired_qty?:mixed,deadstock_qty?:mixed,notes?:mixed} $conditions
+     * @return array{0:?float,1:?float,2:?float,3:?string}
+     */
+    private static function validateConditions(array $conditions, float $qtyBase): array
+    {
+        $values = [];
+        foreach (['rusak_qty' => 'Rusak', 'expired_qty' => 'Expired', 'deadstock_qty' => 'Deadstock'] as $key => $label) {
+            if (!array_key_exists($key, $conditions) || $conditions[$key] === null || $conditions[$key] === '') {
+                $values[$key] = null;
+                continue;
+            }
+            if (!is_numeric($conditions[$key])) {
+                throw new ValidationException(["{$label} must be a valid number"]);
+            }
+            $qty = (float) $conditions[$key];
+            if ($qty < 0) {
+                throw new ValidationException(["{$label} cannot be negative"]);
+            }
+            if ($qty - $qtyBase > self::QTY_EPSILON) {
+                throw new ValidationException(["{$label} ({$qty}) cannot exceed the counted Qty Hitung ({$qtyBase})"]);
+            }
+            $values[$key] = $qty;
+        }
+        $notes = isset($conditions['notes']) && trim((string) $conditions['notes']) !== '' ? substr(trim((string) $conditions['notes']), 0, 255) : null;
+
+        return [$values['rusak_qty'], $values['expired_qty'], $values['deadstock_qty'], $notes];
+    }
+
+    /**
+     * PHASE V2.14.9 — mirrors resolveMatchStatus()'s "never average, never
+     * silently pick one side" rule for the new classification columns:
+     * each of final_rusak_qty/final_expired_qty/final_deadstock_qty is set
+     * ONLY when both P1 and P2 have submitted AND agree on that specific
+     * value (independently per field — Rusak can resolve while Expired
+     * stays open, etc.). On any disagreement (or while only one side has
+     * submitted) the final_* column is (re)set to NULL, never guessed —
+     * the supervisor review screen is expected to show both raw sides in
+     * that case, never a single resolved-looking number.
+     */
+    private static function resolveConditionAgreement(PDO $pdo, int $lineId): void
+    {
+        $stmt = $pdo->prepare('SELECT * FROM stock_opname_lines WHERE id = :id');
+        $stmt->execute(['id' => $lineId]);
+        $line = $stmt->fetch();
+        if (!$line || (int) $line['is_excluded'] === 1) {
+            return;
+        }
+
+        $resolve = static function (?string $p1Raw, ?string $p2Raw) {
+            if ($p1Raw === null || $p2Raw === null) {
+                return null;
+            }
+            return self::qtyEquals((float) $p1Raw, (float) $p2Raw) ? (float) $p1Raw : null;
+        };
+
+        $finalRusak = $resolve($line['p1_rusak_qty'], $line['p2_rusak_qty']);
+        $finalExpired = $resolve($line['p1_expired_qty'], $line['p2_expired_qty']);
+        $finalDeadstock = $resolve($line['p1_deadstock_qty'], $line['p2_deadstock_qty']);
+
+        $pdo->prepare('UPDATE stock_opname_lines SET final_rusak_qty = :r, final_expired_qty = :e, final_deadstock_qty = :d WHERE id = :id')
+            ->execute(['r' => $finalRusak, 'e' => $finalExpired, 'd' => $finalDeadstock, 'id' => $lineId]);
     }
 
     /**
@@ -397,7 +502,7 @@ final class StockOpnameService
         }
 
         $lines = $pdo->prepare(
-            'SELECT sol.*, i.sku, i.name, u.code AS unit_code
+            'SELECT sol.*, i.sku, i.name, i.category_id, i.status AS item_status, u.code AS unit_code
              FROM stock_opname_lines sol
              JOIN items i ON i.id = sol.item_id
              LEFT JOIN units u ON u.id = i.base_unit_id
@@ -447,6 +552,8 @@ final class StockOpnameService
                     'item_id' => (int) $r['item_id'],
                     'sku' => $r['sku'],
                     'name' => $r['name'],
+                    'category_id' => $r['category_id'] !== null ? (int) $r['category_id'] : null,
+                    'item_status' => $r['item_status'],
                     'unit_code' => $r['unit_code'],
                     'system_qty_base' => (float) $r['system_qty_base'],
                     'p1_qty_base' => $r['p1_qty_base'],
@@ -459,6 +566,20 @@ final class StockOpnameService
                     'difference_value' => $diff !== null ? round($diff * (float) $r['unit_cost_base'], 4) : null,
                     'is_excluded' => (bool) $r['is_excluded'],
                     'notes' => $r['notes'],
+                    // PHASE V2.14.9 — supervisor-only route (STOCK_OPNAME_SUPERVISE):
+                    // both sides are shown deliberately, never hidden or merged,
+                    // so a P1/P2 disagreement stays visible per the requirement.
+                    'p1_rusak_qty' => $r['p1_rusak_qty'],
+                    'p2_rusak_qty' => $r['p2_rusak_qty'],
+                    'p1_expired_qty' => $r['p1_expired_qty'],
+                    'p2_expired_qty' => $r['p2_expired_qty'],
+                    'p1_deadstock_qty' => $r['p1_deadstock_qty'],
+                    'p2_deadstock_qty' => $r['p2_deadstock_qty'],
+                    'p1_notes' => $r['p1_notes'],
+                    'p2_notes' => $r['p2_notes'],
+                    'final_rusak_qty' => $r['final_rusak_qty'],
+                    'final_expired_qty' => $r['final_expired_qty'],
+                    'final_deadstock_qty' => $r['final_deadstock_qty'],
                 ];
             }, $rows),
         ];

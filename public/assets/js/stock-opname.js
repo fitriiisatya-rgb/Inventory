@@ -227,45 +227,84 @@ const StockOpname = (() => {
     // exist at once regardless of session size, Prev/Next is trivial to
     // test and reason about, and it works identically on desktop/iPad
     // without any scroll-position/resize-observer bookkeeping.
+    // PHASE V2.14.9 — item Master-status ("Aktif"/"Tidak Aktif" on the
+    // ITEM, never opname/session/counted status) and barcode, joined
+    // client-side from the already-loaded Master cache (Master.itemById);
+    // category_id/item_status themselves come straight from
+    // getForCounter()'s own response (added in this phase) so no extra
+    // per-row API call is ever made, at any session size.
+    function itemBarcodeOf(itemId) {
+        const item = Master.itemById(itemId);
+        if (item && item.barcode) return String(item.barcode).toLowerCase();
+        const extra = (Master.itemBarcodes() || []).find((b) => Number(b.item_id) === Number(itemId));
+        return extra ? String(extra.barcode || '').toLowerCase() : '';
+    }
+
+    function categoryNameOf(categoryId) {
+        if (categoryId === null || categoryId === undefined) return '-';
+        const cat = Master.categoryById(categoryId);
+        return cat ? cat.name : '-';
+    }
+
+    function categoryFilterOptionsHtml() {
+        const cats = (Master.categories() || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+        return '<option value="ALL">Semua Kategori</option>' + cats.map((c) => `<option value="${c.id}">${c.name}</option>`).join('');
+    }
+
     function buildBlindCountScreen(initialView) {
         const PAGE_SIZE = 50;
-        const state = { view: initialView, filterText: '', filterStatus: 'ALL', page: 0 };
+        const state = { view: initialView, filterText: '', filterStatus: 'ALL', filterItemStatus: 'ALL', filterCategory: 'ALL', page: 0 };
 
         const wrap = UI.el('div');
         const bannerHost = UI.el('div');
         const progressHost = UI.el('div', { class: 'card' });
-        const searchInput = UI.el('input', { type: 'text', placeholder: 'Cari SKU/nama, atau scan barcode...', class: 'opname-blind-search' });
+        const searchInput = UI.el('input', { type: 'text', placeholder: 'Cari SKU/nama/barcode, atau scan...', class: 'opname-blind-search' });
         const scanBtn = UI.el('button', { type: 'button', class: 'btn btn-secondary btn-sm' }, '📷 Scan');
         const filterSelect = UI.el('select', { id: 'opname-blind-filter', html: `
             <option value="ALL">Semua</option>
             <option value="PENDING">Belum Dihitung</option>
             <option value="COUNTED">Sudah Dihitung</option>
         ` });
+        const itemStatusSelect = UI.el('select', { id: 'opname-blind-item-status', html: `
+            <option value="ALL">Semua Status Item</option>
+            <option value="ACTIVE">Aktif</option>
+            <option value="INACTIVE">Tidak Aktif</option>
+        ` });
+        const categorySelect = UI.el('select', { id: 'opname-blind-category', html: categoryFilterOptionsHtml() });
         const tbody = UI.el('tbody', {});
         const pagerHost = UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center; margin-top:10px; flex-wrap:wrap; gap:8px;' });
 
         wrap.appendChild(bannerHost);
         wrap.appendChild(progressHost);
         wrap.appendChild(UI.el('div', { class: 'card', style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap;' }, [
-            UI.el('div', { style: 'flex:1 1 240px;' }, [searchInput]),
-            UI.el('div', { style: 'width:180px;' }, [filterSelect]),
+            UI.el('div', { style: 'flex:1 1 220px;' }, [searchInput]),
+            UI.el('div', { style: 'width:170px;' }, [filterSelect]),
+            UI.el('div', { style: 'width:160px;' }, [itemStatusSelect]),
+            UI.el('div', { style: 'width:180px;' }, [categorySelect]),
             scanBtn,
         ]));
         wrap.appendChild(UI.el('div', { class: 'compact-table-wrap' }, [
             UI.el('table', { class: 'compact-table' }, [
-                UI.el('thead', {}, [UI.el('tr', {}, ['No', 'SKU / Barang', 'Qty Hitung', 'Status', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
+                UI.el('thead', {}, [UI.el('tr', {}, ['No', 'SKU / Barang', 'Kategori', 'Qty Hitung', 'Rusak', 'Expired', 'Deadstock', 'Keterangan', 'Status', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
                 tbody,
             ]),
         ]));
         wrap.appendChild(pagerHost);
 
+        // Blindness note: every field this filters/searches on
+        // (sku/name/item_status/category_id, plus barcode joined from
+        // Master's own already-loaded item cache) is either already public
+        // master data or this counter's OWN prior submission — nothing
+        // here reads system_qty_base or the other counter's values.
         function filteredLines() {
             const q = state.filterText.trim().toLowerCase();
             return state.view.lines.filter((l) => {
-                if (q && !l.sku.toLowerCase().includes(q) && !l.name.toLowerCase().includes(q)) return false;
+                if (q && !l.sku.toLowerCase().includes(q) && !l.name.toLowerCase().includes(q) && !itemBarcodeOf(l.item_id).includes(q)) return false;
                 const isDone = l.is_counted_by_me || l.is_excluded;
                 if (state.filterStatus === 'PENDING' && isDone) return false;
                 if (state.filterStatus === 'COUNTED' && !isDone) return false;
+                if (state.filterItemStatus !== 'ALL' && l.item_status !== state.filterItemStatus) return false;
+                if (state.filterCategory !== 'ALL' && String(l.category_id) !== state.filterCategory) return false;
                 return true;
             });
         }
@@ -292,7 +331,7 @@ const StockOpname = (() => {
 
             tbody.innerHTML = '';
             if (pageLines.length === 0) {
-                tbody.appendChild(UI.el('tr', {}, [UI.el('td', { colspan: '5' }, 'Tidak ada barang yang cocok.')]));
+                tbody.appendChild(UI.el('tr', {}, [UI.el('td', { colspan: '10' }, 'Tidak ada barang yang cocok.')]));
             } else {
                 pageLines.forEach((line, i) => tbody.appendChild(buildBlindCountRowEl(state, line, start + i + 1)));
             }
@@ -308,6 +347,8 @@ const StockOpname = (() => {
 
         searchInput.addEventListener('input', () => { state.filterText = searchInput.value; state.page = 0; renderTable(); });
         filterSelect.addEventListener('change', () => { state.filterStatus = filterSelect.value; state.page = 0; renderTable(); });
+        itemStatusSelect.addEventListener('change', () => { state.filterItemStatus = itemStatusSelect.value; state.page = 0; renderTable(); });
+        categorySelect.addEventListener('change', () => { state.filterCategory = categorySelect.value; state.page = 0; renderTable(); });
         scanBtn.addEventListener('click', () => openScanModal(state, jumpToItem));
 
         // Re-fetches the SAME getOpname(sessionId) call renderSession()
@@ -325,10 +366,17 @@ const StockOpname = (() => {
         function jumpToItem(itemId) {
             const globalIdx = state.view.lines.findIndex((l) => l.item_id === itemId);
             if (globalIdx === -1) return false;
+            // Reset every active filter so a scanned item is never hidden
+            // by whatever search/status/category/item-status the operator
+            // had set before scanning.
             state.filterText = '';
             state.filterStatus = 'ALL';
+            state.filterItemStatus = 'ALL';
+            state.filterCategory = 'ALL';
             searchInput.value = '';
             filterSelect.value = 'ALL';
+            itemStatusSelect.value = 'ALL';
+            categorySelect.value = 'ALL';
             state.page = Math.floor(globalIdx / PAGE_SIZE);
             renderTable();
             const row = tbody.querySelector(`tr[data-item-id="${itemId}"]`);
@@ -358,12 +406,23 @@ const StockOpname = (() => {
             if (qtyInput) qtyInput.focus();
         }
 
-        async function saveCount(line, qtyInput, saveBtn, alertBox) {
+        // PHASE V2.14.9 — conditionInputs is optional: {rusakInput,
+        // expiredInput, deadstockInput, notesInput}. All fields (qty +
+        // classification + note) are submitted together in this one
+        // write-once save action — never a separate mutation afterward.
+        async function saveCount(line, qtyInput, saveBtn, alertBox, conditionInputs) {
             if (qtyInput.value === '') { UI.toast('Isi jumlah fisik terlebih dahulu.', 'error'); return; }
+            const ci = conditionInputs || {};
+            const conditions = {
+                rusak_qty: ci.rusakInput && ci.rusakInput.value !== '' ? Number(ci.rusakInput.value) : null,
+                expired_qty: ci.expiredInput && ci.expiredInput.value !== '' ? Number(ci.expiredInput.value) : null,
+                deadstock_qty: ci.deadstockInput && ci.deadstockInput.value !== '' ? Number(ci.deadstockInput.value) : null,
+                notes: ci.notesInput ? ci.notesInput.value : null,
+            };
             saveBtn.disabled = true;
             alertBox.innerHTML = '';
             try {
-                await InvApi.submitOpnameCount(state.view.session_id, state.view.role, line.item_id, Number(qtyInput.value));
+                await InvApi.submitOpnameCount(state.view.session_id, state.view.role, line.item_id, Number(qtyInput.value), conditions);
                 UI.toast(`Tersimpan: ${line.sku} = ${qtyInput.value}`, 'success');
                 await refetch();
                 focusNextPending(line.item_id);
@@ -389,37 +448,58 @@ const StockOpname = (() => {
         const row = UI.el('tr', { 'data-item-id': String(line.item_id) });
         row.appendChild(UI.el('td', { class: 'compact-col-no' }, String(rowNo)));
         row.appendChild(UI.el('td', { class: 'compact-col-item' }, `${line.sku} — ${line.name}`));
+        row.appendChild(UI.el('td', {}, categoryNameOf(line.category_id)));
 
         if (line.is_excluded) {
+            row.appendChild(UI.el('td', {}, '-'));
+            row.appendChild(UI.el('td', {}, '-'));
+            row.appendChild(UI.el('td', {}, '-'));
+            row.appendChild(UI.el('td', {}, '-'));
             row.appendChild(UI.el('td', {}, '-'));
             row.appendChild(UI.el('td', {}, [UI.el('span', { class: 'badge badge-cancelled' }, 'Dikecualikan')]));
             row.appendChild(UI.el('td', {}, '-'));
             return row;
         }
+        // Already counted BY ME: show my own read-only classification —
+        // never an input again (write-once), never the other counter's or
+        // any resolved/final value (this is still the blind view).
         if (line.is_counted_by_me) {
             row.appendChild(UI.el('td', {}, UI.formatNumber(line.my_qty_base)));
+            row.appendChild(UI.el('td', {}, line.my_rusak_qty !== null ? UI.formatNumber(line.my_rusak_qty) : '-'));
+            row.appendChild(UI.el('td', {}, line.my_expired_qty !== null ? UI.formatNumber(line.my_expired_qty) : '-'));
+            row.appendChild(UI.el('td', {}, line.my_deadstock_qty !== null ? UI.formatNumber(line.my_deadstock_qty) : '-'));
+            row.appendChild(UI.el('td', {}, line.my_notes || '-'));
             row.appendChild(UI.el('td', {}, [UI.el('span', { class: 'badge badge-received' }, 'Tersimpan')]));
             row.appendChild(UI.el('td', {}, '-'));
             return row;
         }
 
         const qtyInput = UI.el('input', {
-            type: 'number', step: 'any', inputmode: 'decimal', placeholder: 'Qty fisik...',
+            type: 'number', step: 'any', min: '0', inputmode: 'decimal', placeholder: 'Qty fisik...',
             class: 'opname-blind-qty-input',
         });
+        const rusakInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', placeholder: '0', class: 'opname-blind-rusak-input', style: 'width:80px;' });
+        const expiredInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', placeholder: '0', class: 'opname-blind-expired-input', style: 'width:80px;' });
+        const deadstockInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', placeholder: '0', class: 'opname-blind-deadstock-input', style: 'width:80px;' });
+        const notesInput = UI.el('input', { type: 'text', placeholder: 'Keterangan (opsional)', class: 'opname-blind-notes-input', style: 'width:140px;' });
         const saveBtn = UI.el('button', { class: 'btn btn-primary btn-sm compact-row-btn' }, 'Simpan');
         const alertBox = UI.el('div');
-        saveBtn.addEventListener('click', () => state.saveCount(line, qtyInput, saveBtn, alertBox));
+        const conditionInputs = { rusakInput, expiredInput, deadstockInput, notesInput };
+        saveBtn.addEventListener('click', () => state.saveCount(line, qtyInput, saveBtn, alertBox, conditionInputs));
         // Fast-entry: Enter on the qty field saves immediately (never the
         // whole-transaction submit — there is no such single action on
         // this per-line-saved screen to accidentally trigger).
         qtyInput.addEventListener('keydown', (e) => {
             if (e.key !== 'Enter') return;
             e.preventDefault();
-            state.saveCount(line, qtyInput, saveBtn, alertBox);
+            state.saveCount(line, qtyInput, saveBtn, alertBox, conditionInputs);
         });
 
         row.appendChild(UI.el('td', { class: 'compact-col-qty' }, [qtyInput, alertBox]));
+        row.appendChild(UI.el('td', {}, [rusakInput]));
+        row.appendChild(UI.el('td', {}, [expiredInput]));
+        row.appendChild(UI.el('td', {}, [deadstockInput]));
+        row.appendChild(UI.el('td', {}, [notesInput]));
         row.appendChild(UI.el('td', {}, [UI.el('span', { class: 'badge badge-pending' }, 'Belum')]));
         row.appendChild(UI.el('td', {}, [saveBtn]));
         return row;
@@ -464,6 +544,24 @@ const StockOpname = (() => {
     // ============================================================
     // Supervisor comparison/review
     // ============================================================
+    // PHASE V2.14.9 — search/filter toolbar for the supervisor comparison
+    // table, entirely client-side over review.lines (already-loaded bulk
+    // data from opnameReview() — no per-row API calls at any session
+    // size). Status Hitung here covers the full supervisor vocabulary
+    // (match_status as-is, plus PENDING split visually as "Belum
+    // Dihitung" by keteranganFor()); Item Aktif/Tidak Aktif is the ITEM
+    // MASTER status (item_status), never opname/count status.
+    function reviewFilterOptionsHtml() {
+        return `
+            <option value="ALL">Semua</option>
+            <option value="PENDING">Belum Dihitung</option>
+            <option value="MATCH">Cocok</option>
+            <option value="MISMATCH">Selisih</option>
+            <option value="RECOUNTED">Recount</option>
+            <option value="EXCLUDED">Dikecualikan</option>
+        `;
+    }
+
     async function buildSupervisorReviewCard(session) {
         const wrap = UI.el('div');
         let review;
@@ -492,49 +590,66 @@ const StockOpname = (() => {
         });
         wrap.appendChild(kpiBox);
 
-        const rows = review.lines.map((l) => {
-            const diffP1P2 = (l.p1_qty_base !== null && l.p2_qty_base !== null)
-                ? UI.formatNumber(Number(l.p1_qty_base) - Number(l.p2_qty_base))
-                : '-';
-            const cells = [
-                UI.el('td', {}, `${l.sku} — ${l.name}`),
-                UI.el('td', {}, UI.formatNumber(l.system_qty_base)),
-                UI.el('td', {}, l.p1_qty_base !== null ? UI.formatNumber(l.p1_qty_base) : '-'),
-                UI.el('td', {}, l.p2_qty_base !== null ? UI.formatNumber(l.p2_qty_base) : '-'),
-                UI.el('td', {}, diffP1P2),
-                UI.el('td', {}, [UI.el('span', { class: `badge ${badgeClassFor(l.match_status, l.is_excluded)}` }, keteranganFor(l))]),
-                UI.el('td', {}, l.final_physical_qty_base !== null ? UI.formatNumber(l.final_physical_qty_base) : '-'),
-            ];
-            const actionCell = UI.el('td', {});
-            if (!l.is_excluded && l.match_status === 'MISMATCH') {
-                const recountBtn = UI.el('button', { class: 'btn btn-warning btn-sm' }, 'Recount');
-                recountBtn.addEventListener('click', () => recountItem(session.id, l));
-                actionCell.appendChild(recountBtn);
+        const reviewState = { text: '', itemStatus: 'ALL', category: 'ALL', status: 'ALL' };
+        const searchInput = UI.el('input', { type: 'text', placeholder: 'Cari SKU/nama/barcode...', id: 'opname-review-search' });
+        const itemStatusSelect = UI.el('select', { id: 'opname-review-item-status', html: `
+            <option value="ALL">Semua Status Item</option>
+            <option value="ACTIVE">Aktif</option>
+            <option value="INACTIVE">Tidak Aktif</option>
+        ` });
+        const categorySelect = UI.el('select', { id: 'opname-review-category', html: categoryFilterOptionsHtml() });
+        const statusSelect = UI.el('select', { id: 'opname-review-status', html: reviewFilterOptionsHtml() });
+        const tbody = UI.el('tbody', {});
+
+        function matchesFilters(l) {
+            const q = reviewState.text.trim().toLowerCase();
+            if (q && !l.sku.toLowerCase().includes(q) && !l.name.toLowerCase().includes(q) && !itemBarcodeOf(l.item_id).includes(q)) return false;
+            if (reviewState.itemStatus !== 'ALL' && l.item_status !== reviewState.itemStatus) return false;
+            if (reviewState.category !== 'ALL' && String(l.category_id) !== reviewState.category) return false;
+            if (reviewState.status !== 'ALL') {
+                const effectiveStatus = l.is_excluded ? 'EXCLUDED' : l.match_status;
+                if (effectiveStatus !== reviewState.status) return false;
             }
-            if (!l.is_excluded && (l.match_status === 'PENDING' || l.match_status === 'MISMATCH')) {
-                const excludeBtn = UI.el('button', { class: 'btn btn-secondary btn-sm', style: 'margin-left:6px;' }, 'Kecualikan');
-                excludeBtn.addEventListener('click', () => excludeItem(session.id, l));
-                actionCell.appendChild(excludeBtn);
+            return true;
+        }
+
+        function renderRows() {
+            tbody.innerHTML = '';
+            const filtered = review.lines.filter(matchesFilters);
+            if (!filtered.length) {
+                tbody.appendChild(UI.el('tr', {}, [UI.el('td', { colspan: '13' }, 'Tidak ada barang yang cocok.')]));
+                return;
             }
-            cells.push(actionCell);
-            return UI.el('tr', {}, cells);
-        });
+            filtered.forEach((l) => tbody.appendChild(buildReviewRowEl(session, l)));
+        }
+
+        searchInput.addEventListener('input', () => { reviewState.text = searchInput.value; renderRows(); });
+        itemStatusSelect.addEventListener('change', () => { reviewState.itemStatus = itemStatusSelect.value; renderRows(); });
+        categorySelect.addEventListener('change', () => { reviewState.category = categorySelect.value; renderRows(); });
+        statusSelect.addEventListener('change', () => { reviewState.status = statusSelect.value; renderRows(); });
 
         const cancelBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Batalkan Sesi');
         cancelBtn.addEventListener('click', cancelOpname);
 
         wrap.appendChild(UI.el('div', { class: 'card' }, [
-            UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center;' }, [
+            UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;' }, [
                 UI.el('div', { class: 'card-title' }, 'Perbandingan P1 vs P2'),
                 cancelBtn,
             ]),
-            UI.el('div', { class: 'table-wrapper' }, [
-                UI.el('table', {}, [
-                    UI.el('thead', {}, [UI.el('tr', {}, ['Barang', 'Stok Sistem', 'Hasil P1', 'Hasil P2', 'Selisih P1-P2', 'Keterangan', 'Hasil Final/Recount', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
-                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '8' }, '-')])]),
+            UI.el('div', { style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px;' }, [
+                UI.el('div', { style: 'flex:1 1 220px;' }, [searchInput]),
+                UI.el('div', { style: 'width:160px;' }, [itemStatusSelect]),
+                UI.el('div', { style: 'width:180px;' }, [categorySelect]),
+                UI.el('div', { style: 'width:160px;' }, [statusSelect]),
+            ]),
+            UI.el('div', { class: 'compact-table-wrap' }, [
+                UI.el('table', { class: 'compact-table' }, [
+                    UI.el('thead', {}, [UI.el('tr', {}, ['Barang', 'Kategori', 'Stok Sistem', 'P1', 'P2', 'Selisih', 'Rusak P1/P2', 'Expired P1/P2', 'Deadstock P1/P2', 'Keterangan', 'Hasil Final/Recount', 'Status', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
+                    tbody,
                 ]),
             ]),
         ]));
+        renderRows();
 
         const readyToFinalize = s.not_counted === 0 && s.mismatch === 0;
         const finalizeBtn = UI.el('button', { class: 'btn btn-danger', style: 'margin-top:12px;' },
@@ -552,6 +667,49 @@ const StockOpname = (() => {
         });
         wrap.appendChild(finalizeBtn);
         return wrap;
+    }
+
+    // PHASE V2.14.9 — one compact <tr> for the supervisor comparison
+    // table. Rusak/Expired/Deadstock are shown as "P1 / P2" side-by-side
+    // — NEVER merged/averaged/hidden — so a disagreement between counters
+    // stays visible exactly like the pre-existing P1/P2 qty columns
+    // already do. Keterangan shows both counters' own notes distinctly
+    // (never combined into one un-attributable note).
+    function buildReviewRowEl(session, l) {
+        const diffP1P2 = (l.p1_qty_base !== null && l.p2_qty_base !== null)
+            ? UI.formatNumber(Number(l.p1_qty_base) - Number(l.p2_qty_base))
+            : '-';
+        const pairText = (p1, p2) => `${p1 !== null && p1 !== undefined ? UI.formatNumber(p1) : '-'} / ${p2 !== null && p2 !== undefined ? UI.formatNumber(p2) : '-'}`;
+        const notesText = (l.p1_notes || l.p2_notes)
+            ? `P1: ${l.p1_notes || '-'} | P2: ${l.p2_notes || '-'}`
+            : '-';
+        const cells = [
+            UI.el('td', {}, `${l.sku} — ${l.name}`),
+            UI.el('td', {}, categoryNameOf(l.category_id)),
+            UI.el('td', {}, UI.formatNumber(l.system_qty_base)),
+            UI.el('td', {}, l.p1_qty_base !== null ? UI.formatNumber(l.p1_qty_base) : '-'),
+            UI.el('td', {}, l.p2_qty_base !== null ? UI.formatNumber(l.p2_qty_base) : '-'),
+            UI.el('td', {}, diffP1P2),
+            UI.el('td', {}, pairText(l.p1_rusak_qty, l.p2_rusak_qty)),
+            UI.el('td', {}, pairText(l.p1_expired_qty, l.p2_expired_qty)),
+            UI.el('td', {}, pairText(l.p1_deadstock_qty, l.p2_deadstock_qty)),
+            UI.el('td', {}, notesText),
+            UI.el('td', {}, l.final_physical_qty_base !== null ? UI.formatNumber(l.final_physical_qty_base) : '-'),
+            UI.el('td', {}, [UI.el('span', { class: `badge ${badgeClassFor(l.match_status, l.is_excluded)}` }, keteranganFor(l))]),
+        ];
+        const actionCell = UI.el('td', {});
+        if (!l.is_excluded && l.match_status === 'MISMATCH') {
+            const recountBtn = UI.el('button', { class: 'btn btn-warning btn-sm' }, 'Recount');
+            recountBtn.addEventListener('click', () => recountItem(session.id, l));
+            actionCell.appendChild(recountBtn);
+        }
+        if (!l.is_excluded && (l.match_status === 'PENDING' || l.match_status === 'MISMATCH')) {
+            const excludeBtn = UI.el('button', { class: 'btn btn-secondary btn-sm', style: 'margin-left:6px;' }, 'Kecualikan');
+            excludeBtn.addEventListener('click', () => excludeItem(session.id, l));
+            actionCell.appendChild(excludeBtn);
+        }
+        cells.push(actionCell);
+        return UI.el('tr', {}, cells);
     }
 
     /**

@@ -731,9 +731,22 @@ CREATE TABLE stock_opname_lines (
     p1_qty_base          DECIMAL(20,6) NULL,
     p1_user_id           INT UNSIGNED NULL,
     p1_submitted_at       DATETIME NULL,
+    -- PHASE V2.14.9: each counter's own Rusak/Expired/Deadstock
+    -- classification of a SUBSET of their own p{1,2}_qty_base, plus a
+    -- free-text note — never shown to the other counter (see
+    -- StockOpnameService::getForCounter()). Never read by finalize()/
+    -- post() — entering these has zero effect on inventory.
+    p1_rusak_qty         DECIMAL(20,6) NULL,
+    p1_expired_qty       DECIMAL(20,6) NULL,
+    p1_deadstock_qty     DECIMAL(20,6) NULL,
+    p1_notes             VARCHAR(255) NULL,
     p2_qty_base          DECIMAL(20,6) NULL,
     p2_user_id           INT UNSIGNED NULL,
     p2_submitted_at       DATETIME NULL,
+    p2_rusak_qty         DECIMAL(20,6) NULL,
+    p2_expired_qty       DECIMAL(20,6) NULL,
+    p2_deadstock_qty     DECIMAL(20,6) NULL,
+    p2_notes             VARCHAR(255) NULL,
     -- PHASE V2.12A: only ever populated for a MISMATCH line, by an
     -- authorized recount user (Section 9) — original P1/P2 above are never
     -- overwritten.
@@ -759,6 +772,16 @@ CREATE TABLE stock_opname_lines (
     cost_required       TINYINT(1) NOT NULL DEFAULT 0,    -- true when variance is IN and no reliable cost exists yet
     override_cost_base  DECIMAL(20,4) NULL,               -- admin-supplied cost when cost_required was flagged
     notes               VARCHAR(255) NULL,                -- also holds the exclusion reason when is_excluded=1
+    -- PHASE V2.14.9: resolved-agreement values — auto-set ONLY when P1 and
+    -- P2 agree on that specific classification (mirrors how
+    -- counted_qty_base already resolves for qty); left NULL on
+    -- disagreement so the supervisor screen shows both sides rather than
+    -- silently picking one. final_notes is never auto-copied from either
+    -- side's p{1,2}_notes.
+    final_rusak_qty      DECIMAL(20,6) NULL,
+    final_expired_qty    DECIMAL(20,6) NULL,
+    final_deadstock_qty  DECIMAL(20,6) NULL,
+    final_notes          VARCHAR(255) NULL,
     CONSTRAINT fk_sol2_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
     CONSTRAINT fk_sol2_item FOREIGN KEY (item_id) REFERENCES items(id),
     CONSTRAINT fk_sol_p1_user FOREIGN KEY (p1_user_id) REFERENCES users(id),

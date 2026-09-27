@@ -321,7 +321,8 @@ const InvApi = (() => {
         // ---- PHASE V2.12: dual-count (P1/P2 blind) Stock Opname ----
         opnameEligibleCounters: (warehouseId) => request('GET', `/stock-opname/eligible-counters?warehouse_id=${warehouseId}`),
         assignOpnameCounters: (id, assignments) => request('POST', `/stock-opname/${id}/assign-counters`, assignments),
-        submitOpnameCount: (id, role, itemId, countedQtyBase) => request('POST', `/stock-opname/${id}/count/${role}`, { item_id: itemId, counted_qty_base: countedQtyBase }),
+        // PHASE V2.14.9 — `conditions` is optional: {rusak_qty, expired_qty, deadstock_qty, notes}.
+        submitOpnameCount: (id, role, itemId, countedQtyBase, conditions = {}) => request('POST', `/stock-opname/${id}/count/${role}`, { item_id: itemId, counted_qty_base: countedQtyBase, ...conditions }),
         opnameReview: (id) => request('GET', `/stock-opname/${id}/review`),
         recountOpname: (id, itemId, countedQtyBase, reason) => request('POST', `/stock-opname/${id}/recount`, { item_id: itemId, counted_qty_base: countedQtyBase, reason }),
         excludeOpnameItem: (id, itemId, reason) => request('POST', `/stock-opname/${id}/exclude`, { item_id: itemId, reason }),
