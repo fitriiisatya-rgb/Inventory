@@ -2978,15 +2978,26 @@ $routes = [
             throw new ValidationException(['counted_qty_base is required']);
         }
 
-        // PHASE V2.14.9 — optional physical-condition classification,
-        // submitted together with the qty in this same write-once call.
-        // StockOpnameService::submitCount()/validateConditions() does the
-        // actual >=0 / <=qty validation; this route only passes through
-        // whatever the client sent.
-        $conditions = [];
-        if (array_key_exists('rusak_qty', $input)) { $conditions['rusak_qty'] = $input['rusak_qty']; }
-        if (array_key_exists('expired_qty', $input)) { $conditions['expired_qty'] = $input['expired_qty']; }
-        if (array_key_exists('deadstock_qty', $input)) { $conditions['deadstock_qty'] = $input['deadstock_qty']; }
+        // PHASE V2.14.9 — physical-condition classification, submitted
+        // together with the qty in this same write-once call.
+        // PHASE V2.14.9.3 — StockOpnameService::validateConditions()
+        // accepts a literal [] for backward compatibility with old
+        // direct-service/internal callers, but that bypass is NOT part of
+        // this HTTP contract: a P1/P2 count submitted over this endpoint
+        // must always explicitly state all three fields (0 if none found)
+        // so an omitted field is never silently written as NULL. Missing
+        // any of the three is rejected before submitCount() is ever
+        // called — the line is never touched.
+        foreach (['rusak_qty', 'expired_qty', 'deadstock_qty'] as $conditionField) {
+            if (!array_key_exists($conditionField, $input)) {
+                inv_error(422, 'VALIDATION_ERROR', 'Rusak, Expired, dan Deadstock wajib dikirim. Gunakan 0 bila tidak ada.');
+            }
+        }
+        $conditions = [
+            'rusak_qty' => $input['rusak_qty'],
+            'expired_qty' => $input['expired_qty'],
+            'deadstock_qty' => $input['deadstock_qty'],
+        ];
         if (array_key_exists('notes', $input)) { $conditions['notes'] = $input['notes']; }
 
         $result = Database::transaction(
