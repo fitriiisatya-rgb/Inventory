@@ -116,6 +116,25 @@ final class WarehouseCutoverService
      * return more than one row, so MULTIPLE_MATCH/CODE_COLLISION is never
      * produced by this implementation (defined in the schema's ENUM for a
      * future fuzzier matcher, not reachable from this one).
+     *
+     * PHASE V2.14.5 — unit compatibility is no longer "source_unit string
+     * equals base unit code, case-insensitively": a source unit is now
+     * considered compatible when it normalizes (via the project's existing
+     * UnitNormalizationService — case/whitespace-insensitive alias
+     * resolution, never an invented conversion) to EITHER the item's own
+     * base_unit_id OR any unit_id that already has a real row in
+     * item_unit_conversions for that item (any version, not just the
+     * currently-open one — the question here is only "has this unit ever
+     * been genuinely configured for this item", not "what is its current
+     * factor"). This never invents a KG<->Gram/Liter<->ml-style conversion
+     * that doesn't already exist in the master data, and it never touches
+     * reconciliation_status/exception_codes — those are a separate,
+     * already-computed historical fact from the original import, not
+     * recomputed here, so a SOURCE_UNIT_CONFLICT-flagged line (e.g. the
+     * opening file and movement file disagreeing on this SKU's own unit)
+     * stays CRITICAL regardless of whether the master item separately has
+     * a valid conversion for one of those units. mapping_status and
+     * reconciliation_status remain two independent concepts.
      */
     public static function matchItems(PDO $pdo, int $cutoverId): array
     {
@@ -126,11 +145,8 @@ final class WarehouseCutoverService
         $lines->execute(['id' => $cutoverId]);
         $lines = $lines->fetchAll();
 
-        $itemStmt = $pdo->prepare(
-            'SELECT i.id, i.name, u.code AS unit_code
-               FROM items i JOIN units u ON u.id = i.base_unit_id
-              WHERE i.sku = :sku'
-        );
+        $itemStmt = $pdo->prepare('SELECT id, name, base_unit_id FROM items WHERE sku = :sku');
+        $conversionUnitsStmt = $pdo->prepare('SELECT DISTINCT unit_id FROM item_unit_conversions WHERE item_id = :item_id');
         $update = $pdo->prepare('UPDATE warehouse_cutover_lines SET item_id = :item_id, mapping_status = :status WHERE id = :id');
 
         $counts = ['MATCHED' => 0, 'NOT_FOUND' => 0, 'NAME_MISMATCH' => 0, 'UNIT_MISMATCH' => 0];
@@ -142,7 +158,18 @@ final class WarehouseCutoverService
                 $counts['NOT_FOUND']++;
                 continue;
             }
-            $unitMatches = strcasecmp(trim((string) $item['unit_code']), trim((string) $line['source_unit'])) === 0;
+
+            $sourceUnitId = UnitNormalizationService::resolveUnitId($pdo, (string) $line['source_unit']);
+            $unitMatches = false;
+            if ($sourceUnitId !== null) {
+                if ($sourceUnitId === (int) $item['base_unit_id']) {
+                    $unitMatches = true;
+                } else {
+                    $conversionUnitsStmt->execute(['item_id' => $item['id']]);
+                    $validUnitIds = array_map('intval', $conversionUnitsStmt->fetchAll(PDO::FETCH_COLUMN));
+                    $unitMatches = in_array($sourceUnitId, $validUnitIds, true);
+                }
+            }
             $nameMatches = strcasecmp(trim((string) $item['name']), trim((string) $line['source_name'])) === 0;
             $status = !$unitMatches ? 'UNIT_MISMATCH' : (!$nameMatches ? 'NAME_MISMATCH' : 'MATCHED');
             $update->execute(['item_id' => $item['id'], 'status' => $status, 'id' => $line['id']]);
