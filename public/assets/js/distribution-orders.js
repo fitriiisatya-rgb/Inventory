@@ -372,12 +372,41 @@ const DistributionOrders = (() => {
         return wrap;
     }
 
+    // PHASE V2.14.8 — compact table (was one grid-3 block per line; a
+    // 20-50 item DO produced an extremely long page). Qty Diterima still
+    // defaults to qty_sent_base (preserving the existing prefill exactly
+    // — never invented), Selisih is a LIVE display-only calculation
+    // mirroring DistributionOrderService::receive()'s own
+    // `$diff = round($received - $sent, 6)` sign convention, and the
+    // discrepancy reason enum/values are completely unchanged. "Catatan"
+    // maps to the already-existing, already-accepted discrepancy_notes
+    // column (schema + receive() both already support it — it was simply
+    // never exposed in the UI before now, so no schema/backend change).
     function buildReceiveForm(detail, onDone) {
         const wrap = UI.el('div', { class: 'card', style: 'padding:12px;' }, [
             UI.el('div', { style: 'font-weight:700; margin-bottom:8px;' }, 'Konfirmasi Penerimaan Bakery'),
         ]);
-        const rowInputs = detail.lines.map((l) => {
-            const qtyInput = UI.el('input', { type: 'number', min: '0', step: 'any', value: String(l.qty_sent_base) });
+        const tbody = UI.el('tbody', {});
+        const summaryBox = UI.el('div', { class: 'compact-summary' });
+        const rowInputs = [];
+
+        function updateSummary() {
+            let sesuai = 0;
+            let selisih = 0;
+            rowInputs.forEach((r) => {
+                const diff = Number(r.qtyInput.value || 0) - r.sentQty;
+                if (Math.abs(diff) > 0.000001) selisih++; else sesuai++;
+            });
+            summaryBox.innerHTML = '';
+            summaryBox.appendChild(UI.el('div', {}, ['Total Item: ', UI.el('b', {}, String(rowInputs.length))]));
+            summaryBox.appendChild(UI.el('div', {}, ['Item Sesuai: ', UI.el('b', {}, String(sesuai))]));
+            summaryBox.appendChild(UI.el('div', {}, ['Item Selisih: ', UI.el('b', {}, String(selisih))]));
+        }
+
+        detail.lines.forEach((l, idx) => {
+            const sentQty = Number(l.qty_sent_base);
+            const qtyInput = UI.el('input', { type: 'number', min: '0', step: 'any', value: String(sentQty), class: 'do-receive-qty' });
+            const selisihCell = UI.el('td', { class: 'compact-col-qty', style: 'text-align:right;' }, '0');
             const reasonSelect = UI.el('select', { html: `
                 <option value="">- tidak ada selisih -</option>
                 <option value="KURANG">Kurang</option>
@@ -386,18 +415,70 @@ const DistributionOrders = (() => {
                 <option value="SALAH_BARANG">Salah Barang</option>
                 <option value="LAINNYA">Lainnya</option>
             ` });
-            wrap.appendChild(UI.el('div', { class: 'grid-3', style: 'margin-bottom:6px;' }, [
-                UI.el('div', {}, `${l.sku_snapshot} — ${l.item_name_snapshot} (terkirim ${UI.formatNumber(l.qty_sent_base)})`),
-                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Qty Diterima'), qtyInput]),
-                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Alasan Selisih (jika ada)'), reasonSelect]),
-            ]));
-            return { doLineId: l.id, qtyInput, reasonSelect };
+            const notesInput = UI.el('input', { type: 'text', placeholder: 'Catatan (opsional)' });
+            const row = UI.el('tr', {}, [
+                UI.el('td', { class: 'compact-col-no' }, String(idx + 1)),
+                UI.el('td', { class: 'compact-col-item' }, `${l.sku_snapshot} — ${l.item_name_snapshot}`),
+                UI.el('td', { class: 'compact-col-qty', style: 'text-align:right;' }, UI.formatNumber(sentQty)),
+                UI.el('td', { class: 'compact-col-qty' }, [qtyInput]),
+                selisihCell,
+                UI.el('td', {}, [reasonSelect]),
+                UI.el('td', {}, [notesInput]),
+            ]);
+
+            function recompute() {
+                const diff = Number(qtyInput.value || 0) - sentQty;
+                const hasDiscrepancy = Math.abs(diff) > 0.000001;
+                selisihCell.textContent = (diff > 0 ? '+' : '') + UI.formatNumber(diff);
+                row.classList.toggle('compact-row-discrepancy', hasDiscrepancy);
+                // Requirement E — visually emphasize the reason as required
+                // when there's a discrepancy (mirrors, never weakens, the
+                // backend's own requirement that discrepancy_reason be set
+                // whenever qty_received differs from qty_sent).
+                reasonSelect.style.borderColor = (hasDiscrepancy && !reasonSelect.value) ? 'var(--red)' : '';
+                updateSummary();
+            }
+            qtyInput.addEventListener('input', recompute);
+            reasonSelect.addEventListener('change', recompute);
+            // Fast-entry: Enter on Qty Diterima jumps straight to the next
+            // row's Qty Diterima (never submits — submit stays a separate,
+            // explicit button click).
+            qtyInput.addEventListener('keydown', (e) => {
+                if (e.key !== 'Enter') return;
+                e.preventDefault();
+                const next = rowInputs[idx + 1];
+                if (next) next.qtyInput.focus();
+            });
+            recompute();
+            tbody.appendChild(row);
+            rowInputs.push({ doLineId: l.id, qtyInput, reasonSelect, notesInput, sentQty });
         });
-        const submitBtn = UI.el('button', { class: 'btn btn-primary btn-sm' }, 'Simpan Penerimaan');
+
+        wrap.appendChild(UI.el('div', { class: 'compact-table-wrap' }, [
+            UI.el('table', { class: 'compact-table' }, [
+                UI.el('thead', {}, [UI.el('tr', {}, ['No', 'SKU / Barang', 'Qty Kirim', 'Qty Diterima', 'Selisih', 'Alasan', 'Catatan'].map((h) => UI.el('th', {}, h)))]),
+                tbody,
+            ]),
+        ]));
+        wrap.appendChild(summaryBox);
+        updateSummary();
+
+        const alertBox = UI.el('div', { style: 'margin-top:8px;' });
+        const submitBtn = UI.el('button', { class: 'btn btn-primary btn-sm', style: 'margin-top:10px;' }, 'Simpan Penerimaan');
         submitBtn.addEventListener('click', async () => {
+            alertBox.innerHTML = '';
+            // Client-side mirror of receive()'s own requirement (never a
+            // new rule): a discrepancy without a reason is rejected
+            // server-side anyway — checking here just saves a round trip.
+            const missingReason = rowInputs.some((r) => Math.abs(Number(r.qtyInput.value || 0) - r.sentQty) > 0.000001 && !r.reasonSelect.value);
+            if (missingReason) {
+                alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Ada baris dengan selisih qty tapi Alasan Selisih belum diisi (ditandai merah) — lengkapi terlebih dahulu.'));
+                return;
+            }
             const lines = rowInputs.map((r) => ({
                 do_line_id: r.doLineId, qty_received: Number(r.qtyInput.value),
                 discrepancy_reason: r.reasonSelect.value || null,
+                discrepancy_notes: r.notesInput.value || null,
             }));
             try {
                 const result = await InvApi.receiveDistributionOrder(detail.id, { lines });
@@ -407,6 +488,7 @@ const DistributionOrders = (() => {
                 UI.handleApiError(err);
             }
         });
+        wrap.appendChild(alertBox);
         wrap.appendChild(submitBtn);
         return wrap;
     }

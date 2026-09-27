@@ -314,6 +314,14 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
     background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm);
     max-height: 280px; overflow-y: auto; box-shadow: 0 12px 30px rgba(0,0,0,0.4);
 }
+/* PHASE V2.14.8 — body-reparented variant (see item-selector.js): JS sets
+   left/top-or-bottom/width inline per-open against the input's live
+   bounding rect, so only position/z-index/visual chrome belong here.
+   z-index must clear .modal (1200 — the Cutover resolve modal mounts an
+   ItemSelector) and .drawer (1101). */
+.item-selector-dropdown-floating {
+    position: fixed; right: auto; z-index: 1300;
+}
 .item-selector-option { display: flex; gap: 10px; align-items: baseline; padding: 9px 12px; cursor: pointer; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
 .item-selector-option:last-child { border-bottom: none; }
 .item-selector-option:hover, .item-selector-option.active { background: rgba(59,130,246,0.14); }
@@ -325,6 +333,55 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 .item-selector-camera-video { width: 100%; border-radius: var(--radius-sm); background: #000; max-height: 320px; object-fit: cover; }
 .item-selector-camera-status { color: var(--text3); font-size: 0.82rem; margin-top: 8px; text-align: center; }
 .price-reference-hint { font-size: 0.78rem; color: var(--text3); margin-top: 6px; }
+
+/* PHASE V2.14.8 — ItemSelector embedded inside a compact table cell
+   (showLabel:false, compact:true): no label text, no .form-group bottom
+   margin, smaller input/select/scan-button so the row stays within the
+   ~44-56px target height. */
+.form-group-compact { margin-bottom: 0; }
+.item-selector-compact .item-selector-input { padding: 4px 8px; font-size: 0.85rem; height: 32px; }
+.item-selector-compact .item-selector-scan-btn { width: 32px; height: 32px; font-size: 0.95rem; }
+.item-selector-compact .item-selector-unit { padding: 4px 6px; font-size: 0.85rem; height: 32px; }
+.item-selector-compact .item-selector-error { position: absolute; }
+
+/* ============================================================
+   PHASE V2.14.8 — shared compact operational table (Transfer item entry,
+   Production materials, DO Receive, Stock Opname blind count). Bulk
+   operational data (20-1000+ rows) reads as a real table, not a stack of
+   vertical cards: sticky header, a bounded scrollable body (55-65vh), and
+   a target row height of ~44-56px so an iPad shows many rows at once
+   without either giant cards or a page-length scroll.
+   ============================================================ */
+.compact-table-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.compact-table-wrap {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    max-height: 62vh; overflow: auto; position: relative;
+}
+.compact-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; min-width: 640px; }
+.compact-table thead th {
+    position: sticky; top: 0; z-index: 5; background: var(--bg3);
+    padding: 8px 10px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--border);
+}
+.compact-table tbody td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.compact-table tbody tr:hover { background: rgba(59,130,246,0.04); }
+.compact-table .compact-col-no { color: var(--text3); width: 36px; text-align: center; }
+.compact-table .compact-col-item { min-width: 240px; }
+.compact-table .compact-col-qty { width: 130px; }
+.compact-table .compact-col-stock { width: 120px; text-align: right; color: var(--text2); }
+.compact-table .compact-col-action { width: 90px; text-align: center; }
+.compact-table input[type="number"], .compact-table input[type="text"], .compact-table select {
+    width: 100%; padding: 4px 8px; font-size: 0.85rem; height: 32px;
+}
+.compact-row-discrepancy { background: rgba(239, 68, 68, 0.1) !important; }
+.compact-row-duplicate { background: rgba(245, 158, 11, 0.14) !important; }
+.compact-row-btn { padding: 4px 10px; font-size: 0.8rem; min-height: 32px; }
+.compact-summary { display: flex; gap: 24px; margin-top: 10px; font-size: 0.85rem; color: var(--text2); flex-wrap: wrap; }
+.compact-summary b { color: var(--text); }
+.compact-inline-warning { color: var(--orange); font-size: 0.76rem; margin-top: 2px; }
+
+@media (max-width: 900px) {
+    .compact-table-wrap { max-height: 58vh; }
+}
 .price-reference-hint.price-diff { color: var(--orange); }
 
 @media (max-width: 640px) {

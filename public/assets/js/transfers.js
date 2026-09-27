@@ -9,15 +9,18 @@ const Transfers = (() => {
     let lineCount = 0;
     let transferWarehouses = [];
     let sourceWarehouseId = null;
-    // PHASE V2.14.7 — idx -> { ctl, qtyInput, rowEl }. Each line gets its
-    // own independent ItemSelector instance (unlike Distribution Order's
+    // PHASE V2.14.7/V2.14.8 — idx -> { ctl, qtyInput, unitHost, rowEl,
+    // noCell, stockCell, warnCell, stockBase }. Each line gets its own
+    // independent ItemSelector instance (unlike Distribution Order's
     // single re-mounted Quick Add bar) because Transfer lets the admin
     // fill in several rows simultaneously, search/select on each
     // independently, and remove any one of them without disturbing the
     // others — ctl.destroy() is always called before a row's DOM is
-    // removed. ItemSelector owns unit selection internally (showUnit
-    // defaults true), so there is no separate .transfer-line-unit select
-    // anymore.
+    // removed. V2.14.8: rows are real <tr>s in a compact, sticky-header,
+    // scrollable table (not stacked grid-3 blocks) — ItemSelector mounts
+    // with showLabel:false/compact:true/externalUnitHost so "Barang" and
+    // "Satuan" land in their own table cells per the required header
+    // (No | Barang/SKU | Satuan | Qty Transfer | Stok Tersedia | Aksi).
     let lineSelectors = new Map();
 
     const receiveUuids = new Map();
@@ -75,6 +78,7 @@ const Transfers = (() => {
         lineCount = 0;
         lineSelectors.forEach((l) => l.ctl.destroy());
         lineSelectors = new Map();
+        const tbody = UI.el('tbody', { id: 'transfer-lines-tbody' });
         const card = UI.el('div', { class: 'card' }, [
             UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '🚚 Buat Transfer Baru')]),
             UI.el('div', { id: 'transfer-create-alert' }),
@@ -83,36 +87,71 @@ const Transfers = (() => {
                 <div class="form-group"><label>Gudang Tujuan</label><select id="transfer-to-wh">${toWarehouseOptions}</select></div>
                 <div class="form-group"><label>Tanggal Kirim</label><input type="date" id="transfer-ship-date" value="${new Date().toISOString().slice(0, 10)}"></div>
             ` }),
-            UI.el('div', { id: 'transfer-lines' }),
-            UI.el('button', { class: 'btn btn-secondary btn-sm', id: 'transfer-add-line' }, '+ Tambah Barang'),
+            UI.el('div', { class: 'compact-table-toolbar' }, [
+                UI.el('button', { class: 'btn btn-secondary btn-sm', id: 'transfer-add-line' }, '+ Tambah Barang'),
+                UI.el('button', { class: 'btn btn-secondary btn-sm', id: 'transfer-add-5' }, '+ 5 Baris'),
+                UI.el('button', { class: 'btn btn-secondary btn-sm', id: 'transfer-add-10' }, '+ 10 Baris'),
+            ]),
+            UI.el('div', { class: 'compact-table-wrap' }, [
+                UI.el('table', { class: 'compact-table' }, [
+                    UI.el('thead', {}, [UI.el('tr', {}, ['No', 'Barang / SKU', 'Satuan', 'Qty Transfer', 'Stok Tersedia', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
+                    tbody,
+                ]),
+            ]),
+            UI.el('div', { class: 'compact-summary', id: 'transfer-summary' }),
             UI.el('div', { style: 'margin-top:14px;' }, [
                 UI.el('button', { class: 'btn btn-primary', id: 'transfer-submit-btn' }, 'Kirim Transfer'),
             ]),
         ]);
         setTimeout(() => {
             addLine();
-            document.getElementById('transfer-add-line').addEventListener('click', addLine);
+            document.getElementById('transfer-add-line').addEventListener('click', () => addLine());
+            document.getElementById('transfer-add-5').addEventListener('click', () => { for (let i = 0; i < 5; i++) addLine(); });
+            document.getElementById('transfer-add-10').addEventListener('click', () => { for (let i = 0; i < 10; i++) addLine(); });
             document.getElementById('transfer-submit-btn').addEventListener('click', submitTransfer);
+            document.getElementById('transfer-from-wh')?.addEventListener('change', refreshAllStock);
         }, 0);
         return card;
+    }
+
+    function currentSourceWarehouseId() {
+        const el = document.getElementById('transfer-from-wh');
+        return el && el.value ? Number(el.value) : null;
     }
 
     function addLine() {
         const idx = lineCount++;
         const itemSelectorHost = UI.el('div');
+        const unitHost = UI.el('td', {});
         const qtyInput = UI.el('input', { type: 'number', class: 'transfer-line-qty', min: '0', step: 'any' });
-        const removeBtn = UI.el('button', { type: 'button', class: 'btn btn-secondary btn-sm', title: 'Hapus baris ini' }, '✕ Hapus');
-        const row = UI.el('div', { class: 'grid-3', id: `transfer-line-${idx}` }, [
-            itemSelectorHost,
-            UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Jumlah'), qtyInput]),
-            UI.el('div', { class: 'form-group', style: 'align-self:flex-end;' }, [removeBtn]),
+        const qtyWarn = UI.el('div', { class: 'compact-inline-warning', style: 'display:none;' });
+        const stockCell = UI.el('td', { class: 'compact-col-stock' }, '-');
+        const noCell = UI.el('td', { class: 'compact-col-no' }, String(lineSelectors.size + 1));
+        const removeBtn = UI.el('button', { type: 'button', class: 'btn btn-secondary btn-sm compact-row-btn', title: 'Hapus baris ini' }, '✕');
+        const itemCell = UI.el('td', { class: 'compact-col-item' }, [itemSelectorHost]);
+        const qtyCell = UI.el('td', { class: 'compact-col-qty' }, [qtyInput, qtyWarn]);
+        const row = UI.el('tr', { id: `transfer-line-${idx}` }, [
+            noCell, itemCell, unitHost, qtyCell, stockCell,
+            UI.el('td', { class: 'compact-col-action' }, [removeBtn]),
         ]);
-        document.getElementById('transfer-lines').appendChild(row);
+        document.getElementById('transfer-lines-tbody').appendChild(row);
 
-        const ctl = ItemSelector.mount(itemSelectorHost, { onChange: () => {} });
-        lineSelectors.set(idx, { ctl, qtyInput, rowEl: row });
+        const entry = { qtyInput, unitHost, rowEl: row, noCell, stockCell, qtyWarn, stockBase: null, itemId: null };
+        const ctl = ItemSelector.mount(itemSelectorHost, {
+            showLabel: false, compact: true, externalUnitHost: unitHost,
+            onChange: (state) => {
+                entry.itemId = state.valid ? state.itemId : null;
+                refreshStockFor(idx);
+                checkDuplicates();
+            },
+        });
+        entry.ctl = ctl;
+        lineSelectors.set(idx, entry);
+        qtyInput.addEventListener('input', () => checkQtyWarning(idx));
 
         removeBtn.addEventListener('click', () => removeLine(idx));
+        renumberRows();
+        updateSummary();
     }
 
     // PHASE V2.14.7 — destroys this line's ItemSelector instance BEFORE
@@ -130,6 +169,95 @@ const Transfers = (() => {
         entry.rowEl.remove();
         lineSelectors.delete(idx);
         if (lineSelectors.size === 0) addLine();
+        renumberRows();
+        checkDuplicates();
+        updateSummary();
+    }
+
+    function renumberRows() {
+        let n = 1;
+        lineSelectors.forEach((entry) => { entry.noCell.textContent = String(n++); });
+    }
+
+    // PHASE V2.14.8, requirement D — "Stok Tersedia" always reflects
+    // GUDANG ASAL, reusing the exact same InvApi.currentStock() endpoint
+    // Distribution Order's own quick-add table already uses (no new
+    // endpoint), displayed as the plain base-unit quantity — the same
+    // convention that table and Kartu Stok already use, never a
+    // unit-converted figure invented for this screen.
+    async function refreshStockFor(idx) {
+        const entry = lineSelectors.get(idx);
+        if (!entry) return;
+        const whId = currentSourceWarehouseId();
+        if (!entry.itemId || !whId) { entry.stockBase = null; entry.stockCell.textContent = '-'; return; }
+        entry.stockCell.textContent = '...';
+        try {
+            const stock = await InvApi.currentStock(entry.itemId, whId);
+            const current = lineSelectors.get(idx);
+            if (!current || current.itemId !== entry.itemId) return; // selection changed while awaiting
+            current.stockBase = Number(stock.qty_base);
+            current.stockCell.textContent = UI.formatNumber(current.stockBase);
+            checkQtyWarning(idx);
+        } catch (err) {
+            entry.stockCell.textContent = '-';
+        }
+    }
+
+    function refreshAllStock() {
+        lineSelectors.forEach((entry, idx) => { if (entry.itemId) refreshStockFor(idx); });
+    }
+
+    // Requirement E — inline-only warning; TransferService's own backend
+    // validation is completely unchanged and remains the real gate.
+    function checkQtyWarning(idx) {
+        const entry = lineSelectors.get(idx);
+        if (!entry) return;
+        const qty = Number(entry.qtyInput.value);
+        if (!qty || entry.stockBase === null) { entry.qtyWarn.style.display = 'none'; return; }
+        const state = entry.ctl.getState();
+        const unit = (state.units || []).find((u) => String(u.id) === String(state.unitId));
+        const factor = unit ? Number(unit.conversion_to_base) : 1;
+        const qtyBaseEquivalent = qty * factor;
+        if (qtyBaseEquivalent > entry.stockBase) {
+            entry.qtyWarn.textContent = `⚠ Melebihi stok tersedia (${UI.formatNumber(entry.stockBase)})`;
+            entry.qtyWarn.style.display = 'block';
+        } else {
+            entry.qtyWarn.style.display = 'none';
+        }
+        updateSummary();
+    }
+
+    // Requirement H — warn (and block submit) rather than silently merge;
+    // TransferService::create() has no documented same-item-line merge
+    // behavior, so two lines picking the same item stay two separate
+    // lines and must be corrected by the admin, not auto-combined.
+    function checkDuplicates() {
+        const seen = new Map(); // itemId -> [idx,...]
+        lineSelectors.forEach((entry, idx) => {
+            if (!entry.itemId) return;
+            if (!seen.has(entry.itemId)) seen.set(entry.itemId, []);
+            seen.get(entry.itemId).push(idx);
+        });
+        const duplicateIdxs = new Set();
+        seen.forEach((idxs) => { if (idxs.length > 1) idxs.forEach((i) => duplicateIdxs.add(i)); });
+        lineSelectors.forEach((entry, idx) => {
+            entry.rowEl.classList.toggle('compact-row-duplicate', duplicateIdxs.has(idx));
+        });
+        return duplicateIdxs.size > 0;
+    }
+
+    function updateSummary() {
+        const box = document.getElementById('transfer-summary');
+        if (!box) return;
+        let totalItem = 0;
+        let totalQty = 0;
+        lineSelectors.forEach((entry) => {
+            const qty = Number(entry.qtyInput.value);
+            if (entry.itemId && qty > 0) { totalItem++; totalQty += qty; }
+        });
+        box.innerHTML = '';
+        box.appendChild(UI.el('div', {}, ['Total Item: ', UI.el('b', {}, String(totalItem))]));
+        box.appendChild(UI.el('div', {}, ['Total Qty: ', UI.el('b', {}, UI.formatNumber(totalQty))]));
     }
 
     let transferUuid = null;
@@ -153,6 +281,13 @@ const Transfers = (() => {
 
         if (fromWh === toWh) {
             alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Gudang asal dan tujuan harus berbeda.'));
+            return;
+        }
+        // Requirement H — block rather than silently merge duplicate item
+        // lines (rows are already visually flagged via checkDuplicates()
+        // on every selection change; this is the submit-time gate).
+        if (checkDuplicates()) {
+            alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Barang yang sama dipilih di lebih dari satu baris (ditandai merah) — gabungkan menjadi satu baris atau ganti barangnya sebelum mengirim.'));
             return;
         }
         const lines = [];
@@ -182,7 +317,7 @@ const Transfers = (() => {
             transferUuid = null;
             lineSelectors.forEach((l) => l.ctl.destroy());
             lineSelectors = new Map();
-            document.getElementById('transfer-lines').innerHTML = '';
+            document.getElementById('transfer-lines-tbody').innerHTML = '';
             lineCount = 0;
             addLine();
             loadList();

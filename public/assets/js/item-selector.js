@@ -109,17 +109,25 @@ const ItemSelector = (() => {
 
     /**
      * @param {HTMLElement} hostEl container to render into (emptied first)
-     * @param {{initialItemId?:number, initialUnitId?:number, showUnit?:boolean,
+     * @param {{initialItemId?:number, initialUnitId?:number, showUnit?:boolean, showLabel?:boolean, compact?:boolean, externalUnitHost?:HTMLElement,
      *          onChange:(state:{itemId:?number, unitId:?number, item:?object, units:list, valid:boolean})=>void}} opts
      *   showUnit (default true) — when false, no "Satuan" sub-selector is
      *   rendered and InvApi.itemUnits() is never called for this instance;
      *   for callers (Stock Adjustment, Kartu Stok filter) that only ever
      *   need item_id and have no unit concept of their own. unitId/units in
      *   the emitted state stay null/[] in that mode.
+     *   showLabel (default true) — when false, skips the "Barang"/"Satuan"
+     *   <label> text and the .form-group wrapper's margin, for embedding
+     *   inside a compact table cell whose column header already names the
+     *   field (PHASE V2.14.8 — Transfer/Production row tables).
+     *   compact (default false) — slightly tighter input padding, for the
+     *   same table-cell embedding.
      */
     function mount(hostEl, opts) {
         const idPrefix = `isel-${Math.random().toString(36).slice(2, 9)}`;
         const showUnit = opts.showUnit !== false;
+        const showLabel = opts.showLabel !== false;
+        const compact = !!opts.compact;
         let itemId = opts.initialItemId || null;
         let unitId = opts.initialUnitId || null;
         let units = [];
@@ -141,26 +149,46 @@ const ItemSelector = (() => {
             type: 'button', class: 'item-selector-scan-btn',
             title: cameraSupported ? 'Scan Barcode (kamera)' : MSG_CAMERA_UNSUPPORTED,
         }, '📷');
-        const dropdown = UI.el('div', { class: 'item-selector-dropdown' });
+        // PHASE V2.14.8 — the dropdown is appended to document.body (never
+        // to inputWrap) and positioned with `position:fixed` computed from
+        // the input's own live bounding rect. A mounted-inside-a-table
+        // instance (Transfer/Production's compact rows) sits inside an
+        // `overflow-y:auto` scroll body — an absolutely-positioned child
+        // would be silently clipped by that ancestor's overflow, and would
+        // never be able to escape the table row's own height either. Body-
+        // reparenting sidesteps both problems for every caller, old and
+        // new (Stock IN/OUT, the Cutover modal, etc. behave identically).
+        const dropdown = UI.el('div', { class: 'item-selector-dropdown item-selector-dropdown-floating' });
         dropdown.style.display = 'none';
         inputWrap.appendChild(input);
         inputWrap.appendChild(scanBtn);
-        inputWrap.appendChild(dropdown);
         const errorNode = UI.el('div', { class: 'item-selector-error' });
         errorNode.style.display = 'none';
 
+        // PHASE V2.14.8 — externalUnitHost: when set, the "Satuan" <select>
+        // is appended THERE instead of stacked under the item input — used
+        // by the Transfer/Production compact tables, whose header already
+        // has a separate "Satuan" column (mounting both pieces in one
+        // table cell would blow past the ~44-56px row-height target).
+        // Unit-fetching/wiring logic is unchanged either way.
         let unitGroup = null;
         let unitSelect = null;
         if (showUnit) {
-            unitGroup = UI.el('div', { class: 'form-group' }, [
-                UI.el('label', {}, 'Satuan'),
-            ]);
             unitSelect = UI.el('select', { class: 'item-selector-unit' });
-            unitGroup.appendChild(unitSelect);
+            if (opts.externalUnitHost) {
+                opts.externalUnitHost.innerHTML = '';
+                opts.externalUnitHost.appendChild(unitSelect);
+            } else {
+                unitGroup = UI.el('div', { class: showLabel ? 'form-group' : 'form-group form-group-compact' },
+                    showLabel ? [UI.el('label', {}, 'Satuan')] : []);
+                unitGroup.appendChild(unitSelect);
+            }
         }
 
-        wrap.appendChild(UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Barang'), inputWrap, errorNode]));
+        const barangGroupChildren = showLabel ? [UI.el('label', {}, 'Barang'), inputWrap, errorNode] : [inputWrap, errorNode];
+        wrap.appendChild(UI.el('div', { class: showLabel ? 'form-group' : 'form-group form-group-compact' }, barangGroupChildren));
         if (unitGroup) wrap.appendChild(unitGroup);
+        if (compact) wrap.classList.add('item-selector-compact');
         hostEl.appendChild(wrap);
 
         function emitChange() {
@@ -177,7 +205,33 @@ const ItemSelector = (() => {
         function closeDropdown() {
             dropdown.style.display = 'none';
             dropdown.innerHTML = '';
+            if (dropdown.parentNode) dropdown.parentNode.removeChild(dropdown);
             highlightIndex = -1;
+        }
+
+        // Positions the body-attached dropdown against the input's live
+        // bounding rect — flips above the input when there isn't enough
+        // room below (common for a row near the bottom of a scrollable
+        // table body), and clamps horizontally so it never overflows the
+        // right edge of the viewport on a narrow/iPad screen.
+        function positionDropdown() {
+            const rect = input.getBoundingClientRect();
+            const viewportH = window.innerHeight;
+            const viewportW = window.innerWidth;
+            const maxDropdownH = 280;
+            const spaceBelow = viewportH - rect.bottom;
+            const openAbove = spaceBelow < maxDropdownH && rect.top > spaceBelow;
+            const width = Math.max(rect.width, 220);
+            const left = Math.min(rect.left, viewportW - width - 8);
+            dropdown.style.left = `${Math.max(8, left)}px`;
+            dropdown.style.width = `${width}px`;
+            if (openAbove) {
+                dropdown.style.top = 'auto';
+                dropdown.style.bottom = `${viewportH - rect.top + 6}px`;
+            } else {
+                dropdown.style.bottom = 'auto';
+                dropdown.style.top = `${rect.bottom + 6}px`;
+            }
         }
 
         function renderDropdown() {
@@ -201,6 +255,8 @@ const ItemSelector = (() => {
                     dropdown.appendChild(row);
                 });
             }
+            if (!dropdown.parentNode) document.body.appendChild(dropdown);
+            positionDropdown();
             dropdown.style.display = 'block';
         }
 
@@ -326,9 +382,28 @@ const ItemSelector = (() => {
 
         function onDocumentMousedown(e) {
             if (destroyed) return;
-            if (!wrap.contains(e.target)) closeDropdown();
+            // dropdown is a document.body sibling now (not a descendant of
+            // wrap), so a click on one of its own option rows must not be
+            // treated as "outside" — selectItem()'s own mousedown handler
+            // (bound directly to the row) already ran first in the bubble
+            // phase; this only needs to catch genuinely outside clicks.
+            if (!wrap.contains(e.target) && !dropdown.contains(e.target)) closeDropdown();
         }
         document.addEventListener('mousedown', onDocumentMousedown);
+
+        // Scrolling any ancestor (e.g. a compact table's own scrollable
+        // body) would otherwise leave the floating dropdown visually
+        // detached from the input it belongs to — closing it on any
+        // scroll (capture:true catches scrolling on any element, not just
+        // window) is the simplest correct behavior, same convention a
+        // native <select> or browser autocomplete uses.
+        function onAncestorScroll(e) {
+            if (destroyed || dropdown.style.display === 'none') return;
+            if (e.target === input || e.target.contains?.(input)) return;
+            closeDropdown();
+        }
+        window.addEventListener('scroll', onAncestorScroll, true);
+        window.addEventListener('resize', onAncestorScroll);
 
         if (unitSelect) {
             unitSelect.addEventListener('change', () => {
@@ -423,25 +498,30 @@ const ItemSelector = (() => {
             invalidate: invalidateSelection,
             focus: () => input.focus(),
             // Every mount() must be independently disposable: removes the
-            // document-level outside-click listener (the one leak that
-            // outlives this instance's own DOM, since it's registered on
-            // `document`, not on `wrap`), stops any in-progress camera
-            // stream, closes any open dropdown, and clears result/highlight
-            // state. Input/keydown/unit-change listeners are all bound
-            // directly to elements inside `wrap` — once the caller removes
-            // hostEl/wrap from the document (which every caller does
-            // immediately after calling destroy(), same as
-            // DistributionOrders' remountQuickAddSelector() already
-            // established), those die with the DOM node and need no
-            // separate teardown. Safe to call multiple times.
+            // document-level outside-click listener and the window-level
+            // scroll/resize listeners (the leaks that outlive this
+            // instance's own DOM, since none of them are registered on
+            // `wrap`), stops any in-progress camera stream, closes any open
+            // dropdown (which also detaches it from document.body — see
+            // closeDropdown()), and clears result/highlight state.
+            // Input/keydown/unit-change listeners are all bound directly to
+            // elements inside `wrap` — once the caller removes hostEl/wrap
+            // from the document (which every caller does immediately after
+            // calling destroy(), same as DistributionOrders'
+            // remountQuickAddSelector() already established), those die
+            // with the DOM node and need no separate teardown. Safe to
+            // call multiple times.
             destroy: () => {
                 if (destroyed) return;
                 destroyed = true;
                 if (cameraStop) cameraStop();
                 document.removeEventListener('mousedown', onDocumentMousedown);
+                window.removeEventListener('scroll', onAncestorScroll, true);
+                window.removeEventListener('resize', onAncestorScroll);
                 closeDropdown();
                 results = [];
                 hostEl.innerHTML = '';
+                if (opts.externalUnitHost) opts.externalUnitHost.innerHTML = '';
             },
         };
     }

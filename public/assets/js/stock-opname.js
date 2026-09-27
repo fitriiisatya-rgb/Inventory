@@ -204,84 +204,228 @@ const StockOpname = (() => {
     }
 
     // ============================================================
-    // Blind counting screen (P1 or P2) — mobile-friendly
-    // ============================================================
-    function buildBlindCountScreen(view) {
+    // Blind counting screen (P1 or P2) — PHASE V2.14.8: compact,
+    // paginated high-volume table (was one full-width <div class="card">
+    // per line — hundreds/1000+ session lines rendered as cards was both
+    // the giant-page-length problem this phase targets AND a real iPad
+    // scroll-performance risk). Item identity is read-only by design (no
+    // ItemSelector anywhere on this screen — session lines are already
+    // predetermined; nothing here is "searched and picked").
+    //
+    // BLINDNESS SAFETY: this screen only ever renders fields already
+    // present on `view.lines` (sku, name, item_id, my_qty_base,
+    // is_counted_by_me, is_excluded) — the exact same shape
+    // StockOpnameService::getForCounter() has always returned, which
+    // structurally never includes system_qty_base, the other counter's
+    // qty, or match/variance data (see that method's own docblock). This
+    // rewrite adds no new field to the request or response and reads
+    // nothing beyond what was already reachable in the pre-V2.14.8 code —
+    // pagination/filtering only ever slices the SAME array differently.
+    //
+    // Pagination (not a virtual-scroll/windowed-scroll mechanism) is the
+    // "simple safe mechanism" chosen here: at most PAGE_SIZE real DOM rows
+    // exist at once regardless of session size, Prev/Next is trivial to
+    // test and reason about, and it works identically on desktop/iPad
+    // without any scroll-position/resize-observer bookkeeping.
+    function buildBlindCountScreen(initialView) {
+        const PAGE_SIZE = 50;
+        const state = { view: initialView, filterText: '', filterStatus: 'ALL', page: 0 };
+
         const wrap = UI.el('div');
-        wrap.appendChild(UI.el('div', { class: 'banner-lock' },
-            `🔒 STOCK OPNAME — Sesi ${view.session_number || view.session_id} — Anda login sebagai ${view.role.toUpperCase()} (Hitung Fisik Independen/Blind).`));
-
-        const progressPct = view.progress.total > 0 ? Math.round((view.progress.counted / view.progress.total) * 100) : 0;
-        wrap.appendChild(UI.el('div', { class: 'card' }, [
-            UI.el('div', { class: 'card-title' }, `Progress ${view.role.toUpperCase()}: ${view.progress.counted} / ${view.progress.total}`),
-            UI.el('div', { style: `height:10px; background:var(--border); border-radius:6px; overflow:hidden; margin-top:6px;` }, [
-                UI.el('div', { style: `height:100%; width:${progressPct}%; background:var(--primary, #2563eb);` }),
-            ]),
-        ]));
-
+        const bannerHost = UI.el('div');
+        const progressHost = UI.el('div', { class: 'card' });
         const searchInput = UI.el('input', { type: 'text', placeholder: 'Cari SKU/nama, atau scan barcode...', class: 'opname-blind-search' });
         const scanBtn = UI.el('button', { type: 'button', class: 'btn btn-secondary btn-sm' }, '📷 Scan');
-        wrap.appendChild(UI.el('div', { class: 'card', style: 'display:flex; gap:8px; align-items:center;' }, [searchInput, scanBtn]));
+        const filterSelect = UI.el('select', { id: 'opname-blind-filter', html: `
+            <option value="ALL">Semua</option>
+            <option value="PENDING">Belum Dihitung</option>
+            <option value="COUNTED">Sudah Dihitung</option>
+        ` });
+        const tbody = UI.el('tbody', {});
+        const pagerHost = UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center; margin-top:10px; flex-wrap:wrap; gap:8px;' });
 
-        const listHost = UI.el('div', { id: 'opname-blind-list' });
-        wrap.appendChild(listHost);
+        wrap.appendChild(bannerHost);
+        wrap.appendChild(progressHost);
+        wrap.appendChild(UI.el('div', { class: 'card', style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap;' }, [
+            UI.el('div', { style: 'flex:1 1 240px;' }, [searchInput]),
+            UI.el('div', { style: 'width:180px;' }, [filterSelect]),
+            scanBtn,
+        ]));
+        wrap.appendChild(UI.el('div', { class: 'compact-table-wrap' }, [
+            UI.el('table', { class: 'compact-table' }, [
+                UI.el('thead', {}, [UI.el('tr', {}, ['No', 'SKU / Barang', 'Qty Hitung', 'Status', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
+                tbody,
+            ]),
+        ]));
+        wrap.appendChild(pagerHost);
 
-        function renderList(filter) {
-            listHost.innerHTML = '';
-            const q = String(filter || '').trim().toLowerCase();
-            const lines = view.lines.filter((l) => !q || l.sku.toLowerCase().includes(q) || l.name.toLowerCase().includes(q));
-            lines.forEach((line) => listHost.appendChild(buildBlindCountRow(view, line)));
-            if (lines.length === 0) {
-                listHost.appendChild(UI.el('div', { class: 'alert alert-info' }, 'Tidak ada barang yang cocok.'));
+        function filteredLines() {
+            const q = state.filterText.trim().toLowerCase();
+            return state.view.lines.filter((l) => {
+                if (q && !l.sku.toLowerCase().includes(q) && !l.name.toLowerCase().includes(q)) return false;
+                const isDone = l.is_counted_by_me || l.is_excluded;
+                if (state.filterStatus === 'PENDING' && isDone) return false;
+                if (state.filterStatus === 'COUNTED' && !isDone) return false;
+                return true;
+            });
+        }
+
+        function renderChrome() {
+            bannerHost.innerHTML = '';
+            bannerHost.appendChild(UI.el('div', { class: 'banner-lock' },
+                `🔒 STOCK OPNAME — Sesi ${state.view.session_number || state.view.session_id} — Anda login sebagai ${state.view.role.toUpperCase()} (Hitung Fisik Independen/Blind).`));
+
+            const progressPct = state.view.progress.total > 0 ? Math.round((state.view.progress.counted / state.view.progress.total) * 100) : 0;
+            progressHost.innerHTML = '';
+            progressHost.appendChild(UI.el('div', { class: 'card-title' }, `Progress ${state.view.role.toUpperCase()}: ${state.view.progress.counted} / ${state.view.progress.total}`));
+            progressHost.appendChild(UI.el('div', { style: 'height:10px; background:var(--border); border-radius:6px; overflow:hidden; margin-top:6px;' }, [
+                UI.el('div', { style: `height:100%; width:${progressPct}%; background:var(--primary, #2563eb);` }),
+            ]));
+        }
+
+        function renderTable() {
+            const filtered = filteredLines();
+            const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+            state.page = Math.min(state.page, totalPages - 1);
+            const start = state.page * PAGE_SIZE;
+            const pageLines = filtered.slice(start, start + PAGE_SIZE);
+
+            tbody.innerHTML = '';
+            if (pageLines.length === 0) {
+                tbody.appendChild(UI.el('tr', {}, [UI.el('td', { colspan: '5' }, 'Tidak ada barang yang cocok.')]));
+            } else {
+                pageLines.forEach((line, i) => tbody.appendChild(buildBlindCountRowEl(state, line, start + i + 1)));
             }
-        }
-        searchInput.addEventListener('input', () => renderList(searchInput.value));
-        scanBtn.addEventListener('click', () => openScanModal(view));
-        renderList('');
 
-        return wrap;
-    }
-
-    function buildBlindCountRow(view, line) {
-        const isCounted = line.is_counted_by_me || line.is_excluded;
-        const card = UI.el('div', { class: 'card', id: `opname-line-${line.item_id}`, style: 'padding:12px 16px;' });
-        card.appendChild(UI.el('div', { style: 'font-weight:700; font-size:1.05rem;' }, `${line.sku} — ${line.name}`));
-
-        if (line.is_excluded) {
-            card.appendChild(UI.el('div', { class: 'alert alert-info', style: 'margin-top:8px;' }, '⏭️ Dikecualikan oleh supervisor.'));
-            return card;
-        }
-        if (isCounted) {
-            card.appendChild(UI.el('div', { class: 'alert alert-success', style: 'margin-top:8px;' }, `✅ Sudah dihitung: ${UI.formatNumber(line.my_qty_base)}`));
-            return card;
+            pagerHost.innerHTML = '';
+            const prevBtn = UI.el('button', { class: 'btn btn-secondary btn-sm', ...(state.page === 0 ? { disabled: 'disabled' } : {}) }, '‹ Sebelumnya');
+            const nextBtn = UI.el('button', { class: 'btn btn-secondary btn-sm', ...(state.page >= totalPages - 1 ? { disabled: 'disabled' } : {}) }, 'Berikutnya ›');
+            prevBtn.addEventListener('click', () => { state.page--; renderTable(); });
+            nextBtn.addEventListener('click', () => { state.page++; renderTable(); });
+            pagerHost.appendChild(UI.el('div', { style: 'color:var(--text3); font-size:0.85rem;' }, `Halaman ${state.page + 1} dari ${totalPages} (${filtered.length} item)`));
+            pagerHost.appendChild(UI.el('div', { style: 'display:flex; gap:8px;' }, [prevBtn, nextBtn]));
         }
 
-        const qtyInput = UI.el('input', {
-            type: 'number', step: 'any', inputmode: 'decimal', placeholder: 'Qty fisik...',
-            class: 'opname-blind-qty-input', style: 'font-size:1.4rem; padding:12px; width:100%; margin-top:8px;',
-        });
-        const saveBtn = UI.el('button', { class: 'btn btn-primary', style: 'width:100%; margin-top:8px; padding:12px; font-size:1.05rem;' }, 'Simpan Hitungan');
-        const alertBox = UI.el('div');
-        saveBtn.addEventListener('click', async () => {
+        searchInput.addEventListener('input', () => { state.filterText = searchInput.value; state.page = 0; renderTable(); });
+        filterSelect.addEventListener('change', () => { state.filterStatus = filterSelect.value; state.page = 0; renderTable(); });
+        scanBtn.addEventListener('click', () => openScanModal(state, jumpToItem));
+
+        // Re-fetches the SAME getOpname(sessionId) call renderSession()
+        // itself uses, but patches state.view / re-renders THIS screen in
+        // place — preserving the operator's current search/filter/page
+        // (a full renderSession() call would reset all three on every
+        // single save, breaking the "next pending item" fast-entry flow).
+        async function refetch() {
+            const fresh = await InvApi.getOpname(state.view.session_id);
+            state.view = fresh;
+            renderChrome();
+            renderTable();
+        }
+
+        function jumpToItem(itemId) {
+            const globalIdx = state.view.lines.findIndex((l) => l.item_id === itemId);
+            if (globalIdx === -1) return false;
+            state.filterText = '';
+            state.filterStatus = 'ALL';
+            searchInput.value = '';
+            filterSelect.value = 'ALL';
+            state.page = Math.floor(globalIdx / PAGE_SIZE);
+            renderTable();
+            const row = tbody.querySelector(`tr[data-item-id="${itemId}"]`);
+            if (row) {
+                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                const qtyInput = row.querySelector('.opname-blind-qty-input');
+                if (qtyInput) qtyInput.focus();
+            }
+            return true;
+        }
+
+        // After a successful save, focus the workflow forward: the next
+        // PENDING item under the CURRENT filter/search (so a counter
+        // working through "Belum Dihitung" stays in that flow), or if the
+        // current filter excludes it, just re-render the same page.
+        function focusNextPending(afterItemId) {
+            const filtered = filteredLines();
+            const idx = filtered.findIndex((l) => l.item_id === afterItemId);
+            const next = filtered.slice(idx + 1).find((l) => !l.is_counted_by_me && !l.is_excluded)
+                || filtered.find((l) => !l.is_counted_by_me && !l.is_excluded);
+            if (!next) return;
+            const globalIdxInFiltered = filtered.indexOf(next);
+            state.page = Math.floor(globalIdxInFiltered / PAGE_SIZE);
+            renderTable();
+            const row = tbody.querySelector(`tr[data-item-id="${next.item_id}"]`);
+            const qtyInput = row && row.querySelector('.opname-blind-qty-input');
+            if (qtyInput) qtyInput.focus();
+        }
+
+        async function saveCount(line, qtyInput, saveBtn, alertBox) {
             if (qtyInput.value === '') { UI.toast('Isi jumlah fisik terlebih dahulu.', 'error'); return; }
             saveBtn.disabled = true;
             alertBox.innerHTML = '';
             try {
-                await InvApi.submitOpnameCount(view.session_id, view.role, line.item_id, Number(qtyInput.value));
+                await InvApi.submitOpnameCount(state.view.session_id, state.view.role, line.item_id, Number(qtyInput.value));
                 UI.toast(`Tersimpan: ${line.sku} = ${qtyInput.value}`, 'success');
-                await renderSession(view.session_id);
+                await refetch();
+                focusNextPending(line.item_id);
             } catch (err) {
                 alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal menyimpan.'));
                 saveBtn.disabled = false;
             }
-        });
-        card.appendChild(qtyInput);
-        card.appendChild(saveBtn);
-        card.appendChild(alertBox);
-        return card;
+        }
+        // Exposed on state so buildBlindCountRowEl (a sibling function,
+        // not a closure over this one) can call back into the save flow.
+        state.saveCount = saveCount;
+
+        renderChrome();
+        renderTable();
+        return wrap;
     }
 
-    function openScanModal(view) {
+    // One compact <tr> per session line — status is derived ONLY from
+    // is_counted_by_me/is_excluded (fields already on the blind view;
+    // never a system/theoretical quantity, which this shape never
+    // carries in the first place).
+    function buildBlindCountRowEl(state, line, rowNo) {
+        const row = UI.el('tr', { 'data-item-id': String(line.item_id) });
+        row.appendChild(UI.el('td', { class: 'compact-col-no' }, String(rowNo)));
+        row.appendChild(UI.el('td', { class: 'compact-col-item' }, `${line.sku} — ${line.name}`));
+
+        if (line.is_excluded) {
+            row.appendChild(UI.el('td', {}, '-'));
+            row.appendChild(UI.el('td', {}, [UI.el('span', { class: 'badge badge-cancelled' }, 'Dikecualikan')]));
+            row.appendChild(UI.el('td', {}, '-'));
+            return row;
+        }
+        if (line.is_counted_by_me) {
+            row.appendChild(UI.el('td', {}, UI.formatNumber(line.my_qty_base)));
+            row.appendChild(UI.el('td', {}, [UI.el('span', { class: 'badge badge-received' }, 'Tersimpan')]));
+            row.appendChild(UI.el('td', {}, '-'));
+            return row;
+        }
+
+        const qtyInput = UI.el('input', {
+            type: 'number', step: 'any', inputmode: 'decimal', placeholder: 'Qty fisik...',
+            class: 'opname-blind-qty-input',
+        });
+        const saveBtn = UI.el('button', { class: 'btn btn-primary btn-sm compact-row-btn' }, 'Simpan');
+        const alertBox = UI.el('div');
+        saveBtn.addEventListener('click', () => state.saveCount(line, qtyInput, saveBtn, alertBox));
+        // Fast-entry: Enter on the qty field saves immediately (never the
+        // whole-transaction submit — there is no such single action on
+        // this per-line-saved screen to accidentally trigger).
+        qtyInput.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            state.saveCount(line, qtyInput, saveBtn, alertBox);
+        });
+
+        row.appendChild(UI.el('td', { class: 'compact-col-qty' }, [qtyInput, alertBox]));
+        row.appendChild(UI.el('td', {}, [UI.el('span', { class: 'badge badge-pending' }, 'Belum')]));
+        row.appendChild(UI.el('td', {}, [saveBtn]));
+        return row;
+    }
+
+    function openScanModal(state, jumpToItem) {
         if (typeof ItemSelector === 'undefined' || !ItemSelector.resolveBarcode) {
             Modal.alert({ title: 'Scan Barcode', message: 'Fitur scan tidak tersedia.' });
             return;
@@ -307,18 +451,12 @@ const StockOpname = (() => {
                 statusLine.textContent = 'Barcode tidak dikenali / barang tidak aktif.';
                 return;
             }
-            const line = view.lines.find((l) => l.item_id === resolution.item.id);
-            if (!line) {
+            const found = jumpToItem(resolution.item.id);
+            if (!found) {
                 statusLine.textContent = 'Barang ini tidak termasuk dalam cakupan sesi opname ini.';
                 return;
             }
             overlay.remove();
-            const row = document.getElementById(`opname-line-${line.item_id}`);
-            if (row) {
-                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                const qtyInput = row.querySelector('.opname-blind-qty-input');
-                if (qtyInput) qtyInput.focus();
-            }
         });
         setTimeout(() => input.focus(), 0);
     }
