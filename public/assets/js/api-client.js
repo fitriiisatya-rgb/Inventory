@@ -324,8 +324,10 @@ const InvApi = (() => {
         // PHASE V2.14.9 — `conditions` is optional: {rusak_qty, expired_qty, deadstock_qty, notes}.
         submitOpnameCount: (id, role, itemId, countedQtyBase, conditions = {}) => request('POST', `/stock-opname/${id}/count/${role}`, { item_id: itemId, counted_qty_base: countedQtyBase, ...conditions }),
         opnameReview: (id) => request('GET', `/stock-opname/${id}/review`),
-        recountOpname: (id, itemId, countedQtyBase, reason) => request('POST', `/stock-opname/${id}/recount`, { item_id: itemId, counted_qty_base: countedQtyBase, reason }),
+        // PHASE V2.14.9.1 — finalConditions is optional: {final_rusak_qty, final_expired_qty, final_deadstock_qty, final_notes}.
+        recountOpname: (id, itemId, countedQtyBase, reason, finalConditions = {}) => request('POST', `/stock-opname/${id}/recount`, { item_id: itemId, counted_qty_base: countedQtyBase, reason, ...finalConditions }),
         excludeOpnameItem: (id, itemId, reason) => request('POST', `/stock-opname/${id}/exclude`, { item_id: itemId, reason }),
+        resolveOpnameConditions: (id, itemId, finalValues) => request('POST', `/stock-opname/${id}/resolve-conditions`, { item_id: itemId, ...finalValues }),
         cancelOpname: (id, reason) => request('POST', `/stock-opname/${id}/cancel`, { reason }),
         opnamePrintUrl: (id) => `/api/stock-opname/${id}/print`,
         opnameReportDetail: (id) => request('GET', `/reports/opname/${id}`),

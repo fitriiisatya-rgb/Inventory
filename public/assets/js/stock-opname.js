@@ -576,6 +576,7 @@ const StockOpname = (() => {
             ['Total Item', s.total_items], ['Match', s.match], ['Mismatch', s.mismatch],
             ['Recounted', s.recounted], ['Belum Dihitung', s.not_counted], ['Dikecualikan', s.excluded],
         ];
+        if (s.condition_disagreement) kpis.push(['Perlu Resolusi Kondisi', s.condition_disagreement]);
         // A legacy single-count session mixed into this same warehouse's
         // history can carry lines counted via the old (pre-dual-count)
         // flow — real data, just never compared, so it gets its own tile
@@ -651,9 +652,15 @@ const StockOpname = (() => {
         ]));
         renderRows();
 
-        const readyToFinalize = s.not_counted === 0 && s.mismatch === 0;
+        // PHASE V2.14.9.1 — finalize is also blocked while any line has an
+        // unresolved condition disagreement (mirrors the server-side
+        // check in StockOpnameService::finalize()); the button label
+        // surfaces both blockers together so the supervisor knows exactly
+        // what's outstanding.
+        const readyToFinalize = s.not_counted === 0 && s.mismatch === 0 && !s.condition_disagreement;
+        const pendingCount = s.not_counted + s.mismatch + (s.condition_disagreement || 0);
         const finalizeBtn = UI.el('button', { class: 'btn btn-danger', style: 'margin-top:12px;' },
-            readyToFinalize ? '🔐 Finalisasi Sesi' : `🔐 Finalisasi Sesi (${s.not_counted + s.mismatch} item belum selesai)`);
+            readyToFinalize ? '🔐 Finalisasi Sesi' : `🔐 Finalisasi Sesi (${pendingCount} item belum selesai)`);
         finalizeBtn.addEventListener('click', async () => {
             finalizeBtn.disabled = true;
             try {
@@ -695,7 +702,13 @@ const StockOpname = (() => {
             UI.el('td', {}, pairText(l.p1_deadstock_qty, l.p2_deadstock_qty)),
             UI.el('td', {}, notesText),
             UI.el('td', {}, l.final_physical_qty_base !== null ? UI.formatNumber(l.final_physical_qty_base) : '-'),
-            UI.el('td', {}, [UI.el('span', { class: `badge ${badgeClassFor(l.match_status, l.is_excluded)}` }, keteranganFor(l))]),
+            UI.el('td', {}, [
+                UI.el('span', { class: `badge ${badgeClassFor(l.match_status, l.is_excluded)}` }, keteranganFor(l)),
+                // PHASE V2.14.9.1 — a condition-only disagreement can exist
+                // even on a qty MATCH line, so this is a SEPARATE badge,
+                // never folded into match_status's own badge.
+                l.requires_condition_resolution ? UI.el('span', { class: 'badge badge-void', style: 'margin-left:4px;' }, 'Perlu Resolusi') : null,
+            ].filter(Boolean)),
         ];
         const actionCell = UI.el('td', {});
         if (!l.is_excluded && l.match_status === 'MISMATCH') {
@@ -708,8 +721,15 @@ const StockOpname = (() => {
             excludeBtn.addEventListener('click', () => excludeItem(session.id, l));
             actionCell.appendChild(excludeBtn);
         }
+        if (l.requires_condition_resolution) {
+            const resolveBtn = UI.el('button', { class: 'btn btn-danger btn-sm', style: 'margin-left:6px;' }, 'Resolusi Kondisi');
+            resolveBtn.addEventListener('click', () => resolveConditionsItem(session.id, l));
+            actionCell.appendChild(resolveBtn);
+        }
         cells.push(actionCell);
-        return UI.el('tr', {}, cells);
+        const row = UI.el('tr', {}, cells);
+        if (l.requires_condition_resolution) row.classList.add('compact-row-discrepancy');
+        return row;
     }
 
     /**
@@ -769,6 +789,41 @@ const StockOpname = (() => {
         try {
             await InvApi.excludeOpnameItem(sessionId, line.item_id, reason);
             UI.toast('Barang dikecualikan dari sesi ini.', 'success');
+            await renderSession(sessionId);
+        } catch (err) { UI.handleApiError(err); }
+    }
+
+    // PHASE V2.14.9.1 — explicit supervisor resolution of a Rusak/Expired/
+    // Deadstock disagreement (never auto-picks P1 or P2 — the supervisor
+    // types the actual final value for each disagreeing field; a field
+    // already agreed/resolved is shown as a hint but left editable in case
+    // the supervisor wants to override it too).
+    async function resolveConditionsItem(sessionId, line) {
+        const values = await MasterCommon.formModal({
+            title: `Resolusi Kondisi — ${line.sku}`,
+            submitLabel: 'Simpan Resolusi',
+            initial: {
+                final_rusak_qty: line.final_rusak_qty ?? '',
+                final_expired_qty: line.final_expired_qty ?? '',
+                final_deadstock_qty: line.final_deadstock_qty ?? '',
+                final_notes: line.final_notes ?? '',
+            },
+            fields: [
+                { key: 'final_rusak_qty', label: `Final Rusak (P1: ${line.p1_rusak_qty ?? '-'} / P2: ${line.p2_rusak_qty ?? '-'})`, type: 'text' },
+                { key: 'final_expired_qty', label: `Final Expired (P1: ${line.p1_expired_qty ?? '-'} / P2: ${line.p2_expired_qty ?? '-'})`, type: 'text' },
+                { key: 'final_deadstock_qty', label: `Final Deadstock (P1: ${line.p1_deadstock_qty ?? '-'} / P2: ${line.p2_deadstock_qty ?? '-'})`, type: 'text' },
+                { key: 'final_notes', label: 'Keterangan Final (opsional)', type: 'text' },
+            ],
+        });
+        if (!values) return;
+        try {
+            await InvApi.resolveOpnameConditions(sessionId, line.item_id, {
+                final_rusak_qty: values.final_rusak_qty === '' ? null : Number(values.final_rusak_qty),
+                final_expired_qty: values.final_expired_qty === '' ? null : Number(values.final_expired_qty),
+                final_deadstock_qty: values.final_deadstock_qty === '' ? null : Number(values.final_deadstock_qty),
+                final_notes: values.final_notes || null,
+            });
+            UI.toast('Resolusi kondisi tersimpan.', 'success');
             await renderSession(sessionId);
         } catch (err) { UI.handleApiError(err); }
     }

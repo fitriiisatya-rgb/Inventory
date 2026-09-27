@@ -416,6 +416,56 @@ function inv_require_warehouse_scope(array $user, int $warehouseId): void
     }
 }
 
+/**
+ * PHASE V2.14.9.1 — Stock-Opname-SPECIFIC warehouse scope guard. Deliberately
+ * NOT a change to AuthService::assertWarehouseScope() (that function is
+ * shared by every other warehouse-scoped route in the app — transactions,
+ * transfers, adjustments, reports — and widening it to also restrict ADMIN
+ * would be a global authorization change nobody asked for here).
+ *
+ * "ADMIN Transit" business definition for Stock Opname only: the existing
+ * ADMIN role, with users.warehouse_id set to a specific warehouse, is
+ * restricted to operating on THAT warehouse's opname sessions only.
+ * SUPERADMIN is always allowed (subject to whatever permission check the
+ * route already performs). An ADMIN with warehouse_id = NULL keeps the
+ * exact pre-V2.14.9.1 behavior (unscoped) — nothing changes for that
+ * account. STOCK keeps its existing behavior via assertWarehouseScope().
+ */
+function inv_require_so_warehouse_scope(array $user, int $warehouseId): void
+{
+    if ($user['role_code'] === 'SUPERADMIN') {
+        return;
+    }
+    if ($user['role_code'] === 'ADMIN' && $user['warehouse_id'] !== null) {
+        if ((int) $user['warehouse_id'] !== $warehouseId) {
+            inv_error(403, 'FORBIDDEN', "Stock Opname: this account is scoped to warehouse {$user['warehouse_id']}, not {$warehouseId}");
+        }
+        return;
+    }
+    // STOCK (and any other role) — unchanged, existing general guard.
+    inv_require_warehouse_scope($user, $warehouseId);
+}
+
+/**
+ * PHASE V2.14.9.1 — same rule as inv_require_so_warehouse_scope(), but for
+ * a LIST-style Stock Opname route that has no single target warehouse to
+ * validate against: an ADMIN scoped to a warehouse has their filter FORCED
+ * to that warehouse (never silently shown another warehouse's sessions,
+ * and never merely hidden client-side), exactly mirroring how STOCK is
+ * already forced today. SUPERADMIN and an unscoped ADMIN see whatever
+ * $requestedWarehouseId (or lack thereof) they asked for, unchanged.
+ */
+function inv_so_resolve_warehouse_scope(array $user, ?int $requestedWarehouseId): ?int
+{
+    if ($user['role_code'] === 'ADMIN' && $user['warehouse_id'] !== null) {
+        return (int) $user['warehouse_id'];
+    }
+    if ($user['role_code'] === 'STOCK' && $user['warehouse_id'] !== null) {
+        return (int) $user['warehouse_id'];
+    }
+    return $requestedWarehouseId;
+}
+
 function inv_require_division_scope(array $user, ?int $divisionId): void
 {
     try {
@@ -1787,6 +1837,12 @@ $routes = [
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
         $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        // PHASE V2.14.9.1 — ADMIN Transit (ADMIN + warehouse_id set) must
+        // never see another warehouse's opname sessions in this report
+        // either; inv_hpp_resolve_warehouse_scope() is shared by unrelated
+        // HPP reports so it is not touched — this is an SO-specific
+        // override applied only here.
+        $warehouseId = inv_so_resolve_warehouse_scope($user, $warehouseId);
         $isExport = ($query['format'] ?? '') === 'csv';
         $result = StockOpnameReportService::list($pdo, [
             'warehouse_id' => $warehouseId, 'status' => $query['status'] ?? null,
@@ -1826,7 +1882,7 @@ $routes = [
         if ($warehouseId === false) {
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
-        inv_require_warehouse_scope($user, (int) $warehouseId);
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
 
         $detail = StockOpnameReportService::detail($pdo, $sessionId);
 
@@ -2716,7 +2772,7 @@ $routes = [
             throw new ValidationException(['warehouse_id is required']);
         }
 
-        inv_require_warehouse_scope($user, $warehouseId);
+        inv_require_so_warehouse_scope($user, $warehouseId);
 
         $sessionId = Database::transaction(
             fn (PDO $tx) => StockOpnameService::start(
@@ -2737,15 +2793,16 @@ $routes = [
         $sql = 'SELECT * FROM stock_opname_sessions WHERE 1=1';
         $params = [];
 
-        if (
-            $user['role_code'] === 'STOCK'
-            && $user['warehouse_id'] !== null
-        ) {
+        // PHASE V2.14.9.1 — ADMIN Transit (ADMIN + warehouse_id set) is
+        // forced to their own warehouse here exactly like STOCK already
+        // was, so this list route never returns another warehouse's
+        // sessions to a scoped account (enforced server-side, not merely
+        // hidden client-side).
+        $requestedWarehouseId = isset($query['warehouse_id']) ? (int) $query['warehouse_id'] : null;
+        $effectiveWarehouseId = inv_so_resolve_warehouse_scope($user, $requestedWarehouseId);
+        if ($effectiveWarehouseId !== null) {
             $sql .= ' AND warehouse_id = :wh';
-            $params['wh'] = (int) $user['warehouse_id'];
-        } elseif (isset($query['warehouse_id'])) {
-            $sql .= ' AND warehouse_id = :wh';
-            $params['wh'] = (int) $query['warehouse_id'];
+            $params['wh'] = $effectiveWarehouseId;
         }
 
         if (isset($query['status'])) {
@@ -2773,7 +2830,7 @@ $routes = [
         if ($warehouseId <= 0) {
             throw new ValidationException(['warehouse_id is required']);
         }
-        inv_require_warehouse_scope($user, $warehouseId);
+        inv_require_so_warehouse_scope($user, $warehouseId);
 
         $stmt = $pdo->prepare(
             "SELECT DISTINCT u.id, u.username, u.full_name, r.code AS role_code
@@ -2809,7 +2866,7 @@ $routes = [
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
 
-        inv_require_warehouse_scope($user, (int) $sessionRow['warehouse_id']);
+        inv_require_so_warehouse_scope($user, (int) $sessionRow['warehouse_id']);
 
         $canSupervise = AuthService::hasPermission($pdo, $user['role_code'], 'STOCK_OPNAME_SUPERVISE');
         if (!$canSupervise && $sessionRow['p1_user_id'] !== null && (int) $sessionRow['p1_user_id'] === (int) $user['id']) {
@@ -2840,7 +2897,7 @@ $routes = [
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
 
-        inv_require_warehouse_scope($user, (int) $warehouseId);
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
 
         $counts = [];
         foreach ((array) ($input['counts'] ?? []) as $row) {
@@ -2879,7 +2936,7 @@ $routes = [
         if ($warehouseId === false) {
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
-        inv_require_warehouse_scope($user, (int) $warehouseId);
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
 
         $assignments = [];
         if (array_key_exists('p1_user_id', $input)) { $assignments['p1_user_id'] = $input['p1_user_id'] !== null ? (int) $input['p1_user_id'] : null; }
@@ -2911,7 +2968,7 @@ $routes = [
         if ($warehouseId === false) {
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
-        inv_require_warehouse_scope($user, (int) $warehouseId);
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
 
         $itemId = (int) ($input['item_id'] ?? 0);
         if ($itemId <= 0) {
@@ -2951,7 +3008,7 @@ $routes = [
         if ($warehouseId === false) {
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
-        inv_require_warehouse_scope($user, (int) $warehouseId);
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
 
         inv_ok(StockOpnameService::review($pdo, $sessionId), 'OK');
     },
@@ -2969,7 +3026,7 @@ $routes = [
         if ($warehouseId === false) {
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
-        inv_require_warehouse_scope($user, (int) $warehouseId);
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
 
         $itemId = (int) ($input['item_id'] ?? 0);
         if ($itemId <= 0) {
@@ -2979,11 +3036,54 @@ $routes = [
             throw new ValidationException(['counted_qty_base is required']);
         }
 
+        // PHASE V2.14.9.1 — optional final condition resolution carried in
+        // the same recount action (see StockOpnameService::recount()).
+        $finalConditions = [];
+        foreach (['final_rusak_qty', 'final_expired_qty', 'final_deadstock_qty', 'final_notes'] as $key) {
+            if (array_key_exists($key, $input)) { $finalConditions[$key] = $input[$key]; }
+        }
+
         $result = Database::transaction(
-            fn (PDO $tx) => StockOpnameService::recount($tx, $sessionId, $itemId, (float) $input['counted_qty_base'], (string) ($input['reason'] ?? ''), $user['id'])
+            fn (PDO $tx) => StockOpnameService::recount($tx, $sessionId, $itemId, (float) $input['counted_qty_base'], (string) ($input['reason'] ?? ''), $user['id'], $finalConditions)
         );
 
         inv_ok($result, 'Recount recorded');
+    },
+
+    // PHASE V2.14.9.1 — supervisor explicitly resolves a Rusak/Expired/
+    // Deadstock/Keterangan disagreement between P1 and P2 (independent of
+    // match_status — a MATCH qty line can still have a condition-only
+    // disagreement). StockOpnameService::resolveConditions() itself
+    // refuses this until the line's physical qty is resolved (MATCH or
+    // RECOUNTED).
+    'POST /stock-opname/{id}/resolve-conditions' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+
+        $itemId = (int) ($input['item_id'] ?? 0);
+        if ($itemId <= 0) {
+            throw new ValidationException(['item_id is required']);
+        }
+
+        $finalValues = [];
+        foreach (['final_rusak_qty', 'final_expired_qty', 'final_deadstock_qty', 'final_notes'] as $key) {
+            if (array_key_exists($key, $input)) { $finalValues[$key] = $input[$key]; }
+        }
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::resolveConditions($tx, $sessionId, $itemId, $finalValues, $user['id'])
+        );
+
+        inv_ok($result, 'Condition values resolved');
     },
 
     // PHASE V2.12B: supervisor excuses a still-unresolved item from
@@ -2999,7 +3099,7 @@ $routes = [
         if ($warehouseId === false) {
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
-        inv_require_warehouse_scope($user, (int) $warehouseId);
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
 
         $itemId = (int) ($input['item_id'] ?? 0);
         if ($itemId <= 0) {
@@ -3032,7 +3132,7 @@ $routes = [
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
 
-        inv_require_warehouse_scope($user, (int) $warehouseId);
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
 
         $result = Database::transaction(
             fn (PDO $tx) => StockOpnameService::finalize(
@@ -3064,7 +3164,7 @@ $routes = [
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
 
-        inv_require_warehouse_scope($user, (int) $warehouseId);
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
 
         $overrides = [];
         foreach ((array) ($input['cost_overrides'] ?? []) as $itemId => $cost) {
@@ -3096,7 +3196,7 @@ $routes = [
         if ($warehouseId === false) {
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
-        inv_require_warehouse_scope($user, (int) $warehouseId);
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
 
         $result = Database::transaction(
             fn (PDO $tx) => StockOpnameService::cancel($tx, $sessionId, (string) ($input['reason'] ?? ''), $user['id'])
@@ -3116,7 +3216,7 @@ $routes = [
         if ($warehouseId === false) {
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
-        inv_require_warehouse_scope($user, (int) $warehouseId);
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
         inv_html(StockOpnamePrintService::renderResult($pdo, $sessionId));
     },
 
@@ -3317,7 +3417,7 @@ $routes = [
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'AUDIT_LOG_VIEW');
         $result = TraceService::opnameTrace($pdo, (int) $params['id']);
-        inv_require_warehouse_scope($user, (int) $result['session']['warehouse_id']);
+        inv_require_so_warehouse_scope($user, (int) $result['session']['warehouse_id']);
         inv_ok($result, 'OK');
     },
 

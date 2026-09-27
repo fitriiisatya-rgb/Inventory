@@ -421,6 +421,145 @@ final class StockOpnameService
     }
 
     /**
+     * PHASE V2.14.9.1 — a line's Rusak/Expired/Deadstock classification
+     * "requires resolution" ONLY when BOTH P1 and P2 explicitly submitted
+     * a non-null value for that SPECIFIC field and those values disagree,
+     * and no final value has been recorded yet (by agreement or by
+     * explicit supervisor resolution). Blank/null semantics, defined
+     * explicitly per the correction request:
+     *   - both sides blank (null) for a field -> NOT a disagreement, no
+     *     resolution required (nothing was ever compared).
+     *   - only one side supplied a value for a field -> NOT treated as a
+     *     disagreement either (there is nothing on the other side to
+     *     disagree WITH — condition fields are optional per counter, same
+     *     as the original V2.14.9 design); resolution is required only
+     *     once two real, differing numbers exist to reconcile.
+     *   - both sides supplied DIFFERENT non-null values -> resolution
+     *     required until a supervisor explicitly records a final value
+     *     (see resolveConditions()) or the values happen to already
+     *     match (auto-resolved by resolveConditionAgreement()).
+     * An EXCLUDED line never requires resolution (nobody was required to
+     * count it in the first place).
+     */
+    private static function conditionRequiresResolution(array $line): bool
+    {
+        if ((int) $line['is_excluded'] === 1) {
+            return false;
+        }
+        foreach (['rusak', 'expired', 'deadstock'] as $field) {
+            $p1 = $line["p1_{$field}_qty"];
+            $p2 = $line["p2_{$field}_qty"];
+            $final = $line["final_{$field}_qty"];
+            if ($p1 !== null && $p2 !== null && $final === null && !self::qtyEquals((float) $p1, (float) $p2)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * PHASE V2.14.9.1 — supervisor-only explicit resolution of a Rusak/
+     * Expired/Deadstock (and/or Keterangan) disagreement between P1 and
+     * P2. Never invoked automatically — the only other writer of
+     * final_{field}_qty is resolveConditionAgreement(), which only ever
+     * auto-fills a field when both sides already agree, so this method
+     * never silently overwrites an auto-resolved value with a guess: it
+     * always reflects a deliberate supervisor decision, one field at a
+     * time or all at once, whichever the caller supplies.
+     *
+     * Requires the line's PHYSICAL quantity to already be resolved (MATCH
+     * or RECOUNTED) — condition values are validated as a subset of that
+     * resolved quantity (counted_qty_base), so resolving conditions on a
+     * still-PENDING/MISMATCH qty line is refused with a clear message
+     * (use recount() to resolve qty first, optionally carrying final
+     * conditions in that same call — see recount()'s own docblock).
+     *
+     * @param array{final_rusak_qty?:mixed,final_expired_qty?:mixed,final_deadstock_qty?:mixed,final_notes?:mixed} $finalValues
+     */
+    public static function resolveConditions(PDO $pdo, int $sessionId, int $itemId, array $finalValues, int $userId): array
+    {
+        self::requireStatus($pdo, $sessionId, 'OPEN');
+
+        $line = $pdo->prepare('SELECT * FROM stock_opname_lines WHERE session_id = :sid AND item_id = :item');
+        $line->execute(['sid' => $sessionId, 'item' => $itemId]);
+        $line = $line->fetch();
+        if (!$line) {
+            throw new ValidationException(["item {$itemId} is not part of this opname session's scope"]);
+        }
+        if ((int) $line['is_excluded'] === 1) {
+            throw new ValidationException(['this item has been excluded from the session — condition resolution does not apply']);
+        }
+        if (!in_array($line['match_status'], ['MATCH', 'RECOUNTED'], true) || $line['counted_qty_base'] === null) {
+            throw new ValidationException(['the physical quantity (Qty Hitung) must be resolved (MATCH or RECOUNTED) before condition values can be resolved — use recount() first if quantity also disagrees']);
+        }
+
+        self::applyFinalConditions($pdo, $line, $finalValues, $userId, 'STOCK_OPNAME_RESOLVE_CONDITIONS');
+
+        return self::get($pdo, $sessionId);
+    }
+
+    /**
+     * Shared writer for an explicit supervisor final-condition decision —
+     * used by both resolveConditions() and recount() (when the latter is
+     * given optional final condition values alongside a qty recount).
+     * Validates each supplied field independently (>= 0, <= the line's
+     * resolved physical qty — never a cross-field sum requirement, since
+     * Rusak/Expired/Deadstock are independent, possibly-overlapping
+     * classifications), and always writes a full audit before/after
+     * snapshot via AuditService, attributing the change to $userId.
+     */
+    private static function applyFinalConditions(PDO $pdo, array $line, array $finalValues, int $userId, string $auditEvent): void
+    {
+        $qtyBase = (float) $line['counted_qty_base'];
+        $before = [
+            'final_rusak_qty' => $line['final_rusak_qty'], 'final_expired_qty' => $line['final_expired_qty'],
+            'final_deadstock_qty' => $line['final_deadstock_qty'], 'final_notes' => $line['final_notes'],
+        ];
+
+        $sets = [];
+        $params = ['id' => $line['id']];
+        foreach (['final_rusak_qty' => 'Rusak', 'final_expired_qty' => 'Expired', 'final_deadstock_qty' => 'Deadstock'] as $col => $label) {
+            if (!array_key_exists($col, $finalValues)) {
+                continue;
+            }
+            $raw = $finalValues[$col];
+            if ($raw === null || $raw === '') {
+                $sets[] = "{$col} = NULL";
+                continue;
+            }
+            if (!is_numeric($raw)) {
+                throw new ValidationException(["Final {$label} must be a valid number"]);
+            }
+            $qty = (float) $raw;
+            if ($qty < 0) {
+                throw new ValidationException(["Final {$label} cannot be negative"]);
+            }
+            if ($qty - $qtyBase > self::QTY_EPSILON) {
+                throw new ValidationException(["Final {$label} ({$qty}) cannot exceed the resolved Qty Hitung ({$qtyBase})"]);
+            }
+            $paramKey = "p_{$col}";
+            $sets[] = "{$col} = :{$paramKey}";
+            $params[$paramKey] = $qty;
+        }
+        if (array_key_exists('final_notes', $finalValues)) {
+            $notes = $finalValues['final_notes'] !== null ? substr(trim((string) $finalValues['final_notes']), 0, 255) : null;
+            $sets[] = 'final_notes = :final_notes';
+            $params['final_notes'] = $notes === '' ? null : $notes;
+        }
+        if ($sets === []) {
+            return; // nothing supplied — a no-op, not an error
+        }
+
+        $pdo->prepare('UPDATE stock_opname_lines SET ' . implode(', ', $sets) . ' WHERE id = :id')->execute($params);
+
+        $after = $pdo->prepare('SELECT final_rusak_qty, final_expired_qty, final_deadstock_qty, final_notes FROM stock_opname_lines WHERE id = :id');
+        $after->execute(['id' => $line['id']]);
+        $after = $after->fetch();
+
+        AuditService::log($pdo, $userId, 'system', $auditEvent, 'stock_opname_lines', (int) $line['id'], $before, $after, null);
+    }
+
+    /**
      * PHASE V2.12A — the mission's "SYSTEM COMPARE" step: runs
      * automatically the instant a line has both a P1 and a P2 value (or a
      * recount). Never averages, never silently picks one side (Section
@@ -516,8 +655,15 @@ final class StockOpnameService
             'not_counted' => 0, 'legacy_counted' => 0, 'excluded' => 0,
             'positive_difference_count' => 0, 'negative_difference_count' => 0,
             'estimated_adjustment_value' => 0.0,
+            // PHASE V2.14.9.1 — lines whose Rusak/Expired/Deadstock
+            // disagreement blocks finalize() until a supervisor explicitly
+            // resolves them (see StockOpnameService::conditionRequiresResolution()).
+            'condition_disagreement' => 0,
         ];
         foreach ($rows as $r) {
+            if (self::conditionRequiresResolution($r)) {
+                $summary['condition_disagreement']++;
+            }
             switch ($r['match_status']) {
                 case 'MATCH': $summary['match']++; break;
                 case 'MISMATCH': $summary['mismatch']++; break;
@@ -580,6 +726,8 @@ final class StockOpnameService
                     'final_rusak_qty' => $r['final_rusak_qty'],
                     'final_expired_qty' => $r['final_expired_qty'],
                     'final_deadstock_qty' => $r['final_deadstock_qty'],
+                    'final_notes' => $r['final_notes'],
+                    'requires_condition_resolution' => self::conditionRequiresResolution($r),
                 ];
             }, $rows),
         ];
@@ -589,8 +737,17 @@ final class StockOpnameService
      * PHASE V2.12B — recount for a MISMATCH line (Section 9). Preserves
      * the original P1/P2 values untouched; only ever resolves the FINAL
      * physical quantity via counted_qty_base (through resolveMatchStatus).
+     *
+     * PHASE V2.14.9.1 — $finalConditions optionally lets the supervisor
+     * resolve Rusak/Expired/Deadstock/Keterangan in this SAME action, for
+     * the case where qty was MISMATCH (needing this recount) AND the
+     * condition classifications also disagree — never required: if
+     * omitted, condition resolution can still be done afterward via
+     * resolveConditions() once this recount has resolved the qty.
+     *
+     * @param array{final_rusak_qty?:mixed,final_expired_qty?:mixed,final_deadstock_qty?:mixed,final_notes?:mixed} $finalConditions
      */
-    public static function recount(PDO $pdo, int $sessionId, int $itemId, float $qtyBase, string $reason, int $userId): array
+    public static function recount(PDO $pdo, int $sessionId, int $itemId, float $qtyBase, string $reason, int $userId, array $finalConditions = []): array
     {
         if (trim($reason) === '') {
             throw new ValidationException(['a recount reason is required']);
@@ -624,6 +781,12 @@ final class StockOpnameService
         self::resolveMatchStatus($pdo, (int) $line['id']);
 
         AuditService::log($pdo, $userId, 'system', 'STOCK_OPNAME_RECOUNT', 'stock_opname_lines', (int) $line['id'], null, ['item_id' => $itemId, 'qty_base' => $qtyBase, 'reason' => $reason], null);
+
+        if ($finalConditions !== []) {
+            $refreshed = $pdo->prepare('SELECT * FROM stock_opname_lines WHERE id = :id');
+            $refreshed->execute(['id' => $line['id']]);
+            self::applyFinalConditions($pdo, $refreshed->fetch(), $finalConditions, $userId, 'STOCK_OPNAME_RESOLVE_CONDITIONS');
+        }
 
         return self::get($pdo, $sessionId);
     }
@@ -673,6 +836,28 @@ final class StockOpnameService
         $uncountedCount = (int) $uncountedStmt->fetchColumn();
         if ($uncountedCount > 0) {
             throw new ValidationException(["{$uncountedCount} item(s) have not been counted yet — finalize requires every line counted, recounted, or explicitly excluded"]);
+        }
+
+        // PHASE V2.14.9.1 — a genuine, still-unresolved Rusak/Expired/
+        // Deadstock disagreement between P1 and P2 blocks finalize until a
+        // supervisor explicitly resolves it (resolveConditions(), or
+        // recount() carrying final conditions). Never blocks merely
+        // because both sides left a field blank, or because only one side
+        // supplied a value — see conditionRequiresResolution()'s docblock
+        // for the exact blank/null semantics. This check is independent
+        // of match_status (MATCH lines can still have a condition-only
+        // disagreement), and re-derived from the actual column values
+        // here rather than trusting any client-supplied state.
+        $conditionCheckStmt = $pdo->prepare('SELECT * FROM stock_opname_lines WHERE session_id = :id');
+        $conditionCheckStmt->execute(['id' => $sessionId]);
+        $unresolvedCount = 0;
+        foreach ($conditionCheckStmt->fetchAll() as $checkLine) {
+            if (self::conditionRequiresResolution($checkLine)) {
+                $unresolvedCount++;
+            }
+        }
+        if ($unresolvedCount > 0) {
+            throw new ValidationException(["{$unresolvedCount} item(s) have an unresolved Rusak/Expired/Deadstock disagreement between P1 and P2 — a supervisor must resolve them before finalize"]);
         }
 
         $lines = $pdo->prepare('SELECT * FROM stock_opname_lines WHERE session_id = :id');

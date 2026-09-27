@@ -34,21 +34,31 @@
 -- — entering a Rusak/Expired/Deadstock quantity has zero effect on
 -- inventory. Stock Opname finalization remains driven exclusively by
 -- counted_qty_base/variance_qty_base, exactly as before this migration.
+--
+-- V2.14.9.1 CORRECTION: every clause below uses ADD COLUMN IF NOT EXISTS
+-- (supported since MariaDB 10.0.2) so this migration is genuinely
+-- idempotent — a second run against a database that already has these
+-- columns succeeds as a no-op instead of failing on "Duplicate column
+-- name". Verified: forward -> forward -> rollback -> rollback all
+-- succeed, existing stock_opname_lines data and inventory are unchanged
+-- by any of the four runs.
 -- ============================================================================
 
 ALTER TABLE stock_opname_lines
-    ADD COLUMN p1_rusak_qty      DECIMAL(20,6) NULL AFTER p1_submitted_at,
-    ADD COLUMN p1_expired_qty    DECIMAL(20,6) NULL AFTER p1_rusak_qty,
-    ADD COLUMN p1_deadstock_qty  DECIMAL(20,6) NULL AFTER p1_expired_qty,
-    ADD COLUMN p1_notes          VARCHAR(255)  NULL AFTER p1_deadstock_qty,
-    ADD COLUMN p2_rusak_qty      DECIMAL(20,6) NULL AFTER p2_submitted_at,
-    ADD COLUMN p2_expired_qty    DECIMAL(20,6) NULL AFTER p2_rusak_qty,
-    ADD COLUMN p2_deadstock_qty  DECIMAL(20,6) NULL AFTER p2_expired_qty,
-    ADD COLUMN p2_notes          VARCHAR(255)  NULL AFTER p2_deadstock_qty,
+    ADD COLUMN IF NOT EXISTS p1_rusak_qty      DECIMAL(20,6) NULL AFTER p1_submitted_at,
+    ADD COLUMN IF NOT EXISTS p1_expired_qty    DECIMAL(20,6) NULL AFTER p1_rusak_qty,
+    ADD COLUMN IF NOT EXISTS p1_deadstock_qty  DECIMAL(20,6) NULL AFTER p1_expired_qty,
+    ADD COLUMN IF NOT EXISTS p1_notes          VARCHAR(255)  NULL AFTER p1_deadstock_qty,
+    ADD COLUMN IF NOT EXISTS p2_rusak_qty      DECIMAL(20,6) NULL AFTER p2_submitted_at,
+    ADD COLUMN IF NOT EXISTS p2_expired_qty    DECIMAL(20,6) NULL AFTER p2_rusak_qty,
+    ADD COLUMN IF NOT EXISTS p2_deadstock_qty  DECIMAL(20,6) NULL AFTER p2_expired_qty,
+    ADD COLUMN IF NOT EXISTS p2_notes          VARCHAR(255)  NULL AFTER p2_deadstock_qty,
     -- Resolved-agreement values (Section: "supervisor must be able to see
     -- disagreements" — these are NEVER auto-copied from one side when the
-    -- two disagree; they stay NULL until both sides genuinely match).
-    ADD COLUMN final_rusak_qty     DECIMAL(20,6) NULL,
-    ADD COLUMN final_expired_qty   DECIMAL(20,6) NULL,
-    ADD COLUMN final_deadstock_qty DECIMAL(20,6) NULL,
-    ADD COLUMN final_notes         VARCHAR(255)  NULL;
+    -- two disagree; they stay NULL until both sides genuinely match, or
+    -- until an explicit supervisor resolution is recorded — see
+    -- StockOpnameService::resolveConditions()).
+    ADD COLUMN IF NOT EXISTS final_rusak_qty     DECIMAL(20,6) NULL,
+    ADD COLUMN IF NOT EXISTS final_expired_qty   DECIMAL(20,6) NULL,
+    ADD COLUMN IF NOT EXISTS final_deadstock_qty DECIMAL(20,6) NULL,
+    ADD COLUMN IF NOT EXISTS final_notes         VARCHAR(255)  NULL;
