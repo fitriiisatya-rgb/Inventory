@@ -414,9 +414,15 @@ const StockOpname = (() => {
             if (qtyInput.value === '') { UI.toast('Isi jumlah fisik terlebih dahulu.', 'error'); return; }
             const ci = conditionInputs || {};
             const conditions = {
-                rusak_qty: ci.rusakInput && ci.rusakInput.value !== '' ? Number(ci.rusakInput.value) : null,
-                expired_qty: ci.expiredInput && ci.expiredInput.value !== '' ? Number(ci.expiredInput.value) : null,
-                deadstock_qty: ci.deadstockInput && ci.deadstockInput.value !== '' ? Number(ci.deadstockInput.value) : null,
+                // PHASE V2.14.9.2 — always an explicit number, never null:
+                // inputs default to '0' and stay that way unless the
+                // counter types something else; a manually-cleared field
+                // (edge case) falls back to 0 rather than sending blank,
+                // since the backend now REJECTS a missing/blank value for
+                // a new submission (validateConditions()).
+                rusak_qty: Number((ci.rusakInput && ci.rusakInput.value) || 0),
+                expired_qty: Number((ci.expiredInput && ci.expiredInput.value) || 0),
+                deadstock_qty: Number((ci.deadstockInput && ci.deadstockInput.value) || 0),
                 notes: ci.notesInput ? ci.notesInput.value : null,
             };
             saveBtn.disabled = true;
@@ -478,9 +484,15 @@ const StockOpname = (() => {
             type: 'number', step: 'any', min: '0', inputmode: 'decimal', placeholder: 'Qty fisik...',
             class: 'opname-blind-qty-input',
         });
-        const rusakInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', placeholder: '0', class: 'opname-blind-rusak-input', style: 'width:80px;' });
-        const expiredInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', placeholder: '0', class: 'opname-blind-expired-input', style: 'width:80px;' });
-        const deadstockInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', placeholder: '0', class: 'opname-blind-deadstock-input', style: 'width:80px;' });
+        // PHASE V2.14.9.2 — EXPLICIT ZERO: these three fields start with a
+        // real value="0" (never blank/placeholder-only), so a counter who
+        // never touches them still submits an explicit "I found none" 0,
+        // not an ambiguous absence the backend could confuse with "not
+        // asked". saveCount() below also guards against a manually-
+        // cleared field by falling back to 0 rather than sending blank.
+        const rusakInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', value: '0', class: 'opname-blind-rusak-input', style: 'width:80px;' });
+        const expiredInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', value: '0', class: 'opname-blind-expired-input', style: 'width:80px;' });
+        const deadstockInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', value: '0', class: 'opname-blind-deadstock-input', style: 'width:80px;' });
         const notesInput = UI.el('input', { type: 'text', placeholder: 'Keterangan (opsional)', class: 'opname-blind-notes-input', style: 'width:140px;' });
         const saveBtn = UI.el('button', { class: 'btn btn-primary btn-sm compact-row-btn' }, 'Simpan');
         const alertBox = UI.el('div');

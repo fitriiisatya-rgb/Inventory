@@ -360,13 +360,49 @@ final class StockOpnameService
      * @param array{rusak_qty?:mixed,expired_qty?:mixed,deadstock_qty?:mixed,notes?:mixed} $conditions
      * @return array{0:?float,1:?float,2:?float,3:?string}
      */
+    /**
+     * PHASE V2.14.9.2 — EXPLICIT ZERO, not optional-null, for a NEW blind
+     * count submission: rusak_qty/expired_qty/deadstock_qty must each be
+     * present and numeric (0 is the correct "counter explicitly found
+     * none" value — never a stand-in for "not asked"). A missing key,
+     * null, or blank string is REJECTED here, not silently treated as
+     * "no classification". This closes the one-sided-NULL ambiguity gap
+     * (P1 Expired=5, P2 Expired=blank could never disagree, so it could
+     * never require resolution, so the true P1-reported 5 could vanish
+     * from the final result) — every NEW line now has two real, always-
+     * comparable numbers for every field, so conditionRequiresResolution()
+     * (unchanged) always sees a genuine agreement or a genuine
+     * disagreement, never an accidental non-comparison.
+     *
+     * This method is ONLY ever called from submitCount() (the P1/P2
+     * blind-count path). It intentionally does NOT gate
+     * applyFinalConditions() (resolveConditions()/recount()'s optional,
+     * per-field supervisor resolution — unchanged, still allows
+     * resolving only the fields that actually need it) or the legacy
+     * single-count path (count() — never had condition fields at all).
+     * A historical line submitted before this phase (NULL p{1,2}_*_qty)
+     * is never rewritten and never re-validated by this method — it was
+     * already written, write-once, before this check existed.
+     */
     private static function validateConditions(array $conditions, float $qtyBase): array
     {
+        // Backward compatibility: a caller that never attempts to use the
+        // condition-classification feature at all (omits the argument
+        // entirely, e.g. legacy callers predating V2.14.9) passes the
+        // literal default []. That is NOT a "new count with missing
+        // fields" — it's "this feature is not in use here" — so it must
+        // bypass the explicit-zero requirement entirely and behave exactly
+        // as it did before V2.14.9.2, writing NULL for all three fields.
+        // Supplying ANY key at all (even one) means the caller IS using
+        // the feature, so the full completeness requirement below applies.
+        if ($conditions === []) {
+            return [null, null, null, null];
+        }
+
         $values = [];
         foreach (['rusak_qty' => 'Rusak', 'expired_qty' => 'Expired', 'deadstock_qty' => 'Deadstock'] as $key => $label) {
             if (!array_key_exists($key, $conditions) || $conditions[$key] === null || $conditions[$key] === '') {
-                $values[$key] = null;
-                continue;
+                throw new ValidationException(["{$label} is required (use 0 if none found)"]);
             }
             if (!is_numeric($conditions[$key])) {
                 throw new ValidationException(["{$label} must be a valid number"]);
