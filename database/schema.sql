@@ -740,6 +740,15 @@ CREATE TABLE stock_opname_lines (
     p1_expired_qty       DECIMAL(20,6) NULL,
     p1_deadstock_qty     DECIMAL(20,6) NULL,
     p1_notes             VARCHAR(255) NULL,
+    -- PHASE V2.14.10: a short-lived, per-team claim/lease so two members of
+    -- the SAME team (P1 can be more than one user now — see
+    -- stock_opname_team_members below) can't both start counting this SKU
+    -- at once. Cleared once this side's count is actually submitted;
+    -- otherwise expires automatically after the service's claim-lease
+    -- window. p1_user_id above already IS the "counted by" audit identity
+    -- once a count lands, so no separate counted-by column was added.
+    p1_claimed_by_user_id INT UNSIGNED NULL,
+    p1_claimed_at         DATETIME NULL,
     p2_qty_base          DECIMAL(20,6) NULL,
     p2_user_id           INT UNSIGNED NULL,
     p2_submitted_at       DATETIME NULL,
@@ -747,6 +756,8 @@ CREATE TABLE stock_opname_lines (
     p2_expired_qty       DECIMAL(20,6) NULL,
     p2_deadstock_qty     DECIMAL(20,6) NULL,
     p2_notes             VARCHAR(255) NULL,
+    p2_claimed_by_user_id INT UNSIGNED NULL,
+    p2_claimed_at         DATETIME NULL,
     -- PHASE V2.12A: only ever populated for a MISMATCH line, by an
     -- authorized recount user (Section 9) — original P1/P2 above are never
     -- overwritten.
@@ -790,6 +801,88 @@ CREATE TABLE stock_opname_lines (
     CONSTRAINT fk_sol_excluded_by FOREIGN KEY (excluded_by) REFERENCES users(id),
     UNIQUE KEY uq_sol2_session_item (session_id, item_id),
     INDEX idx_sol_match_status (session_id, match_status)
+) ENGINE=InnoDB;
+
+-- PHASE V2.14.10: normalized P1/P2 TEAM membership — a team role can now
+-- hold one or more users, replacing the "exactly one P1, one P2"
+-- assumption baked into stock_opname_sessions.p1_user_id/p2_user_id above
+-- (those legacy columns are UNCHANGED and still fully supported — see
+-- StockOpnameService::getTeamMembers()'s synthetic one-member fallback for
+-- any session with no rows here). Session-scoped counter authorization is
+-- derived from an ACTIVE row in this table, independent of the assigned
+-- user's global role — see inv_require_so_counter_or_permission() in
+-- index.php.
+CREATE TABLE stock_opname_team_members (
+    id            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    session_id    INT UNSIGNED NOT NULL,
+    team_role     ENUM('P1','P2') NOT NULL,
+    user_id       INT UNSIGNED NOT NULL,
+    assigned_by   INT UNSIGNED NOT NULL,
+    assigned_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    removed_by    INT UNSIGNED NULL,
+    removed_at    DATETIME NULL,
+    active        TINYINT(1) NOT NULL DEFAULT 1,
+    CONSTRAINT fk_sotm_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
+    CONSTRAINT fk_sotm_user FOREIGN KEY (user_id) REFERENCES users(id),
+    CONSTRAINT fk_sotm_assigned_by FOREIGN KEY (assigned_by) REFERENCES users(id),
+    CONSTRAINT fk_sotm_removed_by FOREIGN KEY (removed_by) REFERENCES users(id),
+    -- Same-user-both-roles is rejected in the service layer (not here —
+    -- see the migration file's comment for why a DB constraint can't
+    -- express it without losing removal history).
+    UNIQUE KEY uq_sotm_session_role_user (session_id, team_role, user_id),
+    INDEX idx_sotm_session_active (session_id, active)
+) ENGINE=InnoDB;
+
+-- PHASE V2.14.10 — append-only counting EVENTS: "P1/P2 count is written
+-- exactly once" is replaced by "P1/P2's result is the SUM of one or more
+-- findings" (Tambah Temuan — the same SKU found again elsewhere in the
+-- warehouse never overwrites an earlier finding). Never edited after
+-- creation; a correction is a void (voided_by/voided_at/void_reason),
+-- never a rewrite of base_qty/rusak_qty/etc. stock_opname_lines.
+-- p1_qty_base/p2_qty_base and the p{1,2}_rusak_qty/expired_qty/
+-- deadstock_qty columns become a MAINTAINED AGGREGATE (SUM of this
+-- role's non-voided findings) for any line that has finding rows —
+-- StockOpnameService recomputes them in the same transaction as every
+-- insert/void. A line with zero finding rows (a legacy write-once
+-- submission via the original submitCount() path) is unaffected; that
+-- path and its meaning are completely unchanged.
+CREATE TABLE stock_opname_findings (
+    id                   BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    session_id           INT UNSIGNED NOT NULL,
+    stock_opname_line_id BIGINT UNSIGNED NOT NULL,
+    team_role            ENUM('P1','P2') NOT NULL,
+    counter_user_id      INT UNSIGNED NOT NULL,
+    base_qty             DECIMAL(20,6) NOT NULL,
+    rusak_qty            DECIMAL(20,6) NOT NULL,
+    expired_qty          DECIMAL(20,6) NOT NULL,
+    deadstock_qty        DECIMAL(20,6) NOT NULL,
+    notes                VARCHAR(255) NULL,
+    created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    voided_by            INT UNSIGNED NULL,
+    voided_at            DATETIME NULL,
+    void_reason          VARCHAR(255) NULL,
+    CONSTRAINT fk_sof_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
+    CONSTRAINT fk_sof_line FOREIGN KEY (stock_opname_line_id) REFERENCES stock_opname_lines(id),
+    CONSTRAINT fk_sof_user FOREIGN KEY (counter_user_id) REFERENCES users(id),
+    CONSTRAINT fk_sof_voided_by FOREIGN KEY (voided_by) REFERENCES users(id),
+    INDEX idx_sof_line_role (stock_opname_line_id, team_role, voided_at)
+) ENGINE=InnoDB;
+
+-- Multi-unit breakdown of ONE finding (e.g. "5 Karton + 4 Pcs" is two rows
+-- under one finding) — mirrors inventory_transaction_lines' proven
+-- snapshot pattern exactly (input_qty/input_unit_id/
+-- conversion_factor_snapshot/base_qty) so a later item_unit_conversions
+-- change never retroactively alters an already-saved finding's math.
+CREATE TABLE stock_opname_finding_units (
+    id                         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    finding_id                 BIGINT UNSIGNED NOT NULL,
+    unit_id                    INT UNSIGNED NOT NULL,
+    input_qty                  DECIMAL(20,6) NOT NULL,
+    conversion_factor_snapshot DECIMAL(20,6) NOT NULL,
+    base_qty_contribution      DECIMAL(20,6) NOT NULL,
+    CONSTRAINT fk_sofu_finding FOREIGN KEY (finding_id) REFERENCES stock_opname_findings(id),
+    CONSTRAINT fk_sofu_unit FOREIGN KEY (unit_id) REFERENCES units(id),
+    INDEX idx_sofu_finding (finding_id)
 ) ENGINE=InnoDB;
 
 CREATE TABLE stock_adjustments (

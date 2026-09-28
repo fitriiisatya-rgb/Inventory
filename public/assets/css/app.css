@@ -384,6 +384,51 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 }
 .price-reference-hint.price-diff { color: var(--orange); }
 
+/* ============================================================
+   PHASE V2.14.10 — Stock Opname counter screen: desktop/tablet
+   two-pane split (list left, count panel right, panel sticky) per the
+   "left: SKU list/search/filter, right: selected-item counting panel"
+   requirement; collapses to a single stacked column on phones (the
+   panel replaces the list visually via a "Kembali" back action, never
+   both a giant list AND a giant panel competing for a narrow viewport).
+   ============================================================ */
+.opname-counter-split { display: flex; gap: 16px; align-items: flex-start; }
+.opname-counter-list { flex: 1 1 55%; min-width: 0; }
+.opname-counter-panel { flex: 1 1 45%; min-width: 0; position: sticky; top: 12px; }
+/* A flex item's default min-width:auto sizes it to its content's
+   min-content width (here, .compact-table's own min-width:640px),
+   overriding the flex-basis/min-width:0 above and forcing the WHOLE
+   page wider on a narrow viewport instead of letting .compact-table-wrap
+   scroll internally as it does everywhere else this class is used. Scoped
+   to inside this screen only — never touches the shared .card/
+   .compact-table-wrap classes' behavior on any other feature. */
+.opname-counter-list .card, .opname-counter-list .compact-table-wrap { min-width: 0; }
+@media (max-width: 900px) {
+    /* align-items: flex-start (set above for the desktop ROW layout,
+       where it controls HEIGHT so the shorter pane doesn't stretch to
+       match the taller one) becomes a WIDTH directive once
+       flex-direction flips to column here — "don't stretch" then means
+       "shrink to content", which let .compact-table's own min-width:640px
+       win and force the whole page wider than the phone viewport.
+       Explicitly restoring stretch for the column layout so each pane
+       fills the available width and .compact-table-wrap's own
+       overflow:auto is what handles the wide table, exactly as it does
+       everywhere else this class is used. */
+    .opname-counter-split { flex-direction: column; align-items: stretch; }
+    .opname-counter-panel { position: static; }
+}
+.opname-unit-input-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.opname-unit-input-row label { flex: 0 0 140px; font-size: 0.85rem; color: var(--text2); }
+.opname-unit-input-row input { flex: 1 1 auto; }
+.opname-finding-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+.opname-finding-row.is-voided { text-decoration: line-through; color: var(--text3); }
+.opname-total-otomatis { padding: 10px 14px; border-radius: var(--radius-sm); background: rgba(59,130,246,0.08); font-weight: 600; margin: 8px 0; }
+.opname-sticky-actions { position: sticky; bottom: 0; background: var(--bg2); padding: 10px 0 4px; display: flex; gap: 10px; }
+@media (max-width: 640px) {
+    .opname-unit-input-row label { flex-basis: 110px; font-size: 0.8rem; }
+    .opname-sticky-actions { flex-direction: column; }
+}
+
 @media (max-width: 640px) {
     .drawer { width: 100vw; }
     .app-main-v2 { padding: 14px 12px 30px; }

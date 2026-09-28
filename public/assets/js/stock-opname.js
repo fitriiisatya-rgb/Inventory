@@ -152,54 +152,90 @@ const StockOpname = (() => {
     }
 
     // ============================================================
-    // Dual-count: assign P1/P2
+    // PHASE V2.14.10 — TEAM assignment: P1/P2 are now teams of one or
+    // more users (any active user — see StockOpnameService::
+    // assertCanCount()'s corrected eligibility rule), replacing the old
+    // single-select dropdown with a searchable multi-select + chip list
+    // per role. Backed by assignOpnameTeam() (full-membership
+    // reconciliation — see StockOpnameService::assignTeamMembers()).
     // ============================================================
     async function buildAssignCountersCard(session) {
         const card = UI.el('div', { class: 'card' }, [
-            UI.el('div', { class: 'card-title' }, '👥 Dual Count — Tugaskan Petugas 1 (P1) & Petugas 2 (P2)'),
+            UI.el('div', { class: 'card-title' }, '👥 Penugasan Tim P1 & Tim P2'),
         ]);
         let eligible = [];
+        let currentTeams = { p1: [], p2: [] };
         try {
             eligible = await InvApi.opnameEligibleCounters(session.warehouse_id);
         } catch (err) { UI.handleApiError(err); }
+        try {
+            const review = await InvApi.opnameReview(session.id);
+            currentTeams.p1 = (review.team_progress && review.team_progress.p1 && review.team_progress.p1.members) || [];
+            currentTeams.p2 = (review.team_progress && review.team_progress.p2 && review.team_progress.p2.members) || [];
+        } catch (err) { /* team assignment still usable even if review() is briefly unavailable */ }
 
-        const options = (excludeId) => eligible
-            .filter((u) => String(u.id) !== String(excludeId))
-            .map((u) => `<option value="${u.id}">${u.username} (${u.role_code})</option>`).join('');
-
-        const p1Select = UI.el('select', { id: 'opname-assign-p1', html: `<option value="">- pilih P1 -</option>${options(session.p2_user_id)}` });
-        const p2Select = UI.el('select', { id: 'opname-assign-p2', html: `<option value="">- pilih P2 -</option>${options(session.p1_user_id)}` });
-        if (session.p1_user_id) p1Select.value = String(session.p1_user_id);
-        if (session.p2_user_id) p2Select.value = String(session.p2_user_id);
-
-        // Reassigning a role once that person has already submitted a
-        // blind count is refused server-side (assertRoleNotYetSubmitted) —
-        // this form doesn't try to predict that, it just surfaces whatever
-        // error the server returns.
-        const saveBtn = UI.el('button', { class: 'btn btn-primary btn-sm', id: 'opname-assign-save-btn' }, 'Simpan Penugasan');
         const alertBox = UI.el('div');
-        saveBtn.addEventListener('click', async () => {
-            const assignments = {};
-            if (p1Select.value) assignments.p1_user_id = Number(p1Select.value);
-            if (p2Select.value) assignments.p2_user_id = Number(p2Select.value);
-            alertBox.innerHTML = '';
-            try {
-                await InvApi.assignOpnameCounters(session.id, assignments);
-                UI.toast('Petugas P1/P2 berhasil ditugaskan.', 'success');
-                await renderSession(session.id);
-            } catch (err) {
-                alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal menugaskan petugas.'));
-            }
-        });
-
-        card.appendChild(UI.el('div', { class: 'grid-3' }, [
-            UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Petugas 1 (P1)'), p1Select]),
-            UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Petugas 2 (P2)'), p2Select]),
-            UI.el('div', { style: 'align-self:flex-end;' }, [saveBtn]),
-        ]));
+        const teamsHost = UI.el('div', { class: 'grid-2' });
+        card.appendChild(teamsHost);
         card.appendChild(UI.el('div', { style: 'color:var(--text3); font-size:0.85rem; margin-top:4px;' },
-            'P1 dan P2 harus orang berbeda — server menolak jika sama. Setelah seseorang mulai menghitung, perannya tidak bisa dipindah ke orang lain.'));
+            'ANY user aktif dapat ditugaskan — kewenangan menghitung berasal dari penugasan sesi ini, bukan dari peran global akun. Satu orang tidak bisa berada di Tim P1 dan Tim P2 sekaligus.'));
         card.appendChild(alertBox);
+
+        function buildTeamEditor(role, label) {
+            const selected = new Set((currentTeams[role] || []).map((m) => String(m.user_id)));
+            const chipHost = UI.el('div', { style: 'display:flex; flex-wrap:wrap; gap:6px; margin:8px 0;' });
+            const addSelect = UI.el('select', { html: '<option value="">+ Tambah Petugas...</option>' });
+
+            function usernameOf(userId) {
+                const u = eligible.find((e) => String(e.id) === String(userId));
+                if (u) return u.username;
+                const cur = (currentTeams[role] || []).find((m) => String(m.user_id) === String(userId));
+                return cur ? cur.username : `user #${userId}`;
+            }
+
+            function renderChips() {
+                chipHost.innerHTML = '';
+                selected.forEach((uid) => {
+                    const chip = UI.el('span', { class: 'badge badge-received', style: 'display:inline-flex; align-items:center; gap:6px;' }, [
+                        document.createTextNode(usernameOf(uid)),
+                        UI.el('button', { type: 'button', style: 'border:none; background:none; color:inherit; cursor:pointer; font-weight:700; padding:0;' }, '×'),
+                    ]);
+                    chip.lastChild.addEventListener('click', () => { selected.delete(uid); renderChips(); renderOptions(); });
+                    chipHost.appendChild(chip);
+                });
+            }
+            function renderOptions() {
+                const opts = eligible.filter((u) => !selected.has(String(u.id)));
+                addSelect.innerHTML = '<option value="">+ Tambah Petugas...</option>' + opts.map((u) =>
+                    `<option value="${u.id}">${u.username} (${u.role_code}${u.same_warehouse ? '' : ' — gudang lain'})</option>`).join('');
+            }
+            addSelect.addEventListener('change', () => {
+                if (addSelect.value) { selected.add(addSelect.value); renderChips(); renderOptions(); addSelect.value = ''; }
+            });
+            renderChips();
+            renderOptions();
+
+            const saveBtn = UI.el('button', { class: 'btn btn-primary btn-sm' }, `Simpan Tim ${label}`);
+            saveBtn.addEventListener('click', async () => {
+                alertBox.innerHTML = '';
+                try {
+                    await InvApi.assignOpnameTeam(session.id, role, Array.from(selected).map(Number));
+                    UI.toast(`Tim ${label} berhasil disimpan.`, 'success');
+                    await renderSession(session.id);
+                } catch (err) {
+                    alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || `Gagal menyimpan Tim ${label}.`));
+                }
+            });
+
+            return UI.el('div', { class: 'form-group', style: 'border:1px solid var(--border); border-radius:8px; padding:10px;' }, [
+                UI.el('label', {}, `Tim ${label} (${selected.size} petugas)`),
+                chipHost, addSelect,
+                UI.el('div', { style: 'margin-top:8px;' }, [saveBtn]),
+            ]);
+        }
+
+        teamsHost.appendChild(buildTeamEditor('p1', 'P1'));
+        teamsHost.appendChild(buildTeamEditor('p2', 'P2'));
         return card;
     }
 
@@ -251,19 +287,31 @@ const StockOpname = (() => {
         return '<option value="ALL">Semua Kategori</option>' + cats.map((c) => `<option value="${c.id}">${c.name}</option>`).join('');
     }
 
+    // PHASE V2.14.10 — REWRITTEN for append-only multi-unit findings.
+    // Two-pane layout (list left, count panel right — collapses to a
+    // single stacked column on phones via .opname-counter-split's own
+    // media query): the list is now read-only status display (search/
+    // filter/pagination unchanged from V2.14.9), the count panel is
+    // rendered ONCE for whichever single item is currently claimed/
+    // selected — never one input row per SKU in the table itself, so
+    // 1000+ rows still render as a plain compact list.
     function buildBlindCountScreen(initialView) {
         const PAGE_SIZE = 50;
-        const state = { view: initialView, filterText: '', filterStatus: 'ALL', filterItemStatus: 'ALL', filterCategory: 'ALL', page: 0 };
+        const state = {
+            view: initialView, filterText: '', filterStatus: 'ALL', filterItemStatus: 'ALL', filterCategory: 'ALL', page: 0,
+            activeItemId: null, unitsCache: {},
+        };
 
         const wrap = UI.el('div');
         const bannerHost = UI.el('div');
         const progressHost = UI.el('div', { class: 'card' });
         const searchInput = UI.el('input', { type: 'text', placeholder: 'Cari SKU/nama/barcode, atau scan...', class: 'opname-blind-search' });
         const scanBtn = UI.el('button', { type: 'button', class: 'btn btn-secondary btn-sm' }, '📷 Scan');
+        const nextItemBtn = UI.el('button', { type: 'button', class: 'btn btn-primary btn-sm' }, '➡️ Ambil Item Berikutnya');
         const filterSelect = UI.el('select', { id: 'opname-blind-filter', html: `
             <option value="ALL">Semua</option>
             <option value="PENDING">Belum Dihitung</option>
-            <option value="COUNTED">Sudah Dihitung</option>
+            <option value="COUNTED">Sudah Ada Temuan</option>
         ` });
         const itemStatusSelect = UI.el('select', { id: 'opname-blind-item-status', html: `
             <option value="ALL">Semua Status Item</option>
@@ -273,29 +321,33 @@ const StockOpname = (() => {
         const categorySelect = UI.el('select', { id: 'opname-blind-category', html: categoryFilterOptionsHtml() });
         const tbody = UI.el('tbody', {});
         const pagerHost = UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center; margin-top:10px; flex-wrap:wrap; gap:8px;' });
+        const listHost = UI.el('div', { class: 'opname-counter-list' }, [
+            UI.el('div', { class: 'card', style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap;' }, [
+                UI.el('div', { style: 'flex:1 1 220px;' }, [searchInput]),
+                UI.el('div', { style: 'width:170px;' }, [filterSelect]),
+                UI.el('div', { style: 'width:160px;' }, [itemStatusSelect]),
+                UI.el('div', { style: 'width:180px;' }, [categorySelect]),
+                scanBtn, nextItemBtn,
+            ]),
+            UI.el('div', { class: 'compact-table-wrap' }, [
+                UI.el('table', { class: 'compact-table' }, [
+                    UI.el('thead', {}, [UI.el('tr', {}, ['No', 'SKU / Barang', 'Kategori', 'Status', 'Terakhir Diinput', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
+                    tbody,
+                ]),
+            ]),
+            pagerHost,
+        ]);
+        const panelHost = UI.el('div', { class: 'opname-counter-panel card' });
 
         wrap.appendChild(bannerHost);
         wrap.appendChild(progressHost);
-        wrap.appendChild(UI.el('div', { class: 'card', style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap;' }, [
-            UI.el('div', { style: 'flex:1 1 220px;' }, [searchInput]),
-            UI.el('div', { style: 'width:170px;' }, [filterSelect]),
-            UI.el('div', { style: 'width:160px;' }, [itemStatusSelect]),
-            UI.el('div', { style: 'width:180px;' }, [categorySelect]),
-            scanBtn,
-        ]));
-        wrap.appendChild(UI.el('div', { class: 'compact-table-wrap' }, [
-            UI.el('table', { class: 'compact-table' }, [
-                UI.el('thead', {}, [UI.el('tr', {}, ['No', 'SKU / Barang', 'Kategori', 'Qty Hitung', 'Rusak', 'Expired', 'Deadstock', 'Keterangan', 'Status', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
-                tbody,
-            ]),
-        ]));
-        wrap.appendChild(pagerHost);
+        wrap.appendChild(UI.el('div', { class: 'opname-counter-split' }, [listHost, panelHost]));
 
         // Blindness note: every field this filters/searches on
         // (sku/name/item_status/category_id, plus barcode joined from
         // Master's own already-loaded item cache) is either already public
-        // master data or this counter's OWN prior submission — nothing
-        // here reads system_qty_base or the other counter's values.
+        // master data or this counter's OWN TEAM'S prior findings — nothing
+        // here reads system_qty_base or the other team's values.
         function filteredLines() {
             const q = state.filterText.trim().toLowerCase();
             return state.view.lines.filter((l) => {
@@ -312,11 +364,11 @@ const StockOpname = (() => {
         function renderChrome() {
             bannerHost.innerHTML = '';
             bannerHost.appendChild(UI.el('div', { class: 'banner-lock' },
-                `🔒 STOCK OPNAME — Sesi ${state.view.session_number || state.view.session_id} — Anda login sebagai ${state.view.role.toUpperCase()} (Hitung Fisik Independen/Blind).`));
+                `🔒 STOCK OPNAME — Sesi ${state.view.session_number || state.view.session_id} — Anda login sebagai Tim ${state.view.role.toUpperCase()} (Hitung Fisik Independen/Blind).`));
 
             const progressPct = state.view.progress.total > 0 ? Math.round((state.view.progress.counted / state.view.progress.total) * 100) : 0;
             progressHost.innerHTML = '';
-            progressHost.appendChild(UI.el('div', { class: 'card-title' }, `Progress ${state.view.role.toUpperCase()}: ${state.view.progress.counted} / ${state.view.progress.total}`));
+            progressHost.appendChild(UI.el('div', { class: 'card-title' }, `Progress Tim ${state.view.role.toUpperCase()}: ${state.view.progress.counted} / ${state.view.progress.total}`));
             progressHost.appendChild(UI.el('div', { style: 'height:10px; background:var(--border); border-radius:6px; overflow:hidden; margin-top:6px;' }, [
                 UI.el('div', { style: `height:100%; width:${progressPct}%; background:var(--primary, #2563eb);` }),
             ]));
@@ -331,9 +383,9 @@ const StockOpname = (() => {
 
             tbody.innerHTML = '';
             if (pageLines.length === 0) {
-                tbody.appendChild(UI.el('tr', {}, [UI.el('td', { colspan: '10' }, 'Tidak ada barang yang cocok.')]));
+                tbody.appendChild(UI.el('tr', {}, [UI.el('td', { colspan: '6' }, 'Tidak ada barang yang cocok.')]));
             } else {
-                pageLines.forEach((line, i) => tbody.appendChild(buildBlindCountRowEl(state, line, start + i + 1)));
+                pageLines.forEach((line, i) => tbody.appendChild(buildBlindCountRowEl(state, line, start + i + 1, selectItem)));
             }
 
             pagerHost.innerHTML = '';
@@ -350,12 +402,11 @@ const StockOpname = (() => {
         itemStatusSelect.addEventListener('change', () => { state.filterItemStatus = itemStatusSelect.value; state.page = 0; renderTable(); });
         categorySelect.addEventListener('change', () => { state.filterCategory = categorySelect.value; state.page = 0; renderTable(); });
         scanBtn.addEventListener('click', () => openScanModal(state, jumpToItem));
+        nextItemBtn.addEventListener('click', claimNextItem);
 
         // Re-fetches the SAME getOpname(sessionId) call renderSession()
         // itself uses, but patches state.view / re-renders THIS screen in
-        // place — preserving the operator's current search/filter/page
-        // (a full renderSession() call would reset all three on every
-        // single save, breaking the "next pending item" fast-entry flow).
+        // place — preserving the operator's current search/filter/page.
         async function refetch() {
             const fresh = await InvApi.getOpname(state.view.session_id);
             state.view = fresh;
@@ -366,9 +417,6 @@ const StockOpname = (() => {
         function jumpToItem(itemId) {
             const globalIdx = state.view.lines.findIndex((l) => l.item_id === itemId);
             if (globalIdx === -1) return false;
-            // Reset every active filter so a scanned item is never hidden
-            // by whatever search/status/category/item-status the operator
-            // had set before scanning.
             state.filterText = '';
             state.filterStatus = 'ALL';
             state.filterItemStatus = 'ALL';
@@ -379,141 +427,207 @@ const StockOpname = (() => {
             categorySelect.value = 'ALL';
             state.page = Math.floor(globalIdx / PAGE_SIZE);
             renderTable();
-            const row = tbody.querySelector(`tr[data-item-id="${itemId}"]`);
-            if (row) {
-                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                const qtyInput = row.querySelector('.opname-blind-qty-input');
-                if (qtyInput) qtyInput.focus();
-            }
+            selectItem(itemId);
             return true;
         }
 
-        // After a successful save, focus the workflow forward: the next
-        // PENDING item under the CURRENT filter/search (so a counter
-        // working through "Belum Dihitung" stays in that flow), or if the
-        // current filter excludes it, just re-render the same page.
-        function focusNextPending(afterItemId) {
-            const filtered = filteredLines();
-            const idx = filtered.findIndex((l) => l.item_id === afterItemId);
-            const next = filtered.slice(idx + 1).find((l) => !l.is_counted_by_me && !l.is_excluded)
-                || filtered.find((l) => !l.is_counted_by_me && !l.is_excluded);
-            if (!next) return;
-            const globalIdxInFiltered = filtered.indexOf(next);
-            state.page = Math.floor(globalIdxInFiltered / PAGE_SIZE);
-            renderTable();
-            const row = tbody.querySelector(`tr[data-item-id="${next.item_id}"]`);
-            const qtyInput = row && row.querySelector('.opname-blind-qty-input');
-            if (qtyInput) qtyInput.focus();
-        }
-
-        // PHASE V2.14.9 — conditionInputs is optional: {rusakInput,
-        // expiredInput, deadstockInput, notesInput}. All fields (qty +
-        // classification + note) are submitted together in this one
-        // write-once save action — never a separate mutation afterward.
-        async function saveCount(line, qtyInput, saveBtn, alertBox, conditionInputs) {
-            if (qtyInput.value === '') { UI.toast('Isi jumlah fisik terlebih dahulu.', 'error'); return; }
-            const ci = conditionInputs || {};
-            const conditions = {
-                // PHASE V2.14.9.2 — always an explicit number, never null:
-                // inputs default to '0' and stay that way unless the
-                // counter types something else; a manually-cleared field
-                // (edge case) falls back to 0 rather than sending blank,
-                // since the backend now REJECTS a missing/blank value for
-                // a new submission (validateConditions()).
-                rusak_qty: Number((ci.rusakInput && ci.rusakInput.value) || 0),
-                expired_qty: Number((ci.expiredInput && ci.expiredInput.value) || 0),
-                deadstock_qty: Number((ci.deadstockInput && ci.deadstockInput.value) || 0),
-                notes: ci.notesInput ? ci.notesInput.value : null,
-            };
-            saveBtn.disabled = true;
-            alertBox.innerHTML = '';
+        // Claims $itemId (or, if omitted, whatever the server picks as
+        // "next available" — see StockOpnameService::claimItem()) for THIS
+        // team, then opens the count panel on it. A conflict (someone on
+        // the same team currently holds a live claim) surfaces the exact
+        // server message ("sedang dihitung oleh ...") rather than silently
+        // opening the panel anyway.
+        async function selectItem(itemId) {
             try {
-                await InvApi.submitOpnameCount(state.view.session_id, state.view.role, line.item_id, Number(qtyInput.value), conditions);
-                UI.toast(`Tersimpan: ${line.sku} = ${qtyInput.value}`, 'success');
+                const claim = await InvApi.claimOpnameItem(state.view.session_id, state.view.role, itemId);
+                state.activeItemId = claim.item_id;
                 await refetch();
-                focusNextPending(line.item_id);
+                await renderPanel();
+                panelHost.scrollIntoView({ behavior: 'smooth', block: 'start' });
             } catch (err) {
-                alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal menyimpan.'));
-                saveBtn.disabled = false;
+                UI.handleApiError(err);
+                UI.toast((err && err.message) || 'Barang tidak tersedia untuk diklaim.', 'error');
             }
         }
-        // Exposed on state so buildBlindCountRowEl (a sibling function,
-        // not a closure over this one) can call back into the save flow.
-        state.saveCount = saveCount;
+
+        async function claimNextItem() {
+            await selectItem(null);
+        }
+
+        async function closePanel() {
+            if (state.activeItemId !== null) {
+                try { await InvApi.releaseOpnameItem(state.view.session_id, state.view.role, state.activeItemId); } catch (err) { /* best-effort */ }
+            }
+            state.activeItemId = null;
+            await refetch();
+            renderPanelEmpty();
+        }
+
+        function renderPanelEmpty() {
+            panelHost.innerHTML = '';
+            panelHost.appendChild(UI.el('div', { class: 'alert alert-info' }, 'Pilih barang dari daftar ("Hitung"), scan barcode, atau klik "Ambil Item Berikutnya" untuk mulai menghitung.'));
+        }
+
+        async function renderPanel() {
+            const line = state.view.lines.find((l) => l.item_id === state.activeItemId);
+            if (!line) { renderPanelEmpty(); return; }
+
+            let units = state.unitsCache[state.activeItemId];
+            if (!units) {
+                try {
+                    units = await InvApi.itemUnits(state.activeItemId);
+                    state.unitsCache[state.activeItemId] = units;
+                } catch (err) {
+                    UI.handleApiError(err);
+                    units = [];
+                }
+            }
+            const baseUnitCode = line.base_unit_code;
+
+            panelHost.innerHTML = '';
+            panelHost.appendChild(UI.el('div', { class: 'card-title' }, `${line.sku} — ${line.name}`));
+            panelHost.appendChild(UI.el('div', { style: 'color:var(--text3); font-size:0.85rem; margin-bottom:8px;' }, `Kategori: ${categoryNameOf(line.category_id)}`));
+
+            const closeBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, '‹ Kembali ke Daftar');
+            closeBtn.addEventListener('click', closePanel);
+            panelHost.appendChild(closeBtn);
+
+            const unitInputs = {};
+            const unitInputsHost = UI.el('div', { style: 'margin-top:12px;' });
+            units.forEach((u) => {
+                const input = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', placeholder: '0' });
+                unitInputs[u.id] = input;
+                unitInputsHost.appendChild(UI.el('div', { class: 'opname-unit-input-row' }, [
+                    UI.el('label', {}, `${u.code} (${u.name})`), input,
+                ]));
+            });
+            panelHost.appendChild(unitInputsHost);
+
+            const totalHost = UI.el('div', { class: 'opname-total-otomatis' });
+            function recomputeTotalPreview() {
+                let total = 0;
+                units.forEach((u) => { total += (Number(unitInputs[u.id].value) || 0) * Number(u.conversion_to_base); });
+                totalHost.textContent = `Total Otomatis (dalam satuan dasar: ${baseUnitCode}): ${UI.formatNumber(total)}`;
+            }
+            Object.values(unitInputs).forEach((inp) => inp.addEventListener('input', recomputeTotalPreview));
+            recomputeTotalPreview();
+            panelHost.appendChild(totalHost);
+
+            // PHASE V2.14.9.2/.3 — EXPLICIT ZERO, per finding (unchanged rule,
+            // now applied to each individual Tambah Temuan event).
+            const rusakInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', value: '0' });
+            const expiredInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', value: '0' });
+            const deadstockInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', value: '0' });
+            const notesInput = UI.el('input', { type: 'text', placeholder: 'Keterangan (opsional)' });
+            panelHost.appendChild(UI.el('div', { class: 'grid-3', style: 'margin-top:8px;' }, [
+                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Rusak'), rusakInput]),
+                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Expired'), expiredInput]),
+                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Deadstock'), deadstockInput]),
+            ]));
+            panelHost.appendChild(UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Keterangan'), notesInput]));
+
+            // Riwayat Temuan — THIS TEAM's own history only (already
+            // structurally guaranteed by getForCounter() never returning
+            // the other team's data at all).
+            const findingsHost = UI.el('div', { style: 'margin-top:10px; border:1px solid var(--border); border-radius:8px;' });
+            findingsHost.appendChild(UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center; padding:6px 10px; font-weight:600;' }, [
+                document.createTextNode('Riwayat Temuan (Tim)'),
+            ]));
+            if (line.findings.length === 0) {
+                findingsHost.appendChild(UI.el('div', { style: 'padding:8px 10px; color:var(--text3); font-size:0.85rem;' }, 'Belum ada temuan untuk barang ini.'));
+            } else {
+                line.findings.forEach((f, idx) => {
+                    const unitBreakdown = f.units.map((u) => `${UI.formatNumber(u.input_qty)} ${u.unit_code}`).join(' + ');
+                    findingsHost.appendChild(UI.el('div', { class: 'opname-finding-row' }, [
+                        UI.el('div', {}, `Temuan ${idx + 1}: ${unitBreakdown} = ${UI.formatNumber(f.base_qty)} ${baseUnitCode} — oleh ${f.counter_username}`),
+                        UI.el('div', { style: 'color:var(--text3);' }, f.created_at),
+                    ]));
+                });
+            }
+            const totalAkumulasi = line.findings.reduce((sum, f) => sum + f.base_qty, 0);
+            findingsHost.appendChild(UI.el('div', { class: 'compact-summary', style: 'padding:8px 10px;' }, [
+                UI.el('div', {}, [document.createTextNode('Total Akumulasi Tim: '), UI.el('b', {}, `${UI.formatNumber(totalAkumulasi)} ${baseUnitCode}`)]),
+            ]));
+            panelHost.appendChild(findingsHost);
+
+            const alertBox = UI.el('div');
+            panelHost.appendChild(alertBox);
+
+            async function submitFinding(keepPanelOpen) {
+                const inputsWithValues = units.filter((u) => Number(unitInputs[u.id].value) > 0);
+                if (inputsWithValues.length === 0) {
+                    UI.toast('Isi minimal satu satuan qty.', 'error');
+                    return;
+                }
+                const unitPayload = inputsWithValues.map((u) => ({ unit_id: u.id, qty: Number(unitInputs[u.id].value) }));
+                const conditions = {
+                    rusak_qty: Number(rusakInput.value || 0),
+                    expired_qty: Number(expiredInput.value || 0),
+                    deadstock_qty: Number(deadstockInput.value || 0),
+                    notes: notesInput.value || null,
+                };
+                alertBox.innerHTML = '';
+                try {
+                    await InvApi.submitOpnameFinding(state.view.session_id, state.view.role, state.activeItemId, unitPayload, conditions);
+                    UI.toast('Temuan tersimpan.', 'success');
+                    await refetch();
+                    if (keepPanelOpen) {
+                        await renderPanel(); // stays on same item, inputs reset (fresh DOM)
+                    } else {
+                        state.activeItemId = null;
+                        renderPanelEmpty();
+                    }
+                } catch (err) {
+                    alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal menyimpan temuan.'));
+                }
+            }
+
+            const addFindingBtn = UI.el('button', { class: 'btn btn-secondary' }, '+ Tambah Temuan');
+            const saveBtn = UI.el('button', { class: 'btn btn-primary' }, '💾 Simpan Hitungan');
+            addFindingBtn.addEventListener('click', () => submitFinding(true));
+            saveBtn.addEventListener('click', () => submitFinding(false));
+            panelHost.appendChild(UI.el('div', { class: 'opname-sticky-actions' }, [addFindingBtn, saveBtn]));
+        }
 
         renderChrome();
         renderTable();
+        renderPanelEmpty();
         return wrap;
     }
 
-    // One compact <tr> per session line — status is derived ONLY from
-    // is_counted_by_me/is_excluded (fields already on the blind view;
-    // never a system/theoretical quantity, which this shape never
-    // carries in the first place).
-    function buildBlindCountRowEl(state, line, rowNo) {
+    // One compact <tr> per session line — no inline inputs at all
+    // (V2.14.10: input happens exclusively in the count panel, opened via
+    // this row's "Hitung" button). Status is derived ONLY from
+    // is_counted_by_me/is_excluded/claimed_by_* (fields already on the
+    // blind view; never a system/theoretical quantity, which this shape
+    // never carries in the first place).
+    function buildBlindCountRowEl(state, line, rowNo, selectItem) {
         const row = UI.el('tr', { 'data-item-id': String(line.item_id) });
         row.appendChild(UI.el('td', { class: 'compact-col-no' }, String(rowNo)));
         row.appendChild(UI.el('td', { class: 'compact-col-item' }, `${line.sku} — ${line.name}`));
         row.appendChild(UI.el('td', {}, categoryNameOf(line.category_id)));
 
         if (line.is_excluded) {
-            row.appendChild(UI.el('td', {}, '-'));
-            row.appendChild(UI.el('td', {}, '-'));
-            row.appendChild(UI.el('td', {}, '-'));
-            row.appendChild(UI.el('td', {}, '-'));
-            row.appendChild(UI.el('td', {}, '-'));
             row.appendChild(UI.el('td', {}, [UI.el('span', { class: 'badge badge-cancelled' }, 'Dikecualikan')]));
             row.appendChild(UI.el('td', {}, '-'));
-            return row;
-        }
-        // Already counted BY ME: show my own read-only classification —
-        // never an input again (write-once), never the other counter's or
-        // any resolved/final value (this is still the blind view).
-        if (line.is_counted_by_me) {
-            row.appendChild(UI.el('td', {}, UI.formatNumber(line.my_qty_base)));
-            row.appendChild(UI.el('td', {}, line.my_rusak_qty !== null ? UI.formatNumber(line.my_rusak_qty) : '-'));
-            row.appendChild(UI.el('td', {}, line.my_expired_qty !== null ? UI.formatNumber(line.my_expired_qty) : '-'));
-            row.appendChild(UI.el('td', {}, line.my_deadstock_qty !== null ? UI.formatNumber(line.my_deadstock_qty) : '-'));
-            row.appendChild(UI.el('td', {}, line.my_notes || '-'));
-            row.appendChild(UI.el('td', {}, [UI.el('span', { class: 'badge badge-received' }, 'Tersimpan')]));
             row.appendChild(UI.el('td', {}, '-'));
             return row;
         }
 
-        const qtyInput = UI.el('input', {
-            type: 'number', step: 'any', min: '0', inputmode: 'decimal', placeholder: 'Qty fisik...',
-            class: 'opname-blind-qty-input',
-        });
-        // PHASE V2.14.9.2 — EXPLICIT ZERO: these three fields start with a
-        // real value="0" (never blank/placeholder-only), so a counter who
-        // never touches them still submits an explicit "I found none" 0,
-        // not an ambiguous absence the backend could confuse with "not
-        // asked". saveCount() below also guards against a manually-
-        // cleared field by falling back to 0 rather than sending blank.
-        const rusakInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', value: '0', class: 'opname-blind-rusak-input', style: 'width:80px;' });
-        const expiredInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', value: '0', class: 'opname-blind-expired-input', style: 'width:80px;' });
-        const deadstockInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', value: '0', class: 'opname-blind-deadstock-input', style: 'width:80px;' });
-        const notesInput = UI.el('input', { type: 'text', placeholder: 'Keterangan (opsional)', class: 'opname-blind-notes-input', style: 'width:140px;' });
-        const saveBtn = UI.el('button', { class: 'btn btn-primary btn-sm compact-row-btn' }, 'Simpan');
-        const alertBox = UI.el('div');
-        const conditionInputs = { rusakInput, expiredInput, deadstockInput, notesInput };
-        saveBtn.addEventListener('click', () => state.saveCount(line, qtyInput, saveBtn, alertBox, conditionInputs));
-        // Fast-entry: Enter on the qty field saves immediately (never the
-        // whole-transaction submit — there is no such single action on
-        // this per-line-saved screen to accidentally trigger).
-        qtyInput.addEventListener('keydown', (e) => {
-            if (e.key !== 'Enter') return;
-            e.preventDefault();
-            state.saveCount(line, qtyInput, saveBtn, alertBox, conditionInputs);
-        });
+        let statusBadge;
+        if (line.is_counted_by_me) {
+            statusBadge = UI.el('span', { class: 'badge badge-received' }, `Ada Temuan (${UI.formatNumber(line.my_qty_base)} ${line.base_unit_code})`);
+        } else if (line.claimed_by_teammate_username) {
+            statusBadge = UI.el('span', { class: 'badge badge-pending' }, `Sedang dihitung oleh ${line.claimed_by_teammate_username}`);
+        } else {
+            statusBadge = UI.el('span', { class: 'badge badge-pending' }, 'Belum Dihitung');
+        }
+        row.appendChild(UI.el('td', {}, [statusBadge]));
+        row.appendChild(UI.el('td', {}, line.my_submitted_at || '-'));
 
-        row.appendChild(UI.el('td', { class: 'compact-col-qty' }, [qtyInput, alertBox]));
-        row.appendChild(UI.el('td', {}, [rusakInput]));
-        row.appendChild(UI.el('td', {}, [expiredInput]));
-        row.appendChild(UI.el('td', {}, [deadstockInput]));
-        row.appendChild(UI.el('td', {}, [notesInput]));
-        row.appendChild(UI.el('td', {}, [UI.el('span', { class: 'badge badge-pending' }, 'Belum')]));
-        row.appendChild(UI.el('td', {}, [saveBtn]));
+        const hitungBtn = UI.el('button', { class: 'btn btn-primary btn-sm compact-row-btn' }, line.is_counted_by_me ? 'Tambah Temuan' : 'Hitung');
+        hitungBtn.addEventListener('click', () => selectItem(line.item_id));
+        row.appendChild(UI.el('td', {}, [hitungBtn]));
         return row;
     }
 
@@ -602,6 +716,27 @@ const StockOpname = (() => {
             ]));
         });
         wrap.appendChild(kpiBox);
+
+        // PHASE V2.14.10 — Team Progress panel: members / total / counted /
+        // remaining / % per role, plus an optional per-member breakdown
+        // (operational visibility only — never surfaced as a performance
+        // judgment).
+        if (review.team_progress) {
+            const teamBox = UI.el('div', { class: 'grid-2', style: 'margin-bottom:12px;' });
+            ['p1', 'p2'].forEach((role) => {
+                const tp = review.team_progress[role];
+                if (!tp) return;
+                const memberNames = tp.members.map((m) => m.username).join(', ') || '(belum ditugaskan)';
+                const perMemberList = (tp.per_member || []).map((pm) => UI.el('div', { style: 'font-size:0.8rem; color:var(--text3);' }, `${pm.username}: ${pm.counted} SKU`));
+                teamBox.appendChild(UI.el('div', { class: 'card', style: 'margin-bottom:0;' }, [
+                    UI.el('div', { class: 'card-title', style: 'font-size:0.9rem;' }, `Tim ${role.toUpperCase()} (${tp.members.length} petugas)`),
+                    UI.el('div', { style: 'font-size:0.85rem; color:var(--text2); margin-bottom:6px;' }, memberNames),
+                    UI.el('div', {}, `${tp.counted} / ${tp.total} dihitung (${tp.progress_pct}%) — sisa ${tp.remaining}`),
+                    ...perMemberList,
+                ]));
+            });
+            wrap.appendChild(teamBox);
+        }
 
         const reviewState = { text: '', itemStatus: 'ALL', category: 'ALL', status: 'ALL' };
         const searchInput = UI.el('input', { type: 'text', placeholder: 'Cari SKU/nama/barcode...', id: 'opname-review-search' });
@@ -706,8 +841,10 @@ const StockOpname = (() => {
             UI.el('td', {}, `${l.sku} — ${l.name}`),
             UI.el('td', {}, categoryNameOf(l.category_id)),
             UI.el('td', {}, UI.formatNumber(l.system_qty_base)),
-            UI.el('td', {}, l.p1_qty_base !== null ? UI.formatNumber(l.p1_qty_base) : '-'),
-            UI.el('td', {}, l.p2_qty_base !== null ? UI.formatNumber(l.p2_qty_base) : '-'),
+            // PHASE V2.14.10 — "who counted P1 / who counted P2" caption,
+            // essential once a team can hold more than one member.
+            UI.el('td', {}, l.p1_qty_base !== null ? `${UI.formatNumber(l.p1_qty_base)}${l.p1_counter_username ? ` (${l.p1_counter_username})` : ''}` : '-'),
+            UI.el('td', {}, l.p2_qty_base !== null ? `${UI.formatNumber(l.p2_qty_base)}${l.p2_counter_username ? ` (${l.p2_counter_username})` : ''}` : '-'),
             UI.el('td', {}, diffP1P2),
             UI.el('td', {}, pairText(l.p1_rusak_qty, l.p2_rusak_qty)),
             UI.el('td', {}, pairText(l.p1_expired_qty, l.p2_expired_qty)),
@@ -737,6 +874,14 @@ const StockOpname = (() => {
             const resolveBtn = UI.el('button', { class: 'btn btn-danger btn-sm', style: 'margin-left:6px;' }, 'Resolusi Kondisi');
             resolveBtn.addEventListener('click', () => resolveConditionsItem(session.id, l));
             actionCell.appendChild(resolveBtn);
+        }
+        // PHASE V2.14.10 — full finding drilldown (both teams, including
+        // voided entries) — supervisor-only data, already scoped that way
+        // by review() itself.
+        if ((l.p1_findings && l.p1_findings.length) || (l.p2_findings && l.p2_findings.length)) {
+            const findingsBtn = UI.el('button', { class: 'btn btn-secondary btn-sm', style: 'margin-left:6px;' }, 'Riwayat Temuan');
+            findingsBtn.addEventListener('click', () => showFindingsDrilldown(session.id, l));
+            actionCell.appendChild(findingsBtn);
         }
         cells.push(actionCell);
         const row = UI.el('tr', {}, cells);
@@ -838,6 +983,57 @@ const StockOpname = (() => {
             UI.toast('Resolusi kondisi tersimpan.', 'success');
             await renderSession(sessionId);
         } catch (err) { UI.handleApiError(err); }
+    }
+
+    // PHASE V2.14.10 — supervisor-only full finding drilldown, BOTH teams,
+    // including voided entries — the audit trail (Section "Supervisor
+    // View": "P1 finding details / P2 finding details ... who counted each
+    // finding / timestamps"). Voiding here is the ONLY correction path —
+    // a finding's own quantities are never editable.
+    function showFindingsDrilldown(sessionId, line) {
+        function renderTeamFindings(role, findings, overlayRef) {
+            if (!findings.length) return UI.el('div', { style: 'color:var(--text3); padding:6px 0;' }, `Belum ada temuan Tim ${role}.`);
+            const host = UI.el('div');
+            findings.forEach((f, idx) => {
+                const unitBreakdown = f.units.map((u) => `${UI.formatNumber(u.input_qty)} ${u.unit_code}`).join(' + ');
+                const rowEl = UI.el('div', { class: `opname-finding-row${f.is_voided ? ' is-voided' : ''}` }, [
+                    UI.el('div', {}, `Temuan ${idx + 1}: ${unitBreakdown} = ${UI.formatNumber(f.base_qty)} — oleh ${f.counter_username} — ${f.created_at}${f.is_voided ? ` (VOID: ${f.void_reason})` : ''}`),
+                ]);
+                if (!f.is_voided) {
+                    const voidBtn = UI.el('button', { class: 'btn btn-danger btn-sm' }, 'Void');
+                    voidBtn.addEventListener('click', async () => {
+                        const reason = await Modal.prompt({ title: `Void Temuan #${f.id}`, label: 'Alasan void (wajib)', required: true });
+                        if (reason === null) return;
+                        try {
+                            await InvApi.voidOpnameFinding(sessionId, f.id, reason);
+                            UI.toast('Temuan di-void.', 'success');
+                            overlayRef.remove();
+                            await renderSession(sessionId);
+                        } catch (err) { UI.handleApiError(err); }
+                    });
+                    rowEl.appendChild(voidBtn);
+                }
+                host.appendChild(rowEl);
+            });
+            return host;
+        }
+
+        const closeBtn = UI.el('button', { class: 'btn btn-secondary' }, 'Tutup');
+        const overlay = UI.el('div', { class: 'modal open' });
+        const bodyHost = UI.el('div');
+        const content = UI.el('div', { class: 'modal-content' }, [
+            UI.el('h3', {}, `Riwayat Temuan — ${line.sku}`),
+            bodyHost,
+            UI.el('div', { style: 'display:flex; justify-content:flex-end; margin-top:14px;' }, [closeBtn]),
+        ]);
+        overlay.appendChild(content);
+        document.body.appendChild(overlay);
+        bodyHost.appendChild(UI.el('div', { class: 'card-title', style: 'font-size:0.9rem;' }, 'Tim P1'));
+        bodyHost.appendChild(renderTeamFindings('P1', line.p1_findings || [], overlay));
+        bodyHost.appendChild(UI.el('div', { class: 'card-title', style: 'font-size:0.9rem; margin-top:12px;' }, 'Tim P2'));
+        bodyHost.appendChild(renderTeamFindings('P2', line.p2_findings || [], overlay));
+        closeBtn.addEventListener('click', () => overlay.remove());
+        overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) overlay.remove(); });
     }
 
     // ============================================================
@@ -975,5 +1171,74 @@ const StockOpname = (() => {
         } catch (err) { UI.handleApiError(err); }
     }
 
-    return { render };
+    // ============================================================
+    // PHASE V2.14.10 — "STOCK OPNAME SAYA": deliberately reachable by ANY
+    // active user regardless of global role/permission (see index.html's
+    // sidebar link — no data-require-permission attribute at all). Lists
+    // only sessions where the logged-in user personally has an active
+    // team membership; clicking one hands off straight into the SAME
+    // buildBlindCountScreen() the "Stock Opname" tab itself uses (via
+    // renderSession()), so there is exactly one counter-screen
+    // implementation, not two.
+    // ============================================================
+    async function renderMySessions(container) {
+        container.innerHTML = '<div class="alert alert-info">Memuat sesi Anda...</div>';
+        let sessions = [];
+        try {
+            sessions = await InvApi.myOpnameSessions();
+        } catch (err) {
+            UI.handleApiError(err);
+            container.innerHTML = '<div class="alert alert-error">Gagal memuat sesi Stock Opname Anda.</div>';
+            return;
+        }
+
+        container.innerHTML = '';
+        container.appendChild(UI.el('div', { class: 'card' }, [
+            UI.el('div', { class: 'card-title' }, '🙋 Stock Opname Saya'),
+            UI.el('div', { style: 'color:var(--text3); font-size:0.85rem;' }, 'Hanya sesi yang secara eksplisit menugaskan Anda sebagai Tim P1/P2 muncul di sini.'),
+        ]));
+
+        if (sessions.length === 0) {
+            container.appendChild(UI.el('div', { class: 'alert alert-info' }, 'Anda belum ditugaskan ke sesi Stock Opname manapun.'));
+            return;
+        }
+
+        sessions.forEach((s) => {
+            const pct = s.progress.total > 0 ? Math.round((s.progress.counted / s.progress.total) * 100) : 0;
+            const card = UI.el('div', { class: 'card' }, [
+                UI.el('div', { class: 'card-title' }, s.session_number || `Sesi #${s.session_id}`),
+                UI.el('div', {}, `Gudang: ${s.warehouse_name}`),
+                UI.el('div', {}, `Tim: ${s.role.toUpperCase()}`),
+                UI.el('div', {}, `Status: ${s.status}`),
+                UI.el('div', { style: 'margin:6px 0;' }, `Progress Tim: ${s.progress.counted} / ${s.progress.total} (${pct}%)`),
+            ]);
+            const goBtn = UI.el('button', { class: 'btn btn-primary btn-sm' }, s.progress.counted > 0 ? 'Lanjut Hitung' : 'Mulai Hitung');
+            goBtn.addEventListener('click', async () => {
+                // Reuses the exact same session-detail render path as the
+                // main "Stock Opname" tab — GET /stock-opname/{id} already
+                // resolves to this user's blind counter view server-side.
+                document.querySelectorAll('.sidebar-link').forEach((l) => l.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach((t) => t.classList.remove('active'));
+                const opnameTab = document.getElementById('tab-opname');
+                opnameTab.classList.add('active');
+                const bc = document.getElementById('breadcrumb-current');
+                if (bc) bc.textContent = 'Stock Opname';
+                // Ensure #opname-body (renderSession()'s mount point) exists
+                // — a user who reaches "Stock Opname Saya" without ever
+                // opening the main "Stock Opname" tab first never had this
+                // skeleton built. Built directly (not via render()) to
+                // avoid render()'s own loadForWarehouse() side effect
+                // racing against the renderSession() call right below.
+                if (!document.getElementById('opname-body')) {
+                    opnameTab.innerHTML = '';
+                    opnameTab.appendChild(UI.el('div', { id: 'opname-body' }));
+                }
+                await renderSession(s.session_id);
+            });
+            card.appendChild(goBtn);
+            container.appendChild(card);
+        });
+    }
+
+    return { render, renderMySessions };
 })();

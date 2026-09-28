@@ -466,6 +466,44 @@ function inv_so_resolve_warehouse_scope(array $user, ?int $requestedWarehouseId)
     return $requestedWarehouseId;
 }
 
+/**
+ * PHASE V2.14.10 — session-scoped counter authorization. "Counter
+ * authority comes from the SESSION ASSIGNMENT, not from promoting the
+ * person's global role": an ACTIVE user explicitly assigned to P1/P2 for
+ * THIS SPECIFIC session must be able to open it, claim/release a line,
+ * and submit a count for their own role — regardless of whether their
+ * global role holds STOCK_OPNAME_MANAGE at all, and regardless of the
+ * normal warehouse-scope rule (a supervisor may deliberately assign a
+ * counter across warehouses; the session's own warehouse is what they're
+ * counting, not their own users.warehouse_id).
+ *
+ * This grant is checked FRESH on every call (never cached on
+ * $_SESSION — the global role/permission set is untouched), is scoped to
+ * exactly the $sessionId passed in, and never widens beyond whatever the
+ * calling route does with the returned role — no other route, warehouse,
+ * or Stock Opname session is reachable through it. A caller who instead
+ * holds $permission globally (the pre-V2.14.10 SUPERADMIN/ADMIN/STOCK
+ * path) is reported as 'privileged' and the caller is expected to apply
+ * whatever additional check (e.g. inv_require_so_warehouse_scope) it
+ * always has.
+ *
+ * @return array{mode:'privileged'}|array{mode:'counter', role:string}
+ */
+function inv_require_so_counter_or_permission(PDO $pdo, array $user, int $sessionId, string $permission): array
+{
+    try {
+        $role = StockOpnameService::assertIsActiveCounter($pdo, $sessionId, (int) $user['id']);
+        return ['mode' => 'counter', 'role' => $role];
+    } catch (ValidationException $e) {
+        // Not an assigned counter for this session — fall through to the
+        // caller's own global-permission path.
+    }
+    if (!AuthService::hasPermission($pdo, $user['role_code'], $permission)) {
+        inv_error(403, 'FORBIDDEN', "Missing permission: {$permission}");
+    }
+    return ['mode' => 'privileged'];
+}
+
 function inv_require_division_scope(array $user, ?int $divisionId): void
 {
     try {
@@ -2818,11 +2856,16 @@ $routes = [
         inv_ok($stmt->fetchAll(), 'OK');
     },
 
-    // PHASE V2.12A: candidate P1/P2 users for a warehouse — anyone active,
-    // STOCK_OPNAME_MANAGE-holding, and either unscoped or scoped to this
-    // exact warehouse (the same rule StockOpnameService::assignCounters()
-    // itself enforces server-side; this route only helps the UI populate a
-    // dropdown, never the actual authorization decision).
+    // PHASE V2.14.10 — CORRECTED ELIGIBILITY: "ANY ACTIVE USER may be
+    // selected as a Stock Opname counter, provided they are explicitly
+    // assigned to that Stock Opname team. Counter authority comes from the
+    // SESSION ASSIGNMENT, not from promoting the person's global role."
+    // Every active user is listed (not just STOCK_OPNAME_MANAGE-holders);
+    // `same_warehouse` tells the UI which candidates are this warehouse's
+    // "usual" pool vs. a deliberate cross-warehouse assignment, but it is
+    // never a hard filter — the server-side authorization decision lives
+    // in StockOpnameService::assertCanCount()/assignTeamMembers(), not
+    // here (this route only helps the UI populate the multi-select).
     'GET /stock-opname/eligible-counters' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
@@ -2833,17 +2876,33 @@ $routes = [
         inv_require_so_warehouse_scope($user, $warehouseId);
 
         $stmt = $pdo->prepare(
-            "SELECT DISTINCT u.id, u.username, u.full_name, r.code AS role_code
+            "SELECT u.id, u.username, u.full_name, r.code AS role_code,
+                    (u.warehouse_id IS NULL OR u.warehouse_id = :wh) AS same_warehouse
              FROM users u
              JOIN roles r ON r.id = u.role_id
-             JOIN role_permissions rp ON rp.role_id = r.id
-             JOIN permissions p ON p.id = rp.permission_id
-             WHERE p.code = 'STOCK_OPNAME_MANAGE' AND u.is_active = 1
-               AND (u.warehouse_id IS NULL OR u.warehouse_id = :wh)
-             ORDER BY u.username"
+             WHERE u.is_active = 1
+             ORDER BY same_warehouse DESC, u.username"
         );
         $stmt->execute(['wh' => $warehouseId]);
-        inv_ok($stmt->fetchAll(), 'OK');
+        $rows = $stmt->fetchAll();
+        inv_ok(array_map(static fn (array $r): array => [
+            'id' => (int) $r['id'], 'username' => $r['username'], 'full_name' => $r['full_name'],
+            'role_code' => $r['role_code'], 'same_warehouse' => (bool) $r['same_warehouse'],
+        ], $rows), 'OK');
+    },
+
+    // PHASE V2.14.10 — "STOCK OPNAME SAYA": any authenticated active user
+    // may call this; it only ever returns sessions where THEY personally
+    // have an active team membership, across every warehouse — nothing
+    // about global role/permission gates this route, by design (mirrors
+    // GET /auth/me's "only ever about the caller themselves" safety).
+    // Defined BEFORE the 'GET /stock-opname/{id}' wildcard route below
+    // (the router matches {id} against ANY non-slash string, including
+    // "my-sessions" — same reason eligible-counters is also defined
+    // before it) so this static path is never shadowed.
+    'GET /stock-opname/my-sessions' => function () use ($pdo) {
+        $user = inv_require_auth();
+        inv_ok(StockOpnameService::mySessions($pdo, (int) $user['id']), 'OK');
     },
 
     // PHASE V2.12A: full detail (system qty, both P1/P2, match_status) is
@@ -2854,11 +2913,10 @@ $routes = [
     // exact route and see the other side's count (Section 4).
     'GET /stock-opname/{id}' => function (array $params) use ($pdo) {
         $user = inv_require_auth();
-        inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
 
         $sessionId = (int) $params['id'];
 
-        $scope = $pdo->prepare('SELECT warehouse_id, p1_user_id, p2_user_id FROM stock_opname_sessions WHERE id = :id');
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
         $scope->execute(['id' => $sessionId]);
         $sessionRow = $scope->fetch();
 
@@ -2866,16 +2924,27 @@ $routes = [
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
 
-        inv_require_so_warehouse_scope($user, (int) $sessionRow['warehouse_id']);
-
         $canSupervise = AuthService::hasPermission($pdo, $user['role_code'], 'STOCK_OPNAME_SUPERVISE');
-        if (!$canSupervise && $sessionRow['p1_user_id'] !== null && (int) $sessionRow['p1_user_id'] === (int) $user['id']) {
-            inv_ok(StockOpnameService::getForCounter($pdo, $sessionId, 'p1'), 'OK');
-        }
-        if (!$canSupervise && $sessionRow['p2_user_id'] !== null && (int) $sessionRow['p2_user_id'] === (int) $user['id']) {
-            inv_ok(StockOpnameService::getForCounter($pdo, $sessionId, 'p2'), 'OK');
+        if ($canSupervise) {
+            inv_require_so_warehouse_scope($user, (int) $sessionRow['warehouse_id']);
+            inv_ok(StockOpnameService::get($pdo, $sessionId), 'OK');
         }
 
+        // PHASE V2.14.10 — a plain assigned P1/P2 team member (ANY global
+        // role, including one with no Stock Opname permission at all) gets
+        // the blind counter view for their own session — session-scoped
+        // ONLY, deliberately bypassing the normal warehouse-scope check
+        // (a supervisor may assign a counter across warehouses on purpose;
+        // see inv_require_so_counter_or_permission()'s docblock).
+        try {
+            $role = StockOpnameService::assertIsActiveCounter($pdo, $sessionId, (int) $user['id']);
+            inv_ok(StockOpnameService::getForCounter($pdo, $sessionId, $role, (int) $user['id']), 'OK');
+        } catch (ValidationException $e) {
+            // Not a counter here — fall through to the global-permission path.
+        }
+
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
+        inv_require_so_warehouse_scope($user, (int) $sessionRow['warehouse_id']);
         inv_ok(StockOpnameService::get($pdo, $sessionId), 'OK');
     },
 
@@ -2949,12 +3018,173 @@ $routes = [
         inv_ok($result, 'Counters assigned');
     },
 
+    // PHASE V2.14.10 — multi-user TEAM assignment: sets P1 or P2's FULL
+    // membership in one call (the supervisor's multi-select "these N
+    // users are now on this team"). Same route-level gate as
+    // assign-counters (STOCK_OPNAME_MANAGE + warehouse scope) — assigning
+    // a team is still a supervisor-tier action; StockOpnameService::
+    // assignTeamMembers() re-validates every candidate (any active user,
+    // no global-permission requirement — see its docblock) and the
+    // same-user-both-roles rule server-side.
+    'POST /stock-opname/{id}/assign-team' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
+
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+
+        $role = (string) ($input['role'] ?? '');
+        if (!in_array(strtolower($role), ['p1', 'p2'], true)) {
+            throw new ValidationException(['role must be p1 or p2']);
+        }
+        $userIds = array_map('intval', (array) ($input['user_ids'] ?? []));
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::assignTeamMembers($tx, $sessionId, $role, $userIds, (int) $user['id'])
+        );
+
+        inv_ok($result, 'Team assigned');
+    },
+
+    // PHASE V2.14.10 — session-scoped: only an active team member of the
+    // POSTed role may claim/release for it; the route itself performs no
+    // global-permission or warehouse-scope check at all (identical
+    // reasoning to POST .../count/{role} — see
+    // inv_require_so_counter_or_permission()'s docblock). "Ambil Item
+    // Berikutnya" when item_id is omitted; a specific scanned/searched
+    // item otherwise.
+    'POST /stock-opname/{id}/claim' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        $sessionId = (int) $params['id'];
+        $role = (string) ($input['role'] ?? '');
+        if (!in_array(strtolower($role), ['p1', 'p2'], true)) {
+            throw new ValidationException(['role must be p1 or p2']);
+        }
+        $itemId = isset($input['item_id']) ? (int) $input['item_id'] : null;
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::claimItem($tx, $sessionId, strtolower($role), (int) $user['id'], $itemId)
+        );
+        inv_ok($result, 'Item claimed');
+    },
+
+    // PHASE V2.14.10 — release a claim: the caller's own claim by default;
+    // a supervisor (STOCK_OPNAME_SUPERVISE) may pass supervisor_override
+    // to release ANY claim on the line (the "unreachable claimant" escape
+    // hatch) — checked here, not assumed by the service method.
+    'POST /stock-opname/{id}/release' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        $sessionId = (int) $params['id'];
+        $role = (string) ($input['role'] ?? '');
+        if (!in_array(strtolower($role), ['p1', 'p2'], true)) {
+            throw new ValidationException(['role must be p1 or p2']);
+        }
+        $itemId = (int) ($input['item_id'] ?? 0);
+        if ($itemId <= 0) {
+            throw new ValidationException(['item_id is required']);
+        }
+        $wantsOverride = !empty($input['supervisor_override']);
+        $isOverride = false;
+        if ($wantsOverride) {
+            inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+            $isOverride = true;
+        }
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::releaseItem($tx, $sessionId, strtolower($role), $itemId, (int) $user['id'], $isOverride)
+        );
+        inv_ok($result, 'Claim released');
+    },
+
+    // PHASE V2.14.10 — "Tambah Temuan": append-only multi-unit finding.
+    // Session-scoped: only an active team member of the POSTed role may
+    // submit one (no global-permission/warehouse-scope check at all — see
+    // inv_require_so_counter_or_permission()'s docblock, same reasoning as
+    // /count/{role} and /claim above). unit_inputs mirrors GET
+    // /items/{id}/units' own shape: [{unit_id, qty}, ...] — the client
+    // never invents a conversion factor, the server resolves it fresh
+    // against UnitConversionService at submission time. Same explicit-zero
+    // HTTP gate as V2.14.9.3's /count/{role} — rusak_qty/expired_qty/
+    // deadstock_qty must all be present in the JSON body.
+    'POST /stock-opname/{id}/findings' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        $sessionId = (int) $params['id'];
+        $role = (string) ($input['role'] ?? '');
+        if (!in_array(strtolower($role), ['p1', 'p2'], true)) {
+            throw new ValidationException(['role must be p1 or p2']);
+        }
+
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        $auth = inv_require_so_counter_or_permission($pdo, $user, $sessionId, 'STOCK_OPNAME_MANAGE');
+        if ($auth['mode'] === 'privileged') {
+            inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        }
+
+        $itemId = (int) ($input['item_id'] ?? 0);
+        if ($itemId <= 0) {
+            throw new ValidationException(['item_id is required']);
+        }
+        $unitInputs = (array) ($input['unit_inputs'] ?? []);
+        if ($unitInputs === []) {
+            throw new ValidationException(['unit_inputs (at least one {unit_id, qty}) is required']);
+        }
+        foreach (['rusak_qty', 'expired_qty', 'deadstock_qty'] as $conditionField) {
+            if (!array_key_exists($conditionField, $input)) {
+                inv_error(422, 'VALIDATION_ERROR', 'Rusak, Expired, dan Deadstock wajib dikirim. Gunakan 0 bila tidak ada.');
+            }
+        }
+        $conditions = [
+            'rusak_qty' => $input['rusak_qty'], 'expired_qty' => $input['expired_qty'], 'deadstock_qty' => $input['deadstock_qty'],
+        ];
+        if (array_key_exists('notes', $input)) { $conditions['notes'] = $input['notes']; }
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::submitFinding($tx, $sessionId, strtolower($role), $itemId, $unitInputs, $conditions, (int) $user['id'])
+        );
+        inv_ok($result, 'Finding recorded');
+    },
+
+    // PHASE V2.14.10 — supervisor-only correction: void (never rewrite) a
+    // finding. Requires the physical/condition history to remain fully
+    // auditable — see StockOpnameService::voidFinding()'s docblock.
+    'POST /stock-opname/{id}/findings/{findingId}/void' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $findingId = (int) $params['findingId'];
+
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+
+        $reason = (string) ($input['reason'] ?? '');
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::voidFinding($tx, $sessionId, $findingId, $reason, (int) $user['id'])
+        );
+        inv_ok($result, 'Finding voided');
+    },
+
     // PHASE V2.12A: blind, one-item-at-a-time submission (Section 6/16 —
     // barcode-scan friendly). {role} is 'p1' or 'p2'; the service itself
     // enforces that the caller IS that session's assigned counter.
     'POST /stock-opname/{id}/count/{role}' => function (array $params) use ($pdo, $input) {
         $user = inv_require_auth();
-        inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
 
         $sessionId = (int) $params['id'];
         $role = (string) $params['role'];
@@ -2968,7 +3198,15 @@ $routes = [
         if ($warehouseId === false) {
             inv_error(404, 'NOT_FOUND', 'opname session not found');
         }
-        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+
+        // PHASE V2.14.10 — an active team member of THIS exact role
+        // bypasses the global-permission + warehouse-scope gate entirely
+        // (session-scoped grant); anyone else falls back to the original
+        // STOCK_OPNAME_MANAGE + warehouse-scope path unchanged.
+        $auth = inv_require_so_counter_or_permission($pdo, $user, $sessionId, 'STOCK_OPNAME_MANAGE');
+        if ($auth['mode'] === 'privileged') {
+            inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        }
 
         $itemId = (int) ($input['item_id'] ?? 0);
         if ($itemId <= 0) {

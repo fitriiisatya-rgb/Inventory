@@ -321,6 +321,14 @@ const InvApi = (() => {
         // ---- PHASE V2.12: dual-count (P1/P2 blind) Stock Opname ----
         opnameEligibleCounters: (warehouseId) => request('GET', `/stock-opname/eligible-counters?warehouse_id=${warehouseId}`),
         assignOpnameCounters: (id, assignments) => request('POST', `/stock-opname/${id}/assign-counters`, assignments),
+        // ---- PHASE V2.14.10: multi-user P1/P2 TEAM Stock Opname ----
+        assignOpnameTeam: (id, role, userIds) => request('POST', `/stock-opname/${id}/assign-team`, { role, user_ids: userIds }),
+        claimOpnameItem: (id, role, itemId) => request('POST', `/stock-opname/${id}/claim`, { role, ...(itemId ? { item_id: itemId } : {}) }),
+        releaseOpnameItem: (id, role, itemId, supervisorOverride = false) => request('POST', `/stock-opname/${id}/release`, { role, item_id: itemId, supervisor_override: supervisorOverride }),
+        // ---- PHASE V2.14.10: append-only multi-unit findings ("Tambah Temuan") ----
+        submitOpnameFinding: (id, role, itemId, unitInputs, conditions = {}) => request('POST', `/stock-opname/${id}/findings`, { role, item_id: itemId, unit_inputs: unitInputs, ...conditions }),
+        voidOpnameFinding: (id, findingId, reason) => request('POST', `/stock-opname/${id}/findings/${findingId}/void`, { reason }),
+        myOpnameSessions: () => request('GET', '/stock-opname/my-sessions'),
         // PHASE V2.14.9 — `conditions` is optional: {rusak_qty, expired_qty, deadstock_qty, notes}.
         submitOpnameCount: (id, role, itemId, countedQtyBase, conditions = {}) => request('POST', `/stock-opname/${id}/count/${role}`, { item_id: itemId, counted_qty_base: countedQtyBase, ...conditions }),
         opnameReview: (id) => request('GET', `/stock-opname/${id}/review`),

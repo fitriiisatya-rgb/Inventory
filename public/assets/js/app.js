@@ -124,6 +124,8 @@
             Production.render(document.getElementById('tab-produksi'));
         } else if (name === 'opname') {
             StockOpname.render(document.getElementById('tab-opname'));
+        } else if (name === 'opname-saya') {
+            StockOpname.renderMySessions(document.getElementById('tab-opname-saya'));
         } else if (name === 'import') {
             Imports.render(document.getElementById('tab-import'));
         } else if (name === 'audit') {

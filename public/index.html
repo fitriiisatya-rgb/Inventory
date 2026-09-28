@@ -22,7 +22,7 @@
      a date, 02 for a second release the SAME day, etc.) — NEVER leave
      this as a bare date, and NEVER reuse a value that has already been
      shipped once, even earlier the same day. -->
-<link rel="stylesheet" href="assets/css/app.css?v=20260928-01">
+<link rel="stylesheet" href="assets/css/app.css?v=20261003-01">
 </head>
 <body>
 
@@ -225,6 +225,16 @@
                 </button>
                 <div class="sidebar-submenu" hidden>
                     <a class="sidebar-link" data-tab="opname" data-require-permission="STOCK_OPNAME_MANAGE"><span class="icon">📋</span> Stock Opname</a>
+                    <!-- PHASE V2.14.10: "Stock Opname Saya" is deliberately
+                         NEVER permission-gated — counter authority comes
+                         from a per-session team assignment, not from the
+                         user's global role, so ANY active user (even one
+                         with no Stock Opname permission at all) must be
+                         able to reach this entry point and see whichever
+                         sessions they were personally, explicitly assigned
+                         to. It renders an empty state for anyone with no
+                         assignment — never an error, never hidden. -->
+                    <a class="sidebar-link" data-tab="opname-saya"><span class="icon">🙋</span> Stock Opname Saya</a>
                 </div>
             </div>
             <div class="sidebar-group sidebar-group-collapsible" data-group="master-data">
@@ -278,6 +288,7 @@
                 <div class="tab-content" id="tab-distribusi-laporan"></div>
                 <div class="tab-content" id="tab-produksi"></div>
                 <div class="tab-content" id="tab-opname"></div>
+                <div class="tab-content" id="tab-opname-saya"></div>
                 <div class="tab-content" id="tab-laporan"></div>
                 <div class="tab-content" id="tab-master-item"></div>
                 <div class="tab-content" id="tab-master-warehouse"></div>
@@ -312,7 +323,7 @@
     </div>
 </div>
 
-<script src="assets/js/api-client.js?v=20260930-01"></script>
+<script src="assets/js/api-client.js?v=20261003-01"></script>
 <script src="assets/js/ui.js?v=20260924-01"></script>
 <script src="assets/js/modal.js?v=20260924-01"></script>
 <script src="assets/js/drawer.js?v=20260924-01"></script>
@@ -331,7 +342,7 @@
 <script src="assets/js/distribution-invoices.js?v=20260927-02"></script>
 <script src="assets/js/distribution-reports.js?v=20260924-01"></script>
 <script src="assets/js/production.js?v=20260928-01"></script>
-<script src="assets/js/stock-opname.js?v=20261002-01"></script>
+<script src="assets/js/stock-opname.js?v=20261003-01"></script>
 <script src="assets/js/adjustments.js?v=20260927-02"></script>
 <script src="assets/js/closing.js?v=20260924-01"></script>
 <script src="assets/js/imports.js?v=20260924-01"></script>
@@ -364,6 +375,6 @@
 <script src="assets/js/report-slow-movement.js?v=20260924-01"></script>
 <script src="assets/js/report-audit.js?v=20260924-01"></script>
 <script src="assets/js/sidebar.js?v=20260924-01"></script>
-<script src="assets/js/app.js?v=20260927-01"></script>
+<script src="assets/js/app.js?v=20261003-01"></script>
 </body>
 </html>
