@@ -12,7 +12,8 @@ require __DIR__ . '/../includes/layout_header.php';
     <li><code>sku,system_qty_base,unit_cost</code> — qty sudah dalam base unit item.</li>
     <li><code>sku,qty,unit,unit_cost</code> — qty dikonversi otomatis mengikuti Master Barang (unit harus persis buy/mid/base unit item tsb).</li>
   </ul>
-  <form class="inline" id="uploadForm" enctype="multipart/form-data">
+  <button type="button" class="secondary" id="downloadTemplateBtn">⬇ Download Template CSV</button>
+  <form class="inline" id="uploadForm" enctype="multipart/form-data" style="margin-top:10px;">
     <label>Lokasi <select name="location_id" id="locationSelect" required></select></label>
     <label>File CSV <input type="file" name="file" accept=".csv,text/csv" required></label>
     <button type="submit">Preview Import</button>
@@ -85,5 +86,18 @@ document.getElementById('commitBtn').addEventListener('click', async () => {
 });
 
 loadLocations();
+
+document.getElementById('downloadTemplateBtn').addEventListener('click', () => {
+  const csv = 'sku,system_qty_base,unit_cost\nCONTOH-SKU-001,100,5000\n';
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'template_import_stok.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
 </script>
 <?php require __DIR__ . '/../includes/layout_footer.php'; ?>

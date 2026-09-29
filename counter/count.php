@@ -5,8 +5,30 @@ $me = Auth::requireLogin();
 Permissions::require($me['role'], 'counter.count');
 $sessionId = (int) ($_GET['session_id'] ?? 0);
 $pageTitle = 'Input Stok Opname';
+
+$pdo = Database::pdo();
+$headerStmt = $pdo->prepare(
+    'SELECT s.session_no, s.name AS session_name, l.name AS location_name, sc.team
+     FROM stock_opname_sessions s
+     JOIN locations l ON l.id = s.location_id
+     JOIN stock_opname_session_counters sc ON sc.session_id = s.id AND sc.user_id = ? AND sc.status = \'ACTIVE\'
+     WHERE s.id = ? LIMIT 1'
+);
+$headerStmt->execute([$me['id'], $sessionId]);
+$headerInfo = $headerStmt->fetch();
+
 require __DIR__ . '/../includes/layout_header.php';
 ?>
+<div class="card" style="background:#1e293b; color:#f1f5f9; border-radius:8px;">
+  <?php if ($headerInfo): ?>
+    <div><b>Petugas:</b> <?= htmlspecialchars($me['full_name']) ?> &nbsp;|&nbsp;
+         <b>Team:</b> <?= htmlspecialchars($headerInfo['team']) ?> &nbsp;|&nbsp;
+         <b>Lokasi:</b> <?= htmlspecialchars($headerInfo['location_name']) ?></div>
+    <div><small><?= htmlspecialchars($headerInfo['session_no']) ?> — <?= htmlspecialchars($headerInfo['session_name']) ?></small></div>
+  <?php else: ?>
+    <div><em>Anda tidak di-assign pada session ini.</em></div>
+  <?php endif; ?>
+</div>
 <div class="card">
   <form class="inline" id="filterForm">
     <label>Kategori <select name="category_id" id="categorySelect"><option value="">Semua</option></select></label>
@@ -88,7 +110,8 @@ async function loadItems() {
   params.set('session_id', sessionId);
   const result = await SO.api('/api/counter/items.php?' + params.toString());
   window.__rows = Object.fromEntries(result.data.map(r => [r.session_item_id, r]));
-  document.getElementById('progress').innerHTML = `Team ${result.team}: ${result.progress.team_done} / ${result.progress.team_total} selesai`;
+  document.getElementById('progress').innerHTML =
+    `<b>Saya:</b> ${result.progress.my_done} / ${result.progress.team_total} selesai &nbsp;|&nbsp; <b>Team ${result.team}:</b> ${result.progress.team_done} / ${result.progress.team_total} selesai`;
   document.getElementById('rows').innerHTML = result.data.map(r => `
     <tr>
       <td>${SO.escapeHtml(r.sku)}</td>

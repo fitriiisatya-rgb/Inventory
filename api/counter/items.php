@@ -68,6 +68,7 @@ $lockStmt = $pdo->prepare('SELECT user_id FROM stock_opname_item_locks WHERE ses
 
 $rows = [];
 $teamDone = 0;
+$myDone = 0;
 foreach ($sessionItems as $si) {
     $countStmt->execute([$si['id'], $team, $si['current_round']]);
     $ownCount = $countStmt->fetch() ?: null;
@@ -75,6 +76,9 @@ foreach ($sessionItems as $si) {
     $status = $recon->counterStatus($si, $team, $ownCount);
     if ($ownCount) {
         $teamDone++;
+        if ((int) $ownCount['user_id'] === (int) $user['id']) {
+            $myDone++;
+        }
     }
 
     if ($countStatusFilter !== 'SEMUA' && $countStatusFilter !== $status) {
@@ -125,5 +129,6 @@ Response::json([
     'progress' => [
         'team_total' => count($sessionItems),
         'team_done' => $teamDone,
+        'my_done' => $myDone,
     ],
 ]);
