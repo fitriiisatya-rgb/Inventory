@@ -1,0 +1,73 @@
+:root {
+  --navy-900: #0b1530;
+  --navy-800: #10203f;
+  --navy-700: #16294f;
+  --blue-500: #3b82f6;
+  --green-500: #22c55e;
+  --red-500: #ef4444;
+  --orange-500: #f59e0b;
+  --gray-400: #94a3b8;
+  --text-light: #e2e8f0;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+header.app-header {
+  background: var(--navy-900);
+  color: var(--text-light);
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+header.app-header nav a {
+  color: var(--text-light);
+  text-decoration: none;
+  margin-right: 18px;
+  font-size: 14px;
+  opacity: 0.85;
+}
+header.app-header nav a:hover { opacity: 1; text-decoration: underline; }
+
+main.app-main { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+
+.card {
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e2e8f0; }
+th { color: #475569; font-weight: 600; }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.badge-active, .badge-matched { background: #dcfce7; color: #166534; }
+.badge-inactive { background: #e2e8f0; color: #475569; }
+.badge-error, .badge-invalid_qty, .badge-invalid_unit, .badge-sku_not_found, .badge-duplicate { background: #fee2e2; color: #991b1b; }
+.badge-warning { background: #fef3c7; color: #92400e; }
+
+form.inline { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
+form.inline label { display: flex; flex-direction: column; font-size: 12px; color: #475569; gap: 4px; }
+input, select, textarea {
+  padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px;
+}
+button {
+  background: var(--navy-800); color: #fff; border: none; border-radius: 6px;
+  padding: 9px 16px; font-size: 14px; cursor: pointer;
+}
+button:hover { background: var(--navy-700); }
+button.secondary { background: #64748b; }
+.error-box { background: #fee2e2; color: #991b1b; padding: 10px 14px; border-radius: 6px; margin-bottom: 14px; font-size: 14px; }
+.warning-box { background: #fef3c7; color: #92400e; padding: 10px 14px; border-radius: 6px; margin-bottom: 14px; font-size: 14px; }
+.login-wrap { max-width: 360px; margin: 80px auto; }

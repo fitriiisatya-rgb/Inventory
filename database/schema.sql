@@ -1,11 +1,13 @@
 -- =====================================================================
--- STOCK OPNAME MULTI USER — DATABASE SCHEMA (Phase 2 Design)
+-- STOCK OPNAME MULTI USER — DATABASE SCHEMA
 -- Engine target : MySQL 8.0+ / MariaDB 10.5+ (InnoDB, utf8mb4)
--- Status        : DRAFT — pending design-review approval. Not yet
---                  wired into any application code.
--- Timezone      : all DATETIME columns are stored and interpreted as
---                  Asia/Jakarta app-side; MySQL is kept in UTC or
---                  session-local, no reliance on MySQL's own TZ tables.
+-- Status        : Phase 3 FINAL — approved design, foundation tables
+--                  (users..audit_logs) are live/coded in Phase 3;
+--                  stock_opname_* workflow tables are finalized here
+--                  but their API/UI is built in Phase 4.
+-- Timezone      : Asia/Jakarta, enforced app-side (PHP date_default_timezone_set).
+--                  DATETIME columns store server-local time consistently;
+--                  no reliance on MySQL's own named-timezone tables.
 -- =====================================================================
 
 SET NAMES utf8mb4;
@@ -57,9 +59,6 @@ CREATE TABLE locations (
 -- =====================================================================
 -- 2. MASTER BARANG + KONVERSI SATUAN
 --
--- Conversion model (CORRECTED per design review, matches legacy
--- index_2.php semantics exactly):
---
 --   buy_content = jumlah BASE UNIT dalam 1 BUY UNIT
 --   mid_content = jumlah MID UNIT dalam 1 BUY UNIT
 --   mid_to_base (derived, never stored) = buy_content / mid_content
@@ -98,17 +97,23 @@ CREATE TABLE items (
     CONSTRAINT fk_items_category FOREIGN KEY (category_id) REFERENCES categories(id)
 ) ENGINE=InnoDB;
 
--- "Stok sistem" ground truth. This standalone app does not run a
--- purchasing/sales ledger (out of scope), so system_qty is maintained
--- as an explicit balance: seeded by import/manual entry, and rolled
--- forward automatically whenever a Stock Opname session for that
--- item+location FINISHES (final_qty becomes the new system_qty).
--- See section 19 (Design Decision: Source of "Stok Sistem").
+-- =====================================================================
+-- 3. SYSTEM STOCK (source of truth = IMPORT for V1 — decision 2026-09-29:
+--    NOT rolled forward automatically from a finished SO session, because
+--    this app does not record purchases/usage/transfers between opname
+--    periods. Every session's system_qty_snapshot comes from whatever is
+--    currently in item_stock, which is populated only by an explicit
+--    Import Stok Sistem. See includes/SystemStockProvider/*.php for the
+--    abstraction that lets a future API-based provider replace this
+--    without changing session code.
+-- =====================================================================
+
 CREATE TABLE item_stock (
     id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     item_id         BIGINT UNSIGNED NOT NULL,
     location_id     BIGINT UNSIGNED NOT NULL,
     system_qty      DECIMAL(18,4) NOT NULL DEFAULT 0,   -- base unit
+    unit_cost       DECIMAL(18,2) NOT NULL DEFAULT 0,   -- per base unit
     updated_by      BIGINT UNSIGNED NULL,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uq_item_location (item_id, location_id),
@@ -117,22 +122,65 @@ CREATE TABLE item_stock (
     CONSTRAINT fk_stock_updated_by FOREIGN KEY (updated_by) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
+CREATE TABLE stock_import_batches (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    location_id     BIGINT UNSIGNED NOT NULL,
+    file_name       VARCHAR(255) NOT NULL,
+    status          ENUM('PREVIEWED','COMMITTED','CANCELLED') NOT NULL DEFAULT 'PREVIEWED',
+    total_rows      INT UNSIGNED NOT NULL DEFAULT 0,
+    matched_count   INT UNSIGNED NOT NULL DEFAULT 0,
+    invalid_count   INT UNSIGNED NOT NULL DEFAULT 0,
+    warning_count   INT UNSIGNED NOT NULL DEFAULT 0,
+    duplicate_count INT UNSIGNED NOT NULL DEFAULT 0,
+    uploaded_by     BIGINT UNSIGNED NOT NULL,
+    uploaded_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    committed_by    BIGINT UNSIGNED NULL,
+    committed_at    DATETIME NULL,
+    KEY idx_import_location (location_id),
+    KEY idx_import_status (status),
+    CONSTRAINT fk_import_location FOREIGN KEY (location_id) REFERENCES locations(id),
+    CONSTRAINT fk_import_uploaded_by FOREIGN KEY (uploaded_by) REFERENCES users(id),
+    CONSTRAINT fk_import_committed_by FOREIGN KEY (committed_by) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+CREATE TABLE stock_import_rows (
+    id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    batch_id            BIGINT UNSIGNED NOT NULL,
+    row_no          INT UNSIGNED NOT NULL,
+    raw_sku             VARCHAR(50) NULL,
+    raw_qty             VARCHAR(50) NULL,
+    raw_unit            VARCHAR(30) NULL,
+    raw_unit_cost       VARCHAR(50) NULL,
+    item_id             BIGINT UNSIGNED NULL,           -- resolved; NULL if SKU_NOT_FOUND
+    parsed_qty_base     DECIMAL(18,4) NULL,
+    parsed_unit_cost    DECIMAL(18,2) NULL,
+    status              ENUM('MATCHED','DUPLICATE','SKU_NOT_FOUND','INVALID_QTY','INVALID_UNIT','WARNING') NOT NULL,
+    message             VARCHAR(255) NULL,
+    committed           TINYINT(1) NOT NULL DEFAULT 0,
+    KEY idx_import_row_batch (batch_id),
+    KEY idx_import_row_item (item_id),
+    CONSTRAINT fk_import_row_batch FOREIGN KEY (batch_id) REFERENCES stock_import_batches(id),
+    CONSTRAINT fk_import_row_item FOREIGN KEY (item_id) REFERENCES items(id)
+) ENGINE=InnoDB;
+
 CREATE TABLE item_stock_adjustments (
     id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     item_stock_id       BIGINT UNSIGNED NOT NULL,
     old_qty             DECIMAL(18,4) NOT NULL,
     new_qty             DECIMAL(18,4) NOT NULL,
+    source              ENUM('MANUAL','IMPORT') NOT NULL,
+    import_batch_id     BIGINT UNSIGNED NULL,
     reason              VARCHAR(255) NOT NULL,
-    source_session_id   BIGINT UNSIGNED NULL,   -- set when caused by SO finalization
     changed_by          BIGINT UNSIGNED NOT NULL,
     changed_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     KEY idx_adj_stock (item_stock_id),
     CONSTRAINT fk_adj_stock FOREIGN KEY (item_stock_id) REFERENCES item_stock(id),
+    CONSTRAINT fk_adj_batch FOREIGN KEY (import_batch_id) REFERENCES stock_import_batches(id),
     CONSTRAINT fk_adj_user  FOREIGN KEY (changed_by) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
 -- =====================================================================
--- 3. STOCK OPNAME SESSION
+-- 4. STOCK OPNAME SESSION  (schema finalized in Phase 3; API/UI = Phase 4)
 -- =====================================================================
 
 CREATE TABLE stock_opname_sessions (
@@ -154,9 +202,7 @@ CREATE TABLE stock_opname_sessions (
     started_by          BIGINT UNSIGNED NULL,
     finished_by         BIGINT UNSIGNED NULL,
 
-    -- Correction-session mechanism (section 15): a FINISHED session is
-    -- immutable; corrections happen via a new session referencing it.
-    parent_session_id   BIGINT UNSIGNED NULL,
+    parent_session_id   BIGINT UNSIGNED NULL,   -- correction-session mechanism
     correction_reason   VARCHAR(255) NULL,
 
     cancel_reason       VARCHAR(255) NULL,
@@ -176,8 +222,6 @@ CREATE TABLE stock_opname_sessions (
     CONSTRAINT fk_session_parent FOREIGN KEY (parent_session_id) REFERENCES stock_opname_sessions(id)
 ) ENGINE=InnoDB;
 
--- Who is assigned to a session (distinct from who actually counted —
--- see "Assigned vs Participated", section 16 / report rule).
 CREATE TABLE stock_opname_assignments (
     id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     session_id  BIGINT UNSIGNED NOT NULL,
@@ -192,7 +236,7 @@ CREATE TABLE stock_opname_assignments (
 
 -- One row per item included in the session. Everything here is a
 -- SNAPSHOT taken at session start (ACTIVE) and is immutable afterward,
--- even if the Master Barang record changes later.
+-- even if the Master Barang record or item_stock changes later.
 CREATE TABLE stock_opname_session_items (
     id                      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     session_id              BIGINT UNSIGNED NOT NULL,
@@ -210,14 +254,23 @@ CREATE TABLE stock_opname_session_items (
     mid_content_snapshot    DECIMAL(18,4) NULL,
     base_unit_snapshot      VARCHAR(30)   NOT NULL,
 
-    system_qty_snapshot     DECIMAL(18,4) NOT NULL,   -- base unit, frozen at snapshot_at
+    system_qty_snapshot     DECIMAL(18,4) NOT NULL,   -- base unit, frozen at snapshot_at, from item_stock (via SystemStockProvider)
     unit_cost_snapshot      DECIMAL(18,2) NOT NULL,   -- price per base unit, frozen at snapshot_at
 
     -- item explicitly added to an already-ACTIVE session by Superadmin
-    -- (section 16). NULL for items included at normal session start.
     added_after_start_by    BIGINT UNSIGNED NULL,
     added_after_start_at    DATETIME NULL,
     added_after_start_reason VARCHAR(255) NULL,
+
+    -- Explicit item disposition within the session (decision 2026-09-29):
+    -- 0 qty is a real physical count and must never be confused with
+    -- "could not be counted at all". NOT_COUNTABLE is SUPERADMIN-only,
+    -- requires a reason, and is audited. EXCLUDED is reserved for a
+    -- future workflow (not wired to any endpoint yet).
+    item_status              ENUM('NORMAL','NOT_COUNTABLE','EXCLUDED') NOT NULL DEFAULT 'NORMAL',
+    not_countable_reason     VARCHAR(255) NULL,
+    not_countable_set_by     BIGINT UNSIGNED NULL,
+    not_countable_set_at     DATETIME NULL,
 
     created_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -225,19 +278,16 @@ CREATE TABLE stock_opname_session_items (
     UNIQUE KEY uq_session_item (session_id, item_id),
     KEY idx_si_session (session_id),
     KEY idx_si_item (item_id),
+    KEY idx_si_status (item_status),
     CONSTRAINT fk_si_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
     CONSTRAINT fk_si_item FOREIGN KEY (item_id) REFERENCES items(id),
-    CONSTRAINT fk_si_added_by FOREIGN KEY (added_after_start_by) REFERENCES users(id)
+    CONSTRAINT fk_si_added_by FOREIGN KEY (added_after_start_by) REFERENCES users(id),
+    CONSTRAINT fk_si_not_countable_by FOREIGN KEY (not_countable_set_by) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
 -- =====================================================================
--- 4. LOCKING (CORRECTED: per-team, not global)
---
--- P1 and P2 count the same item independently and simultaneously.
--- Only same-team collisions (P1 vs P1, P2 vs P2) are prevented.
--- UNIQUE(session_item_id, team) is the concurrency primitive: acquiring
--- a lock is an INSERT that fails on duplicate-key if the team's slot
--- is already held and unexpired -> caller gets "locked by <user>".
+-- 5. LOCKING — per team, not global. UNIQUE(session_item_id, team) is
+--    the concurrency primitive: P1 and P2 hold independent lock slots.
 -- =====================================================================
 
 CREATE TABLE stock_opname_item_locks (
@@ -255,7 +305,7 @@ CREATE TABLE stock_opname_item_locks (
 ) ENGINE=InnoDB;
 
 -- =====================================================================
--- 5. COUNTS
+-- 6. COUNTS
 -- =====================================================================
 
 CREATE TABLE stock_opname_counts (
@@ -266,9 +316,6 @@ CREATE TABLE stock_opname_counts (
     user_name_snapshot      VARCHAR(150) NOT NULL,
     round                   INT UNSIGNED NOT NULL DEFAULT 1,
 
-    -- GOOD: raw input per unit level actually rendered in the UI
-    -- (buy/mid/base fields are shown or hidden per item's own level
-    -- count -- see section 4 "Good Stock Input" in the review reply).
     good_buy_qty            DECIMAL(18,4) NOT NULL DEFAULT 0,
     good_mid_qty            DECIMAL(18,4) NOT NULL DEFAULT 0,
     good_base_input_qty     DECIMAL(18,4) NOT NULL DEFAULT 0,
@@ -302,10 +349,7 @@ CREATE TABLE stock_opname_counts (
     CONSTRAINT fk_count_user FOREIGN KEY (user_id) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
--- Append-only, full-state JSON snapshot per edit (CORRECTED: JSON
--- snapshot, not narrow per-field diff, so any historical count state
--- can be reconstructed exactly). A per-field diff for the UI is
--- generated at read-time by diffing consecutive JSON blobs.
+-- Append-only, full-state JSON snapshot per edit.
 CREATE TABLE stock_opname_count_revisions (
     id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     count_id        BIGINT UNSIGNED NOT NULL,
@@ -321,7 +365,7 @@ CREATE TABLE stock_opname_count_revisions (
     CONSTRAINT fk_revision_user FOREIGN KEY (changed_by) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
--- Recount requests are SUPERADMIN-only for now (app-layer rule).
+-- Recount requests are SUPERADMIN-only (app-layer rule).
 CREATE TABLE stock_opname_recounts (
     id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     session_item_id BIGINT UNSIGNED NOT NULL,
@@ -336,8 +380,8 @@ CREATE TABLE stock_opname_recounts (
 ) ENGINE=InnoDB;
 
 -- =====================================================================
--- 6. PHOTO EVIDENCE (CORRECTED: tied to count_id, not just session_item,
---    so each round keeps its own distinct evidence)
+-- 7. PHOTO EVIDENCE — tied to count_id so each round keeps its own
+--    distinct evidence; never overwritten across rounds.
 -- =====================================================================
 
 CREATE TABLE stock_opname_photos (
@@ -360,8 +404,10 @@ CREATE TABLE stock_opname_photos (
 ) ENGINE=InnoDB;
 
 -- =====================================================================
--- 7. FINAL (CORRECTED: append-only, single source of truth —
---    no duplicate final_qty column on session_items)
+-- 8. FINAL — append-only, single source of truth. No session_items
+--    column duplicates final_qty. NOT_COUNTABLE items never get a row
+--    here (there is nothing measured to finalize); reports LEFT JOIN
+--    this table so their variance naturally renders as NULL/blank.
 -- =====================================================================
 
 CREATE TABLE stock_opname_finals (
@@ -380,15 +426,13 @@ CREATE TABLE stock_opname_finals (
     CONSTRAINT fk_final_session_item FOREIGN KEY (session_item_id) REFERENCES stock_opname_session_items(id),
     CONSTRAINT fk_final_user FOREIGN KEY (set_by) REFERENCES users(id)
 ) ENGINE=InnoDB;
--- Application enforces: on INSERT of a new version for a session_item,
--- flip the previous is_current=1 row to 0 inside the same transaction.
--- A partial UNIQUE index (session_item_id) WHERE is_current=1 is not
--- portable to MariaDB < 10.5 the same way as MySQL 8 functional
--- indexes, so this is enforced in application code + a nightly
--- consistency check query, not a DB constraint. See section 21.
+-- Application enforces: inserting a new version for a session_item
+-- flips the previous is_current=1 row to 0 in the same transaction.
+-- Not DB-constrained (MariaDB-portability), so a scheduled consistency
+-- check query is required — see Phase 2 security checklist item 21.
 
 -- =====================================================================
--- 8. APPROVAL
+-- 9. APPROVAL
 -- =====================================================================
 
 CREATE TABLE stock_opname_approvals (
@@ -405,14 +449,14 @@ CREATE TABLE stock_opname_approvals (
 ) ENGINE=InnoDB;
 
 -- =====================================================================
--- 9. AUDIT LOG (general-purpose; count-specific edits use
---    stock_opname_count_revisions instead, which is richer)
+-- 10. AUDIT LOG (general-purpose; count-specific edits use
+--     stock_opname_count_revisions instead, which is richer)
 -- =====================================================================
 
 CREATE TABLE audit_logs (
     id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     actor_id        BIGINT UNSIGNED NULL,
-    action          VARCHAR(100) NOT NULL,     -- e.g. 'SESSION_CANCEL', 'ITEM_UPDATE', 'RECOUNT_REQUEST'
+    action          VARCHAR(100) NOT NULL,     -- e.g. 'SESSION_CANCEL', 'ITEM_UPDATE', 'STOCK_IMPORT_COMMIT'
     entity_type     VARCHAR(50) NOT NULL,
     entity_id       BIGINT UNSIGNED NOT NULL,
     old_value       JSON NULL,
@@ -424,6 +468,17 @@ CREATE TABLE audit_logs (
     KEY idx_audit_actor (actor_id),
     KEY idx_audit_created (created_at),
     CONSTRAINT fk_audit_actor FOREIGN KEY (actor_id) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+-- =====================================================================
+-- 11. MIGRATION BOOKKEEPING
+-- =====================================================================
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    id          INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    filename    VARCHAR(255) NOT NULL,
+    applied_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_migration_filename (filename)
 ) ENGINE=InnoDB;
 
 SET FOREIGN_KEY_CHECKS = 1;
