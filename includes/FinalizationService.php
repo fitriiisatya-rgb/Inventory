@@ -131,9 +131,20 @@ final class FinalizationService
         $physical = $good + $damaged + $expired + $deadstock;
         $available = $good;
         $systemQty = (float) $si['system_qty_snapshot'];
-        $varianceQty = $available - $systemQty;
         $unitCost = $si['unit_cost_snapshot'] !== null ? (float) $si['unit_cost_snapshot'] : null;
-        $varianceValue = $unitCost !== null ? round($varianceQty * $unitCost, 2) : null;
+
+        // Two variances, named explicitly — never one ambiguous number.
+        // AVAILABLE stays the default operational/sellable-stock
+        // adjustment reference (business logic decision, unchanged);
+        // PHYSICAL is always computed and stored alongside it for audit
+        // reporting. variance_qty/variance_value are kept, unchanged,
+        // as the pre-0006 AVAILABLE-basis columns for backward compat.
+        $variancePhysicalQty = $physical - $systemQty;
+        $variancePhysicalValue = $unitCost !== null ? round($variancePhysicalQty * $unitCost, 2) : null;
+        $varianceAvailableQty = $available - $systemQty;
+        $varianceAvailableValue = $unitCost !== null ? round($varianceAvailableQty * $unitCost, 2) : null;
+        $varianceQty = $varianceAvailableQty;
+        $varianceValue = $varianceAvailableValue;
 
         $existing = $this->currentFinal($sessionItemId);
         $nextVersion = $existing ? ((int) $existing['version']) + 1 : 1;
@@ -146,17 +157,22 @@ final class FinalizationService
             'INSERT INTO stock_opname_finals
                 (session_item_id, version, final_good_base_qty, final_damaged_base_qty, final_expired_base_qty,
                  final_deadstock_base_qty, final_physical_base_qty, final_available_base_qty, source,
-                 final_qty, variance_qty, variance_value, reason, set_by, is_current)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)'
+                 final_qty, variance_qty, variance_value,
+                 variance_physical_qty, variance_physical_value, variance_available_qty, variance_available_value,
+                 reason, set_by, is_current)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)'
         )->execute([
             $sessionItemId, $nextVersion, $good, $damaged, $expired, $deadstock, $physical, $available, $source,
-            $physical, $varianceQty, $varianceValue, $reason, $actorId,
+            $physical, $varianceQty, $varianceValue,
+            $variancePhysicalQty, $variancePhysicalValue, $varianceAvailableQty, $varianceAvailableValue,
+            $reason, $actorId,
         ]);
         $finalId = (int) $this->pdo->lastInsertId();
 
         Audit::log($actorId, 'FINAL_SET', 'stock_opname_session_items', $sessionItemId, $existing ?: null, [
             'good' => $good, 'damaged' => $damaged, 'expired' => $expired, 'deadstock' => $deadstock,
-            'physical' => $physical, 'available' => $available, 'variance_qty' => $varianceQty,
+            'physical' => $physical, 'available' => $available,
+            'variance_physical_qty' => $variancePhysicalQty, 'variance_available_qty' => $varianceAvailableQty,
             'reason' => $reason, 'source' => $source, 'version' => $nextVersion,
         ]);
 

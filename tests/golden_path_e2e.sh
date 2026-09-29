@@ -158,9 +158,25 @@ BULK=$(curl -s -b "$jar_admin" -X POST "$BASE_URL/api/review/bulk_finalize.php" 
 assert_eq "Bulk finalize: 1 item auto-finalized" "1" "$(field "$BULK" data | php -r '$d=json_decode(file_get_contents("php://stdin"),true); echo $d["finalized"];')"
 
 echo "--- 11. Manual finalize MISMATCH (GP-B) ---"
+# damaged>0 deliberately makes PHYSICAL and AVAILABLE variance diverge, to
+# prove both are computed and stored as distinct, explicitly-named values
+# (not one ambiguous "variance") — see the P0 correction.
 SETFINAL=$(curl -s -b "$jar_admin" -X POST "$BASE_URL/api/review/set_final.php" -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF_A" \
-  -d "{\"session_item_id\":$SI_B,\"good\":192500,\"damaged\":0,\"expired\":0,\"deadstock\":0,\"reason\":\"Golden path E2E manual resolution\"}")
+  -d "{\"session_item_id\":$SI_B,\"good\":192500,\"damaged\":1000,\"expired\":0,\"deadstock\":0,\"reason\":\"Golden path E2E manual resolution\"}")
 assert_eq "GP-B final good qty" "192500" "$(field "$SETFINAL" data | php -r '$d=json_decode(file_get_contents("php://stdin"),true); echo (int)$d["final_good_base_qty"];')"
+assert_eq "GP-B variance_physical_qty = physical(193500) - system_qty(200000)" "-6500" "$(field "$SETFINAL" data | php -r '$d=json_decode(file_get_contents("php://stdin"),true); echo (int)$d["variance_physical_qty"];')"
+assert_eq "GP-B variance_available_qty = available(192500) - system_qty(200000)" "-7500" "$(field "$SETFINAL" data | php -r '$d=json_decode(file_get_contents("php://stdin"),true); echo (int)$d["variance_available_qty"];')"
+assert_eq "GP-B variance_physical_value = -6500 * 500" "-3250000" "$(field "$SETFINAL" data | php -r '$d=json_decode(file_get_contents("php://stdin"),true); echo (int)$d["variance_physical_value"];')"
+assert_eq "GP-B variance_available_value = -7500 * 500" "-3750000" "$(field "$SETFINAL" data | php -r '$d=json_decode(file_get_contents("php://stdin"),true); echo (int)$d["variance_available_value"];')"
+
+echo "--- 11b. Review payload uses explicit variance field names, not the bare ambiguous ones ---"
+REVIEW_AFTER_FINAL=$(curl -s -b "$jar_admin" "$BASE_URL/api/review/items.php?session_id=$SESSION_ID")
+GP_B_FINAL_PHYS=$(echo "$REVIEW_AFTER_FINAL" | php -r '$d=json_decode(file_get_contents("php://stdin"),true); foreach($d["data"] as $r) if($r["sku"]=="GP-B") echo $r["final"]["variance_physical_qty"];')
+GP_B_FINAL_AVAIL=$(echo "$REVIEW_AFTER_FINAL" | php -r '$d=json_decode(file_get_contents("php://stdin"),true); foreach($d["data"] as $r) if($r["sku"]=="GP-B") echo $r["final"]["variance_available_qty"];')
+assert_eq "review/items.php final.variance_physical_qty" "-6500" "$GP_B_FINAL_PHYS"
+assert_eq "review/items.php final.variance_available_qty" "-7500" "$GP_B_FINAL_AVAIL"
+AMBIGUOUS_LEAK=$(echo "$REVIEW_AFTER_FINAL" | grep -o '"variance_qty"\|"variance_value"' || true)
+assert_eq "review/items.php never exposes the bare ambiguous variance_qty/variance_value field names" "" "$AMBIGUOUS_LEAK"
 
 echo "--- 12. REVIEW -> FINISHED ---"
 FINISH=$(curl -s -b "$jar_admin" -X POST "$BASE_URL/api/sessions/finish.php" -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF_A" -d "{\"session_id\":$SESSION_ID}")
@@ -183,11 +199,15 @@ try:
     rows = list(detail.iter_rows(values_only=True))
     skus = [r[0] for r in rows[1:]]
     assert 'GP-A' in skus and 'GP-B' in skus, skus
+    header = rows[0]
+    for col in ['Selisih Fisik', 'Nilai Selisih Fisik (Rp)', 'Selisih Stok Layak / Available', 'Nilai Selisih Available (Rp)']:
+        assert col in header, ('missing column: ' + col, header)
+    assert 'Selisih Qty' not in header, 'ambiguous Selisih Qty column header still present'
     print('OK')
 except Exception as e:
     print('FAIL: ' + str(e))
 " 2>&1)
-assert_eq "Excel export opens with openpyxl and has correct sheets/rows" "OK" "$XLSX_CHECK"
+assert_eq "Excel export opens with openpyxl, correct sheets/rows, explicit variance column labels" "OK" "$XLSX_CHECK"
 
 echo ""
 echo "==================================="

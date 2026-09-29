@@ -178,12 +178,18 @@ function test_finalization(): void
         T::assertEquals(100.0, (float) $finalA['final_good_base_qty'], 'FIN-A final good = 100 (from the agreeing P1/P2 count)');
         T::assertEquals(100.0, (float) $finalA['final_physical_base_qty'], 'FIN-A physical = good+damaged+expired+deadstock = 100');
         T::assertEquals(100.0, (float) $finalA['final_available_base_qty'], 'FIN-A available = good = 100');
-        T::assertEquals(0.0, (float) $finalA['variance_qty'], 'FIN-A variance = available(100) - system_qty(100) = 0');
-        T::assertEquals(0.0, (float) $finalA['variance_value'], 'FIN-A variance_value = 0 * 1000 = 0');
+        T::assertEquals(0.0, (float) $finalA['variance_qty'], 'FIN-A legacy variance_qty (backward compat) = available(100) - system_qty(100) = 0');
+        T::assertEquals(0.0, (float) $finalA['variance_value'], 'FIN-A legacy variance_value (backward compat) = 0 * 1000 = 0');
+        T::assertEquals(0.0, (float) $finalA['variance_physical_qty'], 'FIN-A variance_physical_qty = physical(100) - system_qty(100) = 0');
+        T::assertEquals(0.0, (float) $finalA['variance_physical_value'], 'FIN-A variance_physical_value = 0 * 1000 = 0');
+        T::assertEquals(0.0, (float) $finalA['variance_available_qty'], 'FIN-A variance_available_qty = available(100) - system_qty(100) = 0');
+        T::assertEquals(0.0, (float) $finalA['variance_available_value'], 'FIN-A variance_available_value = 0 * 1000 = 0');
 
         $finalD = $fin->currentFinal($dId);
         T::assertTrue($finalD !== null, 'FIN-D now has a current final');
-        T::assertTrue($finalD['variance_value'] === null, 'FIN-D variance_value stays NULL — unit_cost_snapshot is genuinely unknown, never coerced to 0');
+        T::assertTrue($finalD['variance_value'] === null, 'FIN-D legacy variance_value stays NULL — unit_cost_snapshot is genuinely unknown, never coerced to 0');
+        T::assertTrue($finalD['variance_physical_value'] === null, 'FIN-D variance_physical_value stays NULL for the same reason');
+        T::assertTrue($finalD['variance_available_value'] === null, 'FIN-D variance_available_value stays NULL for the same reason');
 
         $finalB = $fin->currentFinal($bId);
         T::assertTrue($finalB === null, 'FIN-B (MISMATCH) was correctly skipped by bulk auto-finalize');
@@ -225,8 +231,20 @@ function test_finalization(): void
         T::assertEquals('MANUAL', $finalBRow['source'], 'Manual final tagged source=MANUAL');
         T::assertEquals(195.0, (float) $finalBRow['final_physical_base_qty'], 'FIN-B physical = 193 good + 2 damaged = 195');
         T::assertEquals(193.0, (float) $finalBRow['final_available_base_qty'], 'FIN-B available = good only = 193');
-        T::assertEquals(-7.0, (float) $finalBRow['variance_qty'], 'FIN-B variance = 193 - system_qty(200) = -7');
-        T::assertEquals(-3500.0, (float) $finalBRow['variance_value'], 'FIN-B variance_value = -7 * 500 = -3500');
+        T::assertEquals(-7.0, (float) $finalBRow['variance_qty'], 'FIN-B legacy variance_qty (backward compat) = 193 - system_qty(200) = -7');
+        T::assertEquals(-3500.0, (float) $finalBRow['variance_value'], 'FIN-B legacy variance_value (backward compat) = -7 * 500 = -3500');
+        // The whole point of this correction: PHYSICAL and AVAILABLE variance
+        // are genuinely different numbers here (damaged=2 makes them diverge),
+        // and both must be stored and reported explicitly, never folded into
+        // one ambiguous "variance".
+        T::assertEquals(-5.0, (float) $finalBRow['variance_physical_qty'], 'FIN-B variance_physical_qty = physical(195) - system_qty(200) = -5');
+        T::assertEquals(-2500.0, (float) $finalBRow['variance_physical_value'], 'FIN-B variance_physical_value = -5 * 500 = -2500');
+        T::assertEquals(-7.0, (float) $finalBRow['variance_available_qty'], 'FIN-B variance_available_qty = available(193) - system_qty(200) = -7');
+        T::assertEquals(-3500.0, (float) $finalBRow['variance_available_value'], 'FIN-B variance_available_value = -7 * 500 = -3500');
+        T::assertTrue(
+            (float) $finalBRow['variance_physical_qty'] !== (float) $finalBRow['variance_available_qty'],
+            'FIN-B proves PHYSICAL and AVAILABLE variance are genuinely distinct values, not aliases of each other'
+        );
 
         // Re-setting a final is append-only versioning, never an overwrite.
         $finalBRow2 = $fin->setFinal($bId, $superadminId, ['good' => 194, 'damaged' => 1, 'expired' => 0, 'deadstock' => 0], 'Koreksi kecil setelah re-cek fisik');

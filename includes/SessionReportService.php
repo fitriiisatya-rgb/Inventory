@@ -70,7 +70,8 @@ final class SessionReportService
             'MATCH' => 0, 'MISMATCH' => 0, 'CONDITION_MISMATCH' => 0, 'PARTIAL' => 0,
             'BELUM_DIHITUNG' => 0, 'RECOUNT_REQUIRED' => 0, 'NOT_COUNTABLE' => 0,
         ];
-        $totalVarianceValue = 0.0;
+        $totalVariancePhysicalValue = 0.0;
+        $totalVarianceAvailableValue = 0.0;
         $hasUnknownCostVariance = false;
         $missingFinal = 0;
         foreach ($rows as $r) {
@@ -80,8 +81,9 @@ final class SessionReportService
                 $missingFinal++;
             }
             if ($r['final'] !== null) {
-                if ($r['final']['variance_value'] !== null) {
-                    $totalVarianceValue += (float) $r['final']['variance_value'];
+                if ($r['final']['variance_physical_value'] !== null && $r['final']['variance_available_value'] !== null) {
+                    $totalVariancePhysicalValue += (float) $r['final']['variance_physical_value'];
+                    $totalVarianceAvailableValue += (float) $r['final']['variance_available_value'];
                 } else {
                     $hasUnknownCostVariance = true;
                 }
@@ -109,7 +111,8 @@ final class SessionReportService
             ['RECOUNT_REQUIRED', $counts['RECOUNT_REQUIRED']],
             ['NOT_COUNTABLE', $counts['NOT_COUNTABLE']],
             ['Item NORMAL belum di-final', $missingFinal],
-            ['Total Selisih Nilai (Rp)', round($totalVarianceValue, 2)],
+            ['Total Nilai Selisih Fisik (Rp)', round($totalVariancePhysicalValue, 2)],
+            ['Total Nilai Selisih Available (Rp)', round($totalVarianceAvailableValue, 2)],
         ];
         if ($hasUnknownCostVariance) {
             $body[] = ['Catatan', 'Sebagian item tidak memiliki harga (unit_cost tidak diketahui) — selisih nilainya TIDAK termasuk dalam total di atas.'];
@@ -127,7 +130,10 @@ final class SessionReportService
             'P2 Good', 'P2 Rusak', 'P2 Expired', 'P2 Deadstock', 'P2 Fisik',
             'Status Rekonsiliasi',
             'Final Good', 'Final Rusak', 'Final Expired', 'Final Deadstock', 'Final Fisik', 'Final Tersedia',
-            'Selisih Qty', 'Harga Satuan', 'Selisih Nilai (Rp)', 'Sumber Final', 'Alasan Final',
+            'Harga Satuan',
+            'Selisih Fisik', 'Nilai Selisih Fisik (Rp)',
+            'Selisih Stok Layak / Available', 'Nilai Selisih Available (Rp)',
+            'Sumber Final', 'Alasan Final',
         ];
         $body = [];
         foreach ($rows as $r) {
@@ -149,9 +155,11 @@ final class SessionReportService
                 $final ? (float) $final['final_good_base_qty'] : null, $final ? (float) $final['final_damaged_base_qty'] : null,
                 $final ? (float) $final['final_expired_base_qty'] : null, $final ? (float) $final['final_deadstock_base_qty'] : null,
                 $final ? (float) $final['final_physical_base_qty'] : null, $final ? (float) $final['final_available_base_qty'] : null,
-                $final ? (float) $final['variance_qty'] : null,
                 $si['unit_cost_snapshot'] !== null ? (float) $si['unit_cost_snapshot'] : null,
-                $final && $final['variance_value'] !== null ? (float) $final['variance_value'] : null,
+                $final ? (float) $final['variance_physical_qty'] : null,
+                $final && $final['variance_physical_value'] !== null ? (float) $final['variance_physical_value'] : null,
+                $final ? (float) $final['variance_available_qty'] : null,
+                $final && $final['variance_available_value'] !== null ? (float) $final['variance_available_value'] : null,
                 $final['source'] ?? null, $final['reason'] ?? null,
             ];
         }

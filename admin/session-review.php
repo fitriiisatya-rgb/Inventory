@@ -134,8 +134,12 @@ function finalCell(r) {
   if (r.item_status === 'NOT_COUNTABLE') return '-';
   if (!r.final) return '<em>belum final</em>';
   const f = r.final;
-  const valueStr = f.variance_value === null ? 'N/A' : f.variance_value;
-  return `Good:${f.good} Rusak:${f.damaged} Exp:${f.expired} Dead:${f.deadstock}<br>Selisih: ${f.variance_qty} (Rp ${valueStr}) <span class="badge badge-${f.source === 'AUTO_MATCH' ? 'active' : 'warning'}">${f.source}</span>`;
+  const physValueStr = f.variance_physical_value === null ? 'N/A' : f.variance_physical_value;
+  const availValueStr = f.variance_available_value === null ? 'N/A' : f.variance_available_value;
+  return `Good:${f.good} Rusak:${f.damaged} Exp:${f.expired} Dead:${f.deadstock}<br>
+    Selisih Fisik: ${f.variance_physical_qty} (Nilai Selisih Fisik: Rp ${physValueStr})<br>
+    Selisih Stok Layak/Available: ${f.variance_available_qty} (Nilai Selisih Available: Rp ${availValueStr})
+    <span class="badge badge-${f.source === 'AUTO_MATCH' ? 'active' : 'warning'}">${f.source}</span>`;
 }
 
 async function loadItems() {

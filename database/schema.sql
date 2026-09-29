@@ -502,8 +502,20 @@ CREATE TABLE stock_opname_finals (
     source              ENUM('AUTO_MATCH','MANUAL') NOT NULL DEFAULT 'MANUAL',
 
     final_qty           DECIMAL(18,4) NOT NULL,   -- base unit; kept = final_physical_base_qty
+    -- Deprecated (migration 0004) — kept for backward compatibility only,
+    -- always equal to variance_available_qty/variance_available_value.
+    -- New code reads the explicit *_physical_*/*_available_* columns below.
     variance_qty        DECIMAL(18,4) NOT NULL,   -- final_available_base_qty - system_qty_snapshot
     variance_value      DECIMAL(18,2) NULL,       -- variance_qty * unit_cost_snapshot; NULL when cost unknown
+    -- Explicit PHYSICAL vs AVAILABLE variance (migration 0006). An audit
+    -- report must show both, named unambiguously — see the correction
+    -- note dated 2026-09-30. AVAILABLE remains the default operational/
+    -- sellable-stock adjustment reference; PHYSICAL is always reported
+    -- alongside it, never folded into one ambiguous "variance".
+    variance_physical_qty    DECIMAL(18,4) NOT NULL DEFAULT 0,   -- final_physical_base_qty - system_qty_snapshot
+    variance_physical_value  DECIMAL(18,2) NULL,                 -- NULL when unit_cost_snapshot unknown
+    variance_available_qty   DECIMAL(18,4) NOT NULL DEFAULT 0,   -- final_available_base_qty - system_qty_snapshot
+    variance_available_value DECIMAL(18,2) NULL,                 -- NULL when unit_cost_snapshot unknown
     reason              VARCHAR(255) NOT NULL,
     set_by              BIGINT UNSIGNED NOT NULL,
     set_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

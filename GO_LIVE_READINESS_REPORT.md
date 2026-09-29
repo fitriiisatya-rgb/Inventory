@@ -2,13 +2,22 @@
 
 **Branch:** `claude/eloquent-mayer-yxesi3` (up to date with origin)
 **Target go-live:** 30 September 2026
-**Report generated:** 29 September 2026
+**Report generated:** 29 September 2026, updated 30 September 2026 (variance correction)
 
 This is the single consolidated report for the URGENT GO-LIVE MODE work,
 covering everything built since the Phase 5 Photo Evidence Report: session
 finalization, Excel/PDF export, ops tooling, and the legacy data migration
 that was added mid-stream as a new P0. It replaces the intermediate phase
 reports as the document to read before tomorrow.
+
+**Post-report correction (§3a):** a P0 fix landed after this report was
+first written — `variance_qty`/`variance_value` on `stock_opname_finals`
+were computed against AVAILABLE only, under one ambiguous name. The system
+now stores and reports **two explicit variances**, PHYSICAL and AVAILABLE,
+never one bare "variance." Migration `0006_variance_breakdown.sql`,
+backward-safe (purely additive; the original columns are kept, unchanged,
+for compatibility). See §3a for detail — the rest of this report is
+otherwise unchanged from the original 29 September version.
 
 ---
 
@@ -101,6 +110,61 @@ else in this app.
 **51 test assertions** in `tests/FinalizationTest.php` cover the full
 state machine, both preflight gates, auto vs. manual finalization, and
 versioning — all passing against a real MariaDB instance.
+
+---
+
+## 3a. Correction: explicit PHYSICAL vs AVAILABLE variance
+
+**Problem.** `variance_qty`/`variance_value` were computed against
+AVAILABLE only, under one ambiguous name — a report reader had no way to
+tell, from the field name alone, whether "variance" meant "everything
+physically counted" or "sellable stock only," and these two numbers can
+genuinely differ whenever an item has any damaged/expired/deadstock
+quantity.
+
+**Fix.** `stock_opname_finals` now stores four explicit columns
+(migration `0006_variance_breakdown.sql`, purely additive/backward-safe —
+the original `variance_qty`/`variance_value` columns are kept, unchanged,
+still populated with the AVAILABLE-basis numbers for anything that might
+read them):
+
+```
+variance_physical_qty    = final_physical_base_qty  - system_qty_snapshot
+variance_available_qty   = final_available_base_qty - system_qty_snapshot
+variance_physical_value  = variance_physical_qty  * unit_cost_snapshot   (NULL if cost unknown)
+variance_available_value = variance_available_qty * unit_cost_snapshot  (NULL if cost unknown)
+```
+
+`FinalizationService::setFinal()`/`bulkFinalizeMatch()` compute and store
+both on every write. AVAILABLE stays the default operational/sellable-
+stock adjustment reference (existing business logic, unchanged) — but
+PHYSICAL is now always reported alongside it, never omitted from audit
+output.
+
+**Where the labels now appear**, all using the exact wording requested
+(no bare "variance" anywhere in UI or report output):
+- **Excel** (`Detail SO` sheet): *Selisih Fisik*, *Nilai Selisih Fisik
+  (Rp)*, *Selisih Stok Layak / Available*, *Nilai Selisih Available
+  (Rp)*. `Ringkasan` sheet totals both separately.
+- **PDF / print view**: same four columns, same labels.
+- **Admin review UI** (Set Final display): *Selisih Fisik* and *Selisih
+  Stok Layak/Available* shown as two separate lines.
+- **API** (`api/review/items.php`): `final.variance_physical_qty`,
+  `final.variance_physical_value`, `final.variance_available_qty`,
+  `final.variance_available_value` — the bare `variance_qty`/
+  `variance_value` keys were removed from this response entirely (they
+  still exist as DB columns for backward compatibility, just never
+  surfaced to a UI/report consumer).
+
+**Verification.** 11 new assertions in `tests/FinalizationTest.php`
+(using a case with `damaged=2` specifically so PHYSICAL and AVAILABLE
+variance land on different numbers, e.g. `-5` vs. `-7`, proving they're
+genuinely distinct, not aliases) plus 8 new assertions in the Golden Path
+E2E test (HTTP-level: the `set_final.php` response, the `review/items.php`
+payload — including a grep confirming the ambiguous field names never
+appear in the response body — and the exported `.xlsx`'s actual column
+headers). Full suite re-run after the patch: **313 + 11 + 5 + 12 + 34 =
+375 checks, all green.**
 
 ---
 
@@ -247,13 +311,14 @@ existing team count, no new fields exposed).
 
 | Suite | Result |
 |---|---|
-| `tests/run.php` (PHP/MariaDB unit+integration) | **302 / 302** |
+| `tests/run.php` (PHP/MariaDB unit+integration) | **313 / 313** |
 | `tests/api_security_test.sh` (RBAC/IDOR, HTTP) | **11 / 11** |
 | `tests/concurrency_test.sh` (real parallel requests) | **5 / 5 scenarios** |
 | `tests/photo_security_test.sh` (evidence upload/IDOR) | **12 / 12** |
-| `tests/golden_path_e2e.sh` (full flow, new) | **27 / 27** |
+| `tests/golden_path_e2e.sh` (full flow, incl. variance correction) | **34 / 34** |
 
-**357 total checks, all green.** Database confirmed empty of test
+**375 total checks, all green** (numbers as of the §3a variance
+correction; 357 before it). Database confirmed empty of test
 fixtures after the full run (`bin/clear_test_data.php` dry-run reports 0
 rows across all 15 transactional tables).
 

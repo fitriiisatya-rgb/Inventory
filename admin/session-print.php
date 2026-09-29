@@ -75,20 +75,23 @@ $fmtMoney = static fn($v) => $v === null ? 'N/A' : number_format((float) $v, 0, 
 <h2>Ringkasan</h2>
 <?php
 $counts = ['MATCH' => 0, 'MISMATCH' => 0, 'CONDITION_MISMATCH' => 0, 'PARTIAL' => 0, 'BELUM_DIHITUNG' => 0, 'RECOUNT_REQUIRED' => 0, 'NOT_COUNTABLE' => 0];
-$totalVariance = 0.0;
+$totalVariancePhysical = 0.0;
+$totalVarianceAvailable = 0.0;
 foreach ($rows as $r) {
     $counts[$r['status']] = ($counts[$r['status']] ?? 0) + 1;
-    if ($r['final'] && $r['final']['variance_value'] !== null) {
-        $totalVariance += (float) $r['final']['variance_value'];
+    if ($r['final'] && $r['final']['variance_physical_value'] !== null && $r['final']['variance_available_value'] !== null) {
+        $totalVariancePhysical += (float) $r['final']['variance_physical_value'];
+        $totalVarianceAvailable += (float) $r['final']['variance_available_value'];
     }
 }
 ?>
 <table>
-  <tr><th>Total Item</th><th>MATCH</th><th>MISMATCH</th><th>COND. MISMATCH</th><th>NOT COUNTABLE</th><th>Total Selisih (Rp)</th></tr>
+  <tr><th>Total Item</th><th>MATCH</th><th>MISMATCH</th><th>COND. MISMATCH</th><th>NOT COUNTABLE</th><th>Total Nilai Selisih Fisik (Rp)</th><th>Total Nilai Selisih Available (Rp)</th></tr>
   <tr>
     <td><?= count($rows) ?></td><td><?= $counts['MATCH'] ?></td><td><?= $counts['MISMATCH'] ?></td>
     <td><?= $counts['CONDITION_MISMATCH'] ?></td><td><?= $counts['NOT_COUNTABLE'] ?></td>
-    <td><?= $fmtMoney($totalVariance) ?></td>
+    <td><?= $fmtMoney($totalVariancePhysical) ?></td>
+    <td><?= $fmtMoney($totalVarianceAvailable) ?></td>
   </tr>
 </table>
 
@@ -96,7 +99,10 @@ foreach ($rows as $r) {
 <table>
   <thead><tr>
     <th>SKU</th><th>Nama</th><th>Sistem</th><th>Final Good</th><th>Rusak</th><th>Expired</th><th>Dead</th>
-    <th>Fisik</th><th>Tersedia</th><th>Selisih</th><th>Nilai Selisih</th><th>Status</th>
+    <th>Fisik</th><th>Tersedia</th>
+    <th>Selisih Fisik</th><th>Nilai Selisih Fisik</th>
+    <th>Selisih Stok Layak / Available</th><th>Nilai Selisih Available</th>
+    <th>Status</th>
   </tr></thead>
   <tbody>
   <?php foreach ($rows as $r): $si = $r['session_item']; $f = $r['final']; ?>
@@ -110,8 +116,10 @@ foreach ($rows as $r) {
       <td><?= $f ? $fmt($f['final_deadstock_base_qty']) : '-' ?></td>
       <td><?= $f ? $fmt($f['final_physical_base_qty']) : '-' ?></td>
       <td><?= $f ? $fmt($f['final_available_base_qty']) : '-' ?></td>
-      <td><?= $f ? $fmt($f['variance_qty']) : '-' ?></td>
-      <td><?= $f ? $fmtMoney($f['variance_value']) : '-' ?></td>
+      <td><?= $f ? $fmt($f['variance_physical_qty']) : '-' ?></td>
+      <td><?= $f ? $fmtMoney($f['variance_physical_value']) : '-' ?></td>
+      <td><?= $f ? $fmt($f['variance_available_qty']) : '-' ?></td>
+      <td><?= $f ? $fmtMoney($f['variance_available_value']) : '-' ?></td>
       <td><span class="badge <?= $r['status'] === 'MATCH' ? 'b-match' : ($r['status'] === 'MISMATCH' ? 'b-mismatch' : 'b-other') ?>"><?= htmlspecialchars($r['status']) ?></span></td>
     </tr>
   <?php endforeach; ?>

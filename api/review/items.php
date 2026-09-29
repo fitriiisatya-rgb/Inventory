@@ -63,8 +63,14 @@ $rows = array_map(static function (array $r) use ($fin) {
             'good' => (float) $final['final_good_base_qty'], 'damaged' => (float) $final['final_damaged_base_qty'],
             'expired' => (float) $final['final_expired_base_qty'], 'deadstock' => (float) $final['final_deadstock_base_qty'],
             'physical' => (float) $final['final_physical_base_qty'], 'available' => (float) $final['final_available_base_qty'],
-            'variance_qty' => (float) $final['variance_qty'],
-            'variance_value' => $final['variance_value'] !== null ? (float) $final['variance_value'] : null,
+            // Explicit, unambiguous variance pair (correction 2026-09-30) —
+            // never a single bare "variance". AVAILABLE stays the default
+            // operational/sellable-stock adjustment reference; PHYSICAL is
+            // always reported alongside it for audit purposes.
+            'variance_physical_qty' => (float) $final['variance_physical_qty'],
+            'variance_physical_value' => $final['variance_physical_value'] !== null ? (float) $final['variance_physical_value'] : null,
+            'variance_available_qty' => (float) $final['variance_available_qty'],
+            'variance_available_value' => $final['variance_available_value'] !== null ? (float) $final['variance_available_value'] : null,
             'source' => $final['source'], 'reason' => $final['reason'], 'version' => (int) $final['version'],
             'set_at' => $final['set_at'],
         ] : null,
