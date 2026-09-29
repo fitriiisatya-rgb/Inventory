@@ -128,8 +128,12 @@ fi
 
 mysql -uroot stok_opname -e "
 DELETE l FROM stock_opname_item_locks l JOIN stock_opname_session_items si ON si.id=l.session_item_id JOIN stock_opname_sessions s ON s.id=si.session_id JOIN locations loc ON loc.id=s.location_id WHERE loc.code='SEC-LOC';
+DELETE cr FROM stock_opname_count_revisions cr
+  JOIN stock_opname_counts c ON c.id=cr.count_id
+  JOIN stock_opname_session_items si ON si.id=c.session_item_id
+  JOIN stock_opname_sessions s ON s.id=si.session_id
+  JOIN locations loc ON loc.id=s.location_id WHERE loc.code='SEC-LOC';
 DELETE c FROM stock_opname_counts c JOIN stock_opname_session_items si ON si.id=c.session_item_id JOIN stock_opname_sessions s ON s.id=si.session_id JOIN locations loc ON loc.id=s.location_id WHERE loc.code='SEC-LOC';
-DELETE cr FROM stock_opname_count_revisions cr LEFT JOIN stock_opname_counts c ON c.id=cr.count_id WHERE c.id IS NULL;
 DELETE si FROM stock_opname_session_items si JOIN stock_opname_sessions s ON s.id=si.session_id JOIN locations loc ON loc.id=s.location_id WHERE loc.code='SEC-LOC';
 DELETE sc FROM stock_opname_session_counters sc JOIN stock_opname_sessions s ON s.id=sc.session_id JOIN locations loc ON loc.id=s.location_id WHERE loc.code='SEC-LOC';
 DELETE al FROM audit_logs al WHERE al.actor_id IN (SELECT id FROM users WHERE username LIKE 'sec_%');
