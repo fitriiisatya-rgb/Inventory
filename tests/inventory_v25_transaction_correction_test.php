@@ -299,7 +299,7 @@ echo "\n== Case 13: finalized opname protected — correction only through the g
 [$whOpname, ] = makeWarehouse($pdo, 'OPNAME');
 $item13 = makeItem($pdo, $kgUnitId, 'C13');
 postIn($pdo, $item13, $whOpname, 50, 4000, '2026-09-01 08:00:00', $superadmin, $kgUnitId);
-$session13 = StockOpnameService::start($pdo, $whOpname, $superadmin, [$item13]);
+$session13 = StockOpnameService::start($pdo, $whOpname, $superadmin, [$item13], 'LEGACY_DUAL_COUNT');
 StockOpnameService::count($pdo, $session13, [$item13 => 44], $superadmin); // variance -6
 StockOpnameService::finalize($pdo, $session13, $superadmin);
 $reflection13 = new ReflectionClass(StockOpnameService::class);

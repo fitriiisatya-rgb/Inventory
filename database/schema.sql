@@ -944,8 +944,17 @@ CREATE TABLE stock_opname_finding_quantities (
 -- every still-unattached photo matching this exact session/item/role/
 -- condition/uploader when the finding is created. An upload nobody
 -- attaches (an abandoned form) stays a harmless orphan row.
+-- PHASE V2.14.11.1: upload_token is the unguessable identifier the CLIENT
+-- must present to attach this photo to a finding (submitFinding()'s
+-- `photos` payload takes tokens, never bare ids) — an independent audit
+-- found that auto-attaching every still-pending photo matching (session,
+-- line, role, condition_type, uploader) let an abandoned/reconsidered
+-- upload silently attach itself to a LATER, unrelated finding. See
+-- StockOpnamePhotoService::upload()/attachExplicit()/remove()/
+-- cleanupExpiredPending().
 CREATE TABLE stock_opname_finding_photos (
     id                    BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    upload_token          CHAR(36) NOT NULL,
     session_id            INT UNSIGNED NOT NULL,
     stock_opname_line_id  BIGINT UNSIGNED NOT NULL,
     team_role             ENUM('P1','P2') NOT NULL,
@@ -962,8 +971,10 @@ CREATE TABLE stock_opname_finding_photos (
     CONSTRAINT fk_sofp_line FOREIGN KEY (stock_opname_line_id) REFERENCES stock_opname_lines(id),
     CONSTRAINT fk_sofp_finding FOREIGN KEY (finding_id) REFERENCES stock_opname_findings(id),
     CONSTRAINT fk_sofp_uploaded_by FOREIGN KEY (uploaded_by) REFERENCES users(id),
+    UNIQUE KEY uq_sofp_token (upload_token),
     INDEX idx_sofp_pending_claim (session_id, stock_opname_line_id, team_role, condition_type, uploaded_by, finding_id),
-    INDEX idx_sofp_finding (finding_id, condition_type)
+    INDEX idx_sofp_finding (finding_id, condition_type),
+    INDEX idx_sofp_pending_expiry (finding_id, uploaded_at)
 ) ENGINE=InnoDB;
 
 -- PHASE V2.14.10.1 Gate 1: FROZEN unit conversions for one Stock Opname

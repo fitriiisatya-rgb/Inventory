@@ -264,7 +264,7 @@ Database::transaction(fn (PDO $tx) => FifoService::postIn($tx, [
     'input_qty' => 50, 'input_unit_id' => $kgUnitId, 'unit_price_input' => 500,
     'transaction_date' => '2026-09-04 08:00:00', 'created_by' => $adminUserId, 'username' => 'tracetest', 'supplier_id' => $supplierId,
 ]));
-$opnameSessionId = StockOpnameService::start($pdo, $whAId, $adminUserId, [$opnameItemId]);
+$opnameSessionId = StockOpnameService::start($pdo, $whAId, $adminUserId, [$opnameItemId], 'LEGACY_DUAL_COUNT');
 StockOpnameService::count($pdo, $opnameSessionId, [$opnameItemId => 45.0], $adminUserId); // -5 variance
 StockOpnameService::finalize($pdo, $opnameSessionId, $adminUserId);
 $opnamePostResult = StockOpnameService::post($pdo, $opnameSessionId, $adminUserId);

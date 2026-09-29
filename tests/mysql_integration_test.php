@@ -176,7 +176,7 @@ Database::transaction(fn (PDO $tx) => FifoService::postIn($tx, [
     'transaction_date' => '2026-09-01 08:00:00', 'created_by' => $userId,
 ]));
 
-$sessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $whOp, $userId, [$itemOp]));
+$sessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $whOp, $userId, [$itemOp], 'LEGACY_DUAL_COUNT'));
 
 // while opname is active, movement on this warehouse must be blocked
 $blockedDuringOpname = false;

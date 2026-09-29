@@ -120,6 +120,7 @@ use App\Services\MovementReconciliationReviewService;
 use App\Services\ValidationException;
 use App\Services\CountingModeConflictException;
 use App\Services\ClaimConflictException;
+use App\Services\FindingsCheckpointBRequiredException;
 use App\Services\FifoService;
 use App\Services\InventoryService;
 use App\Services\TransferService;
@@ -360,6 +361,7 @@ set_exception_handler(function (Throwable $e) use ($path) {
         // mix; a claim must be currently valid, not merely presented.
         CountingModeConflictException::class      => ['code' => 409, 'label' => 'COUNTING_MODE_CONFLICT'],
         ClaimConflictException::class              => ['code' => 409, 'label' => 'CLAIM_LOST'],
+        FindingsCheckpointBRequiredException::class => ['code' => 409, 'label' => 'FINDINGS_V1_CHECKPOINT_B_REQUIRED'],
     ];
     // PHASE V2.5: the two dependency exceptions carry a structured
     // `dependencies` list the frontend renders verbatim (spec: "Then list
@@ -3173,8 +3175,21 @@ $routes = [
         }
         $notes = array_key_exists('notes', $input) ? (string) $input['notes'] : null;
 
+        // PHASE V2.14.11.1 — Checkpoint A audit corrective (Blocker 1B):
+        // the client must explicitly name which already-uploaded photo(s)
+        // belong to THIS finding, grouped by condition_type, e.g.
+        // {"DAMAGED": ["<token>"], "EXPIRED": [], "DEADSTOCK": []}. Never
+        // inferred from session/line/role/uploader alone — see
+        // StockOpnamePhotoService::attachExplicit().
+        $photosInput = (array) ($input['photos'] ?? []);
+        $photoTokens = [];
+        foreach (['DAMAGED', 'EXPIRED', 'DEADSTOCK'] as $ct) {
+            $tokens = (array) ($photosInput[$ct] ?? []);
+            $photoTokens[$ct] = array_values(array_map('strval', $tokens));
+        }
+
         $result = Database::transaction(
-            fn (PDO $tx) => StockOpnameService::submitFinding($tx, $sessionId, strtolower($role), $itemId, $conditionsInput, $notes, (int) $user['id'], $claimToken)
+            fn (PDO $tx) => StockOpnameService::submitFinding($tx, $sessionId, strtolower($role), $itemId, $conditionsInput, $notes, (int) $user['id'], $claimToken, $photoTokens)
         );
         inv_ok($result, 'Finding recorded');
     },
@@ -3217,6 +3232,49 @@ $routes = [
             fn (PDO $tx) => StockOpnamePhotoService::upload($tx, $sessionId, strtolower($role), $itemId, $conditionType, (int) $user['id'], $claimToken, $_FILES['photo']['tmp_name'], $caption)
         );
         inv_ok($result, 'Photo uploaded');
+    },
+
+    // PHASE V2.14.11.1 — Checkpoint A audit corrective (Blocker 1D): lets
+    // the counter drop a selected-then-reconsidered photo BEFORE Simpan
+    // Temuan, so it can never later be named in a /findings "photos"
+    // payload by mistake. Only the uploader may remove it, only while it
+    // is still pending (finding_id IS NULL, enforced in the service), and
+    // only by presenting the exact upload_token they were given back at
+    // upload time — the same secure-identifier contract attachExplicit()
+    // itself relies on. Once removed the row is gone outright: it can
+    // never be attached, by this token or any other route.
+    'POST /stock-opname/{id}/photos/{photoId}/remove' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        $sessionId = (int) $params['id'];
+        $photoId = (int) $params['photoId'];
+
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        $auth = inv_require_so_counter_or_permission($pdo, $user, $sessionId, 'STOCK_OPNAME_MANAGE');
+        if ($auth['mode'] === 'privileged') {
+            inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        }
+
+        $token = (string) ($input['token'] ?? '');
+        if (trim($token) === '') {
+            throw new ValidationException(['token is required']);
+        }
+
+        $photo = $pdo->prepare('SELECT session_id FROM stock_opname_finding_photos WHERE id = :id');
+        $photo->execute(['id' => $photoId]);
+        $photoSessionId = $photo->fetchColumn();
+        if ($photoSessionId === false || (int) $photoSessionId !== $sessionId) {
+            inv_error(404, 'NOT_FOUND', 'photo not found');
+        }
+
+        Database::transaction(
+            fn (PDO $tx) => StockOpnamePhotoService::remove($tx, $photoId, $token, (int) $user['id'])
+        );
+        inv_ok(['removed' => true], 'Photo removed');
     },
 
     // PHASE V2.14.11 — streams a stored photo's bytes back. storage/ sits

@@ -204,7 +204,7 @@ Database::transaction(fn (PDO $tx) => FifoService::postIn($tx, [
     'input_qty' => 50, 'input_unit_id' => $kgUnitId, 'unit_price_input' => 2000,
     'transaction_date' => '2026-07-01 00:00:00', 'created_by' => $adminUserId, 'username' => 'rpttest', 'transaction_type' => 'OPENING',
 ]));
-$sessionId = StockOpnameService::start($pdo, $opnameWh, $adminUserId, [$itemOp]);
+$sessionId = StockOpnameService::start($pdo, $opnameWh, $adminUserId, [$itemOp], 'LEGACY_DUAL_COUNT');
 StockOpnameService::count($pdo, $sessionId, [$itemOp => 45], $adminUserId);
 StockOpnameService::finalize($pdo, $sessionId, $adminUserId);
 

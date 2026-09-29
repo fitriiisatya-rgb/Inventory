@@ -268,6 +268,11 @@ $photoFile = makeFakePhotoFile();
 $damagedPhoto = Database::transaction(fn (PDO $tx) => StockOpnamePhotoService::upload($tx, $sessionId, 'p1', $itemA, 'DAMAGED', $viewerP1a, $claim1b['claim_token'], $photoFile));
 check('32. photo re-encoded to a real image/jpeg, stored, and byte_size > 0', $damagedPhoto['byte_size'] > 0);
 
+// PHASE V2.14.11.1 — Checkpoint A audit corrective: a photo being merely
+// "pending" (uploaded, finding_id NULL) is never enough — it must be named
+// explicitly by token in the photos={} argument. Here DAMAGED's own
+// pending photo is deliberately left UNNAMED, so even though a DAMAGED
+// photo file exists on disk, this must still fail for BOTH conditions.
 $twoConditionsOnePhotoErr = expectException(
     fn () => Database::transaction(fn (PDO $tx) => StockOpnameService::submitFinding(
         $tx, $sessionId, 'p1', $itemA,
@@ -276,7 +281,19 @@ $twoConditionsOnePhotoErr = expectException(
     )),
     ValidationException::class
 );
-check('24. two positive conditions require evidence for BOTH — only DAMAGED photo present, EXPIRED missing', $twoConditionsOnePhotoErr !== null, (string) $twoConditionsOnePhotoErr);
+check('24. two positive conditions require evidence for BOTH — no photo token named for either', $twoConditionsOnePhotoErr !== null, (string) $twoConditionsOnePhotoErr);
+
+// Now name DAMAGED's token but still omit EXPIRED's — must still fail,
+// proving each positive condition is checked independently (Blocker 1C).
+$damagedOnlyNamedErr = expectException(
+    fn () => Database::transaction(fn (PDO $tx) => StockOpnameService::submitFinding(
+        $tx, $sessionId, 'p1', $itemA,
+        ['GOOD' => [['unit_id' => $kgUnitId, 'qty' => 5]], 'DAMAGED' => [['unit_id' => $kgUnitId, 'qty' => 2]], 'EXPIRED' => [['unit_id' => $kgUnitId, 'qty' => 1]], 'DEADSTOCK' => [['unit_id' => $kgUnitId, 'qty' => 0]]],
+        null, $viewerP1a, $claim1b['claim_token'], ['DAMAGED' => [$damagedPhoto['token']], 'EXPIRED' => [], 'DEADSTOCK' => []]
+    )),
+    ValidationException::class
+);
+check('24b. naming DAMAGED alone still fails while EXPIRED evidence is unnamed', $damagedOnlyNamedErr !== null, (string) $damagedOnlyNamedErr);
 
 $photoFile2 = makeFakePhotoFile();
 $expiredPhoto = Database::transaction(fn (PDO $tx) => StockOpnamePhotoService::upload($tx, $sessionId, 'p1', $itemA, 'EXPIRED', $viewerP1a, $claim1b['claim_token'], $photoFile2));
@@ -284,7 +301,8 @@ $expiredPhoto = Database::transaction(fn (PDO $tx) => StockOpnamePhotoService::u
 $result2 = Database::transaction(fn (PDO $tx) => StockOpnameService::submitFinding(
     $tx, $sessionId, 'p1', $itemA,
     ['GOOD' => [['unit_id' => $kgUnitId, 'qty' => 5]], 'DAMAGED' => [['unit_id' => $kgUnitId, 'qty' => 2]], 'EXPIRED' => [['unit_id' => $kgUnitId, 'qty' => 1]], 'DEADSTOCK' => [['unit_id' => $kgUnitId, 'qty' => 0]]],
-    'second finding with damage/expired', $viewerP1a, $claim1b['claim_token']
+    'second finding with damage/expired', $viewerP1a, $claim1b['claim_token'],
+    ['DAMAGED' => [$damagedPhoto['token']], 'EXPIRED' => [$expiredPhoto['token']], 'DEADSTOCK' => []]
 ));
 $myLine2 = array_values(array_filter($result2['lines'], fn ($l) => $l['item_id'] === $itemA))[0];
 check('22/23/25. finding with both photos present succeeds', $myLine2['is_counted_by_me'] === true);

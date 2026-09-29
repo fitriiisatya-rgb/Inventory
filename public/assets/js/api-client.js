@@ -341,19 +341,32 @@ const InvApi = (() => {
         // entry each — qty 0 if none found). Gate 4: claim_token is required
         // — claimOpnameItem()'s response carries claim_token, which the
         // caller must pass straight through here.
-        submitOpnameFinding: (id, role, itemId, conditions, notes, claimToken) => request('POST', `/stock-opname/${id}/findings`, { role, item_id: itemId, conditions, notes: notes || null, claim_token: claimToken }),
+        // PHASE V2.14.11.1 — Checkpoint A audit corrective (Blocker 1B):
+        // `photos` is {DAMAGED: [...tokens], EXPIRED: [...], DEADSTOCK: [...]}
+        // naming EXACTLY which already-uploaded photo(s) (by the token
+        // uploadOpnamePhoto() returned) belong to THIS finding. A photo
+        // never attaches just by matching session/item/role/condition —
+        // it must be named here explicitly.
+        submitOpnameFinding: (id, role, itemId, conditions, notes, claimToken, photos) => request('POST', `/stock-opname/${id}/findings`, { role, item_id: itemId, conditions, notes: notes || null, claim_token: claimToken, photos: photos || { DAMAGED: [], EXPIRED: [], DEADSTOCK: [] } }),
         voidOpnameFinding: (id, findingId, reason) => request('POST', `/stock-opname/${id}/findings/${findingId}/void`, { reason }),
         myOpnameSessions: () => request('GET', '/stock-opname/my-sessions'),
-        // PHASE V2.14.11 — photo evidence: uploaded BEFORE the finding it
-        // will belong to exists (see StockOpnamePhotoService's docblock);
-        // the server atomically attaches every still-unattached photo
-        // matching this exact session/item/role/condition/uploader the
-        // moment submitOpnameFinding() creates the finding — the caller
-        // never passes a photo_id anywhere.
+        // PHASE V2.14.11.1 — photo evidence: uploaded BEFORE the finding it
+        // will belong to exists, but stays merely "pending" (finding_id
+        // NULL) until the caller explicitly names its upload_token in
+        // submitOpnameFinding()'s `photos` payload — the server never
+        // auto-attaches by matching session/item/role/condition/uploader
+        // alone. Response carries {photo_id, token, condition_type,
+        // byte_size}; keep the token client-side to submit or remove it.
         uploadOpnamePhoto: (id, role, itemId, conditionType, claimToken, file, caption) =>
             upload(`/stock-opname/${id}/items/${itemId}/photos`, file, {
                 role, condition_type: conditionType, claim_token: claimToken, ...(caption ? { caption } : {}),
             }, 'photo'),
+        // PHASE V2.14.11.1 — Checkpoint A audit corrective (Blocker 1D):
+        // drops a selected-then-reconsidered pending photo before Simpan
+        // Temuan, so it can never later be named in a `photos` payload.
+        // Only the uploader may remove it, and only the exact token they
+        // were given back at upload time is accepted.
+        removeOpnamePhoto: (id, photoId, token) => request('POST', `/stock-opname/${id}/photos/${photoId}/remove`, { token }),
         // Returns the raw-bytes streaming route directly — usable as an
         // <img src>; the browser sends the session cookie automatically,
         // and the server re-checks blind-count authorization on every

@@ -404,7 +404,7 @@ check('report detail exposes per-line SKU/system/P1/P2/final/difference', count(
 echo "\n== FINAL GATE REGRESSION: legacy single-count session never misreports as not-counted ==\n";
 $itemLegacy = makeItem($pdo, $kgUnitId, 'V212-LEGACY');
 postOpeningIn($pdo, $itemLegacy, $kgUnitId, $scmId, 40, 3000, $adminUserId);
-$legacySessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemLegacy]));
+$legacySessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemLegacy], 'LEGACY_DUAL_COUNT'));
 Database::transaction(fn (PDO $tx) => StockOpnameService::count($tx, $legacySessionId, [$itemLegacy => 38], $adminUserId));
 Database::transaction(fn (PDO $tx) => StockOpnameService::finalize($tx, $legacySessionId, $adminUserId));
 Database::transaction(fn (PDO $tx) => StockOpnameService::post($tx, $legacySessionId, $adminUserId));

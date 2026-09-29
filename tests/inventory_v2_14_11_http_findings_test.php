@@ -35,6 +35,7 @@ require_once __DIR__ . '/../services/AuthService.php';
 use App\Services\Database;
 use App\Services\FifoService;
 use App\Services\UnitConversionService;
+use App\Services\StockOpnameService;
 
 $results = [];
 function check(string $name, bool $pass, string $detail = ''): void
@@ -275,14 +276,39 @@ try {
     ], $p1aAuth['jar'], $p1aAuth['csrf']);
     check('12b. photo upload over real multipart HTTP succeeds', $photoUpload['status'] === 200, json_encode($photoUpload['body']));
 
+    // PHASE V2.14.11.1 — Checkpoint A audit corrective (Blocker 1D): the
+    // remove-photo route over real HTTP — upload a throwaway photo, remove
+    // it, then prove naming its token in a finding is refused exactly like
+    // an unnamed photo (it no longer exists to attach).
+    $throwawayPhotoFile = makeFakePhotoFile();
+    $throwawayPhotoUpload = httpUpload("{$base}/stock-opname/{$sessionId}/items/{$itemA}/photos", $throwawayPhotoFile, [
+        'role' => 'p1', 'condition_type' => 'DAMAGED', 'claim_token' => $claim2['body']['data']['claim_token'],
+    ], $p1aAuth['jar'], $p1aAuth['csrf']);
+    check('12c. throwaway photo upload succeeds (setup for remove test)', $throwawayPhotoUpload['status'] === 200, json_encode($throwawayPhotoUpload['body']));
+    $removeCall = httpCall('POST', "{$base}/stock-opname/{$sessionId}/photos/{$throwawayPhotoUpload['body']['data']['photo_id']}/remove", ['token' => $throwawayPhotoUpload['body']['data']['token']], $p1aAuth['jar'], $p1aAuth['csrf']);
+    check('12d. POST /stock-opname/{id}/photos/{photoId}/remove succeeds over real HTTP', $removeCall['status'] === 200, json_encode($removeCall['body']));
+    $removedPhotoSubmit = httpCall('POST', "{$base}/stock-opname/{$sessionId}/findings", [
+        'role' => 'p1', 'item_id' => $itemA, 'claim_token' => $claim2['body']['data']['claim_token'],
+        'conditions' => [
+            'GOOD' => [['unit_id' => $kgUnitId, 'qty' => 10]],
+            'DAMAGED' => [['unit_id' => $kgUnitId, 'qty' => 3]], 'EXPIRED' => [['unit_id' => $kgUnitId, 'qty' => 0]], 'DEADSTOCK' => [['unit_id' => $kgUnitId, 'qty' => 0]],
+        ],
+        'photos' => ['DAMAGED' => [$throwawayPhotoUpload['body']['data']['token']], 'EXPIRED' => [], 'DEADSTOCK' => []],
+    ], $p1aAuth['jar'], $p1aAuth['csrf']);
+    check('12e. naming a REMOVED photo token over HTTP is rejected (422)', $removedPhotoSubmit['status'] === 422, json_encode($removedPhotoSubmit['body']));
+
+    // PHASE V2.14.11.1 — Checkpoint A audit corrective (Blocker 1B): the
+    // uploaded photo alone is not enough; its token must be named
+    // explicitly here or the finding is refused exactly like test 12 above.
     $withPhotoSubmit = httpCall('POST', "{$base}/stock-opname/{$sessionId}/findings", [
         'role' => 'p1', 'item_id' => $itemA, 'claim_token' => $claim2['body']['data']['claim_token'],
         'conditions' => [
             'GOOD' => [['unit_id' => $kgUnitId, 'qty' => 10], ['unit_id' => $pcsUnitId, 'qty' => 2]],
             'DAMAGED' => [['unit_id' => $kgUnitId, 'qty' => 3]], 'EXPIRED' => [['unit_id' => $kgUnitId, 'qty' => 0]], 'DEADSTOCK' => [['unit_id' => $kgUnitId, 'qty' => 0]],
         ],
+        'photos' => ['DAMAGED' => [$photoUpload['body']['data']['token']], 'EXPIRED' => [], 'DEADSTOCK' => []],
     ], $p1aAuth['jar'], $p1aAuth['csrf']);
-    check('11. multi-unit GOOD finding (10 Kg + 2x5 Kg = 20) succeeds with photo present', $withPhotoSubmit['status'] === 200, json_encode($withPhotoSubmit['body']));
+    check('11. multi-unit GOOD finding (10 Kg + 2x5 Kg = 20) succeeds with an explicitly-named photo token', $withPhotoSubmit['status'] === 200, json_encode($withPhotoSubmit['body']));
     $myLineA = null;
     foreach (($withPhotoSubmit['body']['data']['lines'] ?? []) as $l) { if ($l['item_id'] === $itemA) $myLineA = $l; }
     check('11b. total computed correctly over HTTP', $myLineA !== null && abs($myLineA['my_qty_base'] - 20.0) < 0.0001, json_encode($myLineA));
@@ -324,7 +350,13 @@ try {
     $findingsAfterDup = httpCall('GET', "{$base}/stock-opname/{$sessionId}/items/{$itemA}/my-findings", null, $p1aAuth['jar']);
     check('15b. finding count unchanged after the rejected duplicate retry', count($findingsAfterDup['body']['data'] ?? []) === count($findingsAfterOne['body']['data'] ?? []));
 
-    // 16. finalized session immutable — need P1/P2 MATCH on a small separate session
+    // 16. PHASE V2.14.11.1 — Checkpoint A audit corrective (Blocker 2):
+    // FINDINGS_V1 has no approved reconciliation/final-result workflow yet
+    // (that is Checkpoint B's entire scope), so a session started as
+    // FINDINGS_V1 (the default) must be HARD-BLOCKED from finalize/post,
+    // over the real HTTP route, even with a full P1==P2 MATCH already
+    // recorded — this replaces the OLD assertion here (which used to prove
+    // finalize succeeded); Checkpoint A must now prove the opposite.
     $itemC = makeItemWithUnits($pdo, 'V21411H-C', $kgUnitId, null, 1.0);
     postOpeningIn($pdo, $itemC, $kgUnitId, $whId2, 15, 900, $adminUserId);
     $startC = httpCall('POST', "{$base}/stock-opname", ['warehouse_id' => $whId2, 'item_ids' => [$itemC]], $adminAuth['jar'], $adminAuth['csrf']);
@@ -337,21 +369,49 @@ try {
     $claimCp2 = httpCall('POST', "{$base}/stock-opname/{$sessionC}/claim", ['role' => 'p2', 'item_id' => $itemC], $p2aAuth['jar'], $p2aAuth['csrf']);
     httpCall('POST', "{$base}/stock-opname/{$sessionC}/findings", array_merge(['role' => 'p2', 'item_id' => $itemC, 'claim_token' => $claimCp2['body']['data']['claim_token']], ['conditions' => $cGood]), $p2aAuth['jar'], $p2aAuth['csrf']);
     $finalizeC = httpCall('POST', "{$base}/stock-opname/{$sessionC}/finalize", [], $adminAuth['jar'], $adminAuth['csrf']);
-    check('setup: session with P1==P2 MATCH finalizes successfully', $finalizeC['status'] === 200, json_encode($finalizeC['body']));
-    $claimAfterFinalize = httpCall('POST', "{$base}/stock-opname/{$sessionC}/claim", ['role' => 'p1', 'item_id' => $itemC], $p1aAuth['jar'], $p1aAuth['csrf']);
-    check('16. a FINALIZED session refuses a new claim (immutable)', $claimAfterFinalize['status'] !== 200, json_encode($claimAfterFinalize['body']));
+    check('16a. POST /stock-opname/{id}/finalize is HARD BLOCKED for a FINDINGS_V1 session even with P1==P2 MATCH (409 FINDINGS_V1_CHECKPOINT_B_REQUIRED)', $finalizeC['status'] === 409 && ($finalizeC['body']['error']['code'] ?? $finalizeC['body']['code'] ?? '') === 'FINDINGS_V1_CHECKPOINT_B_REQUIRED', json_encode($finalizeC['body']));
+    $postC = httpCall('POST', "{$base}/stock-opname/{$sessionC}/post", [], $adminAuth['jar'], $adminAuth['csrf']);
+    check('16b. POST /stock-opname/{id}/post is HARD BLOCKED for a FINDINGS_V1 session, independently of finalize (409 FINDINGS_V1_CHECKPOINT_B_REQUIRED)', $postC['status'] === 409 && ($postC['body']['error']['code'] ?? $postC['body']['code'] ?? '') === 'FINDINGS_V1_CHECKPOINT_B_REQUIRED', json_encode($postC['body']));
+    // The session must remain OPEN — the block must happen BEFORE any
+    // status transition, not after a silent partial finalize.
+    $sessionCAfter = httpCall('GET', "{$base}/stock-opname/{$sessionC}", null, $adminAuth['jar']);
+    check('16c. the blocked session\'s status is still OPEN, never silently advanced', ($sessionCAfter['body']['data']['status'] ?? '') === 'OPEN', json_encode($sessionCAfter['body']['data'] ?? null));
+    // A still-OPEN session must still allow a normal claim (not accidentally locked out by the blocked finalize attempt).
+    $claimAfterBlockedFinalize = httpCall('POST', "{$base}/stock-opname/{$sessionC}/claim", ['role' => 'p1', 'item_id' => $itemC], $p1aAuth['jar'], $p1aAuth['csrf']);
+    check('16d. the session remains otherwise usable (a claim still succeeds) after the blocked finalize/post attempts', $claimAfterBlockedFinalize['status'] === 200, json_encode($claimAfterBlockedFinalize['body']));
 
-    // 17. inventory unchanged across all of the above (findings never post to FIFO)
+    // 16e. LEGACY_DUAL_COUNT finalize/post still work exactly as before, over real HTTP.
+    $itemD = makeItemWithUnits($pdo, 'V21411H-D', $kgUnitId, null, 1.0);
+    $pdo->prepare("INSERT INTO warehouses (code, name, is_active) VALUES (:c, :n, 1)")->execute(['c' => uid('V21411HD'), 'n' => 'V2.14.11.1 HTTP Legacy WH']);
+    $whIdD = (int) $pdo->lastInsertId();
+    postOpeningIn($pdo, $itemD, $kgUnitId, $whIdD, 12, 850, $adminUserId);
+    $startD = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $whIdD, $adminUserId, [$itemD], 'LEGACY_DUAL_COUNT'));
+    Database::transaction(fn (PDO $tx) => StockOpnameService::assignCounters($tx, $startD, ['p1_user_id' => $viewerP1a['id'], 'p2_user_id' => $viewerP2a['id']], $adminUserId));
+    Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $startD, 'p1', $itemD, 12.0, $viewerP1a['id']));
+    Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $startD, 'p2', $itemD, 12.0, $viewerP2a['id']));
+    $finalizeD = httpCall('POST', "{$base}/stock-opname/{$startD}/finalize", [], $adminAuth['jar'], $adminAuth['csrf']);
+    check('16f. LEGACY_DUAL_COUNT finalize still succeeds over HTTP (backward compatibility unchanged)', $finalizeD['status'] === 200, json_encode($finalizeD['body']));
+    $postD = httpCall('POST', "{$base}/stock-opname/{$startD}/post", [], $adminAuth['jar'], $adminAuth['csrf']);
+    check('16g. LEGACY_DUAL_COUNT post still succeeds over HTTP (backward compatibility unchanged)', $postD['status'] === 200, json_encode($postD['body']));
+
+    // 17. inventory unchanged by the BLOCKED FINDINGS_V1 attempts specifically
+    // (the legacy D session above legitimately posts and IS expected to add
+    // exactly one adjustment-driven batch if variance != 0 — qty matches
+    // exactly here so no adjustment batch is created either way; this
+    // check isolates the invariant under audit: nothing FINDINGS_V1-related
+    // ever reaches StockAdjustmentService/FIFO).
     $invAfter = $pdo->query('SELECT COUNT(*) AS cnt, COALESCE(SUM(qty_base*unit_cost_base),0) AS val FROM inventory_batches')->fetch();
     // $invBefore was captured AFTER itemA/itemB's fixture opening postings
     // (2 batches already included) but BEFORE the server started; itemC's
-    // opening posting (1 more fixture batch) happened mid-test. The
-    // invariant under test is that everything AFTER that — every
-    // httpCall()-driven Stock Opname action (claims/findings/photos/
-    // finalize) — added ZERO further batches beyond that one known
-    // fixture posting.
-    $expectedBatches = (int) $invBefore['cnt'] + 1; // itemC's fixture opening posting
-    check('17. inventory_batches count only reflects the 1 mid-test fixture OPENING posting — no Stock Opname action created a batch', (int) $invAfter['cnt'] === $expectedBatches, "{$invAfter['cnt']} vs expected {$expectedBatches}");
+    // and itemD's opening postings (2 more fixture batches) happened
+    // mid-test. The invariant under test is that everything AFTER that —
+    // every httpCall()-driven Stock Opname action (claims/findings/photos/
+    // the two BLOCKED finalize+post attempts on the FINDINGS_V1 session,
+    // and the legitimate LEGACY_DUAL_COUNT finalize+post) — added ZERO
+    // batches beyond those 2 known fixture postings (P1==P2 exact match on
+    // both C and D means no variance adjustment batch either).
+    $expectedBatches = (int) $invBefore['cnt'] + 2; // itemC's + itemD's fixture opening postings
+    check('17. inventory_batches count only reflects the 2 mid-test fixture OPENING postings — no Stock Opname action (blocked or legitimate) created an unexpected batch', (int) $invAfter['cnt'] === $expectedBatches, "{$invAfter['cnt']} vs expected {$expectedBatches}");
 
 } finally {
     if (getenv('V21411_DEBUG_STDERR')) {

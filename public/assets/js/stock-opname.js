@@ -661,6 +661,15 @@ const StockOpname = (() => {
             // Simpan Temuan — but the FINDING itself is only ever created by
             // Simpan Temuan; selecting a photo alone writes nothing to the
             // findings/quantities tables.
+            // PHASE V2.14.11.1 — Checkpoint A audit corrective (Blocker 1):
+            // a photo no longer auto-attaches just by matching session/
+            // item/role/condition/uploader — Simpan Temuan must explicitly
+            // name each photo's upload_token. This block now tracks
+            // {photo_id, token} per uploaded photo and sends the tokens for
+            // THIS condition; each thumbnail also gets a × button that
+            // calls removeOpnamePhoto() (Blocker 1D) so an abandoned/
+            // reconsidered photo can be dropped before Simpan Temuan and
+            // can never later be swept into a finding.
             function buildConditionBlock(label, conditionKey) {
                 const unitOptions = units.map((u) => `<option value="${u.unit_id}"${u.is_base_unit ? ' selected' : ''}>${u.code}</option>`).join('');
                 const unitSelect = UI.el('select', { html: unitOptions });
@@ -670,6 +679,33 @@ const StockOpname = (() => {
                 const thumbHost = UI.el('div', { class: 'opname-photo-thumbs' });
                 const photoHint = UI.el('div', { class: 'opname-photo-hint' }, `Foto wajib jika ${label} > 0.`);
                 const uploaded = [];
+
+                function renderThumb(entry) {
+                    const wrap = UI.el('div', { class: 'opname-photo-thumb-wrap', style: 'position:relative; display:inline-block;' });
+                    const thumb = UI.el('img', { src: entry.url, class: 'opname-photo-thumb', alt: label });
+                    const removeBtn = UI.el('button', {
+                        type: 'button', class: 'opname-photo-remove',
+                        style: 'position:absolute; top:-6px; right:-6px; width:20px; height:20px; border-radius:50%; border:none; background:#c0392b; color:#fff; line-height:1; cursor:pointer;',
+                        title: `Hapus foto ${label}`,
+                    }, '×');
+                    removeBtn.addEventListener('click', async () => {
+                        removeBtn.disabled = true;
+                        try {
+                            await InvApi.removeOpnamePhoto(state.view.session_id, entry.photo_id, entry.token);
+                            const idx = uploaded.indexOf(entry);
+                            if (idx !== -1) uploaded.splice(idx, 1);
+                            wrap.remove();
+                            updateSaveEnabled();
+                        } catch (err) {
+                            UI.handleApiError(err);
+                            UI.toast((err && err.message) || `Gagal menghapus foto ${label}.`, 'error');
+                            removeBtn.disabled = false;
+                        }
+                    });
+                    wrap.appendChild(thumb);
+                    wrap.appendChild(removeBtn);
+                    thumbHost.appendChild(wrap);
+                }
 
                 photoBtn.addEventListener('click', () => photoInput.click());
                 photoInput.addEventListener('change', async () => {
@@ -686,9 +722,9 @@ const StockOpname = (() => {
                         const result = await InvApi.uploadOpnamePhoto(
                             state.view.session_id, state.view.role, state.activeItemId, conditionKey, state.activeClaimToken, compressed
                         );
-                        uploaded.push(result.photo_id);
-                        const thumb = UI.el('img', { src: URL.createObjectURL(compressed), class: 'opname-photo-thumb', alt: label });
-                        thumbHost.appendChild(thumb);
+                        const entry = { photo_id: result.photo_id, token: result.token, url: URL.createObjectURL(compressed) };
+                        uploaded.push(entry);
+                        renderThumb(entry);
                         updateSaveEnabled();
                     } catch (err) {
                         UI.handleApiError(err);
@@ -710,6 +746,7 @@ const StockOpname = (() => {
                     qty: () => Number(qtyInput.value || 0),
                     payload: () => [{ unit_id: Number(unitSelect.value), qty: Number(qtyInput.value || 0) }],
                     photoCount: () => uploaded.length,
+                    photoTokens: () => uploaded.map((entry) => entry.token),
                 };
             }
 
@@ -753,9 +790,10 @@ const StockOpname = (() => {
             // Gate 4 — retries ONCE, transparently, on CLAIM_LOST: the
             // claim is refreshed and the exact same payload resubmitted, so
             // an expired-but-uncontested lease never forces the counter to
-            // re-type their entry (already-uploaded photos remain matched
-            // by session/item/role/condition/uploader, not by the old
-            // token, so the retry still finds and attaches them).
+            // re-type their entry. PHASE V2.14.11.1 — already-uploaded
+            // photos are named by upload_token (never re-matched by
+            // session/item/role/condition/uploader alone), so the retry's
+            // token list stays valid across the claim refresh.
             async function saveFinding(retryOnClaimLost) {
                 const conditions = {
                     GOOD: units.map((u) => ({ unit_id: u.unit_id, qty: Number(unitInputs[u.unit_id].value || 0) })),
@@ -763,9 +801,14 @@ const StockOpname = (() => {
                     EXPIRED: expiredBlock.payload(),
                     DEADSTOCK: deadstockBlock.payload(),
                 };
+                const photos = {
+                    DAMAGED: damagedBlock.photoTokens(),
+                    EXPIRED: expiredBlock.photoTokens(),
+                    DEADSTOCK: deadstockBlock.photoTokens(),
+                };
                 alertBox.innerHTML = '';
                 try {
-                    await InvApi.submitOpnameFinding(state.view.session_id, state.view.role, state.activeItemId, conditions, notesInput.value || null, state.activeClaimToken);
+                    await InvApi.submitOpnameFinding(state.view.session_id, state.view.role, state.activeItemId, conditions, notesInput.value || null, state.activeClaimToken, photos);
                     UI.toast('Temuan tersimpan.', 'success');
                     state.activeClaimToken = null;
                     state.panelMode = 'summary';

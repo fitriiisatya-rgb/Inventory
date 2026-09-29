@@ -1076,16 +1076,26 @@ final class StockOpnameService
      * the same unit across two DIFFERENT conditions, e.g. Kg in both GOOD
      * and DAMAGED, is fine — they are independent categories).
      *
-     * PHOTO REQUIREMENT — for every condition among DAMAGED/EXPIRED/
-     * DEADSTOCK whose total is > 0, at least one photo must already be
-     * uploaded and unattached for this exact (session, line, role,
-     * condition_type, uploader) — see StockOpnamePhotoService::upload().
-     * Enforced here, server-side, before the finding is ever created; a
-     * missing photo refuses the ENTIRE finding (nothing partially saved).
+     * PHOTO REQUIREMENT [PHASE V2.14.11.1 CORRECTIVE] — for every
+     * condition among DAMAGED/EXPIRED/DEADSTOCK whose total is > 0, the
+     * caller must EXPLICITLY name at least one pending photo's
+     * upload_token in $photoTokens[condition] — never inferred by
+     * matching every still-unattached upload for this session/line/role/
+     * condition/uploader (that auto-match design was found unsafe by
+     * audit: an abandoned/reconsidered upload could silently attach
+     * itself to a later, unrelated finding). See
+     * StockOpnamePhotoService::attachExplicit(), which re-verifies the
+     * full ownership chain for every token and is the ONLY thing that
+     * ever sets finding_id on a photo row. A missing/invalid photo
+     * refuses the ENTIRE finding (nothing partially saved) — and because
+     * this runs inside the same DB transaction as the finding/quantity
+     * inserts, a rollback of either leaves every named photo untouched
+     * and still pending/retryable.
      *
      * @param array{GOOD:array<int,array{unit_id:mixed,qty:mixed}>, DAMAGED:array<int,array{unit_id:mixed,qty:mixed}>, EXPIRED:array<int,array{unit_id:mixed,qty:mixed}>, DEADSTOCK:array<int,array{unit_id:mixed,qty:mixed}>} $conditionInputs
+     * @param array{DAMAGED?:string[], EXPIRED?:string[], DEADSTOCK?:string[]} $photoTokens upload_token(s) per condition, explicitly naming which pending uploads belong to THIS finding
      */
-    public static function submitFinding(PDO $pdo, int $sessionId, string $role, int $itemId, array $conditionInputs, ?string $notes, int $userId, string $claimToken): array
+    public static function submitFinding(PDO $pdo, int $sessionId, string $role, int $itemId, array $conditionInputs, ?string $notes, int $userId, string $claimToken, array $photoTokens = []): array
     {
         if (!in_array($role, ['p1', 'p2'], true)) {
             throw new ValidationException(['role must be p1 or p2']);
@@ -1157,21 +1167,18 @@ final class StockOpnameService
             throw new ValidationException(['an additional finding (Tambah Temuan) must record a total physical quantity greater than zero — the zero-count result is only valid for the very first finding on an item']);
         }
 
-        // PHOTO REQUIREMENT — checked before any write. A photo already
-        // uploaded (StockOpnamePhotoService::upload()) and not yet
-        // attached to a finding, for this exact session/line/role/
-        // condition/uploader, counts as available evidence.
-        $photoCheck = $pdo->prepare(
-            'SELECT COUNT(*) FROM stock_opname_finding_photos
-             WHERE session_id = :sid AND stock_opname_line_id = :line_id AND team_role = :role
-               AND condition_type = :ct AND uploaded_by = :uid AND finding_id IS NULL'
-        );
+        // PHOTO REQUIREMENT [V2.14.11.1] — checked before any write: every
+        // condition with a positive total must have at least one
+        // EXPLICITLY submitted photo token. Not yet verified against the
+        // DB here (attachExplicit() below does that, inside the write
+        // transaction) — this is only the "was anything named at all"
+        // presence check, so an empty/missing photos[condition] fails
+        // fast with a clear message before the finding is even inserted.
         foreach (['DAMAGED', 'EXPIRED', 'DEADSTOCK'] as $ct) {
             if ($totalsByCondition[$ct] <= 0.0) {
                 continue;
             }
-            $photoCheck->execute(['sid' => $sessionId, 'line_id' => $line['id'], 'role' => strtoupper($role), 'ct' => $ct, 'uid' => $userId]);
-            if ((int) $photoCheck->fetchColumn() === 0) {
+            if (empty($photoTokens[$ct])) {
                 throw new ValidationException(["{$ct} photo evidence is required when its quantity is greater than zero — attach at least one photo before saving"]);
             }
         }
@@ -1213,19 +1220,17 @@ final class StockOpnameService
             }
         }
 
-        // Attach every pending (unattached) photo for the conditions this
-        // finding actually reported > 0 for — a photo uploaded for a
-        // condition the counter later zeroed back out stays an orphan.
-        $attachPhotos = $pdo->prepare(
-            'UPDATE stock_opname_finding_photos SET finding_id = :fid, attached_at = :now
-             WHERE session_id = :sid AND stock_opname_line_id = :line_id AND team_role = :role
-               AND condition_type = :ct AND uploaded_by = :uid AND finding_id IS NULL'
-        );
+        // [V2.14.11.1] Attach ONLY the explicitly named tokens — never any
+        // other pending photo, whatever else happens to be unattached for
+        // this session/line/role/condition/uploader. attachExplicit()
+        // re-verifies the full ownership chain per token and throws (the
+        // whole transaction then rolls back, leaving every named photo
+        // untouched and retryable) if any token fails any check.
         foreach (['DAMAGED', 'EXPIRED', 'DEADSTOCK'] as $ct) {
-            if ($totalsByCondition[$ct] <= 0.0) {
+            if (empty($photoTokens[$ct])) {
                 continue;
             }
-            $attachPhotos->execute(['fid' => $findingId, 'now' => $now, 'sid' => $sessionId, 'line_id' => $line['id'], 'role' => strtoupper($role), 'ct' => $ct, 'uid' => $userId]);
+            StockOpnamePhotoService::attachExplicit($pdo, $photoTokens[$ct], $findingId, $sessionId, (int) $line['id'], $role, $ct, $userId);
         }
 
         // PHASE V2.14.10.1 Gate 4 — clear the claim ONLY if it still
@@ -2056,6 +2061,7 @@ final class StockOpnameService
     public static function finalize(PDO $pdo, int $sessionId, int $userId): array
     {
         $session = self::requireStatus($pdo, $sessionId, 'OPEN');
+        self::assertNotFindingsV1($session, 'finalized');
 
         // PHASE V2.12B: an EXCLUDED line is deliberately not required to be
         // counted (Section 10) — everything else (legacy single-count
@@ -2132,6 +2138,14 @@ final class StockOpnameService
         if (!$session) {
             throw new NotFoundException('opname session not found');
         }
+        // PHASE V2.14.11.1 — independent of finalize()'s own guard (which
+        // already prevents a FINDINGS_V1 session from ever reaching
+        // FINALIZED in the first place): checked here too, unconditionally,
+        // before the POSTED/FINALIZED branching below, so a direct call to
+        // post() can never reach StockAdjustmentService::post() for a
+        // FINDINGS_V1 session under any status, including a row a future
+        // bug might otherwise leave in an unexpected state.
+        self::assertNotFindingsV1($session, 'posted');
 
         if ($session['status'] === 'POSTED') {
             // Idempotent: already posted, return the adjustments already created rather than reposting.
@@ -2216,6 +2230,25 @@ final class StockOpnameService
         AuditService::log($pdo, $userId, 'system', 'STOCK_OPNAME_CANCEL', 'stock_opname_sessions', $sessionId, null, ['reason' => $reason], $reason);
 
         return self::get($pdo, $sessionId);
+    }
+
+    /**
+     * PHASE V2.14.11.1 — Checkpoint A audit corrective. A FINDINGS_V1
+     * session has no approved reconciliation/final-result workflow yet
+     * (Checkpoint B's entire scope) — finalize() and post() each call
+     * this independently, unconditionally, before any other check, so
+     * neither can ever reach StockAdjustmentService::post() for a
+     * FINDINGS_V1 session. LEGACY_DUAL_COUNT (and a legacy row where the
+     * column reads NULL, treated the same as the column's own DEFAULT)
+     * is completely unaffected.
+     */
+    private static function assertNotFindingsV1(array $session, string $pastTenseAction): void
+    {
+        if (($session['counting_model'] ?? 'LEGACY_DUAL_COUNT') === 'FINDINGS_V1') {
+            throw new FindingsCheckpointBRequiredException(
+                "this FINDINGS_V1 session cannot be {$pastTenseAction} until the Checkpoint B reconciliation/final-result workflow is completed"
+            );
+        }
     }
 
     private static function requireStatus(PDO $pdo, int $sessionId, string $expected): array

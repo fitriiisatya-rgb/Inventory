@@ -274,6 +274,23 @@ final class ClaimConflictException extends RuntimeException
 }
 
 /**
+ * PHASE V2.14.11.1 — Checkpoint A audit corrective. A FINDINGS_V1 session
+ * has no approved reconciliation/final-result workflow yet (that is
+ * Checkpoint B's entire scope) — finalize() and post() must hard-refuse
+ * it, service-side, independently of each other and independently of the
+ * UI, so nothing can reach StockAdjustmentService::post() (and therefore
+ * inventory_batches) for a FINDINGS_V1 session before Checkpoint B ships.
+ * Error code: FINDINGS_V1_CHECKPOINT_B_REQUIRED (409).
+ */
+final class FindingsCheckpointBRequiredException extends RuntimeException
+{
+    public function __construct(string $message)
+    {
+        parent::__construct("FINDINGS_V1_CHECKPOINT_B_REQUIRED: {$message}");
+    }
+}
+
+/**
  * PHASE V2.5: OPENING is the authoritative go-live baseline — it is never
  * voidable through the generic correction flow, even by SUPERADMIN. If a
  * correction is ever genuinely required, it must go through a separate,
