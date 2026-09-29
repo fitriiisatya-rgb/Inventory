@@ -23,8 +23,10 @@ if ($sessionId <= 0) {
 
 $pdo = Database::pdo();
 $recon = new ReconciliationService($pdo, new ItemLockService($pdo, (int) $GLOBALS['SO_CONFIG']['app']['lock_ttl_seconds']));
+$fin = new FinalizationService($pdo, $recon, new ItemLockService($pdo, (int) $GLOBALS['SO_CONFIG']['app']['lock_ttl_seconds']));
 
-$rows = array_map(static function (array $r) {
+$rows = array_map(static function (array $r) use ($fin) {
+    $final = $fin->currentFinal((int) $r['session_item']['id']);
     $si = $r['session_item'];
     return [
         'session_item_id' => (int) $si['id'],
@@ -57,6 +59,15 @@ $rows = array_map(static function (array $r) {
         'variance_p2' => $r['variance_p2'],
         'p1_evidence_pending' => $r['p1_evidence_pending'],
         'p2_evidence_pending' => $r['p2_evidence_pending'],
+        'final' => $final ? [
+            'good' => (float) $final['final_good_base_qty'], 'damaged' => (float) $final['final_damaged_base_qty'],
+            'expired' => (float) $final['final_expired_base_qty'], 'deadstock' => (float) $final['final_deadstock_base_qty'],
+            'physical' => (float) $final['final_physical_base_qty'], 'available' => (float) $final['final_available_base_qty'],
+            'variance_qty' => (float) $final['variance_qty'],
+            'variance_value' => $final['variance_value'] !== null ? (float) $final['variance_value'] : null,
+            'source' => $final['source'], 'reason' => $final['reason'], 'version' => (int) $final['version'],
+            'set_at' => $final['set_at'],
+        ] : null,
     ];
 }, $recon->listForReview($sessionId));
 

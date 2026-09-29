@@ -30,6 +30,7 @@ require_once __DIR__ . '/ItemLockService.php';
 require_once __DIR__ . '/CountService.php';
 require_once __DIR__ . '/ReconciliationService.php';
 require_once __DIR__ . '/PhotoEvidenceService.php';
+require_once __DIR__ . '/FinalizationService.php';
 
 if (PHP_SAPI !== 'cli') {
     $sessionName = $GLOBALS['SO_CONFIG']['app']['session_name'] ?? 'so_session';

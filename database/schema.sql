@@ -209,6 +209,8 @@ CREATE TABLE stock_opname_sessions (
     finished_at         DATETIME NULL,
 
     started_by          BIGINT UNSIGNED NULL,
+    review_started_at   DATETIME NULL,      -- when ACTIVE -> REVIEW happened
+    review_started_by   BIGINT UNSIGNED NULL,
     finished_by         BIGINT UNSIGNED NULL,
 
     parent_session_id   BIGINT UNSIGNED NULL,   -- correction-session mechanism
@@ -464,9 +466,21 @@ CREATE TABLE stock_opname_finals (
     id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     session_item_id     BIGINT UNSIGNED NOT NULL,
     version             INT UNSIGNED NOT NULL DEFAULT 1,
-    final_qty           DECIMAL(18,4) NOT NULL,   -- base unit
-    variance_qty        DECIMAL(18,4) NOT NULL,   -- final_qty - system_qty_snapshot
-    variance_value      DECIMAL(18,2) NOT NULL,   -- variance_qty * unit_cost_snapshot
+
+    -- Per-condition breakdown (added go-live migration 0004; the table
+    -- started with only final_qty before conditions existed).
+    -- PHYSICAL = GOOD+DAMAGED+EXPIRED+DEADSTOCK; AVAILABLE = GOOD.
+    final_good_base_qty      DECIMAL(18,4) NOT NULL DEFAULT 0,
+    final_damaged_base_qty   DECIMAL(18,4) NOT NULL DEFAULT 0,
+    final_expired_base_qty   DECIMAL(18,4) NOT NULL DEFAULT 0,
+    final_deadstock_base_qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+    final_physical_base_qty  DECIMAL(18,4) NOT NULL DEFAULT 0,
+    final_available_base_qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+    source              ENUM('AUTO_MATCH','MANUAL') NOT NULL DEFAULT 'MANUAL',
+
+    final_qty           DECIMAL(18,4) NOT NULL,   -- base unit; kept = final_physical_base_qty
+    variance_qty        DECIMAL(18,4) NOT NULL,   -- final_available_base_qty - system_qty_snapshot
+    variance_value      DECIMAL(18,2) NULL,       -- variance_qty * unit_cost_snapshot; NULL when cost unknown
     reason              VARCHAR(255) NOT NULL,
     set_by              BIGINT UNSIGNED NOT NULL,
     set_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
