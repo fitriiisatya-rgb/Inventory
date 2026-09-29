@@ -90,8 +90,22 @@ final class StockOpnameService
         $sessionId = (int) $pdo->lastInsertId();
 
         if ($itemIds === null) {
-            $scan = $pdo->prepare('SELECT DISTINCT item_id FROM inventory_batches WHERE warehouse_id = :wh AND qty_base <> 0');
-            $scan->execute(['wh' => $warehouseId]);
+            // PHASE V2.14.11.2 — URGENT HOTFIX: a FINDINGS_V1 physical
+            // Stock Opname must cover every ACTIVE master item, not just
+            // items with a nonzero system batch balance — a zero-system
+            // SKU can still hold real physical stock (that's exactly the
+            // kind of discrepancy a physical count exists to catch), and
+            // excluding it would silently drop it from the count
+            // altogether. LEGACY_DUAL_COUNT's default selection is left
+            // untouched to minimize regression risk on the existing
+            // workflow.
+            if ($countingModel === 'FINDINGS_V1') {
+                $scan = $pdo->prepare("SELECT id AS item_id FROM items WHERE status = 'ACTIVE' ORDER BY id");
+                $scan->execute();
+            } else {
+                $scan = $pdo->prepare('SELECT DISTINCT item_id FROM inventory_batches WHERE warehouse_id = :wh AND qty_base <> 0');
+                $scan->execute(['wh' => $warehouseId]);
+            }
             $itemIds = array_map('intval', array_column($scan->fetchAll(), 'item_id'));
         }
 
