@@ -406,5 +406,6 @@ legacy migration flow and a troubleshooting table.
 
 ---
 
-*Full commit history for this work: `190c510`..`424861d` on
-`claude/eloquent-mayer-yxesi3` (8 commits), all pushed to origin.*
+*Full commit history for this work: `190c510`..`43cd5f9` on
+`claude/eloquent-mayer-yxesi3` (9 commits, including the §3a variance
+correction), all pushed to origin.*
