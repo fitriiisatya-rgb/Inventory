@@ -58,14 +58,32 @@ CREATE TABLE IF NOT EXISTS stock_opname_findings (
     INDEX idx_sof_line_role (stock_opname_line_id, team_role, voided_at)
 ) ENGINE=InnoDB;
 
-CREATE TABLE IF NOT EXISTS stock_opname_finding_units (
-    id                         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    finding_id                 BIGINT UNSIGNED NOT NULL,
-    unit_id                    INT UNSIGNED NOT NULL,
-    input_qty                  DECIMAL(20,6) NOT NULL,
-    conversion_factor_snapshot DECIMAL(20,6) NOT NULL,
-    base_qty_contribution      DECIMAL(20,6) NOT NULL,
-    CONSTRAINT fk_sofu_finding FOREIGN KEY (finding_id) REFERENCES stock_opname_findings(id),
-    CONSTRAINT fk_sofu_unit FOREIGN KEY (unit_id) REFERENCES units(id),
-    INDEX idx_sofu_finding (finding_id)
-) ENGINE=InnoDB;
+-- V2.14.11 NOTE — this table is later RENAMED to
+-- stock_opname_finding_quantities by
+-- 2026_09_29_v2_14_11_condition_typed_findings.sql. "IF NOT EXISTS" alone
+-- is not enough to make a re-run of THIS migration idempotent once that
+-- rename has happened (a plain CREATE TABLE IF NOT EXISTS
+-- stock_opname_finding_units would then try to create a FRESH table whose
+-- constraint/index names collide with the ones still attached to the
+-- renamed table) — guarded via information_schema so this is a no-op once
+-- either name already exists, whichever migration created it.
+SET @sofu_or_sofq_exists = (
+    SELECT COUNT(*) FROM information_schema.TABLES
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('stock_opname_finding_units', 'stock_opname_finding_quantities')
+);
+SET @create_sofu_sql = IF(@sofu_or_sofq_exists = 0,
+    'CREATE TABLE stock_opname_finding_units (
+        id                         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        finding_id                 BIGINT UNSIGNED NOT NULL,
+        unit_id                    INT UNSIGNED NOT NULL,
+        input_qty                  DECIMAL(20,6) NOT NULL,
+        conversion_factor_snapshot DECIMAL(20,6) NOT NULL,
+        base_qty_contribution      DECIMAL(20,6) NOT NULL,
+        CONSTRAINT fk_sofu_finding FOREIGN KEY (finding_id) REFERENCES stock_opname_findings(id),
+        CONSTRAINT fk_sofu_unit FOREIGN KEY (unit_id) REFERENCES units(id),
+        INDEX idx_sofu_finding (finding_id)
+    ) ENGINE=InnoDB',
+    'SELECT 1');
+PREPARE create_sofu_stmt FROM @create_sofu_sql;
+EXECUTE create_sofu_stmt;
+DEALLOCATE PREPARE create_sofu_stmt;

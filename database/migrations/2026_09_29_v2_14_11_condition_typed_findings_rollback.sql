@@ -2,10 +2,23 @@
 
 DROP TABLE IF EXISTS stock_opname_finding_photos;
 
-ALTER TABLE stock_opname_findings
-    DROP INDEX IF EXISTS idx_sof_line_role_round,
-    DROP COLUMN IF EXISTS counter_username_snapshot,
-    DROP COLUMN IF EXISTS round;
+-- Guarded by table existence, not just IF EXISTS on the index/columns —
+-- if a downstream migration's rollback (e.g. the opname_findings
+-- rollback, which DROPs this table outright) already ran, this whole
+-- table is gone and a bare ALTER TABLE would error rather than no-op.
+SET @sof_tbl_exists = (
+    SELECT COUNT(*) FROM information_schema.TABLES
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'stock_opname_findings'
+);
+SET @sof_alter_sql = IF(@sof_tbl_exists > 0,
+    'ALTER TABLE stock_opname_findings
+        DROP INDEX IF EXISTS idx_sof_line_role_round,
+        DROP COLUMN IF EXISTS counter_username_snapshot,
+        DROP COLUMN IF EXISTS round',
+    'SELECT 1');
+PREPARE sof_alter_stmt FROM @sof_alter_sql;
+EXECUTE sof_alter_stmt;
+DEALLOCATE PREPARE sof_alter_stmt;
 
 -- CHANGE COLUMN has no IF EXISTS form; guarded via information_schema so a
 -- second run (already rolled back) is a no-op rather than an error.
