@@ -81,9 +81,9 @@ const InvApi = (() => {
         return payload.data;
     }
 
-    async function upload(path, file, extraFields = {}) {
+    async function upload(path, file, extraFields = {}, fieldName = 'file') {
         const form = new FormData();
-        form.append('file', file);
+        form.append(fieldName, file);
         for (const [k, v] of Object.entries(extraFields)) form.append(k, v);
         let res;
         try {
@@ -336,11 +336,29 @@ const InvApi = (() => {
         // Gate 2: explicit, one-way upgrade of a legacy session to Team/Findings mode.
         upgradeOpnameToFindings: (id) => request('POST', `/stock-opname/${id}/upgrade-to-findings`),
         // ---- PHASE V2.14.10: append-only multi-unit findings ("Tambah Temuan") ----
-        // Gate 4: claim_token is now required — claimOpnameItem()'s response
-        // carries claim_token, which the caller must pass straight through here.
-        submitOpnameFinding: (id, role, itemId, unitInputs, conditions = {}, claimToken) => request('POST', `/stock-opname/${id}/findings`, { role, item_id: itemId, unit_inputs: unitInputs, claim_token: claimToken, ...conditions }),
+        // PHASE V2.14.11 — `conditions` is {GOOD, DAMAGED, EXPIRED, DEADSTOCK},
+        // each an array of {unit_id, qty} (every key required, at least one
+        // entry each — qty 0 if none found). Gate 4: claim_token is required
+        // — claimOpnameItem()'s response carries claim_token, which the
+        // caller must pass straight through here.
+        submitOpnameFinding: (id, role, itemId, conditions, notes, claimToken) => request('POST', `/stock-opname/${id}/findings`, { role, item_id: itemId, conditions, notes: notes || null, claim_token: claimToken }),
         voidOpnameFinding: (id, findingId, reason) => request('POST', `/stock-opname/${id}/findings/${findingId}/void`, { reason }),
         myOpnameSessions: () => request('GET', '/stock-opname/my-sessions'),
+        // PHASE V2.14.11 — photo evidence: uploaded BEFORE the finding it
+        // will belong to exists (see StockOpnamePhotoService's docblock);
+        // the server atomically attaches every still-unattached photo
+        // matching this exact session/item/role/condition/uploader the
+        // moment submitOpnameFinding() creates the finding — the caller
+        // never passes a photo_id anywhere.
+        uploadOpnamePhoto: (id, role, itemId, conditionType, claimToken, file, caption) =>
+            upload(`/stock-opname/${id}/items/${itemId}/photos`, file, {
+                role, condition_type: conditionType, claim_token: claimToken, ...(caption ? { caption } : {}),
+            }, 'photo'),
+        // Returns the raw-bytes streaming route directly — usable as an
+        // <img src>; the browser sends the session cookie automatically,
+        // and the server re-checks blind-count authorization on every
+        // request rather than trusting a bare path.
+        opnamePhotoUrl: (id, photoId) => `/api/stock-opname/${id}/photos/${photoId}`,
         // PHASE V2.14.9 — `conditions` is optional: {rusak_qty, expired_qty, deadstock_qty, notes}.
         submitOpnameCount: (id, role, itemId, countedQtyBase, conditions = {}) => request('POST', `/stock-opname/${id}/count/${role}`, { item_id: itemId, counted_qty_base: countedQtyBase, ...conditions }),
         opnameReview: (id) => request('GET', `/stock-opname/${id}/review`),

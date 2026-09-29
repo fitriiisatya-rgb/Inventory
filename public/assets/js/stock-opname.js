@@ -310,6 +310,29 @@ const StockOpname = (() => {
         return '<option value="ALL">Semua Kategori</option>' + cats.map((c) => `<option value="${c.id}">${c.name}</option>`).join('');
     }
 
+    // PHASE V2.14.11 — one finding's full condition-typed breakdown
+    // (GOOD/DAMAGED/EXPIRED/DEADSTOCK, each its own multi-unit raw input),
+    // shared by the counter's own "Riwayat Temuan" panel and the
+    // supervisor's both-teams drilldown. `baseUnitCode` may be null (the
+    // supervisor drilldown does not carry the item's base unit code in
+    // its response) — the per-condition unit breakdown text is always
+    // self-describing (each row already carries its own unit code) so
+    // this degrades gracefully either way.
+    function buildFindingSummaryEl(f, idx, baseUnitCode) {
+        const goodBreakdown = (f.quantities.GOOD || []).map((u) => `${UI.formatNumber(u.input_qty)} ${u.unit_code}`).join(' + ') || '0';
+        const goodSuffix = baseUnitCode ? ` ${baseUnitCode}` : '';
+        const lines = [UI.el('div', {}, `Temuan ${idx + 1}: GOOD ${goodBreakdown} = ${UI.formatNumber(f.good_qty)}${goodSuffix}`)];
+        [['DAMAGED', 'Rusak', f.damaged_qty], ['EXPIRED', 'Expired', f.expired_qty], ['DEADSTOCK', 'Deadstock', f.deadstock_qty]].forEach(([key, label, qty]) => {
+            const photos = f.photos && f.photos[key] ? f.photos[key] : [];
+            if (Number(qty) === 0 && photos.length === 0) return;
+            const unitBreakdown = (f.quantities[key] || []).map((u) => `${UI.formatNumber(u.input_qty)} ${u.unit_code}`).join(' + ');
+            const row = UI.el('div', { style: 'font-size:0.85rem; color:var(--text2);' }, `${label}: ${unitBreakdown} (${photos.length} foto)`);
+            lines.push(row);
+        });
+        if (f.notes) lines.push(UI.el('div', { style: 'font-size:0.8rem; color:var(--text3); font-style:italic;' }, f.notes));
+        return UI.el('div', {}, lines);
+    }
+
     // PHASE V2.14.10 — REWRITTEN for append-only multi-unit findings.
     // Two-pane layout (list left, count panel right — collapses to a
     // single stacked column on phones via .opname-counter-split's own
@@ -529,7 +552,7 @@ const StockOpname = (() => {
             } catch (err) {
                 UI.handleApiError(err);
             }
-            const totalAkumulasi = findings.reduce((sum, f) => sum + f.base_qty, 0);
+            const totalAkumulasi = findings.reduce((sum, f) => sum + f.good_qty, 0);
             const isAdditional = findings.length > 0;
 
             panelHost.innerHTML = '';
@@ -552,9 +575,8 @@ const StockOpname = (() => {
                 findingsHost.appendChild(UI.el('div', { style: 'padding:8px 10px; color:var(--text3); font-size:0.85rem;' }, 'Belum ada temuan untuk barang ini.'));
             } else {
                 findings.forEach((f, idx) => {
-                    const unitBreakdown = f.units.map((u) => `${UI.formatNumber(u.input_qty)} ${u.unit_code}`).join(' + ');
                     findingsHost.appendChild(UI.el('div', { class: 'opname-finding-row' }, [
-                        UI.el('div', {}, `Temuan ${idx + 1}: ${unitBreakdown} = ${UI.formatNumber(f.base_qty)} ${baseUnitCode} — oleh ${f.counter_username}`),
+                        buildFindingSummaryEl(f, idx, baseUnitCode),
                         UI.el('div', { style: 'color:var(--text3);' }, f.created_at),
                     ]));
                 });
@@ -606,51 +628,144 @@ const StockOpname = (() => {
             panelHost.appendChild(unitInputsHost);
 
             const totalHost = UI.el('div', { class: 'opname-total-otomatis' });
+            // PHASE V2.14.11 — item 6 correction: a blank/untouched form is
+            // NEVER silently treated as "stok fisik 0". Whenever the GOOD
+            // total preview is exactly 0, an explicit confirmation checkbox
+            // appears and must be checked before Simpan is enabled — the
+            // server independently re-validates the actual zero-count rule
+            // (first finding only) regardless of this client-side gate.
+            const zeroConfirmRow = UI.el('div', { class: 'opname-zero-confirm', style: 'display:none;' });
+            const zeroConfirmCheckbox = UI.el('input', { type: 'checkbox', id: 'opname-zero-confirm-chk' });
+            zeroConfirmRow.appendChild(UI.el('label', { style: 'display:flex; align-items:center; gap:8px;' }, [
+                zeroConfirmCheckbox, document.createTextNode('Saya konfirmasi: Stok fisik GOOD = 0 (bukan form kosong)'),
+            ]));
             function recomputeTotalPreview() {
                 let total = 0;
                 units.forEach((u) => { total += (Number(unitInputs[u.unit_id].value) || 0) * Number(u.conversion_to_base); });
                 totalHost.textContent = `Total Otomatis (dalam satuan dasar: ${baseUnitCode}): ${UI.formatNumber(total)}`;
+                zeroConfirmRow.style.display = total === 0 ? 'block' : 'none';
+                if (total !== 0) zeroConfirmCheckbox.checked = false;
+                updateSaveEnabled();
             }
             Object.values(unitInputs).forEach((inp) => inp.addEventListener('input', recomputeTotalPreview));
-            recomputeTotalPreview();
+            zeroConfirmCheckbox.addEventListener('change', updateSaveEnabled);
             panelHost.appendChild(totalHost);
+            panelHost.appendChild(zeroConfirmRow);
 
-            // PHASE V2.14.9.2/.3 — EXPLICIT ZERO, per finding (unchanged rule,
-            // now applied to each individual Tambah Temuan event).
-            const rusakInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', value: '0' });
-            const expiredInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', value: '0' });
-            const deadstockInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', value: '0' });
+            // PHASE V2.14.11 — every condition (GOOD already above; DAMAGED/
+            // EXPIRED/DEADSTOCK here) now has its OWN unit + qty, never a
+            // single base-unit-assumed number — same dynamic-unit source
+            // (the session's frozen snapshot) as GOOD. Photo evidence is
+            // captured HERE, immediately on file selection (uploaded right
+            // away, scoped to the current claim), never deferred until
+            // Simpan Temuan — but the FINDING itself is only ever created by
+            // Simpan Temuan; selecting a photo alone writes nothing to the
+            // findings/quantities tables.
+            function buildConditionBlock(label, conditionKey) {
+                const unitOptions = units.map((u) => `<option value="${u.unit_id}"${u.is_base_unit ? ' selected' : ''}>${u.code}</option>`).join('');
+                const unitSelect = UI.el('select', { html: unitOptions });
+                const qtyInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', value: '0' });
+                const photoInput = UI.el('input', { type: 'file', accept: 'image/*', capture: 'environment', style: 'display:none;' });
+                const photoBtn = UI.el('button', { type: 'button', class: 'btn btn-secondary btn-sm' }, `📷 Foto ${label}`);
+                const thumbHost = UI.el('div', { class: 'opname-photo-thumbs' });
+                const photoHint = UI.el('div', { class: 'opname-photo-hint' }, `Foto wajib jika ${label} > 0.`);
+                const uploaded = [];
+
+                photoBtn.addEventListener('click', () => photoInput.click());
+                photoInput.addEventListener('change', async () => {
+                    const file = photoInput.files && photoInput.files[0];
+                    photoInput.value = '';
+                    if (!file) return;
+                    if (!state.activeClaimToken) {
+                        UI.toast('Klaim sudah tidak aktif — buka ulang barang ini.', 'error');
+                        return;
+                    }
+                    photoBtn.disabled = true;
+                    try {
+                        const compressed = await compressImageFile(file);
+                        const result = await InvApi.uploadOpnamePhoto(
+                            state.view.session_id, state.view.role, state.activeItemId, conditionKey, state.activeClaimToken, compressed
+                        );
+                        uploaded.push(result.photo_id);
+                        const thumb = UI.el('img', { src: URL.createObjectURL(compressed), class: 'opname-photo-thumb', alt: label });
+                        thumbHost.appendChild(thumb);
+                        updateSaveEnabled();
+                    } catch (err) {
+                        UI.handleApiError(err);
+                        UI.toast((err && err.message) || `Gagal mengunggah foto ${label}.`, 'error');
+                    } finally {
+                        photoBtn.disabled = false;
+                    }
+                });
+                qtyInput.addEventListener('input', updateSaveEnabled);
+
+                const block = UI.el('div', { class: 'form-group opname-condition-block' }, [
+                    UI.el('label', {}, label),
+                    UI.el('div', { style: 'display:flex; gap:6px; align-items:center;' }, [qtyInput, unitSelect]),
+                    UI.el('div', { style: 'margin-top:6px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;' }, [photoBtn, photoInput]),
+                    thumbHost, photoHint,
+                ]);
+                return {
+                    el: block,
+                    qty: () => Number(qtyInput.value || 0),
+                    payload: () => [{ unit_id: Number(unitSelect.value), qty: Number(qtyInput.value || 0) }],
+                    photoCount: () => uploaded.length,
+                };
+            }
+
+            const damagedBlock = buildConditionBlock('Rusak', 'DAMAGED');
+            const expiredBlock = buildConditionBlock('Expired', 'EXPIRED');
+            const deadstockBlock = buildConditionBlock('Deadstock', 'DEADSTOCK');
+            panelHost.appendChild(UI.el('div', { class: 'grid-3', style: 'margin-top:8px;' }, [damagedBlock.el, expiredBlock.el, deadstockBlock.el]));
+
             const notesInput = UI.el('input', { type: 'text', placeholder: 'Keterangan (opsional)' });
-            panelHost.appendChild(UI.el('div', { class: 'grid-3', style: 'margin-top:8px;' }, [
-                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Rusak'), rusakInput]),
-                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Expired'), expiredInput]),
-                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Deadstock'), deadstockInput]),
-            ]));
             panelHost.appendChild(UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Keterangan'), notesInput]));
 
             const alertBox = UI.el('div');
             panelHost.appendChild(alertBox);
 
-            // PHASE V2.14.10.1 Gate 3 — every rendered unit row is sent,
-            // including a zero value: an untouched/blank input is a real
-            // "checked this unit, found none" answer, never silently
+            const saveBtn = UI.el('button', { class: 'btn btn-primary' }, isAdditional ? '💾 Simpan Temuan' : '💾 Simpan Hitungan');
+            panelHost.appendChild(UI.el('div', { class: 'opname-sticky-actions' }, [saveBtn]));
+
+            // Client-side pre-check only (mirrors the server's own gate —
+            // see StockOpnameService::submitFinding()'s photo-requirement
+            // check) so a counter never taps Simpan only to be told a photo
+            // is missing after the round trip; the server remains the sole
+            // authority and re-validates everything from scratch.
+            function updateSaveEnabled() {
+                let ok = true;
+                let totalGood = 0;
+                units.forEach((u) => { totalGood += (Number(unitInputs[u.unit_id].value) || 0) * Number(u.conversion_to_base); });
+                if (totalGood === 0 && !zeroConfirmCheckbox.checked) ok = false;
+                [damagedBlock, expiredBlock, deadstockBlock].forEach((b) => {
+                    if (b.qty() > 0 && b.photoCount() === 0) ok = false;
+                });
+                saveBtn.disabled = !ok;
+            }
+            recomputeTotalPreview();
+            updateSaveEnabled();
+
+            // PHASE V2.14.10.1 Gate 3 — every rendered GOOD unit row is
+            // sent, including a zero value: an untouched/blank input is a
+            // real "checked this unit, found none" answer, never silently
             // dropped. The server enforces the actual zero-result rule
             // (valid only for the very first finding on this line/role).
             // Gate 4 — retries ONCE, transparently, on CLAIM_LOST: the
-            // claim is refreshed and the exact same payload resubmitted,
-            // so an expired-but-uncontested lease never forces the
-            // counter to re-type their entry.
+            // claim is refreshed and the exact same payload resubmitted, so
+            // an expired-but-uncontested lease never forces the counter to
+            // re-type their entry (already-uploaded photos remain matched
+            // by session/item/role/condition/uploader, not by the old
+            // token, so the retry still finds and attaches them).
             async function saveFinding(retryOnClaimLost) {
-                const unitPayload = units.map((u) => ({ unit_id: u.unit_id, qty: Number(unitInputs[u.unit_id].value || 0) }));
                 const conditions = {
-                    rusak_qty: Number(rusakInput.value || 0),
-                    expired_qty: Number(expiredInput.value || 0),
-                    deadstock_qty: Number(deadstockInput.value || 0),
-                    notes: notesInput.value || null,
+                    GOOD: units.map((u) => ({ unit_id: u.unit_id, qty: Number(unitInputs[u.unit_id].value || 0) })),
+                    DAMAGED: damagedBlock.payload(),
+                    EXPIRED: expiredBlock.payload(),
+                    DEADSTOCK: deadstockBlock.payload(),
                 };
                 alertBox.innerHTML = '';
                 try {
-                    await InvApi.submitOpnameFinding(state.view.session_id, state.view.role, state.activeItemId, unitPayload, conditions, state.activeClaimToken);
+                    await InvApi.submitOpnameFinding(state.view.session_id, state.view.role, state.activeItemId, conditions, notesInput.value || null, state.activeClaimToken);
                     UI.toast('Temuan tersimpan.', 'success');
                     state.activeClaimToken = null;
                     state.panelMode = 'summary';
@@ -670,10 +785,38 @@ const StockOpname = (() => {
                     alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal menyimpan temuan.'));
                 }
             }
-
-            const saveBtn = UI.el('button', { class: 'btn btn-primary' }, isAdditional ? '💾 Simpan Temuan' : '💾 Simpan Hitungan');
             saveBtn.addEventListener('click', () => saveFinding(true));
-            panelHost.appendChild(UI.el('div', { class: 'opname-sticky-actions' }, [saveBtn]));
+        }
+
+        // PHASE V2.14.11 — client-side compression: draws the source image
+        // onto a canvas capped at 1600px on the longest side and re-encodes
+        // as JPEG. Purely a bandwidth/UX convenience for the mobile upload
+        // — the server (StockOpnamePhotoService) never trusts this and
+        // independently MIME-sniffs, decodes, and re-encodes every upload
+        // itself regardless of what the client sent.
+        function compressImageFile(file) {
+            return new Promise((resolve) => {
+                const img = new Image();
+                const reader = new FileReader();
+                reader.onload = () => { img.src = reader.result; };
+                img.onload = () => {
+                    const maxDim = 1600;
+                    let { width, height } = img;
+                    if (width > maxDim || height > maxDim) {
+                        const scale = Math.min(maxDim / width, maxDim / height);
+                        width = Math.round(width * scale);
+                        height = Math.round(height * scale);
+                    }
+                    const canvas = document.createElement('canvas');
+                    canvas.width = width;
+                    canvas.height = height;
+                    canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+                    canvas.toBlob((blob) => resolve(blob || file), 'image/jpeg', 0.82);
+                };
+                img.onerror = () => resolve(file);
+                reader.onerror = () => resolve(file);
+                reader.readAsDataURL(file);
+            });
         }
 
         renderChrome();
@@ -1091,9 +1234,9 @@ const StockOpname = (() => {
             if (!findings.length) return UI.el('div', { style: 'color:var(--text3); padding:6px 0;' }, `Belum ada temuan Tim ${role}.`);
             const host = UI.el('div');
             findings.forEach((f, idx) => {
-                const unitBreakdown = f.units.map((u) => `${UI.formatNumber(u.input_qty)} ${u.unit_code}`).join(' + ');
                 const rowEl = UI.el('div', { class: `opname-finding-row${f.is_voided ? ' is-voided' : ''}` }, [
-                    UI.el('div', {}, `Temuan ${idx + 1}: ${unitBreakdown} = ${UI.formatNumber(f.base_qty)} — oleh ${f.counter_username} — ${f.created_at}${f.is_voided ? ` (VOID: ${f.void_reason})` : ''}`),
+                    buildFindingSummaryEl(f, idx, null),
+                    UI.el('div', { style: 'color:var(--text3);' }, `oleh ${f.counter_username} — ${f.created_at}${f.is_voided ? ` (VOID: ${f.void_reason})` : ''}`),
                 ]);
                 if (!f.is_voided) {
                     const voidBtn = UI.el('button', { class: 'btn btn-danger btn-sm' }, 'Void');

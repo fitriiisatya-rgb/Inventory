@@ -420,13 +420,25 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 .opname-unit-input-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .opname-unit-input-row label { flex: 0 0 140px; font-size: 0.85rem; color: var(--text2); }
 .opname-unit-input-row input { flex: 1 1 auto; }
-.opname-finding-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+.opname-finding-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 0.85rem; flex-wrap: wrap; }
 .opname-finding-row.is-voided { text-decoration: line-through; color: var(--text3); }
 .opname-total-otomatis { padding: 10px 14px; border-radius: var(--radius-sm); background: rgba(59,130,246,0.08); font-weight: 600; margin: 8px 0; }
 .opname-sticky-actions { position: sticky; bottom: 0; background: var(--bg2); padding: 10px 0 4px; display: flex; gap: 10px; }
+/* PHASE V2.14.11 */
+.opname-zero-confirm { padding: 8px 12px; border-radius: var(--radius-sm); background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3); font-size: 0.82rem; margin-bottom: 10px; }
+.opname-zero-confirm input[type="checkbox"] { width: auto; }
+.opname-condition-block { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; background: var(--bg3); }
+.opname-photo-thumbs { display: flex; flex-wrap: wrap; gap: 6px; }
+.opname-photo-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+.opname-photo-hint { font-size: 0.72rem; color: var(--text3); margin-top: 4px; }
 @media (max-width: 640px) {
     .opname-unit-input-row label { flex-basis: 110px; font-size: 0.8rem; }
     .opname-sticky-actions { flex-direction: column; }
+    .opname-condition-block { padding: 8px; }
+    /* Large touch targets on phone — buttons/selects/inputs never below
+       a 44px hit target, per mobile-first accessibility convention. */
+    .opname-condition-block select, .opname-condition-block input[type="number"] { min-height: 42px; }
+    .opname-condition-block .btn-sm { min-height: 40px; padding: 8px 14px; }
 }
 
 @media (max-width: 640px) {
