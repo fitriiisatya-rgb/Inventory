@@ -8,7 +8,14 @@
     --text: #e2e8f0; --text2: #94a3b8; --text3: #64748b; --radius: 14px; --radius-sm: 8px;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: var(--bg); color: var(--text); font-family: 'Plus Jakarta Sans', -apple-system, sans-serif; min-height: 100vh; }
+/* PHASE V2.14.11.4 — global safety net: never let any single wide
+   element force page-level horizontal scroll. Every existing wide table
+   already scrolls WITHIN its own wrapper (.table-wrapper/.compact-table-wrap/
+   .dt-wrapper all set their own overflow-x/overflow:auto), so this never
+   hides content — it only stops something from overflowing the viewport
+   itself the way a bare <table> would. */
+html { max-width: 100%; overflow-x: hidden; }
+body { background: var(--bg); color: var(--text); font-family: 'Plus Jakarta Sans', -apple-system, sans-serif; min-height: 100vh; max-width: 100%; overflow-x: hidden; }
 
 .app-header { background: linear-gradient(135deg, #0d1b3e, #1a1040); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
 .app-logo { display: flex; align-items: center; gap: 10px; }
@@ -439,6 +446,74 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
        a 44px hit target, per mobile-first accessibility convention. */
     .opname-condition-block select, .opname-condition-block input[type="number"] { min-height: 42px; }
     .opname-condition-block .btn-sm { min-height: 40px; padding: 8px 14px; }
+}
+
+/* ============================================================
+   PHASE V2.14.11.4 — mobile UX hotfix for the Stock Opname counter
+   screen ("Stock Opname Saya"). Frontend-only, no data model change:
+   desktop/tablet (>768px) keeps the existing two-pane list+table
+   layout untouched; everything below only takes effect at <=768px,
+   where the item list becomes a stack of cards instead of the wide
+   table, the filter toolbar stacks to one full-width control per row,
+   the item-status filter becomes a 3-button segmented control (the
+   underlying <select> stays the single source of truth — see
+   syncItemStatusSeg() in stock-opname.js), and touch targets/font
+   sizes are raised to avoid iOS auto-zoom and mis-taps.
+   ============================================================ */
+.opname-counter-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.opname-toolbar-search { flex: 1 1 220px; }
+.opname-toolbar-item-status { width: 160px; }
+.opname-toolbar-category { width: 180px; }
+.opname-toolbar-progress-filter { width: 170px; }
+.opname-toolbar-next, .opname-toolbar-scan { flex: 0 0 auto; }
+.opname-status-segmented { display: none; }
+
+.opname-mobile-cards { display: none; }
+.opname-item-card { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg3); padding: 12px; margin-bottom: 10px; }
+.opname-item-card-sku { font-weight: 700; font-size: 0.95rem; }
+.opname-item-card-name { color: var(--text2); font-size: 0.85rem; margin-top: 2px; }
+.opname-item-card-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.opname-item-card-category { color: var(--text3); font-size: 0.8rem; }
+.opname-item-card-count-status { margin-bottom: 10px; }
+.opname-item-card-btn { width: 100%; min-height: 48px; font-size: 1rem; }
+.opname-empty-state { padding: 16px; text-align: center; color: var(--text3); }
+.opname-history-list { border-top: 1px solid var(--border); }
+
+@media (max-width: 768px) {
+    .opname-counter-screen { max-width: 100%; overflow-x: hidden; }
+
+    /* Requirement 1/2 — no table wider than the viewport: the table is
+       simply not shown at all on mobile, replaced by the card list.
+       Scoped to THIS screen only — .compact-table-wrap/.compact-table are
+       shared with Transfer/Production/DO Receive bulk entry (PHASE
+       V2.14.8), which must keep their existing (table + internal
+       horizontal scroll) mobile behavior untouched. */
+    .opname-counter-screen .compact-table-wrap { display: none; }
+    .opname-mobile-cards { display: block; }
+
+    /* Requirement 3/4 — filter toolbar stacks to one full-width control
+       per row, with the primary action prominent directly below it. */
+    .opname-counter-toolbar { flex-direction: column; align-items: stretch; }
+    .opname-toolbar-search, .opname-toolbar-item-status, .opname-toolbar-category,
+    .opname-toolbar-progress-filter, .opname-toolbar-next, .opname-toolbar-scan { width: 100%; }
+    .opname-toolbar-item-status select { display: none; }
+    .opname-status-segmented { display: flex; gap: 6px; }
+    .opname-status-seg-btn { flex: 1 1 0; min-height: 44px; }
+    .opname-status-seg-btn.active { background: var(--accent); color: #fff; }
+    .opname-toolbar-next .btn { width: 100%; min-height: 48px; font-size: 1rem; }
+    .opname-toolbar-scan .btn { width: 100%; min-height: 44px; }
+
+    /* Requirement 10 — touch targets + iOS zoom avoidance (>=16px input
+       font-size), scoped to this screen only — never a global input/
+       button size change elsewhere in the app. */
+    .opname-counter-screen input, .opname-counter-screen select { min-height: 44px; font-size: 16px; }
+    .opname-counter-screen .btn { min-height: 44px; }
+
+    /* Requirement 8 — save (and Ambil Item Berikutnya) full-width,
+       sticky bottom, safe-area-aware so it's never hidden behind the
+       browser toolbar/home indicator. */
+    .opname-sticky-actions { padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
+    .opname-sticky-actions .btn { width: 100%; min-height: 48px; font-size: 1rem; }
 }
 
 @media (max-width: 640px) {

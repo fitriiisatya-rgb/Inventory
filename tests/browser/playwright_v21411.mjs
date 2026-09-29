@@ -115,14 +115,20 @@ try {
 
     // Enter the session
     await p1a.locator('#tab-opname-saya .card button:has-text("Mulai Hitung")').first().click();
-    await p1a.waitForSelector('#opname-body .compact-table', { timeout: 8000 });
+    await p1a.waitForSelector('#opname-body .opname-counter-toolbar', { timeout: 8000 });
 
     // ============================================================
     // B. first finding — GOOD only, positive quantity, itemA
     // ============================================================
+    // PHASE V2.14.11.4 — the item list now renders BOTH a <tr> (desktop/
+    // tablet) and an .opname-item-card (mobile) for every line; CSS alone
+    // decides which is visible per viewport. Matching on whichever one is
+    // actually :visible keeps this helper correct at the default 390px
+    // phone viewport (card mode) and at the wider viewports used later in
+    // this same file (table mode) without needing two code paths.
     async function claimAndOpenPanel(page, sku) {
-        const row = page.locator('tr', { hasText: sku });
-        await row.locator('.compact-row-btn').click();
+        const row = page.locator('tr, .opname-item-card', { hasText: sku });
+        await row.locator('button:visible').first().click();
         await page.waitForSelector('.opname-condition-block', { timeout: 8000 });
     }
     // Resolve SKUs from seed by re-reading them from the page's row list —
@@ -218,7 +224,7 @@ try {
     const { context: p2aCtx, page: p2a } = await loginAs(browser, seed.p2a);
     await gotoTab(p2a, 'opname-saya', 'opname');
     await p2a.locator('#tab-opname-saya .card button:has-text("Mulai Hitung")').first().click();
-    await p2a.waitForSelector('#opname-body .compact-table', { timeout: 8000 });
+    await p2a.waitForSelector('#opname-body .opname-counter-toolbar', { timeout: 8000 });
     await claimAndOpenPanel(p2a, skuC);
     const p2PanelHtml = await p2a.locator('.opname-counter-panel').innerHTML();
     check('G. P2 counter panel HTML never contains "system_qty"/"mismatch"/"variance"/P1 identity', !/system_qty|mismatch|variance/i.test(p2PanelHtml));
@@ -234,7 +240,7 @@ try {
     const { context: p1bCtx, page: p1b } = await loginAs(browser, seed.p1b);
     await gotoTab(p1b, 'opname-saya', 'opname');
     await p1b.locator('#tab-opname-saya .card button:has-text("Lanjut Hitung"), #tab-opname-saya .card button:has-text("Mulai Hitung")').first().click();
-    await p1b.waitForSelector('#opname-body .compact-table', { timeout: 8000 });
+    await p1b.waitForSelector('#opname-body .opname-counter-toolbar', { timeout: 8000 });
 
     // Via InvApi (real CSRF-attaching client), catching its ApiError so a
     // rejected claim reads as a status code rather than an uncaught throw —

@@ -522,12 +522,12 @@ const StockOpname = (() => {
             activeClaimToken: null, panelMode: 'form',
         };
 
-        const wrap = UI.el('div');
+        const wrap = UI.el('div', { class: 'opname-counter-screen' });
         const bannerHost = UI.el('div');
         const progressHost = UI.el('div', { class: 'card' });
-        const searchInput = UI.el('input', { type: 'text', placeholder: 'Cari SKU/nama/barcode, atau scan...', class: 'opname-blind-search' });
+        const searchInput = UI.el('input', { type: 'text', placeholder: 'Cari SKU / nama barang, atau scan...', class: 'opname-blind-search' });
         const scanBtn = UI.el('button', { type: 'button', class: 'btn btn-secondary btn-sm' }, '📷 Scan');
-        const nextItemBtn = UI.el('button', { type: 'button', class: 'btn btn-primary btn-sm' }, '➡️ Ambil Item Berikutnya');
+        const nextItemBtn = UI.el('button', { type: 'button', class: 'btn btn-primary opname-next-item-btn' }, '➡️ Ambil Item Berikutnya');
         const filterSelect = UI.el('select', { id: 'opname-blind-filter', html: `
             <option value="ALL">Semua</option>
             <option value="PENDING">Belum Dihitung</option>
@@ -539,15 +539,35 @@ const StockOpname = (() => {
             <option value="INACTIVE">Tidak Aktif</option>
         ` });
         const categorySelect = UI.el('select', { id: 'opname-blind-category', html: categoryFilterOptionsHtml() });
+
+        // Mobile-only segmented control mirroring itemStatusSelect exactly
+        // (the select stays the single source of truth — these buttons
+        // only set its value and re-dispatch its own change event). CSS
+        // shows exactly one of the two per viewport width, never both.
+        const itemStatusSegLabels = { ALL: 'Semua', ACTIVE: 'Aktif', INACTIVE: 'Tidak Aktif' };
+        const itemStatusSegButtons = Object.keys(itemStatusSegLabels).map((key) => UI.el('button', {
+            type: 'button', class: 'btn btn-secondary btn-sm opname-status-seg-btn', 'data-value': key,
+        }, itemStatusSegLabels[key]));
+        function syncItemStatusSeg() {
+            itemStatusSegButtons.forEach((btn) => btn.classList.toggle('active', btn.getAttribute('data-value') === itemStatusSelect.value));
+        }
+        itemStatusSegButtons.forEach((btn) => btn.addEventListener('click', () => {
+            itemStatusSelect.value = btn.getAttribute('data-value');
+            itemStatusSelect.dispatchEvent(new Event('change'));
+        }));
+        const itemStatusSegHost = UI.el('div', { class: 'opname-status-segmented' }, itemStatusSegButtons);
+
         const tbody = UI.el('tbody', {});
+        const cardListHost = UI.el('div', { class: 'opname-mobile-cards' });
         const pagerHost = UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center; margin-top:10px; flex-wrap:wrap; gap:8px;' });
         const listHost = UI.el('div', { class: 'opname-counter-list' }, [
-            UI.el('div', { class: 'card', style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap;' }, [
-                UI.el('div', { style: 'flex:1 1 220px;' }, [searchInput]),
-                UI.el('div', { style: 'width:170px;' }, [filterSelect]),
-                UI.el('div', { style: 'width:160px;' }, [itemStatusSelect]),
-                UI.el('div', { style: 'width:180px;' }, [categorySelect]),
-                scanBtn, nextItemBtn,
+            UI.el('div', { class: 'card opname-counter-toolbar' }, [
+                UI.el('div', { class: 'opname-toolbar-search' }, [searchInput]),
+                UI.el('div', { class: 'opname-toolbar-item-status' }, [itemStatusSelect, itemStatusSegHost]),
+                UI.el('div', { class: 'opname-toolbar-category' }, [categorySelect]),
+                UI.el('div', { class: 'opname-toolbar-progress-filter' }, [filterSelect]),
+                UI.el('div', { class: 'opname-toolbar-next' }, [nextItemBtn]),
+                UI.el('div', { class: 'opname-toolbar-scan' }, [scanBtn]),
             ]),
             UI.el('div', { class: 'compact-table-wrap' }, [
                 UI.el('table', { class: 'compact-table' }, [
@@ -555,6 +575,7 @@ const StockOpname = (() => {
                     tbody,
                 ]),
             ]),
+            cardListHost,
             pagerHost,
         ]);
         const panelHost = UI.el('div', { class: 'opname-counter-panel card' });
@@ -588,7 +609,7 @@ const StockOpname = (() => {
 
             const progressPct = state.view.progress.total > 0 ? Math.round((state.view.progress.counted / state.view.progress.total) * 100) : 0;
             progressHost.innerHTML = '';
-            progressHost.appendChild(UI.el('div', { class: 'card-title' }, `Progress Tim ${state.view.role.toUpperCase()}: ${state.view.progress.counted} / ${state.view.progress.total}`));
+            progressHost.appendChild(UI.el('div', { class: 'card-title' }, `Progress Tim ${state.view.role.toUpperCase()}: ${state.view.progress.counted} / ${state.view.progress.total} (${progressPct}%)`));
             progressHost.appendChild(UI.el('div', { style: 'height:10px; background:var(--border); border-radius:6px; overflow:hidden; margin-top:6px;' }, [
                 UI.el('div', { style: `height:100%; width:${progressPct}%; background:var(--primary, #2563eb);` }),
             ]));
@@ -602,10 +623,15 @@ const StockOpname = (() => {
             const pageLines = filtered.slice(start, start + PAGE_SIZE);
 
             tbody.innerHTML = '';
+            cardListHost.innerHTML = '';
             if (pageLines.length === 0) {
                 tbody.appendChild(UI.el('tr', {}, [UI.el('td', { colspan: '6' }, 'Tidak ada barang yang cocok.')]));
+                cardListHost.appendChild(UI.el('div', { class: 'opname-empty-state' }, 'Tidak ada barang yang cocok.'));
             } else {
-                pageLines.forEach((line, i) => tbody.appendChild(buildBlindCountRowEl(state, line, start + i + 1, selectItem)));
+                pageLines.forEach((line, i) => {
+                    tbody.appendChild(buildBlindCountRowEl(state, line, start + i + 1, selectItem));
+                    cardListHost.appendChild(buildBlindCountCardEl(line, selectItem));
+                });
             }
 
             pagerHost.innerHTML = '';
@@ -619,8 +645,9 @@ const StockOpname = (() => {
 
         searchInput.addEventListener('input', () => { state.filterText = searchInput.value; state.page = 0; renderTable(); });
         filterSelect.addEventListener('change', () => { state.filterStatus = filterSelect.value; state.page = 0; renderTable(); });
-        itemStatusSelect.addEventListener('change', () => { state.filterItemStatus = itemStatusSelect.value; state.page = 0; renderTable(); });
+        itemStatusSelect.addEventListener('change', () => { state.filterItemStatus = itemStatusSelect.value; state.page = 0; syncItemStatusSeg(); renderTable(); });
         categorySelect.addEventListener('change', () => { state.filterCategory = categorySelect.value; state.page = 0; renderTable(); });
+        syncItemStatusSeg();
         scanBtn.addEventListener('click', () => openScanModal(state, jumpToItem));
         nextItemBtn.addEventListener('click', claimNextItem);
 
@@ -645,6 +672,7 @@ const StockOpname = (() => {
             filterSelect.value = 'ALL';
             itemStatusSelect.value = 'ALL';
             categorySelect.value = 'ALL';
+            syncItemStatusSeg();
             state.page = Math.floor(globalIdx / PAGE_SIZE);
             renderTable();
             selectItem(itemId);
@@ -733,21 +761,34 @@ const StockOpname = (() => {
             // Riwayat Temuan — THIS TEAM's own history only (already
             // structurally guaranteed by getMyFindingsForItem() never
             // returning the other team's data at all). Shown in BOTH panel
-            // modes (form and summary).
+            // modes (form and summary). PHASE V2.14.11.4 — the itemized
+            // list is collapsed by default (keeps the counting screen
+            // short on mobile) behind a toggle; the accumulated total
+            // stays visible either way so the counter always sees it at a
+            // glance without expanding anything.
             const findingsHost = UI.el('div', { style: 'margin-top:10px; border:1px solid var(--border); border-radius:8px;' });
-            findingsHost.appendChild(UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center; padding:6px 10px; font-weight:600;' }, [
+            const findingsListHost = UI.el('div', { class: 'opname-history-list', style: 'display:none;' });
+            const historyToggleBtn = UI.el('button', { type: 'button', class: 'btn btn-secondary btn-sm opname-history-toggle' }, `Lihat Riwayat Temuan (${findings.length})`);
+            historyToggleBtn.addEventListener('click', () => {
+                const opening = findingsListHost.style.display === 'none';
+                findingsListHost.style.display = opening ? 'block' : 'none';
+                historyToggleBtn.textContent = opening ? 'Sembunyikan Riwayat Temuan' : `Lihat Riwayat Temuan (${findings.length})`;
+            });
+            findingsHost.appendChild(UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center; padding:6px 10px; font-weight:600; flex-wrap:wrap; gap:6px;' }, [
                 document.createTextNode('Riwayat Temuan (Tim)'),
+                historyToggleBtn,
             ]));
             if (findings.length === 0) {
-                findingsHost.appendChild(UI.el('div', { style: 'padding:8px 10px; color:var(--text3); font-size:0.85rem;' }, 'Belum ada temuan untuk barang ini.'));
+                findingsListHost.appendChild(UI.el('div', { style: 'padding:8px 10px; color:var(--text3); font-size:0.85rem;' }, 'Belum ada temuan untuk barang ini.'));
             } else {
                 findings.forEach((f, idx) => {
-                    findingsHost.appendChild(UI.el('div', { class: 'opname-finding-row' }, [
+                    findingsListHost.appendChild(UI.el('div', { class: 'opname-finding-row' }, [
                         buildFindingSummaryEl(f, idx, baseUnitCode),
                         UI.el('div', { style: 'color:var(--text3);' }, f.created_at),
                     ]));
                 });
             }
+            findingsHost.appendChild(findingsListHost);
             findingsHost.appendChild(UI.el('div', { class: 'compact-summary', style: 'padding:8px 10px;' }, [
                 UI.el('div', {}, [document.createTextNode('Total Akumulasi Tim: '), UI.el('b', {}, `${UI.formatNumber(totalAkumulasi)} ${baseUnitCode}`)]),
             ]));
@@ -1069,6 +1110,48 @@ const StockOpname = (() => {
         hitungBtn.addEventListener('click', () => selectItem(line.item_id));
         row.appendChild(UI.el('td', {}, [hitungBtn]));
         return row;
+    }
+
+    // PHASE V2.14.11.4 — mobile card rendering of the SAME session line
+    // buildBlindCountRowEl already renders as a <tr>: same fields, same
+    // is_excluded/is_counted_by_me/claimed_by_teammate_username status
+    // derivation, same selectItem() action, never a second read of
+    // anything the table row doesn't already read. Rendered in parallel
+    // with the table (never instead of it) — CSS alone decides which one
+    // is visible per viewport, so nothing here duplicates business logic,
+    // only presentation.
+    function buildBlindCountCardEl(line, selectItem) {
+        const card = UI.el('div', { class: 'opname-item-card', 'data-item-id': String(line.item_id) });
+        card.appendChild(UI.el('div', { class: 'opname-item-card-title' }, [
+            UI.el('div', { class: 'opname-item-card-sku' }, line.sku),
+            UI.el('div', { class: 'opname-item-card-name' }, line.name),
+        ]));
+
+        const itemStatusBadge = UI.el('span', { class: `badge ${line.item_status === 'INACTIVE' ? 'badge-cancelled' : 'badge-received'}` }, line.item_status === 'INACTIVE' ? 'TIDAK AKTIF' : 'AKTIF');
+        const metaRow = UI.el('div', { class: 'opname-item-card-meta' }, [itemStatusBadge]);
+        const catName = categoryNameOf(line.category_id);
+        if (catName && catName !== '-') metaRow.appendChild(UI.el('span', { class: 'opname-item-card-category' }, catName));
+        card.appendChild(metaRow);
+
+        if (line.is_excluded) {
+            card.appendChild(UI.el('div', { class: 'opname-item-card-count-status' }, [UI.el('span', { class: 'badge badge-cancelled' }, 'Dikecualikan')]));
+            return card;
+        }
+
+        let statusBadge;
+        if (line.is_counted_by_me) {
+            statusBadge = UI.el('span', { class: 'badge badge-received' }, `Ada Temuan (${UI.formatNumber(line.my_qty_base)} ${line.base_unit_code})`);
+        } else if (line.claimed_by_teammate_username) {
+            statusBadge = UI.el('span', { class: 'badge badge-pending' }, `Sedang dihitung oleh ${line.claimed_by_teammate_username}`);
+        } else {
+            statusBadge = UI.el('span', { class: 'badge badge-pending' }, 'Belum Dihitung');
+        }
+        card.appendChild(UI.el('div', { class: 'opname-item-card-count-status' }, [statusBadge]));
+
+        const hitungBtn = UI.el('button', { class: 'btn btn-primary opname-item-card-btn' }, line.is_counted_by_me ? 'Tambah Temuan' : 'HITUNG');
+        hitungBtn.addEventListener('click', () => selectItem(line.item_id));
+        card.appendChild(hitungBtn);
+        return card;
     }
 
     function openScanModal(state, jumpToItem) {
