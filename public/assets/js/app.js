@@ -55,6 +55,20 @@
         } catch (err) {
             UI.handleApiError(err);
         }
+        // PHASE V2.14.11.3 — URGENT HOTFIX: a Petugas Stock Opname
+        // (OPNAME_COUNTER) must land DIRECTLY on "Stock Opname Saya"
+        // every time, never Dashboard — even if a stale sessionStorage
+        // tab from a previous session (or a different role's login on
+        // this same browser) would otherwise reopen something this role
+        // cannot see. The sidebar itself already hides every other tab
+        // for this role (see index.html's data-require-permission
+        // attributes + Auth.applyRoleVisibility() above), but the
+        // landing tab is decided here explicitly rather than trusted to
+        // "whatever was last open".
+        if (user.role_code === 'OPNAME_COUNTER') {
+            activateTab('opname-saya');
+            return;
+        }
         const savedTab = sessionStorage.getItem('inv_active_tab') || 'dashboard';
         activateTab(savedTab);
     }

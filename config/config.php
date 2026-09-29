@@ -51,11 +51,26 @@ if (!function_exists('inv_env')) {
 $root = dirname(__DIR__);
 inv_load_env($root . '/.env');
 
+// PHASE V2.14.11.3 — single central application timezone. Every business
+// date this app produces via date()/time() (Stock Opname session_date,
+// session_number, audit timestamps, DATETIME columns written without an
+// explicit value) must reflect Asia/Jakarta wall-clock time, never the
+// server/container's own system timezone (commonly UTC) — a physical
+// Stock Opname started at 00:29 WIB must get the 30 September business
+// date, not 29 September. This file is `require`d exactly once per
+// process, from inside Database::connection()'s singleton guard, which
+// fires before any business logic that reads the current date — so
+// setting it here, once, covers every entry point (HTTP via
+// public/index.php, every CLI test, the Playwright test's php -S
+// server) without scattering per-function DateTimeZone overrides.
+date_default_timezone_set((string) inv_env('APP_TIMEZONE', 'Asia/Jakarta'));
+
 return [
     'app' => [
-        'env'   => inv_env('APP_ENV', 'production'),
-        'debug' => (bool) inv_env('APP_DEBUG', false),
-        'url'   => inv_env('APP_URL', ''),
+        'env'      => inv_env('APP_ENV', 'production'),
+        'debug'    => (bool) inv_env('APP_DEBUG', false),
+        'url'      => inv_env('APP_URL', ''),
+        'timezone' => (string) inv_env('APP_TIMEZONE', 'Asia/Jakarta'),
     ],
     'db' => [
         'host'    => inv_env('DB_HOST', '127.0.0.1'),

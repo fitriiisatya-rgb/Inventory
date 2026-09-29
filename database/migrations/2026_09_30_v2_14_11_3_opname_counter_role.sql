@@ -1,0 +1,31 @@
+-- ============================================================================
+-- V2.14.11.3 — URGENT HOTFIX: independent login identity for Stock Opname
+-- counters ("Petugas Stock Opname").
+--
+-- Adds ONE new global role, OPNAME_COUNTER ("Petugas Stock Opname"), for
+-- login identity only. It intentionally receives ZERO permissions rows —
+-- no INVENTORY_VIEW, no STOCK_OPNAME_MANAGE, no STOCK_OPNAME_SUPERVISE,
+-- nothing. Its entire operational authority for a given Stock Opname
+-- session comes from stock_opname_team_members (P1/P2 session
+-- assignment, already built in V2.14.10) — never from a global grant.
+-- P1/P2 remain session assignments, never role codes; OPNAME_COUNTER is
+-- the login identity, not the team role.
+--
+-- IDEMPOTENT / SAFE TO RE-RUN: INSERT IGNORE against roles.code's UNIQUE
+-- constraint, so a database that already has this row (a fresh install
+-- from the updated schema.sql, or a database this migration already ran
+-- against once) silently skips it rather than erroring or duplicating.
+--
+-- Deliberately inserts NO role_permissions row for this role — the
+-- absence of any INSERT here (rather than an INSERT of zero rows,
+-- which isn't a meaningful SQL statement) IS the zero-permission
+-- guarantee: nothing in this migration, or in schema.sql's own
+-- per-role grant blocks, ever references OPNAME_COUNTER.
+--
+-- Changes no inventory quantity, no inventory value, no user, no
+-- existing Stock Opname session/finding/team-member row. Adds exactly
+-- one roles row.
+-- ============================================================================
+
+INSERT IGNORE INTO roles (code, name, description) VALUES
+    ('OPNAME_COUNTER', 'Petugas Stock Opname', 'Login identity only for physical Stock Opname counters — zero global permissions; P1/P2 counting authority comes solely from a session-scoped stock_opname_team_members assignment');

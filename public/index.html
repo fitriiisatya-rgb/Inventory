@@ -143,7 +143,7 @@
         <nav class="sidebar" id="sidebar">
             <div class="sidebar-group sidebar-group-static">
                 <div class="sidebar-group-label">Overview</div>
-                <a class="sidebar-link active" data-tab="dashboard"><span class="icon">🏠</span> Dashboard</a>
+                <a class="sidebar-link active" data-tab="dashboard" data-require-permission="INVENTORY_VIEW"><span class="icon">🏠</span> Dashboard</a>
             </div>
             <div class="sidebar-group sidebar-group-collapsible" data-group="laporan">
                 <button type="button" class="sidebar-group-header" aria-expanded="false">
@@ -174,8 +174,8 @@
                     <span class="accordion-arrow">&rsaquo;</span>
                 </button>
                 <div class="sidebar-submenu" hidden>
-                    <a class="sidebar-link" data-tab="stok-barang"><span class="icon">📦</span> Stok Barang</a>
-                    <a class="sidebar-link" data-tab="laporan"><span class="icon">📇</span> Mutasi Stok / Ledger</a>
+                    <a class="sidebar-link" data-tab="stok-barang" data-require-permission="INVENTORY_VIEW"><span class="icon">📦</span> Stok Barang</a>
+                    <a class="sidebar-link" data-tab="laporan" data-require-permission="INVENTORY_VIEW"><span class="icon">📇</span> Mutasi Stok / Ledger</a>
                 </div>
             </div>
             <div class="sidebar-group sidebar-group-collapsible" data-group="transactions">
@@ -185,7 +185,7 @@
                 </button>
                 <div class="sidebar-submenu" hidden>
                     <a class="sidebar-link" data-tab="transaksi" data-require-permission="TRANSACTION_IN_CREATE,TRANSACTION_OUT_CREATE"><span class="icon">📥</span> Stock IN / OUT</a>
-                    <a class="sidebar-link" data-tab="history-transaksi"><span class="icon">🧾</span> History Transaksi</a>
+                    <a class="sidebar-link" data-tab="history-transaksi" data-require-permission="INVENTORY_VIEW"><span class="icon">🧾</span> History Transaksi</a>
                 </div>
             </div>
             <div class="sidebar-group sidebar-group-collapsible" data-group="transfers">
@@ -243,7 +243,7 @@
                     <span class="accordion-arrow">&rsaquo;</span>
                 </button>
                 <div class="sidebar-submenu" hidden>
-                    <a class="sidebar-link" data-tab="master-item"><span class="icon">📦</span> Master Barang</a>
+                    <a class="sidebar-link" data-tab="master-item" data-require-permission="INVENTORY_VIEW"><span class="icon">📦</span> Master Barang</a>
                     <a class="sidebar-link" data-tab="master-warehouse" data-require-permission="MASTER_WAREHOUSE_MANAGE,INVENTORY_VIEW"><span class="icon">🏬</span> Master Gudang</a>
                     <a class="sidebar-link" data-tab="master-division" data-require-permission="MASTER_DIVISION_MANAGE,INVENTORY_VIEW"><span class="icon">🗂️</span> Master Divisi</a>
                     <a class="sidebar-link" data-tab="master-vendor" data-require-permission="MASTER_SUPPLIER_MANAGE,INVENTORY_VIEW"><span class="icon">📇</span> Vendor / Supplier</a>

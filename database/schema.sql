@@ -1563,7 +1563,13 @@ INSERT INTO roles (code, name, description) VALUES
     ('ADMIN',      'Admin',       'Full operational access'),
     ('STOCK',      'Stock Staff', 'Warehouse transactions, transfers, opname'),
     ('DIVISION',   'Division Staff', 'Scoped to own division usage/production'),
-    ('VIEWER',     'Viewer',      'Read-only access to reports and dashboards');
+    ('VIEWER',     'Viewer',      'Read-only access to reports and dashboards'),
+    -- PHASE V2.14.11.3: login identity ONLY for physical Stock Opname
+    -- counters — deliberately granted ZERO permissions (see the absence
+    -- of any role_permissions INSERT for this code below). All counting
+    -- authority comes from a per-session stock_opname_team_members
+    -- (P1/P2) assignment, never from this role directly.
+    ('OPNAME_COUNTER', 'Petugas Stock Opname', 'Login identity only for physical Stock Opname counters — zero global permissions; P1/P2 counting authority comes solely from a session-scoped stock_opname_team_members assignment');
 
 INSERT INTO permissions (code, description) VALUES
     ('TRANSACTION_IN_CREATE',      'Create incoming stock transactions'),

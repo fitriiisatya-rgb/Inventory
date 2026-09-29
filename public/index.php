@@ -41,6 +41,7 @@ require_once __DIR__ . '/../services/WarehouseGuardService.php';
 require_once __DIR__ . '/../services/StockAdjustmentService.php';
 require_once __DIR__ . '/../services/StockOpnameService.php';
 require_once __DIR__ . '/../services/StockOpnamePhotoService.php';
+require_once __DIR__ . '/../services/StockOpnameCounterAccountService.php';
 require_once __DIR__ . '/../services/TransferService.php';
 require_once __DIR__ . '/../services/ProductionService.php';
 require_once __DIR__ . '/../services/BookClosingService.php';
@@ -126,6 +127,7 @@ use App\Services\InventoryService;
 use App\Services\TransferService;
 use App\Services\StockOpnameService;
 use App\Services\StockOpnamePhotoService;
+use App\Services\StockOpnameCounterAccountService;
 use App\Services\StockAdjustmentService;
 use App\Services\ProductionService;
 use App\Services\BookClosingService;
@@ -2908,6 +2910,70 @@ $routes = [
             'id' => (int) $r['id'], 'username' => $r['username'], 'full_name' => $r['full_name'],
             'role_code' => $r['role_code'], 'same_warehouse' => (bool) $r['same_warehouse'],
         ], $rows), 'OK');
+    },
+
+    // PHASE V2.14.11.3 — URGENT HOTFIX: "Petugas Stock Opname" account
+    // management. SUPERADMIN ONLY — a role_code check, not merely a
+    // permission (matching this codebase's existing pattern for
+    // security-sensitive account actions, e.g. POST
+    // /warehouse-cutovers/{id}/load) — STOCK_OPNAME_MANAGE alone is
+    // deliberately NOT sufficient here, since these routes create/reset/
+    // (de)activate LOGIN CREDENTIALS, not Stock Opname data. This is
+    // entirely separate from P1/P2 SESSION assignment
+    // (POST /stock-opname/{id}/assign-team) — create the account here
+    // first, assign it to a session's team second, elsewhere.
+    'GET /stock-opname/counter-accounts' => function () use ($pdo) {
+        $user = inv_require_auth();
+        if ($user['role_code'] !== 'SUPERADMIN') {
+            inv_error(403, 'FORBIDDEN', 'Managing Petugas Stock Opname accounts is restricted to SUPERADMIN');
+        }
+        inv_ok(StockOpnameCounterAccountService::list($pdo), 'OK');
+    },
+
+    'POST /stock-opname/counter-accounts' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        if ($user['role_code'] !== 'SUPERADMIN') {
+            inv_error(403, 'FORBIDDEN', 'Managing Petugas Stock Opname accounts is restricted to SUPERADMIN');
+        }
+        $result = Database::transaction(fn (PDO $tx) => StockOpnameCounterAccountService::create(
+            $tx,
+            (string) ($input['full_name'] ?? ''),
+            (string) ($input['username'] ?? ''),
+            (string) ($input['password'] ?? ''),
+            !array_key_exists('is_active', $input) || (bool) $input['is_active'],
+            (int) $user['id'],
+            (string) $user['username']
+        ));
+        inv_ok($result, 'Petugas Stock Opname account created');
+    },
+
+    'POST /stock-opname/counter-accounts/{id}/reset-password' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        if ($user['role_code'] !== 'SUPERADMIN') {
+            inv_error(403, 'FORBIDDEN', 'Managing Petugas Stock Opname accounts is restricted to SUPERADMIN');
+        }
+        Database::transaction(fn (PDO $tx) => StockOpnameCounterAccountService::resetPassword(
+            $tx, (int) $params['id'], (string) ($input['password'] ?? ''), (int) $user['id'], (string) $user['username']
+        ));
+        inv_ok(['success' => true], 'Password diperbarui');
+    },
+
+    'POST /stock-opname/counter-accounts/{id}/activate' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        if ($user['role_code'] !== 'SUPERADMIN') {
+            inv_error(403, 'FORBIDDEN', 'Managing Petugas Stock Opname accounts is restricted to SUPERADMIN');
+        }
+        Database::transaction(fn (PDO $tx) => StockOpnameCounterAccountService::activate($tx, (int) $params['id'], (int) $user['id'], (string) $user['username']));
+        inv_ok(['success' => true], 'Petugas diaktifkan');
+    },
+
+    'POST /stock-opname/counter-accounts/{id}/deactivate' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        if ($user['role_code'] !== 'SUPERADMIN') {
+            inv_error(403, 'FORBIDDEN', 'Managing Petugas Stock Opname accounts is restricted to SUPERADMIN');
+        }
+        Database::transaction(fn (PDO $tx) => StockOpnameCounterAccountService::deactivate($tx, (int) $params['id'], (int) $user['id'], (string) $user['username']));
+        inv_ok(['success' => true], 'Petugas dinonaktifkan');
     },
 
     // PHASE V2.14.10 — "STOCK OPNAME SAYA": any authenticated active user

@@ -323,6 +323,15 @@ const InvApi = (() => {
         assignOpnameCounters: (id, assignments) => request('POST', `/stock-opname/${id}/assign-counters`, assignments),
         // ---- PHASE V2.14.10: multi-user P1/P2 TEAM Stock Opname ----
         assignOpnameTeam: (id, role, userIds) => request('POST', `/stock-opname/${id}/assign-team`, { role, user_ids: userIds }),
+        // ---- PHASE V2.14.11.3: independent "Petugas Stock Opname" login accounts ----
+        // SUPERADMIN only server-side; separate from P1/P2 session assignment above.
+        listOpnameCounterAccounts: () => request('GET', '/stock-opname/counter-accounts'),
+        createOpnameCounterAccount: (fullName, username, password, isActive) => request('POST', '/stock-opname/counter-accounts', {
+            full_name: fullName, username, password, is_active: isActive,
+        }),
+        resetOpnameCounterPassword: (id, password) => request('POST', `/stock-opname/counter-accounts/${id}/reset-password`, { password }),
+        activateOpnameCounterAccount: (id) => request('POST', `/stock-opname/counter-accounts/${id}/activate`),
+        deactivateOpnameCounterAccount: (id) => request('POST', `/stock-opname/counter-accounts/${id}/deactivate`),
         claimOpnameItem: (id, role, itemId) => request('POST', `/stock-opname/${id}/claim`, { role, ...(itemId ? { item_id: itemId } : {}) }),
         releaseOpnameItem: (id, role, itemId, supervisorOverride = false) => request('POST', `/stock-opname/${id}/release`, { role, item_id: itemId, supervisor_override: supervisorOverride }),
         // ---- PHASE V2.14.10.1: architecture safety corrective ----

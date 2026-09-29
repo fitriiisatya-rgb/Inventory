@@ -93,6 +93,22 @@ const Auth = (() => {
             const roles = node.getAttribute('data-require-role').split(',').map((s) => s.trim());
             node.style.display = hasRole(...roles) ? '' : 'none';
         });
+        // PHASE V2.14.11.3 — once every individual link's visibility above
+        // is settled, hide any sidebar GROUP (header + submenu wrapper)
+        // left with zero visible .sidebar-link children, so an
+        // under-privileged role (OPNAME_COUNTER chief among them, but
+        // this applies to any role) never sees a dead, permanently-empty
+        // accordion section. A group with at least one visible link
+        // (e.g. "Stock Opname" for OPNAME_COUNTER — only "Stock Opname
+        // Saya" is visible, "Stock Opname" admin is not) stays visible.
+        // Generic and role-agnostic by construction — no role name is
+        // ever referenced here.
+        document.querySelectorAll('.sidebar-group').forEach((group) => {
+            const links = group.querySelectorAll('.sidebar-link');
+            if (links.length === 0) return;
+            const anyVisible = Array.from(links).some((link) => link.style.display !== 'none');
+            group.style.display = anyVisible ? '' : 'none';
+        });
     }
 
     return { user, hasPermission, hasRole, tryResumeSession, login, logout, applyRoleVisibility };

@@ -449,7 +449,14 @@ $searchImport = TraceService::search($pdo, $importFileName, 'import');
 check('search by file_name (type=import) finds the import batch', count($searchImport) === 1 && $searchImport[0]['id'] === $importBatchId);
 
 $searchRole = TraceService::search($pdo, 'STOCK', 'role');
-check('search by code (type=role) finds the role', count($searchRole) === 1 && $searchRole[0]['code'] === 'STOCK');
+// PHASE V2.14.11.3 — OPNAME_COUNTER's required display name ("Petugas
+// Stock Opname") legitimately also matches a 'STOCK' name-substring
+// search (TraceService::search()'s role branch matches code OR name) —
+// count===1 no longer holds now that a second, real role's NAME contains
+// "Stock"; the meaningful assertion (the STOCK role itself is found by
+// its code) still must hold regardless of how many other roles also
+// happen to match by name.
+check('search by code (type=role) finds the role', in_array('STOCK', array_column($searchRole, 'code'), true));
 
 // ============================================================
 // G: read-only guarantee — snapshot state, call every trace method

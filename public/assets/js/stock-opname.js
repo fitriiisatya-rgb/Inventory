@@ -23,6 +23,18 @@ const StockOpname = (() => {
 
     function render(container) {
         container.innerHTML = '';
+        // PHASE V2.14.11.3 — "Petugas Stock Opname" account management is
+        // warehouse-independent (it manages LOGIN identities, not a
+        // session), so it renders once here, above the per-warehouse
+        // session card, and only for SUPERADMIN (also enforced
+        // server-side on every counter-accounts route — this is cosmetic
+        // convenience only). Deliberately a SEPARATE card from "Penugasan
+        // Tim P1 & Tim P2" (buildAssignCountersCard): create the account
+        // here first, assign it to a session's team there second — never
+        // mixed into one form.
+        if (Auth.hasRole('SUPERADMIN')) {
+            container.appendChild(buildCounterAccountsCard());
+        }
         const whOptions = Master.warehouses().map((w) => `<option value="${w.id}">${w.name}</option>`).join('');
         container.appendChild(UI.el('div', { class: 'card' }, [
             UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '📋 Stock Opname')]),
@@ -32,6 +44,161 @@ const StockOpname = (() => {
 
         document.getElementById('opname-wh').addEventListener('change', loadForWarehouse);
         if (Master.warehouses().length) loadForWarehouse();
+    }
+
+    // PHASE V2.14.11.3 — URGENT HOTFIX: independent login accounts for
+    // physical Stock Opname counters ("Petugas Stock Opname"). Account
+    // creation/reset-password/activate/deactivate only — never touches
+    // stock_opname_team_members (P1/P2 session assignment stays in
+    // buildAssignCountersCard above). Role is never client-selectable —
+    // the server always assigns OPNAME_COUNTER; no role/warehouse/
+    // division/permission dropdown is ever rendered here.
+    function buildCounterAccountsCard() {
+        const card = UI.el('div', { class: 'card' }, [
+            UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '🪪 Petugas Stock Opname')]),
+        ]);
+        const addBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, '+ Tambah Petugas');
+        const formHost = UI.el('div', { style: 'display:none; margin-top:10px;' });
+        const alertBox = UI.el('div');
+        const listHost = UI.el('div', { style: 'margin-top:10px;' });
+        card.appendChild(UI.el('div', {}, [addBtn]));
+        card.appendChild(formHost);
+        card.appendChild(alertBox);
+        card.appendChild(listHost);
+
+        async function refresh() {
+            listHost.innerHTML = '<div class="alert alert-info">Memuat daftar petugas...</div>';
+            try {
+                renderTable(await InvApi.listOpnameCounterAccounts());
+            } catch (err) {
+                UI.handleApiError(err);
+                listHost.innerHTML = `<div class="alert alert-error">Gagal memuat daftar petugas: ${(err && err.message) || ''}</div>`;
+            }
+        }
+
+        function renderTable(rows) {
+            listHost.innerHTML = '';
+            if (!rows.length) {
+                listHost.appendChild(UI.el('div', { class: 'alert alert-info' }, 'Belum ada Petugas Stock Opname. Klik "+ Tambah Petugas" untuk membuat akun baru.'));
+                return;
+            }
+            const table = UI.el('table', { class: 'table' });
+            table.appendChild(UI.el('thead', {}, [UI.el('tr', {}, ['Nama', 'Username', 'Status', 'Login Terakhir', 'Dibuat', 'Aksi'].map((h) => UI.el('th', {}, h)))]));
+            const tbody = UI.el('tbody');
+            rows.forEach((r) => {
+                const statusBadge = UI.el('span', { class: `badge ${r.is_active ? 'badge-received' : 'badge-cancelled'}` }, r.is_active ? 'Aktif' : 'Nonaktif');
+                const resetBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Reset Password');
+                const toggleBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, r.is_active ? 'Nonaktifkan' : 'Aktifkan');
+                resetBtn.addEventListener('click', () => showResetPasswordForm(r));
+                toggleBtn.addEventListener('click', async () => {
+                    alertBox.innerHTML = '';
+                    try {
+                        if (r.is_active) await InvApi.deactivateOpnameCounterAccount(r.id);
+                        else await InvApi.activateOpnameCounterAccount(r.id);
+                        UI.toast(`Petugas ${r.full_name} berhasil ${r.is_active ? 'dinonaktifkan' : 'diaktifkan'}.`, 'success');
+                        await refresh();
+                    } catch (err) {
+                        alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal mengubah status petugas.'));
+                    }
+                });
+                tbody.appendChild(UI.el('tr', {}, [
+                    UI.el('td', {}, r.full_name),
+                    UI.el('td', {}, r.username),
+                    UI.el('td', {}, [statusBadge]),
+                    UI.el('td', {}, r.last_login_at ? UI.formatDate(r.last_login_at) : '-'),
+                    UI.el('td', {}, r.created_at ? UI.formatDate(r.created_at) : '-'),
+                    UI.el('td', { style: 'display:flex; gap:6px; flex-wrap:wrap;' }, [resetBtn, toggleBtn]),
+                ]));
+            });
+            table.appendChild(tbody);
+            listHost.appendChild(table);
+        }
+
+        function showCreateForm() {
+            formHost.innerHTML = '';
+            formHost.style.display = 'block';
+            const nameInput = UI.el('input', { type: 'text', placeholder: 'Nama Lengkap', autocomplete: 'off' });
+            const usernameInput = UI.el('input', { type: 'text', placeholder: 'Username', autocomplete: 'off' });
+            const passwordInput = UI.el('input', { type: 'password', placeholder: 'Password (min. 8 karakter)', autocomplete: 'new-password' });
+            const confirmInput = UI.el('input', { type: 'password', placeholder: 'Konfirmasi Password', autocomplete: 'new-password' });
+            const activeCheckbox = UI.el('input', { type: 'checkbox', checked: true });
+            const saveBtn = UI.el('button', { class: 'btn btn-primary btn-sm' }, 'Simpan Petugas');
+            const cancelBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Batal');
+            const formAlert = UI.el('div');
+
+            saveBtn.addEventListener('click', async () => {
+                formAlert.innerHTML = '';
+                if (passwordInput.value !== confirmInput.value) {
+                    formAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Password dan konfirmasi tidak sama.'));
+                    return;
+                }
+                saveBtn.disabled = true;
+                try {
+                    await InvApi.createOpnameCounterAccount(nameInput.value, usernameInput.value, passwordInput.value, activeCheckbox.checked);
+                    UI.toast('Petugas Stock Opname berhasil dibuat.', 'success');
+                    formHost.style.display = 'none';
+                    formHost.innerHTML = '';
+                    await refresh();
+                } catch (err) {
+                    formAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal membuat akun petugas.'));
+                } finally {
+                    saveBtn.disabled = false;
+                }
+            });
+            cancelBtn.addEventListener('click', () => { formHost.style.display = 'none'; formHost.innerHTML = ''; });
+
+            formHost.appendChild(UI.el('div', { class: 'form-group', style: 'border:1px solid var(--border); border-radius:8px; padding:10px;' }, [
+                UI.el('label', {}, 'Nama Lengkap *'), nameInput,
+                UI.el('label', { style: 'margin-top:8px; display:block;' }, 'Username *'), usernameInput,
+                UI.el('label', { style: 'margin-top:8px; display:block;' }, 'Password *'), passwordInput,
+                UI.el('label', { style: 'margin-top:8px; display:block;' }, 'Konfirmasi Password *'), confirmInput,
+                UI.el('label', { style: 'margin-top:8px; display:flex; align-items:center; gap:6px;' }, [activeCheckbox, document.createTextNode('Status Aktif')]),
+                formAlert,
+                UI.el('div', { style: 'margin-top:8px; display:flex; gap:8px;' }, [saveBtn, cancelBtn]),
+            ]));
+        }
+
+        function showResetPasswordForm(row) {
+            formHost.innerHTML = '';
+            formHost.style.display = 'block';
+            const passwordInput = UI.el('input', { type: 'password', placeholder: 'Password Baru (min. 8 karakter)', autocomplete: 'new-password' });
+            const confirmInput = UI.el('input', { type: 'password', placeholder: 'Konfirmasi Password', autocomplete: 'new-password' });
+            const saveBtn = UI.el('button', { class: 'btn btn-primary btn-sm' }, 'Simpan Password Baru');
+            const cancelBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Batal');
+            const formAlert = UI.el('div');
+
+            saveBtn.addEventListener('click', async () => {
+                formAlert.innerHTML = '';
+                if (passwordInput.value !== confirmInput.value) {
+                    formAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Password dan konfirmasi tidak sama.'));
+                    return;
+                }
+                saveBtn.disabled = true;
+                try {
+                    await InvApi.resetOpnameCounterPassword(row.id, passwordInput.value);
+                    UI.toast(`Password ${row.full_name} berhasil direset.`, 'success');
+                    formHost.style.display = 'none';
+                    formHost.innerHTML = '';
+                } catch (err) {
+                    formAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal reset password.'));
+                } finally {
+                    saveBtn.disabled = false;
+                }
+            });
+            cancelBtn.addEventListener('click', () => { formHost.style.display = 'none'; formHost.innerHTML = ''; });
+
+            formHost.appendChild(UI.el('div', { class: 'form-group', style: 'border:1px solid var(--border); border-radius:8px; padding:10px;' }, [
+                UI.el('label', {}, `Reset Password — ${row.full_name} (${row.username})`),
+                UI.el('label', { style: 'margin-top:8px; display:block;' }, 'Password Baru *'), passwordInput,
+                UI.el('label', { style: 'margin-top:8px; display:block;' }, 'Konfirmasi Password *'), confirmInput,
+                formAlert,
+                UI.el('div', { style: 'margin-top:8px; display:flex; gap:8px;' }, [saveBtn, cancelBtn]),
+            ]));
+        }
+
+        addBtn.addEventListener('click', showCreateForm);
+        refresh();
+        return card;
     }
 
     async function loadForWarehouse() {
