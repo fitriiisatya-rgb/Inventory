@@ -131,6 +131,15 @@ try {
         await row.locator('button:visible').first().click();
         await page.waitForSelector('.opname-condition-block', { timeout: 8000 });
     }
+    // PHASE V2.14.11.4 — Riwayat Temuan is now collapsed by default after a
+    // save; expand it before asserting on .opname-finding-row content.
+    async function expandHistory(page) {
+        const toggle = page.locator('.opname-history-toggle');
+        await toggle.waitFor({ state: 'visible', timeout: 8000 });
+        if ((await toggle.textContent() || '').includes('Lihat')) {
+            await toggle.click();
+        }
+    }
     // Resolve SKUs from seed by re-reading them from the page's row list —
     // simpler: query the API directly for the session to map item_id->sku.
     const skuMap = await p1a.evaluate(async (sessionId) => {
@@ -147,6 +156,7 @@ try {
     await claimAndOpenPanel(p1a, skuA);
     await p1a.locator('.opname-unit-input-row input').first().fill('12');
     await p1a.locator('button:has-text("💾 Simpan Hitungan")').click();
+    await expandHistory(p1a);
     await p1a.waitForSelector('.opname-finding-row', { timeout: 8000 });
     let findingText = await p1a.locator('.opname-finding-row').first().innerText();
     check('B. first finding (positive GOOD qty) saved and shown in Riwayat Temuan', findingText.includes('GOOD') && findingText.includes('12'), findingText);
@@ -163,6 +173,7 @@ try {
     await p1a.locator('#opname-zero-confirm-chk').check();
     check('C2. Simpan enabled after explicit "Stok fisik 0" confirmation', !(await saveBtnC.isDisabled()));
     await saveBtnC.click();
+    await expandHistory(p1a);
     await p1a.waitForSelector('.opname-finding-row', { timeout: 8000 });
     check('C3. zero-physical finding recorded as COUNTED ZERO (not blocked, not silently blank)', true);
 
@@ -192,6 +203,7 @@ try {
     }, { timeout: 8000 });
     check('D/E3. Simpan enabled once BOTH required photos are attached', true);
     await saveBtnDE.click();
+    await expandHistory(p1a);
     await p1a.waitForSelector('.opname-finding-row:has-text("Rusak")', { timeout: 8000 });
     const findingsAfterDE = await p1a.locator('.opname-finding-row').allInnerTexts();
     const combinedDE = findingsAfterDE.join(' | ');
