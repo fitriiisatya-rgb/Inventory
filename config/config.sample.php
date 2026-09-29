@@ -17,5 +17,6 @@ return [
         'session_name'   => 'so_session',
         'upload_dir'     => __DIR__ . '/../uploads/opname',
         'upload_max_kb'  => 8192,
+        'lock_ttl_seconds' => 300, // SO_LOCK_TTL_SECONDS — per-team item lock lifetime
     ],
 ];

@@ -175,6 +175,47 @@ final class UnitConversion
         return $issues;
     }
 
+    /**
+     * Convert a single qty+unit pair to base unit, matching it against
+     * whichever of the item's buy/mid/base units it names. Returns null
+     * when the unit matches none of them (caller treats that as invalid).
+     * Shared by StockImportService and CountService so the "which level
+     * does this unit belong to" logic exists in exactly one place.
+     */
+    public static function convertToBase(array $item, float $qty, string $unit): ?float
+    {
+        $unit = trim($unit);
+        if (Validation::sameUnit($unit, (string) $item['base_unit'])) {
+            return $qty;
+        }
+        if (Validation::sameUnit($unit, (string) $item['buy_unit'])) {
+            return $qty * (float) $item['buy_content'];
+        }
+        if (!empty($item['mid_unit']) && Validation::sameUnit($unit, (string) $item['mid_unit'])) {
+            $midToBase = self::midToBase($item);
+            return $midToBase !== null ? $qty * $midToBase : null;
+        }
+        return null;
+    }
+
+    /**
+     * Adapts a stock_opname_session_items row (whose conversion columns
+     * are named *_snapshot) into the plain buy_unit/buy_content/... shape
+     * every other method here expects, so snapshot-based code (Phase 4
+     * CountService) can reuse the exact same conversion logic as
+     * Master Barang does, with no duplicated formulas.
+     */
+    public static function fromSessionItemSnapshot(array $sessionItem): array
+    {
+        return [
+            'buy_unit'    => $sessionItem['buy_unit_snapshot'],
+            'buy_content' => $sessionItem['buy_content_snapshot'],
+            'mid_unit'    => $sessionItem['mid_unit_snapshot'],
+            'mid_content' => $sessionItem['mid_content_snapshot'],
+            'base_unit'   => $sessionItem['base_unit_snapshot'],
+        ];
+    }
+
     public static function hasBlockingErrors(array $issues): bool
     {
         foreach ($issues as $issue) {

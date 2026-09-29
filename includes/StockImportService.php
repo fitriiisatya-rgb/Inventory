@@ -125,16 +125,15 @@ final class StockImportService
                             if (!is_numeric($rawQty) || (float) $rawQty < 0) {
                                 $status = 'INVALID_QTY';
                                 $message = "Nilai qty '{$rawQty}' bukan angka valid (>= 0).";
-                            } elseif (Validation::sameUnit($rawUnit, $item['base_unit'])) {
-                                $parsedQtyBase = (float) $rawQty;
-                            } elseif (Validation::sameUnit($rawUnit, $item['buy_unit'])) {
-                                $parsedQtyBase = (float) $rawQty * (float) $item['buy_content'];
-                            } elseif ($item['mid_unit'] !== null && Validation::sameUnit($rawUnit, $item['mid_unit'])) {
-                                $parsedQtyBase = (float) $rawQty * UnitConversion::midToBase($item);
                             } else {
-                                $status = 'INVALID_UNIT';
-                                $message = "Unit '{$rawUnit}' tidak dikenal untuk SKU '{$rawSku}' (harus salah satu dari: {$item['buy_unit']}"
-                                    . ($item['mid_unit'] ? ", {$item['mid_unit']}" : '') . ", {$item['base_unit']}).";
+                                $converted = UnitConversion::convertToBase($item, (float) $rawQty, (string) $rawUnit);
+                                if ($converted === null) {
+                                    $status = 'INVALID_UNIT';
+                                    $message = "Unit '{$rawUnit}' tidak dikenal untuk SKU '{$rawSku}' (harus salah satu dari: {$item['buy_unit']}"
+                                        . ($item['mid_unit'] ? ", {$item['mid_unit']}" : '') . ", {$item['base_unit']}).";
+                                } else {
+                                    $parsedQtyBase = $converted;
+                                }
                             }
                         }
 

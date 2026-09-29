@@ -3,8 +3,17 @@ declare(strict_types=1);
 
 /**
  * CLI migration runner: `php bin/migrate.php`
- * Applies database/schema.sql once (tracked as 0001_initial_schema.sql),
- * then any database/migrations/*.sql files not yet recorded, in order.
+ * Applies every database/migrations/*.sql file not yet recorded, in
+ * filename order, tracked in schema_migrations.
+ *
+ * database/schema.sql is a separate, always-current FULL reference copy
+ * for documentation/manual import — it is NOT read by this runner. It
+ * must never be re-derived as "migration 0001" here: once 0001 has
+ * shipped, its migration file is frozen forever; later schema changes
+ * only ever arrive as new migrations/000N_*.sql files (this is exactly
+ * how the Phase 4 change was caught: schema.sql had already been edited
+ * to the final cumulative shape, so treating it as migration 0001 again
+ * double-applied the Phase 4 columns on a fresh install).
  */
 
 require __DIR__ . '/../includes/bootstrap.php';
@@ -41,7 +50,7 @@ $pdo->exec(
 
 $applied = $pdo->query('SELECT filename FROM schema_migrations')->fetchAll(PDO::FETCH_COLUMN);
 
-$files = ['0001_initial_schema.sql' => __DIR__ . '/../database/schema.sql'];
+$files = [];
 foreach (glob(__DIR__ . '/../database/migrations/*.sql') as $path) {
     $files[basename($path)] = $path;
 }

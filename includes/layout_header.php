@@ -23,6 +23,12 @@ $navUser = Auth::user();
     <?php if (Permissions::can($navUser['role'], 'stock_import.manage')): ?>
       <a href="/admin/import-stok.php">Import Stok Sistem</a>
     <?php endif; ?>
+    <?php if (Permissions::can($navUser['role'], 'session.manage')): ?>
+      <a href="/admin/sessions.php">Sesi SO</a>
+    <?php endif; ?>
+    <?php if (Permissions::can($navUser['role'], 'counter.count')): ?>
+      <a href="/counter/index.php">Hitung Stok</a>
+    <?php endif; ?>
   </nav>
   <div>
     <?= htmlspecialchars($navUser['full_name']) ?> (<?= htmlspecialchars($navUser['role']) ?>)

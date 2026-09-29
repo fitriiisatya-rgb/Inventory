@@ -20,6 +20,12 @@ final class Database
                 PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 PDO::ATTR_EMULATE_PREPARES   => false,
+                // Without this, MySQL/MariaDB reports rowCount() after an
+                // UPDATE as rows CHANGED, not rows MATCHED — an UPDATE whose
+                // WHERE matches a row but whose SET values happen to already
+                // be identical (e.g. two heartbeats landing in the same
+                // second) would report 0 and be mistaken for "no such row".
+                PDO::MYSQL_ATTR_FOUND_ROWS   => true,
             ]);
         }
         return self::$instance;

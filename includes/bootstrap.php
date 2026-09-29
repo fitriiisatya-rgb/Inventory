@@ -25,6 +25,10 @@ require_once __DIR__ . '/SystemStockProvider/SystemStockResult.php';
 require_once __DIR__ . '/SystemStockProvider/ImportSystemStockProvider.php';
 require_once __DIR__ . '/StockImportService.php';
 require_once __DIR__ . '/CodeNameCrud.php';
+require_once __DIR__ . '/SessionService.php';
+require_once __DIR__ . '/ItemLockService.php';
+require_once __DIR__ . '/CountService.php';
+require_once __DIR__ . '/ReconciliationService.php';
 
 if (PHP_SAPI !== 'cli') {
     $sessionName = $GLOBALS['SO_CONFIG']['app']['session_name'] ?? 'so_session';

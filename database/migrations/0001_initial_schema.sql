@@ -189,14 +189,6 @@ CREATE TABLE stock_opname_sessions (
     name                VARCHAR(150) NOT NULL,
     location_id         BIGINT UNSIGNED NOT NULL,
 
-    -- Explicit traceability (design review 2026-09-29): which committed
-    -- stock_import_batch this session's system_qty snapshot reflects.
-    -- Auto-selected as the latest COMMITTED batch for location_id at
-    -- session creation (DRAFT); immutable once ACTIVE. NULL only means
-    -- no batch had been committed for this location yet — start-session
-    -- preflight blocks on that.
-    system_stock_batch_id BIGINT UNSIGNED NULL,
-
     scope_type          ENUM('ALL','CATEGORY') NOT NULL DEFAULT 'ALL',
     category_id         BIGINT UNSIGNED NULL,
 
@@ -227,28 +219,19 @@ CREATE TABLE stock_opname_sessions (
     CONSTRAINT fk_session_category FOREIGN KEY (category_id) REFERENCES categories(id),
     CONSTRAINT fk_session_started_by FOREIGN KEY (started_by) REFERENCES users(id),
     CONSTRAINT fk_session_finished_by FOREIGN KEY (finished_by) REFERENCES users(id),
-    CONSTRAINT fk_session_parent FOREIGN KEY (parent_session_id) REFERENCES stock_opname_sessions(id),
-    CONSTRAINT fk_session_stock_batch FOREIGN KEY (system_stock_batch_id) REFERENCES stock_import_batches(id)
+    CONSTRAINT fk_session_parent FOREIGN KEY (parent_session_id) REFERENCES stock_opname_sessions(id)
 ) ENGINE=InnoDB;
 
--- A user holds at most one team slot per session (UNIQUE on session+user,
--- not session+user+team) — assigning someone to both P1 and P2 in the
--- same session is nonsensical and now unrepresentable. status lets an
--- assignment be soft-removed without losing the historical record of who
--- was ever assigned.
-CREATE TABLE stock_opname_session_counters (
-    id           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    session_id   BIGINT UNSIGNED NOT NULL,
-    user_id      BIGINT UNSIGNED NOT NULL,
-    team         ENUM('P1','P2') NOT NULL,
-    status       ENUM('ACTIVE','REMOVED') NOT NULL DEFAULT 'ACTIVE',
-    assigned_by  BIGINT UNSIGNED NOT NULL,
-    assigned_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_session_counter_user (session_id, user_id),
-    KEY idx_session_counter_session (session_id, team, status),
-    CONSTRAINT fk_sc_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
-    CONSTRAINT fk_sc_user FOREIGN KEY (user_id) REFERENCES users(id),
-    CONSTRAINT fk_sc_assigned_by FOREIGN KEY (assigned_by) REFERENCES users(id)
+CREATE TABLE stock_opname_assignments (
+    id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    session_id  BIGINT UNSIGNED NOT NULL,
+    user_id     BIGINT UNSIGNED NOT NULL,
+    team        ENUM('P1','P2') NOT NULL,
+    assigned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_assignment (session_id, user_id, team),
+    KEY idx_assignment_session (session_id),
+    CONSTRAINT fk_assignment_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
+    CONSTRAINT fk_assignment_user FOREIGN KEY (user_id) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
 -- One row per item included in the session. Everything here is a
@@ -279,21 +262,15 @@ CREATE TABLE stock_opname_session_items (
     added_after_start_at    DATETIME NULL,
     added_after_start_reason VARCHAR(255) NULL,
 
-    -- Explicit item disposition within the session (decision 2026-09-29,
-    -- EXCLUDED removed 2026-09-29 review — no approved business rule for
-    -- it; re-add deliberately in its own migration if ever needed).
+    -- Explicit item disposition within the session (decision 2026-09-29):
     -- 0 qty is a real physical count and must never be confused with
     -- "could not be counted at all". NOT_COUNTABLE is SUPERADMIN-only,
-    -- requires a reason, and is audited.
-    item_status              ENUM('NORMAL','NOT_COUNTABLE') NOT NULL DEFAULT 'NORMAL',
+    -- requires a reason, and is audited. EXCLUDED is reserved for a
+    -- future workflow (not wired to any endpoint yet).
+    item_status              ENUM('NORMAL','NOT_COUNTABLE','EXCLUDED') NOT NULL DEFAULT 'NORMAL',
     not_countable_reason     VARCHAR(255) NULL,
     not_countable_set_by     BIGINT UNSIGNED NULL,
     not_countable_set_at     DATETIME NULL,
-
-    -- Which round is currently open for counting. Bumped only via
-    -- ReconciliationService::requestRecount() (SUPERADMIN-only); old
-    -- rounds' counts are immutable once superseded.
-    current_round            INT UNSIGNED NOT NULL DEFAULT 1,
 
     created_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
