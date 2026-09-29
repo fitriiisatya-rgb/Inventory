@@ -138,6 +138,25 @@ final class LegacyMigrationService
             $midContent = is_numeric($f['mid_content'] ?? null) ? (float) $f['mid_content'] : null;
             $baseUnit = trim((string) ($f['base_unit'] ?? ''));
 
+            // The legacy app never enforced "no mid_unit when it's redundant
+            // with an endpoint" the way this app's UnitConversion does, so a
+            // real, otherwise-fine item can carry a vestigial mid_unit equal
+            // to its own buy_unit or base_unit (observed in real exported
+            // data: buyUnit=baseUnit 1-level items still holding a leftover
+            // mid_unit, or a 2-level item's mid_unit equal to one endpoint).
+            // That mid level carries no information — drop it here rather
+            // than reject an otherwise-valid item, flagged as a WARNING so
+            // the admin can see it happened.
+            if ($midUnit !== null && ($buyUnit !== '' && Validation::sameUnit($midUnit, $buyUnit)
+                || $baseUnit !== '' && Validation::sameUnit($midUnit, $baseUnit))) {
+                $issues[] = "mid_unit legacy ('{$midUnit}') sama dengan buy_unit/base_unit — dianggap tidak ada mid level, dihapus otomatis.";
+                if ($level === 'VALID') {
+                    $level = 'WARNING';
+                }
+                $midUnit = null;
+                $midContent = null;
+            }
+
             if ($buyUnit === '' || $buyContent === null || $baseUnit === '') {
                 $level = 'INVALID';
                 $issues[] = 'buyUnit / buyContent / baseUnit wajib diisi dan valid.';

@@ -42,6 +42,14 @@ function test_legacy_migration(): void
             ['sku' => 'LEG-E', 'name' => 'Item E (no category)', 'buyUnit' => 'Pcs', 'buyContent' => 1, 'baseUnit' => 'Pcs'],
             ['sku' => 'LEG-F', 'name' => 'Item F (weird status)', 'buyUnit' => 'Pcs', 'buyContent' => 1, 'baseUnit' => 'Pcs', 'status' => 'Random Value'],
             ['sku' => 'LEG-EXIST', 'name' => 'Legacy version of existing item', 'buyUnit' => 'Pcs', 'buyContent' => 1, 'baseUnit' => 'Pcs'],
+            // Real pattern observed in an actual legacy export: a 1-level
+            // item (buy_unit == base_unit) still carrying a vestigial
+            // mid_unit equal to itself — must be normalized away, not
+            // rejected as INVALID.
+            ['sku' => 'LEG-G', 'name' => 'Item G (vestigial mid=buy=base)', 'buyUnit' => 'Pack', 'buyContent' => 1, 'midUnit' => 'Pack', 'midContent' => 1, 'baseUnit' => 'Pack'],
+            // A 2-level item whose mid_unit happens to equal its base_unit —
+            // also vestigial, also must be normalized away.
+            ['sku' => 'LEG-H', 'name' => 'Item H (vestigial mid=base)', 'buyUnit' => 'Dus', 'buyContent' => 10, 'midUnit' => 'Pcs', 'midContent' => 10, 'baseUnit' => 'Pcs'],
         ];
 
         $previewM = $legacy->previewMaster($masterRows);
@@ -50,7 +58,7 @@ function test_legacy_migration(): void
             $bySku[$r['sku'] . '#' . $r['row']] = $r;
         }
 
-        T::assertEquals(8, $previewM['summary']['total'], 'previewMaster() sees all 8 rows');
+        T::assertEquals(10, $previewM['summary']['total'], 'previewMaster() sees all 10 rows');
         $rowA = $previewM['rows'][0];
         T::assertEquals('VALID', $rowA['level'], 'LEG-A (3-level, all fields present) -> VALID');
         T::assertEquals('Item Legacy A', $rowA['name'], "alias 'nama' resolved to name");
@@ -84,6 +92,15 @@ function test_legacy_migration(): void
         T::assertEquals('WARNING', $rowExist['level'], 'LEG-EXIST (already in Master Barang) -> WARNING, not INVALID');
         T::assertTrue($rowExist['already_exists'], 'already_exists flag set for LEG-EXIST');
 
+        $rowG = $previewM['rows'][8];
+        T::assertEquals('WARNING', $rowG['level'], 'LEG-G vestigial mid_unit==buy_unit==base_unit -> normalized away, WARNING not INVALID');
+        T::assertTrue($rowG['mid_unit'] === null, 'LEG-G mid_unit dropped to null after normalization');
+        T::assertTrue(str_contains(implode(' ', $rowG['issues']), 'dihapus otomatis'), 'LEG-G issue explains the auto-drop');
+
+        $rowH = $previewM['rows'][9];
+        T::assertEquals('WARNING', $rowH['level'], 'LEG-H vestigial mid_unit==base_unit -> normalized away, WARNING not INVALID');
+        T::assertTrue($rowH['mid_unit'] === null, 'LEG-H mid_unit dropped to null after normalization');
+
         $catNames = array_column($previewM['categories'], 'name');
         T::assertTrue(in_array('Sembako', $catNames, true), 'Sembako appears in category preview (already exists)');
         T::assertTrue(in_array('Umum', $catNames, true), 'Umum (auto-fallback) appears in category preview');
@@ -97,10 +114,16 @@ function test_legacy_migration(): void
         // ------------------------------------------------------------
 
         $commitM = $legacy->commitMaster($masterRows, $superadminId, 'legacy_master_test.json');
-        // Valid+Warning rows that aren't already_exists: A, B, D, E, F = 5. C and duplicate-A are INVALID (2). LEG-EXIST is skipped-existing (1).
-        T::assertEquals(5, $commitM['created'], 'Exactly 5 new items created (A, B, D, E, F)');
+        // Valid+Warning rows that aren't already_exists: A, B, D, E, F, G, H = 7. C and duplicate-A are INVALID (2). LEG-EXIST is skipped-existing (1).
+        T::assertEquals(7, $commitM['created'], 'Exactly 7 new items created (A, B, D, E, F, G, H)');
         T::assertEquals(1, $commitM['skipped_existing'], 'LEG-EXIST skipped as already-existing');
         T::assertEquals(2, $commitM['skipped_invalid'], 'LEG-C and duplicate LEG-A skipped as invalid');
+
+        $itemG = $pdo->prepare('SELECT * FROM items WHERE sku = ?');
+        $itemG->execute(['LEG-G']);
+        $legG = $itemG->fetch();
+        T::assertTrue($legG !== false, 'LEG-G was actually inserted despite its vestigial legacy mid_unit');
+        T::assertTrue($legG['mid_unit'] === null, 'LEG-G persisted with mid_unit=NULL (correctly normalized to a 1-level item)');
 
         $existRow = $pdo->prepare('SELECT * FROM items WHERE sku = ?');
         $existRow->execute(['LEG-EXIST']);
@@ -124,7 +147,7 @@ function test_legacy_migration(): void
         $migRow->execute([$commitM['migration_id']]);
         $migData = $migRow->fetch();
         T::assertEquals('MASTER', $migData['type'], 'legacy_migrations row recorded with type=MASTER');
-        T::assertEquals(5, (int) $migData['committed_rows'], 'legacy_migrations.committed_rows matches created count');
+        T::assertEquals(7, (int) $migData['committed_rows'], 'legacy_migrations.committed_rows matches created count');
 
         $auditCheck = $pdo->prepare("SELECT COUNT(*) FROM audit_logs WHERE action = 'LEGACY_MIGRATION_MASTER_COMMIT' AND entity_id = ?");
         $auditCheck->execute([$commitM['migration_id']]);

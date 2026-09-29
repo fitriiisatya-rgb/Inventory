@@ -59,6 +59,45 @@ let legacyData = null;
 let masterRows = null;
 let stockRows = null;
 
+// Recognizes the specific "Inventory FIFO Pro" localStorage shape this
+// app was migrated from: master_sku (flat array) + stock_batches (an
+// OBJECT keyed by SKU, each value an array of FIFO cost-layer batches
+// like {qty, price, gudang, ...} — never a flat per-SKU qty). Current
+// stock is derived the exact same way the legacy app's own getStock()
+// does: sum(batch.qty) per (sku, gudang), sum(batch.qty*batch.price) for
+// a weighted unit cost. A SKU+gudang whose batches now net to ~0 is
+// correctly left OUT (matches the legacy app's own saldoDivisi filter
+// and this app's "missing stock is never a fabricated 0" rule) — it
+// will surface as MISSING_SYSTEM_STOCK downstream if a session ever
+// needs it, never a silent zero.
+const GUDANG_LIST = [
+  { id: 'scm', name: 'Gudang SCM' },
+  { id: 'cibadak', name: 'Gudang Cibadak' },
+  { id: 'karangtengah', name: 'Gudang Karang Tengah' },
+];
+const DEFAULT_GUDANG = 'scm';
+function gudangName(id) {
+  const g = GUDANG_LIST.find(x => x.id === id);
+  return g ? g.name : (id || DEFAULT_GUDANG);
+}
+function aggregateStockBatches(stockBatches) {
+  const grouped = {};
+  for (const sku of Object.keys(stockBatches)) {
+    const batches = stockBatches[sku];
+    if (!Array.isArray(batches)) continue;
+    for (const b of batches) {
+      const gudang = b.gudang || DEFAULT_GUDANG;
+      const key = sku + '|' + gudang;
+      if (!grouped[key]) grouped[key] = { sku, location: gudangName(gudang), qty: 0, value: 0 };
+      grouped[key].qty += Number(b.qty) || 0;
+      grouped[key].value += (Number(b.qty) || 0) * (Number(b.price) || 0);
+    }
+  }
+  return Object.values(grouped)
+    .filter(r => Math.abs(r.qty) > 0.0001)
+    .map(r => ({ sku: r.sku, location: r.location, qty: r.qty, unit_cost: r.qty !== 0 ? (r.value / r.qty) : null }));
+}
+
 document.getElementById('fileInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
@@ -66,16 +105,33 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
     const text = await file.text();
     const parsed = JSON.parse(text);
     legacyData = parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed;
+
+    if (Array.isArray(legacyData.master_sku) && legacyData.master_sku.length > 0 && legacyData.stock_batches && typeof legacyData.stock_batches === 'object') {
+      const aggregated = aggregateStockBatches(legacyData.stock_batches);
+      document.getElementById('uploadMsg').innerHTML =
+        `<div class="warning-box" style="background:#dcfce7;color:#166534;">
+          Terdeteksi format aplikasi Inventory FIFO Pro (master_sku + stock_batches).
+          <button type="button" id="autoDetectBtn" style="margin-left:10px;">Gunakan Auto-Deteksi (${legacyData.master_sku.length} item master, ${aggregated.length} baris stok teragregasi per gudang)</button>
+        </div>`;
+      document.getElementById('autoDetectBtn').addEventListener('click', () => {
+        masterRows = legacyData.master_sku;
+        stockRows = aggregated;
+        document.getElementById('masterCard').style.display = 'block';
+        document.getElementById('stockCard').style.display = 'block';
+        document.getElementById('keyPicker').style.display = 'none';
+        document.getElementById('uploadMsg').innerHTML += '<div><small>Master dan Stock rows sudah diisi otomatis — langsung ke tombol Preview di bawah.</small></div>';
+      });
+    }
+
     const keys = Object.keys(legacyData).filter(k => Array.isArray(legacyData[k]) && legacyData[k].length > 0 && typeof legacyData[k][0] === 'object');
-    if (keys.length === 0) {
-      document.getElementById('uploadMsg').innerHTML = '<div class="error-box">Tidak ditemukan key berisi array of object di file ini.</div>';
+    if (keys.length === 0 && !(masterRows || stockRows)) {
+      document.getElementById('uploadMsg').innerHTML += '<div class="error-box">Tidak ditemukan key berisi array of object di file ini (dan bukan format Inventory FIFO Pro).</div>';
       return;
     }
     const opts = k => `<option value="${k}">${k} (${legacyData[k].length} baris — contoh field: ${Object.keys(legacyData[k][0]).slice(0,6).join(', ')})</option>`;
-    document.getElementById('masterKeySelect').innerHTML = '<option value="">-- pilih --</option>' + keys.map(opts).join('');
-    document.getElementById('stockKeySelect').innerHTML = '<option value="">-- pilih --</option>' + keys.map(opts).join('');
+    document.getElementById('masterKeySelect').innerHTML = '<option value="">-- pilih manual --</option>' + keys.map(opts).join('');
+    document.getElementById('stockKeySelect').innerHTML = '<option value="">-- pilih manual --</option>' + keys.map(opts).join('');
     document.getElementById('keyPicker').style.display = 'block';
-    document.getElementById('uploadMsg').innerHTML = `<div class="warning-box" style="background:#dcfce7;color:#166534;">File terbaca: ${keys.length} key kandidat ditemukan.</div>`;
   } catch (err) {
     document.getElementById('uploadMsg').innerHTML = `<div class="error-box">Gagal parse file: ${SO.escapeHtml(err.message)}</div>`;
   }
@@ -104,10 +160,11 @@ function levelBadge(level) {
 
 document.getElementById('previewMasterBtn').addEventListener('click', async () => {
   const key = document.getElementById('masterKeySelect').value;
-  if (!key) { alert('Pilih key Master Barang dulu.'); return; }
+  const rowsToPreview = masterRows || (key ? legacyData[key] : null);
+  if (!rowsToPreview) { alert('Pilih key Master Barang dulu, atau gunakan Auto-Deteksi.'); return; }
   try {
-    const result = await SO.api('/api/legacy/preview_master.php', { method: 'POST', body: JSON.stringify({ rows: legacyData[key] }) });
-    masterRows = legacyData[key];
+    const result = await SO.api('/api/legacy/preview_master.php', { method: 'POST', body: JSON.stringify({ rows: rowsToPreview }) });
+    masterRows = rowsToPreview;
     const s = result.summary;
     document.getElementById('masterSummary').innerHTML =
       `<b>Total:</b> ${s.total} &nbsp; <span class="badge badge-active">VALID: ${s.valid}</span> &nbsp;
@@ -147,10 +204,11 @@ let allLocations = [];
 
 document.getElementById('previewStockBtn').addEventListener('click', async () => {
   const key = document.getElementById('stockKeySelect').value;
-  if (!key) { alert('Pilih key Stock dulu.'); return; }
+  const rowsToPreview = stockRows || (key ? legacyData[key] : null);
+  if (!rowsToPreview) { alert('Pilih key Stock dulu, atau gunakan Auto-Deteksi.'); return; }
   try {
-    const result = await SO.api('/api/legacy/preview_stock.php', { method: 'POST', body: JSON.stringify({ rows: legacyData[key] }) });
-    stockRows = legacyData[key];
+    const result = await SO.api('/api/legacy/preview_stock.php', { method: 'POST', body: JSON.stringify({ rows: rowsToPreview }) });
+    stockRows = rowsToPreview;
     const s = result.summary;
     document.getElementById('stockSummary').innerHTML =
       `<b>Total:</b> ${s.total} &nbsp; <span class="badge badge-active">Matched: ${s.matched||0}</span> &nbsp;
