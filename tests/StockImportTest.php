@@ -129,15 +129,27 @@ function test_stock_import(): void
         $garamStock = $stockStmt->fetch();
         T::assertEquals(50000.0, (float) $garamStock['system_qty'], 'Garam system_qty updated to 50.000 despite WARNING');
 
-        T::section('SystemStockProvider — ImportSystemStockProvider');
-        $provider = new ImportSystemStockProvider($pdo);
-        $kejuResult = $provider->getSystemStock($itemIds['TEST-KEJU'], $locationId);
-        T::assertTrue($kejuResult !== null, 'Provider returns a result for an imported item');
+        T::section('SystemStockProvider — ImportSystemStockProvider (batch-bound, design review point 3)');
+        $providerBatch1 = new ImportSystemStockProvider($pdo, $batch1);
+        $kejuResult = $providerBatch1->getSystemStock($itemIds['TEST-KEJU'], $locationId);
+        T::assertTrue($kejuResult !== null, 'Provider returns a result for an item committed in THIS batch');
         T::assertEquals(40000.0, $kejuResult->qty, 'Provider returns correct qty for Keju');
-        T::assertEquals('IMPORT', $kejuResult->source, "Provider source = 'IMPORT'");
+        T::assertEquals('IMPORT', $kejuResult->source, "Provider qty source = 'IMPORT'");
+        T::assertEquals('IMPORT', $kejuResult->costSource, "Provider cost source = 'IMPORT' (CSV supplied a cost)");
 
-        $neverImported = $provider->getSystemStock($itemIds['TEST-TELUR'], $locationId);
-        T::assertTrue($neverImported === null, 'Provider returns null for an item never imported at this location');
+        $neverImported = $providerBatch1->getSystemStock($itemIds['TEST-TELUR'], $locationId);
+        T::assertTrue($neverImported === null, 'Provider returns null (MISSING) for an item never imported at all');
+
+        // The critical case design review point 3 is actually about: TEST-GARAM
+        // WAS imported, but in batch2, not batch1. A provider bound to batch1
+        // must not fall back to the rolling item_stock table and mask this.
+        $garamViaBatch1 = $providerBatch1->getSystemStock($itemIds['TEST-GARAM'], $locationId);
+        T::assertTrue($garamViaBatch1 === null, 'Provider bound to batch1 returns null for an item that batch never mentioned, even though item_stock now has a value from batch2');
+
+        $providerBatch2 = new ImportSystemStockProvider($pdo, $batch2);
+        $garamViaBatch2 = $providerBatch2->getSystemStock($itemIds['TEST-GARAM'], $locationId);
+        T::assertTrue($garamViaBatch2 !== null, 'The SAME item IS found when the provider is bound to the batch that actually committed it');
+        T::assertEquals(50000.0, $garamViaBatch2->qty, 'Provider bound to batch2 returns batch2s qty for Garam');
 
         Audit::log(null, '__TEST_MARKER__', 'test', 0);
         $auditCheck = $pdo->prepare("SELECT COUNT(*) FROM audit_logs WHERE action = 'STOCK_IMPORT_COMMIT'");

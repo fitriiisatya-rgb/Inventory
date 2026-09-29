@@ -42,6 +42,14 @@ final class ItemLockService
                 throw $e;
             }
             $holder = $this->currentHolder($sessionItemId, $team);
+            if ($holder && (int) $holder['user_id'] === $userId) {
+                // Re-acquiring your OWN still-valid lock is a resume, not a
+                // conflict — e.g. reopening an EVIDENCE_REQUIRED item after
+                // a page reload, where the lock was deliberately kept held
+                // (design review point 15). Refresh its TTL and succeed.
+                $this->heartbeat($sessionItemId, $team, $userId);
+                return ['ok' => true, 'lock_id' => (int) $holder['id'], 'expires_at' => date('Y-m-d H:i:s', time() + $this->ttlSeconds)];
+            }
             return ['ok' => false, 'locked_by' => $holder];
         }
     }

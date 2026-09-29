@@ -3,9 +3,10 @@ declare(strict_types=1);
 
 final class SessionPreflightException extends RuntimeException
 {
-    public function __construct(public readonly array $blockers)
+    /** @param array{blockers: array, item_count: int, missing_system_stock: array, cost_warnings: array} $preflight */
+    public function __construct(public readonly array $preflight)
     {
-        parent::__construct('Session start preflight failed: ' . implode('; ', $blockers));
+        parent::__construct('Session start preflight failed: ' . implode('; ', $preflight['blockers']));
     }
 }
 
@@ -103,20 +104,31 @@ final class SessionService
     }
 
     // ------------------------------------------------------------------
-    // Counter assignment (DRAFT only — see Phase 4 report for rationale)
+    // Counter assignment — DRAFT or ACTIVE (design review points 7-11).
+    // A reason is mandatory whenever the session is already ACTIVE; a
+    // team change is NEVER a silent UPDATE of the existing row (which
+    // would rewrite which team a user's already-recorded counts appear
+    // to belong to) — it is always remove-old-row + add-new-row, both
+    // individually audited, so history stays exactly reconstructable:
+    // who was assigned, who was added, who was removed, when, by whom,
+    // and why.
     // ------------------------------------------------------------------
 
-    public function assignCounter(int $sessionId, int $userId, string $team, int $actorId): array
+    public function assignCounter(int $sessionId, int $userId, string $team, int $actorId, ?string $reason = null): array
     {
         $session = $this->find($sessionId);
         if (!$session) {
             throw new RuntimeException('Session tidak ditemukan.');
         }
-        if ($session['status'] !== 'DRAFT') {
-            throw new RuntimeException('Assignment hanya dapat diubah selama session berstatus DRAFT.');
+        if (!in_array($session['status'], ['DRAFT', 'ACTIVE'], true)) {
+            throw new RuntimeException("Assignment tidak dapat diubah pada session berstatus {$session['status']}.");
         }
         if (!in_array($team, ['P1', 'P2'], true)) {
             throw new InvalidArgumentException("team harus 'P1' atau 'P2'.");
+        }
+        $reason = $reason !== null ? trim($reason) : null;
+        if ($session['status'] === 'ACTIVE' && ($reason === null || $reason === '')) {
+            throw new InvalidArgumentException('reason wajib diisi untuk mengubah assignment pada session yang sudah ACTIVE.');
         }
 
         $userStmt = $this->pdo->prepare('SELECT * FROM users WHERE id = ? LIMIT 1');
@@ -126,30 +138,108 @@ final class SessionService
             throw new InvalidArgumentException('User yang di-assign harus memiliki role COUNTER.');
         }
 
-        $stmt = $this->pdo->prepare(
-            'INSERT INTO stock_opname_session_counters (session_id, user_id, team, status, assigned_by)
-             VALUES (?, ?, ?, \'ACTIVE\', ?)
-             ON DUPLICATE KEY UPDATE team = VALUES(team), status = \'ACTIVE\', assigned_by = VALUES(assigned_by), assigned_at = NOW()'
-        );
-        $stmt->execute([$sessionId, $userId, $team, $actorId]);
+        $this->pdo->beginTransaction();
+        try {
+            $existingStmt = $this->pdo->prepare(
+                "SELECT * FROM stock_opname_session_counters WHERE session_id = ? AND user_id = ? AND status = 'ACTIVE' LIMIT 1 FOR UPDATE"
+            );
+            $existingStmt->execute([$sessionId, $userId]);
+            $existing = $existingStmt->fetch();
 
-        Audit::log($actorId, 'SESSION_ASSIGN_COUNTER', 'stock_opname_sessions', $sessionId, null, ['user_id' => $userId, 'team' => $team]);
+            if ($existing && $existing['team'] === $team) {
+                $this->pdo->commit();
+                return $this->listCounters($sessionId); // already assigned to this team — idempotent
+            }
+
+            if ($existing) {
+                // Team change: close out the OLD row under its original team
+                // (that team's already-recorded counts keep pointing to it
+                // correctly) and release any lock this user holds under it.
+                $this->pdo->prepare(
+                    "UPDATE stock_opname_session_counters SET status = 'REMOVED', removed_by = ?, removed_at = NOW(), removed_reason = ? WHERE id = ?"
+                )->execute([$actorId, $reason ?? 'Dipindahkan ke team lain', $existing['id']]);
+
+                $this->pdo->prepare(
+                    "DELETE l FROM stock_opname_item_locks l
+                     JOIN stock_opname_session_items si ON si.id = l.session_item_id
+                     WHERE l.user_id = ? AND l.team = ? AND si.session_id = ?"
+                )->execute([$userId, $existing['team'], $sessionId]);
+            }
+
+            $this->pdo->prepare(
+                'INSERT INTO stock_opname_session_counters (session_id, user_id, team, status, assigned_by, assigned_reason)
+                 VALUES (?, ?, ?, \'ACTIVE\', ?, ?)'
+            )->execute([$sessionId, $userId, $team, $actorId, $reason]);
+
+            Audit::log(
+                $actorId, 'SESSION_ASSIGN_COUNTER', 'stock_opname_sessions', $sessionId,
+                $existing ? ['user_id' => $userId, 'team' => $existing['team']] : null,
+                ['user_id' => $userId, 'team' => $team, 'reason' => $reason, 'session_status' => $session['status']]
+            );
+
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            throw $e;
+        }
 
         return $this->listCounters($sessionId);
     }
 
-    public function unassignCounter(int $sessionId, int $userId, int $actorId): array
+    public function unassignCounter(int $sessionId, int $userId, int $actorId, ?string $reason = null): array
     {
         $session = $this->find($sessionId);
         if (!$session) {
             throw new RuntimeException('Session tidak ditemukan.');
         }
-        if ($session['status'] !== 'DRAFT') {
-            throw new RuntimeException('Assignment hanya dapat diubah selama session berstatus DRAFT.');
+        if (!in_array($session['status'], ['DRAFT', 'ACTIVE'], true)) {
+            throw new RuntimeException("Assignment tidak dapat diubah pada session berstatus {$session['status']}.");
         }
-        $this->pdo->prepare("UPDATE stock_opname_session_counters SET status = 'REMOVED' WHERE session_id = ? AND user_id = ?")
-            ->execute([$sessionId, $userId]);
-        Audit::log($actorId, 'SESSION_UNASSIGN_COUNTER', 'stock_opname_sessions', $sessionId, null, ['user_id' => $userId]);
+        $reason = $reason !== null ? trim($reason) : null;
+        if ($session['status'] === 'ACTIVE' && ($reason === null || $reason === '')) {
+            throw new InvalidArgumentException('reason wajib diisi untuk unassign pada session yang sudah ACTIVE.');
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $existingStmt = $this->pdo->prepare(
+                "SELECT * FROM stock_opname_session_counters WHERE session_id = ? AND user_id = ? AND status = 'ACTIVE' LIMIT 1 FOR UPDATE"
+            );
+            $existingStmt->execute([$sessionId, $userId]);
+            $existing = $existingStmt->fetch();
+            if (!$existing) {
+                throw new RuntimeException('User ini tidak sedang aktif di-assign pada session ini.');
+            }
+
+            $this->pdo->prepare(
+                "UPDATE stock_opname_session_counters SET status = 'REMOVED', removed_by = ?, removed_at = NOW(), removed_reason = ? WHERE id = ?"
+            )->execute([$actorId, $reason, $existing['id']]);
+
+            // Release any lock this user holds on this session's items — but
+            // their already-saved counts, revisions, and this assignment row
+            // itself are never touched, so history stays fully reconstructable.
+            $this->pdo->prepare(
+                "DELETE l FROM stock_opname_item_locks l
+                 JOIN stock_opname_session_items si ON si.id = l.session_item_id
+                 WHERE l.user_id = ? AND si.session_id = ?"
+            )->execute([$userId, $sessionId]);
+
+            Audit::log(
+                $actorId, 'SESSION_UNASSIGN_COUNTER', 'stock_opname_sessions', $sessionId,
+                ['user_id' => $userId, 'team' => $existing['team']],
+                ['reason' => $reason, 'session_status' => $session['status']]
+            );
+
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            throw $e;
+        }
+
         return $this->listCounters($sessionId);
     }
 
@@ -165,17 +255,38 @@ final class SessionService
         return $stmt->fetchAll();
     }
 
+    /** Full reconstructable history: every assignment and removal, by whom, when, why. */
+    public function listCounterHistory(int $sessionId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT sc.*, u.full_name, ab.full_name AS assigned_by_name, rb.full_name AS removed_by_name
+             FROM stock_opname_session_counters sc
+             JOIN users u ON u.id = sc.user_id
+             JOIN users ab ON ab.id = sc.assigned_by
+             LEFT JOIN users rb ON rb.id = sc.removed_by
+             WHERE sc.session_id = ?
+             ORDER BY sc.assigned_at'
+        );
+        $stmt->execute([$sessionId]);
+        return $stmt->fetchAll();
+    }
+
     // ------------------------------------------------------------------
     // Start-session preflight (design review point 4)
     // ------------------------------------------------------------------
 
-    /** @return array{blockers: array<int,string>, item_count: int} */
+    /**
+     * @return array{blockers: array<int,string>, item_count: int,
+     *               missing_system_stock: array<int,array>, cost_warnings: array<int,array>}
+     */
     public function preflight(int $sessionId): array
     {
         $blockers = [];
+        $missingSystemStock = [];
+        $costWarnings = [];
         $session = $this->find($sessionId);
         if (!$session) {
-            return ['blockers' => ['Session tidak ditemukan.'], 'item_count' => 0];
+            return ['blockers' => ['Session tidak ditemukan.'], 'item_count' => 0, 'missing_system_stock' => [], 'cost_warnings' => []];
         }
 
         if ($session['status'] !== 'DRAFT') {
@@ -226,6 +337,39 @@ final class SessionService
                     $blockers[] = "Konversi satuan tidak valid untuk SKU {$item['sku']} ({$item['name']}).";
                 }
             }
+
+            // MISSING SYSTEM STOCK != ZERO STOCK (design review, correction 1-4).
+            // Every NORMAL in-scope item must have a committed row in the
+            // SPECIFIC batch this session is bound to — not just "some value
+            // exists in the rolling item_stock table" — or session start is
+            // refused outright. There is no "treat missing as 0" shortcut.
+            if (!empty($session['system_stock_batch_id'])) {
+                $categoryNameStmt = $this->pdo->prepare('SELECT name FROM categories WHERE id = ?');
+                $rowStmt = $this->pdo->prepare(
+                    "SELECT parsed_unit_cost, unit_cost_source FROM stock_import_rows
+                     WHERE batch_id = ? AND item_id = ? AND status IN ('MATCHED','WARNING') AND committed = 1 LIMIT 1"
+                );
+                foreach ($items as $item) {
+                    $rowStmt->execute([$session['system_stock_batch_id'], $item['id']]);
+                    $row = $rowStmt->fetch();
+                    $categoryNameStmt->execute([$item['category_id']]);
+                    $categoryName = $categoryNameStmt->fetchColumn() ?: '';
+
+                    if (!$row) {
+                        $missingSystemStock[] = [
+                            'sku' => $item['sku'], 'name' => $item['name'], 'category' => $categoryName,
+                            'location_id' => (int) $session['location_id'], 'reason' => 'MISSING_SYSTEM_STOCK',
+                        ];
+                        continue;
+                    }
+                    if ($row['parsed_unit_cost'] === null) {
+                        $costWarnings[] = ['sku' => $item['sku'], 'name' => $item['name'], 'category' => $categoryName];
+                    }
+                }
+                if (!empty($missingSystemStock)) {
+                    $blockers[] = count($missingSystemStock) . ' SKU tidak memiliki System Stock pada import batch ini.';
+                }
+            }
         }
 
         $overlapStmt = $this->pdo->prepare(
@@ -241,7 +385,12 @@ final class SessionService
             }
         }
 
-        return ['blockers' => $blockers, 'item_count' => count($items)];
+        return [
+            'blockers' => $blockers,
+            'item_count' => count($items),
+            'missing_system_stock' => $missingSystemStock,
+            'cost_warnings' => $costWarnings,
+        ];
     }
 
     /** Items in scope: ACTIVE only, matching scope_type/category_id (design decision — see Phase 4 report). */
@@ -279,18 +428,20 @@ final class SessionService
 
             $preflight = $this->preflight($sessionId);
             if (!empty($preflight['blockers'])) {
-                throw new SessionPreflightException($preflight['blockers']);
+                throw new SessionPreflightException($preflight);
             }
 
             $items = $this->resolveScopeItems($session);
-            $provider = new ImportSystemStockProvider($this->pdo);
+            // Bound to THIS session's specific committed batch (design review
+            // point 3) — never the generically "current" item_stock table.
+            $provider = new ImportSystemStockProvider($this->pdo, (int) $session['system_stock_batch_id']);
 
             $insertItem = $this->pdo->prepare(
                 'INSERT INTO stock_opname_session_items
                     (session_id, item_id, sku_snapshot, barcode_snapshot, name_snapshot, category_snapshot, brand_snapshot,
                      buy_unit_snapshot, buy_content_snapshot, mid_unit_snapshot, mid_content_snapshot, base_unit_snapshot,
-                     system_qty_snapshot, unit_cost_snapshot)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                     system_qty_snapshot, unit_cost_snapshot, unit_cost_source)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
             $categoryNameStmt = $this->pdo->prepare('SELECT name FROM categories WHERE id = ?');
             $categoryNameCache = [];
@@ -301,17 +452,23 @@ final class SessionService
                     $categoryNameCache[$item['category_id']] = $categoryNameStmt->fetchColumn() ?: '';
                 }
                 $stock = $provider->getSystemStock((int) $item['id'], (int) $session['location_id']);
-                // No item_stock row yet for this item at this location:
-                // snapshot qty 0 with the item's own last_buy_price as cost,
-                // rather than blocking the whole session on one missing row.
-                $systemQty = $stock !== null ? $stock->qty : 0.0;
-                $unitCost  = $stock !== null ? $stock->unitCost : (float) $item['last_buy_price'];
+                if ($stock === null) {
+                    // Preflight already guarantees every NORMAL in-scope item
+                    // has a committed row in this exact batch — reaching here
+                    // means that invariant broke between preflight and this
+                    // transaction. Fail loudly and roll back everything;
+                    // NEVER silently default system_qty to 0 (design review
+                    // corrections 1-4 exist specifically to prevent that).
+                    throw new RuntimeException(
+                        "Integrity error: SKU {$item['sku']} has no committed system stock row in batch #{$session['system_stock_batch_id']} despite passing preflight."
+                    );
+                }
 
                 $insertItem->execute([
                     $sessionId, $item['id'], $item['sku'], $item['barcode'], $item['name'],
                     $categoryNameCache[$item['category_id']], $item['brand'],
                     $item['buy_unit'], $item['buy_content'], $item['mid_unit'], $item['mid_content'], $item['base_unit'],
-                    $systemQty, $unitCost,
+                    $stock->qty, $stock->unitCost, $stock->costSource,
                 ]);
             }
 

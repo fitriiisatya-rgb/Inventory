@@ -22,7 +22,7 @@ try {
     $row = $service->startSession($sessionId, $user['id']);
     Response::json(['data' => $row]);
 } catch (SessionPreflightException $e) {
-    Response::error('START SESSION ditolak', 422, ['blockers' => $e->blockers]);
+    Response::error('START SESSION ditolak', 422, $e->preflight);
 } catch (RuntimeException $e) {
     Response::error($e->getMessage(), 409);
 }

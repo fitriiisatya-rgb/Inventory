@@ -18,7 +18,8 @@ if ($sessionItemId <= 0) {
 
 $pdo = Database::pdo();
 $locks = new ItemLockService($pdo, (int) $GLOBALS['SO_CONFIG']['app']['lock_ttl_seconds']);
-$service = new CountService($pdo, $locks);
+$evidence = PhotoEvidenceService::fromConfig($pdo, $locks);
+$service = new CountService($pdo, $locks, $evidence);
 
 try {
     $result = $service->saveCount($sessionItemId, $user['id'], $input);

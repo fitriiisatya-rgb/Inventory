@@ -83,7 +83,7 @@ CREATE TABLE items (
     mid_content     DECIMAL(18,4)  NULL,                 -- MID units per 1 buy unit
     base_unit       VARCHAR(30)    NOT NULL,             -- e.g. "Gr"
 
-    last_buy_price  DECIMAL(18,2)  NOT NULL DEFAULT 0,   -- price per BASE unit
+    last_buy_price  DECIMAL(18,2)  NULL DEFAULT NULL,    -- price per BASE unit; NULL = never recorded, never coerced to 0
     status          ENUM('ACTIVE','INACTIVE') NOT NULL DEFAULT 'ACTIVE',
     note            TEXT NULL,
 
@@ -113,7 +113,7 @@ CREATE TABLE item_stock (
     item_id         BIGINT UNSIGNED NOT NULL,
     location_id     BIGINT UNSIGNED NOT NULL,
     system_qty      DECIMAL(18,4) NOT NULL DEFAULT 0,   -- base unit
-    unit_cost       DECIMAL(18,2) NOT NULL DEFAULT 0,   -- per base unit
+    unit_cost       DECIMAL(18,2) NULL DEFAULT NULL,    -- per base unit; NULL = unknown, not Rp0
     updated_by      BIGINT UNSIGNED NULL,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uq_item_location (item_id, location_id),
@@ -154,6 +154,7 @@ CREATE TABLE stock_import_rows (
     item_id             BIGINT UNSIGNED NULL,           -- resolved; NULL if SKU_NOT_FOUND
     parsed_qty_base     DECIMAL(18,4) NULL,
     parsed_unit_cost    DECIMAL(18,2) NULL,
+    unit_cost_source    ENUM('IMPORT','MASTER_LAST_BUY_PRICE','NONE') NULL,  -- resolved once, here, never re-derived later
     status              ENUM('MATCHED','DUPLICATE','SKU_NOT_FOUND','INVALID_QTY','INVALID_UNIT','WARNING') NOT NULL,
     message             VARCHAR(255) NULL,
     committed           TINYINT(1) NOT NULL DEFAULT 0,
@@ -235,20 +236,32 @@ CREATE TABLE stock_opname_sessions (
 -- not session+user+team) — assigning someone to both P1 and P2 in the
 -- same session is nonsensical and now unrepresentable. status lets an
 -- assignment be soft-removed without losing the historical record of who
--- was ever assigned.
+-- was ever assigned. A user may hold MULTIPLE rows over time in the same
+-- session (design review points 7-11): reassigning P1->P2 is always
+-- remove-old-row + add-new-row, both audited, never a silent UPDATE of
+-- team on the existing row (so a user's counts stay attributed to the
+-- team they actually held at the time). At most one row per user should
+-- be ACTIVE at once — application-enforced (SessionService), not a DB
+-- constraint, the same trade-off already accepted for
+-- stock_opname_finals.is_current.
 CREATE TABLE stock_opname_session_counters (
-    id           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    session_id   BIGINT UNSIGNED NOT NULL,
-    user_id      BIGINT UNSIGNED NOT NULL,
-    team         ENUM('P1','P2') NOT NULL,
-    status       ENUM('ACTIVE','REMOVED') NOT NULL DEFAULT 'ACTIVE',
-    assigned_by  BIGINT UNSIGNED NOT NULL,
-    assigned_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_session_counter_user (session_id, user_id),
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    session_id      BIGINT UNSIGNED NOT NULL,
+    user_id         BIGINT UNSIGNED NOT NULL,
+    team            ENUM('P1','P2') NOT NULL,
+    status          ENUM('ACTIVE','REMOVED') NOT NULL DEFAULT 'ACTIVE',
+    assigned_by     BIGINT UNSIGNED NOT NULL,
+    assigned_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    assigned_reason VARCHAR(255) NULL,   -- required by app logic when assigned while session ACTIVE
+    removed_by      BIGINT UNSIGNED NULL,
+    removed_at      DATETIME NULL,
+    removed_reason  VARCHAR(255) NULL,   -- required by app logic when removed while session ACTIVE
     KEY idx_session_counter_session (session_id, team, status),
+    KEY idx_session_counter_user (session_id, user_id, status),
     CONSTRAINT fk_sc_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
     CONSTRAINT fk_sc_user FOREIGN KEY (user_id) REFERENCES users(id),
-    CONSTRAINT fk_sc_assigned_by FOREIGN KEY (assigned_by) REFERENCES users(id)
+    CONSTRAINT fk_sc_assigned_by FOREIGN KEY (assigned_by) REFERENCES users(id),
+    CONSTRAINT fk_sc_removed_by FOREIGN KEY (removed_by) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
 -- One row per item included in the session. Everything here is a
@@ -272,7 +285,8 @@ CREATE TABLE stock_opname_session_items (
     base_unit_snapshot      VARCHAR(30)   NOT NULL,
 
     system_qty_snapshot     DECIMAL(18,4) NOT NULL,   -- base unit, frozen at snapshot_at, from item_stock (via SystemStockProvider)
-    unit_cost_snapshot      DECIMAL(18,2) NOT NULL,   -- price per base unit, frozen at snapshot_at
+    unit_cost_snapshot      DECIMAL(18,2) NULL,       -- price per base unit, frozen at snapshot_at; NULL = genuinely unknown, never coerced to Rp0
+    unit_cost_source        ENUM('IMPORT','MASTER_LAST_BUY_PRICE','NONE') NOT NULL DEFAULT 'NONE',
 
     -- item explicitly added to an already-ACTIVE session by Superadmin
     added_after_start_by    BIGINT UNSIGNED NULL,
@@ -358,6 +372,11 @@ CREATE TABLE stock_opname_counts (
 
     physical_base_qty       DECIMAL(18,4) NOT NULL,  -- good+damaged+expired+deadstock, base unit
 
+    -- A count with a condition qty > 0 but no satisfying photo yet stays
+    -- EVIDENCE_REQUIRED: excluded from reconciliation, shown to the
+    -- counter as incomplete, and its lock is NOT released (PhotoEvidenceService).
+    evidence_status          ENUM('COMPLETE','EVIDENCE_REQUIRED') NOT NULL DEFAULT 'COMPLETE',
+
     is_recount              TINYINT(1) NOT NULL DEFAULT 0,
     note                    TEXT NULL,
 
@@ -414,6 +433,14 @@ CREATE TABLE stock_opname_photos (
     count_id            BIGINT UNSIGNED NOT NULL,
     condition_type      ENUM('DAMAGED','EXPIRED','DEADSTOCK') NOT NULL,
     file_path           VARCHAR(255) NOT NULL,   -- random UUID filename, relative path
+    -- ACTIVE = counts as current evidence; SUPERSEDED = an edit zeroed
+    -- this condition's qty, so it's kept as history but no longer
+    -- satisfies the evidence requirement. Never hard-deleted once a
+    -- count is COMPLETE (see PhotoEvidenceService for the pre-COMPLETE
+    -- delete path, which does hard-delete).
+    status              ENUM('ACTIVE','SUPERSEDED') NOT NULL DEFAULT 'ACTIVE',
+    superseded_at       DATETIME NULL,
+    superseded_reason   VARCHAR(255) NULL,
     caption             VARCHAR(255) NULL,
     uploaded_by         BIGINT UNSIGNED NOT NULL,
     uploaded_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

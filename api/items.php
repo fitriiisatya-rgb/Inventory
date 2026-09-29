@@ -20,7 +20,9 @@ function itemRowFromInput(array $input): array
         'mid_unit'       => isset($input['mid_unit']) && trim((string) $input['mid_unit']) !== '' ? trim((string) $input['mid_unit']) : null,
         'mid_content'    => $input['mid_content'] ?? null,
         'base_unit'      => trim((string) ($input['base_unit'] ?? '')),
-        'last_buy_price' => $input['last_buy_price'] ?? 0,
+        // NULL means "never recorded" — never coerced to 0 (design review point 5).
+        'last_buy_price' => (isset($input['last_buy_price']) && $input['last_buy_price'] !== '')
+            ? $input['last_buy_price'] : null,
         'status'         => in_array($input['status'] ?? '', ['ACTIVE', 'INACTIVE'], true) ? $input['status'] : 'ACTIVE',
         'note'           => trim((string) ($input['note'] ?? '')) ?: null,
     ];

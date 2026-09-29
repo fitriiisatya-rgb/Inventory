@@ -24,8 +24,11 @@ function test_engine(): void
 
         $itemIds = [];
         $itemSpecs = [
+            // sku, name, buy_unit, buy_content, mid_unit, mid_content, base_unit, last_buy_price
             ['ENG-KEJU', 'Keju Engine', 'Karton', 20000, 'Kg', 20, 'Gr', 16.65],
             ['ENG-MINYAK', 'Minyak Engine', 'Karton', 12, null, null, 'Pcs', 5000],
+            ['ENG-GULA', 'Gula Engine', 'Sak', 25000, 'Kg', 25, 'Gr', 999],   // CSV omits cost -> fallback to this master price
+            ['ENG-KOPI', 'Kopi Engine', 'Sak', 20000, 'Kg', 20, 'Gr', null], // CSV omits cost AND master has none -> NONE
         ];
         $insItem = $pdo->prepare(
             'INSERT INTO items (sku, name, category_id, buy_unit, buy_content, mid_unit, mid_content, base_unit, last_buy_price, status)
@@ -43,15 +46,31 @@ function test_engine(): void
 
         // Commit a stock import batch so SessionService can auto-bind
         // system_stock_batch_id through the real pipeline, not a shortcut.
+        // ENG-GULA and ENG-KOPI deliberately have a blank unit_cost cell to
+        // exercise the MASTER_LAST_BUY_PRICE / NONE fallback paths.
         $csv = sys_get_temp_dir() . '/eng_test_import.csv';
-        file_put_contents($csv, "sku,system_qty_base,unit_cost\nENG-KEJU,52200,16.65\nENG-MINYAK,120,5000\n");
+        file_put_contents($csv, "sku,system_qty_base,unit_cost\nENG-KEJU,52200,16.65\nENG-MINYAK,120,5000\nENG-GULA,25000,\nENG-KOPI,20000,\n");
         $importService = new StockImportService($pdo);
         $preview = $importService->previewCsv($locationId, $csv, 'eng.csv', $superadminId);
         $importService->commit($preview['batch_id'], $superadminId);
 
+        T::section('StockImportService — unit_cost_source provenance (design review point 5)');
+        $rowsStmt = $pdo->prepare('SELECT * FROM stock_import_rows WHERE batch_id = ? AND item_id = ?');
+        $rowsStmt->execute([$preview['batch_id'], $itemIds['ENG-KEJU']]);
+        T::assertEquals('IMPORT', $rowsStmt->fetch()['unit_cost_source'], 'CSV-supplied cost is tagged source=IMPORT');
+        $rowsStmt->execute([$preview['batch_id'], $itemIds['ENG-GULA']]);
+        $gulaRow = $rowsStmt->fetch();
+        T::assertEquals('MASTER_LAST_BUY_PRICE', $gulaRow['unit_cost_source'], 'Blank CSV cost + a Master price on file -> MASTER_LAST_BUY_PRICE');
+        T::assertEquals(999.0, (float) $gulaRow['parsed_unit_cost'], 'Fallback value is the actual Master last_buy_price');
+        $rowsStmt->execute([$preview['batch_id'], $itemIds['ENG-KOPI']]);
+        $kopiRow = $rowsStmt->fetch();
+        T::assertEquals('NONE', $kopiRow['unit_cost_source'], 'Blank CSV cost + no Master price at all -> NONE');
+        T::assertTrue($kopiRow['parsed_unit_cost'] === null, 'NONE source means parsed_unit_cost is genuinely NULL, never a silent 0');
+
         $locks = new ItemLockService($pdo, 300);
         $sessions = new SessionService($pdo);
-        $counts = new CountService($pdo, $locks);
+        $evidence = new PhotoEvidenceService($pdo, $locks, sys_get_temp_dir() . '/eng_test_uploads', 8192);
+        $counts = new CountService($pdo, $locks, $evidence);
         $recon = new ReconciliationService($pdo, $locks);
 
         // ------------------------------------------------------------
@@ -65,7 +84,7 @@ function test_engine(): void
         $pre = $sessions->preflight((int) $session['id']);
         T::assertTrue(in_array('Belum ada petugas P1 yang di-assign.', $pre['blockers'], true), 'Preflight blocks on missing P1');
         T::assertTrue(in_array('Belum ada petugas P2 yang di-assign.', $pre['blockers'], true), 'Preflight blocks on missing P2');
-        T::assertEquals(2, $pre['item_count'], 'Preflight resolves 2 SKUs in category scope');
+        T::assertEquals(4, $pre['item_count'], 'Preflight resolves 4 SKUs in category scope');
 
         $sessions->assignCounter((int) $session['id'], $p1aId, 'P1', $superadminId);
         $sessions->assignCounter((int) $session['id'], $p1bId, 'P1', $superadminId);
@@ -74,17 +93,96 @@ function test_engine(): void
         $pre2 = $sessions->preflight((int) $session['id']);
         T::assertEquals([], $pre2['blockers'], 'Preflight clean after P1+P2 assigned');
 
+        T::section('SessionService — MISSING_SYSTEM_STOCK blocks start (design review corrections 1-4)');
+        $pdo->prepare("INSERT INTO categories (code, name, status) VALUES ('ENG-CAT2','Engine Test Category 2','ACTIVE')")->execute();
+        $category2Id = (int) $pdo->lastInsertId();
+        // Added AFTER the batch was already committed — this location's
+        // batch has never heard of this SKU. Real-world equivalent: a new
+        // Master Barang item, or one the import file simply missed.
+        $insItem->execute(['ENG-GARAM', 'Garam Engine', $category2Id, 'Sak', 25000, 'Kg', 25, 'Gr', null]);
+        $itemIds['ENG-GARAM'] = (int) $pdo->lastInsertId();
+
+        $missingSession = $sessions->createSession(
+            ['name' => 'Missing Stock Test', 'location_id' => $locationId, 'scope_type' => 'CATEGORY', 'category_id' => $category2Id],
+            $superadminId
+        );
+        $sessions->assignCounter((int) $missingSession['id'], $p1aId, 'P1', $superadminId);
+        $sessions->assignCounter((int) $missingSession['id'], $p2aId, 'P2', $superadminId);
+        $missingPre = $sessions->preflight((int) $missingSession['id']);
+        T::assertTrue(count($missingPre['blockers']) > 0, 'Preflight blocks when an in-scope item has no committed row in the bound batch');
+        T::assertEquals(1, count($missingPre['missing_system_stock']), 'Exactly 1 SKU reported as missing system stock');
+        T::assertEquals('ENG-GARAM', $missingPre['missing_system_stock'][0]['sku'], 'Missing-stock detail names the correct SKU');
+        T::assertEquals('MISSING_SYSTEM_STOCK', $missingPre['missing_system_stock'][0]['reason'], "Reason explicitly tagged 'MISSING_SYSTEM_STOCK', not silently treated as zero");
+        $blockerText = implode(' ', $missingPre['blockers']);
+        T::assertTrue(str_contains($blockerText, '1 SKU tidak memiliki System Stock'), 'Blocker message matches the requested format');
+
+        $startBlockedByMissingStock = false;
+        try {
+            $sessions->startSession((int) $missingSession['id'], $superadminId);
+        } catch (SessionPreflightException $e) {
+            $startBlockedByMissingStock = true;
+        }
+        T::assertTrue($startBlockedByMissingStock, 'startSession() itself refuses to start — missing system stock is never silently defaulted to 0');
+
+        $missingSessionItemCount = $pdo->prepare('SELECT COUNT(*) FROM stock_opname_session_items WHERE session_id = ?');
+        $missingSessionItemCount->execute([$missingSession['id']]);
+        T::assertEquals(0, (int) $missingSessionItemCount->fetchColumn(), 'No partial snapshot was created for the blocked session');
+
         $active = $sessions->startSession((int) $session['id'], $superadminId);
         T::assertEquals('ACTIVE', $active['status'], 'Session becomes ACTIVE after start');
         T::assertTrue($active['snapshot_at'] !== null, 'snapshot_at recorded');
 
+        // Active-session reassignment (design review points 7-11): allowed,
+        // but only with a reason, and never as a silent in-place team swap.
+        $reasonMissing = false;
         try {
             $sessions->assignCounter((int) $session['id'], $p2aId, 'P1', $superadminId);
-            $threw = false;
-        } catch (RuntimeException $e) {
-            $threw = true;
+        } catch (InvalidArgumentException $e) {
+            $reasonMissing = true;
         }
-        T::assertTrue($threw, 'Assignment is rejected once session is no longer DRAFT');
+        T::assertTrue($reasonMissing, 'Reassigning on an ACTIVE session without a reason is rejected');
+
+        $reassigned = $sessions->assignCounter((int) $session['id'], $p2aId, 'P1', $superadminId, 'Rekan P1 sakit, P2 dipindah sementara');
+        $p2aNowP1 = null;
+        foreach ($reassigned as $c) {
+            if ((int) $c['user_id'] === $p2aId) {
+                $p2aNowP1 = $c;
+            }
+        }
+        T::assertTrue($p2aNowP1 !== null && $p2aNowP1['team'] === 'P1', 'p2a now shows as ACTIVE P1 after reassignment');
+
+        $history = $sessions->listCounterHistory((int) $session['id']);
+        $p2aRows = array_values(array_filter($history, fn($r) => (int) $r['user_id'] === $p2aId));
+        T::assertEquals(2, count($p2aRows), 'History keeps BOTH rows for p2a: the closed-out P2 one and the new ACTIVE P1 one');
+        $closedRow = $p2aRows[0]['status'] === 'REMOVED' ? $p2aRows[0] : $p2aRows[1];
+        T::assertEquals('P2', $closedRow['team'], 'The closed-out row still correctly says team=P2 (never silently rewritten to P1)');
+        T::assertEquals('REMOVED', $closedRow['status'], 'Old team row is REMOVED, not deleted');
+        T::assertTrue($closedRow['removed_reason'] !== null, 'Removal reason recorded on the old row');
+
+        // Adding a genuinely NEW counter (never assigned before) to an
+        // ACTIVE session also requires a reason.
+        $p2bId = ensureEngineUser($pdo, 'eng_p2b', 'COUNTER', 'P2');
+        $noReasonNewAdd = false;
+        try {
+            $sessions->assignCounter((int) $session['id'], $p2bId, 'P2', $superadminId);
+        } catch (InvalidArgumentException $e) {
+            $noReasonNewAdd = true;
+        }
+        T::assertTrue($noReasonNewAdd, 'Adding a fresh counter to an ACTIVE session without a reason is rejected');
+        $sessions->assignCounter((int) $session['id'], $p2bId, 'P2', $superadminId, 'Menambah tenaga P2');
+
+        // Unassign requires a reason on an ACTIVE session, releases the
+        // user's locks, and never touches their already-saved counts.
+        $unassignNoReason = false;
+        try {
+            $sessions->unassignCounter((int) $session['id'], $p2bId, $superadminId);
+        } catch (InvalidArgumentException $e) {
+            $unassignNoReason = true;
+        }
+        T::assertTrue($unassignNoReason, 'Unassign on an ACTIVE session without a reason is rejected');
+        $sessions->unassignCounter((int) $session['id'], $p2bId, $superadminId, 'Perangkat bermasalah');
+        $afterUnassign = $sessions->listCounters((int) $session['id']);
+        T::assertTrue(!in_array($p2bId, array_column($afterUnassign, 'user_id'), true), 'p2b no longer appears among ACTIVE counters after unassign');
 
         $threwDouble = false;
         try {
@@ -97,7 +195,7 @@ function test_engine(): void
         $siStmt = $pdo->prepare('SELECT * FROM stock_opname_session_items WHERE session_id = ? ORDER BY sku_snapshot');
         $siStmt->execute([$session['id']]);
         $sessionItems = $siStmt->fetchAll();
-        T::assertEquals(2, count($sessionItems), 'Snapshot created exactly 2 session_items');
+        T::assertEquals(4, count($sessionItems), 'Snapshot created exactly 4 session_items');
         $kejuSi = $sessionItems[array_search('ENG-KEJU', array_column($sessionItems, 'sku_snapshot'), true)];
         T::assertEquals(52200.0, (float) $kejuSi['system_qty_snapshot'], 'system_qty_snapshot pulled from the committed import batch (via SystemStockProvider)');
         T::assertEquals(16.65, (float) $kejuSi['unit_cost_snapshot'], 'unit_cost_snapshot pulled from the committed import batch');
@@ -114,6 +212,17 @@ function test_engine(): void
         $kejuSessionItemId = (int) $kejuSiAfter['id'];
         $minyakSiAfter = $sessionItemsAfter[array_search('ENG-MINYAK', array_column($sessionItemsAfter, 'sku_snapshot'), true)];
         $minyakSessionItemId = (int) $minyakSiAfter['id'];
+
+        T::assertEquals('IMPORT', $kejuSiAfter['unit_cost_source'], 'Keju snapshot carries unit_cost_source=IMPORT through to the session');
+        T::assertEquals(16.65, (float) $kejuSiAfter['unit_cost_snapshot'], 'Keju unit_cost_snapshot = the imported cost');
+
+        $gulaSiAfter = $sessionItemsAfter[array_search('ENG-GULA', array_column($sessionItemsAfter, 'sku_snapshot'), true)];
+        T::assertEquals('MASTER_LAST_BUY_PRICE', $gulaSiAfter['unit_cost_source'], 'Gula snapshot carries the MASTER_LAST_BUY_PRICE provenance through to the session');
+        T::assertEquals(999.0, (float) $gulaSiAfter['unit_cost_snapshot'], 'Gula unit_cost_snapshot = the Master fallback value');
+
+        $kopiSiAfter = $sessionItemsAfter[array_search('ENG-KOPI', array_column($sessionItemsAfter, 'sku_snapshot'), true)];
+        T::assertEquals('NONE', $kopiSiAfter['unit_cost_source'], 'Kopi snapshot carries source=NONE through to the session');
+        T::assertTrue($kopiSiAfter['unit_cost_snapshot'] === null, 'Kopi unit_cost_snapshot is genuinely NULL, never a silent Rp0');
 
         // ------------------------------------------------------------
         T::section('ItemLockService — per-team locking');
@@ -154,37 +263,40 @@ function test_engine(): void
         T::assertEquals(71200.0, $saved['physical_base_qty'], 'physical = good + damaged (1 Kg = 1.000 Gr) = 71.200 Gr');
         T::assertEquals(70200.0, $saved['available_base_qty'], 'available = good only, not including damaged');
         T::assertEquals(['DAMAGED'], $saved['evidence_required'], 'evidence_required hook flags DAMAGED (qty > 0), Phase 5 owns enforcement');
+        T::assertEquals('EVIDENCE_REQUIRED', $saved['evidence_status'], 'No photo yet -> evidence_status = EVIDENCE_REQUIRED');
 
         $countRow = $pdo->prepare('SELECT * FROM stock_opname_counts WHERE id = ?');
         $countRow->execute([$saved['count_id']]);
         $countRowData = $countRow->fetch();
         T::assertEquals('P1', $countRowData['team'], 'Count recorded under the correct team');
+        T::assertEquals('EVIDENCE_REQUIRED', $countRowData['evidence_status'], 'evidence_status persisted on the count row');
 
         $revCountStmt = $pdo->prepare('SELECT COUNT(*) FROM stock_opname_count_revisions WHERE count_id = ?');
         $revCountStmt->execute([$saved['count_id']]);
         T::assertEquals(1, (int) $revCountStmt->fetchColumn(), 'First save writes exactly one revision (old_value NULL)');
 
-        // Lock was released by the save itself — saving again without reacquiring must fail.
-        $lockGoneException = null;
-        try {
-            $counts->saveCount($kejuSessionItemId, $p1aId, ['good_base_input_qty' => 999, 'damaged_qty' => 0, 'expired_qty' => 0, 'deadstock_qty' => 0]);
-        } catch (CountLockException $e) {
-            $lockGoneException = $e;
-        }
-        T::assertTrue($lockGoneException !== null, 'Lock is released after a successful save; a second save requires re-acquiring it');
+        // Design review point 15: a count with pending evidence is NOT done
+        // yet, so its lock is deliberately KEPT, not released — the SAME
+        // user can immediately continue working on it without re-acquiring.
+        $stillHeld = $locks->findOwnedBy($kejuSessionItemId, 'P1', $p1aId);
+        T::assertTrue($stillHeld !== null, 'Lock is deliberately retained while evidence_status is EVIDENCE_REQUIRED');
 
-        // Re-acquire and edit WITHOUT reason -> rejected.
-        $locks->acquire($kejuSessionItemId, 'P1', $p1aId);
+        // A different P1 user must still be locked out even though evidence is pending.
+        $otherUserBlocked = $locks->acquire($kejuSessionItemId, 'P1', $p1bId);
+        T::assertFalse($otherUserBlocked['ok'], 'A different P1 user still cannot take over an item with a pending-evidence lock');
+
+        // Editing while the lock is retained still requires a reason (it IS an edit).
         $noReasonRejected = false;
         try {
             $counts->saveCount($kejuSessionItemId, $p1aId, ['good_base_input_qty' => 70200, 'good_buy_qty' => 0, 'good_mid_qty' => 0, 'damaged_qty' => 0, 'expired_qty' => 0, 'deadstock_qty' => 0]);
         } catch (CountValidationException $e) {
             $noReasonRejected = true;
         }
-        T::assertTrue($noReasonRejected, 'Editing an existing count without a reason is rejected');
+        T::assertTrue($noReasonRejected, 'Editing an existing count without a reason is rejected, even while the lock is retained');
 
-        // Edit WITH reason -> accepted, revision captures old/new JSON.
-        $locks->acquire($kejuSessionItemId, 'P1', $p1aId); // rejected save didn't consume the lock's validity
+        // Edit WITH reason, zeroing the damaged qty -> evidence no longer
+        // required for anything -> evidence_status flips to COMPLETE ->
+        // the lock is released NOW (not on the earlier save).
         $edited = $counts->saveCount($kejuSessionItemId, $p1aId, [
             'good_buy_qty' => 0, 'good_mid_qty' => 0, 'good_base_input_qty' => 70200,
             'damaged_qty' => 0, 'expired_qty' => 0, 'deadstock_qty' => 0,
@@ -192,6 +304,10 @@ function test_engine(): void
         ]);
         T::assertEquals(70200.0, $edited['good_base_qty'], 'Edited good_base_qty reflects new input');
         T::assertEquals($saved['count_id'], $edited['count_id'], 'Edit updates the SAME official row, not a second one');
+        T::assertEquals('COMPLETE', $edited['evidence_status'], 'Zeroing the only pending condition flips evidence_status to COMPLETE');
+
+        $lockAfterComplete = $locks->findOwnedBy($kejuSessionItemId, 'P1', $p1aId);
+        T::assertTrue($lockAfterComplete === null, 'Lock IS released once evidence_status reaches COMPLETE');
 
         $revCountStmt->execute([$saved['count_id']]);
         T::assertEquals(2, (int) $revCountStmt->fetchColumn(), 'Edit adds a second revision row');
@@ -371,7 +487,7 @@ function cleanupEngineFixtures(PDO $pdo): void
     $pdo->exec("DELETE b FROM stock_import_batches b JOIN locations l ON l.id = b.location_id WHERE l.code = 'ENG-LOC'");
     $pdo->exec("DELETE FROM audit_logs WHERE actor_id IN (SELECT id FROM users WHERE username LIKE 'eng_%')");
     $pdo->exec("DELETE FROM items WHERE sku LIKE 'ENG-%'");
-    $pdo->exec("DELETE FROM categories WHERE code = 'ENG-CAT'");
+    $pdo->exec("DELETE FROM categories WHERE code IN ('ENG-CAT', 'ENG-CAT2')");
     $pdo->exec("DELETE FROM locations WHERE code = 'ENG-LOC'");
     $pdo->exec("DELETE FROM users WHERE username LIKE 'eng_%'");
 }

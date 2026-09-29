@@ -56,14 +56,19 @@ final class ReconciliationService
         return 'MISMATCH';
     }
 
-    /** Uses only this team's own count + this team's own lock state — never reads the other team. */
+    /**
+     * Uses only this team's own count + this team's own lock state — never
+     * reads the other team. A count that exists but still needs photo
+     * evidence (Phase 5) is surfaced as its own distinct state, not shown
+     * as SUDAH_DIHITUNG — the counter must see it's not actually done yet.
+     */
     public function counterStatus(array $sessionItem, string $team, ?array $ownCount): string
     {
         if ($sessionItem['item_status'] === 'NOT_COUNTABLE') {
             return 'NOT_COUNTABLE';
         }
         if ($ownCount) {
-            return 'SUDAH_DIHITUNG';
+            return $ownCount['evidence_status'] === 'EVIDENCE_REQUIRED' ? 'EVIDENCE_REQUIRED' : 'SUDAH_DIHITUNG';
         }
         $holder = $this->locks->currentHolder((int) $sessionItem['id'], $team);
         if ($holder) {
@@ -72,7 +77,15 @@ final class ReconciliationService
         return ((int) $sessionItem['current_round']) > 1 ? 'HITUNG_ULANG' : 'BELUM_DIHITUNG';
     }
 
-    /** @return array{session_item: array, p1: ?array, p2: ?array, status: string} */
+    /**
+     * @return array{session_item: array, p1: ?array, p2: ?array, status: string}
+     *
+     * A count still EVIDENCE_REQUIRED is treated as not-yet-submitted for
+     * reconciliation purposes (design review point 16: "Jangan membuat
+     * Superadmin reconciliation berjalan terhadap count incomplete") — the
+     * WHERE clause below excludes it, so it reads as if p1/p2 were null,
+     * not as a premature MATCH/MISMATCH against unfinished data.
+     */
     public function listForReview(int $sessionId): array
     {
         $itemsStmt = $this->pdo->prepare('SELECT * FROM stock_opname_session_items WHERE session_id = ? ORDER BY sku_snapshot');
@@ -80,7 +93,13 @@ final class ReconciliationService
         $items = $itemsStmt->fetchAll();
 
         $countStmt = $this->pdo->prepare(
-            'SELECT * FROM stock_opname_counts WHERE session_item_id = ? AND team = ? AND round = ? LIMIT 1'
+            "SELECT * FROM stock_opname_counts WHERE session_item_id = ? AND team = ? AND round = ? AND evidence_status = 'COMPLETE' LIMIT 1"
+        );
+        // Separate, non-gating lookup so a superadmin can tell "nobody has
+        // counted this yet" apart from "counted, but photo evidence is
+        // still pending" — informational only, never fed into reviewStatus().
+        $pendingStmt = $this->pdo->prepare(
+            "SELECT 1 FROM stock_opname_counts WHERE session_item_id = ? AND team = ? AND round = ? AND evidence_status = 'EVIDENCE_REQUIRED' LIMIT 1"
         );
 
         $result = [];
@@ -90,6 +109,11 @@ final class ReconciliationService
             $countStmt->execute([$si['id'], 'P2', $si['current_round']]);
             $p2 = $countStmt->fetch() ?: null;
 
+            $pendingStmt->execute([$si['id'], 'P1', $si['current_round']]);
+            $p1EvidencePending = (bool) $pendingStmt->fetchColumn();
+            $pendingStmt->execute([$si['id'], 'P2', $si['current_round']]);
+            $p2EvidencePending = (bool) $pendingStmt->fetchColumn();
+
             $result[] = [
                 'session_item' => $si,
                 'p1' => $p1,
@@ -97,6 +121,8 @@ final class ReconciliationService
                 'status' => $this->reviewStatus($si, $p1, $p2),
                 'variance_p1' => $p1 ? (float) $p1['physical_base_qty'] - (float) $si['system_qty_snapshot'] : null,
                 'variance_p2' => $p2 ? (float) $p2['physical_base_qty'] - (float) $si['system_qty_snapshot'] : null,
+                'p1_evidence_pending' => $p1EvidencePending,
+                'p2_evidence_pending' => $p2EvidencePending,
             ];
         }
         return $result;

@@ -16,6 +16,7 @@ require __DIR__ . '/PermissionsTest.php';
 require __DIR__ . '/AuthTest.php';
 require __DIR__ . '/StockImportTest.php';
 require __DIR__ . '/EngineTest.php';
+require __DIR__ . '/PhotoEvidenceTest.php';
 
 // Auth runs first: it triggers session_regenerate_id(), which sends a
 // cookie header — harmless in a real request (login always precedes any
@@ -25,5 +26,6 @@ test_unit_conversion();
 test_permissions();
 test_stock_import();
 test_engine();
+test_photo_evidence();
 
 exit(T::summary());

@@ -63,8 +63,8 @@ final class StockImportService
             $rowStmt = $this->pdo->prepare(
                 'INSERT INTO stock_import_rows
                     (batch_id, row_no, raw_sku, raw_qty, raw_unit, raw_unit_cost,
-                     item_id, parsed_qty_base, parsed_unit_cost, status, message)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                     item_id, parsed_qty_base, parsed_unit_cost, unit_cost_source, status, message)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
 
             $itemStmt = $this->pdo->prepare('SELECT * FROM items WHERE sku = ? LIMIT 1');
@@ -96,6 +96,7 @@ final class StockImportService
                 $itemId = null;
                 $parsedQtyBase = null;
                 $parsedCost = null;
+                $unitCostSource = null;
 
                 if ($rawSku === '') {
                     $status = 'SKU_NOT_FOUND';
@@ -138,17 +139,32 @@ final class StockImportService
                         }
 
                         if ($status === null) {
-                            // qty resolved; resolve cost and run sanity check
+                            // qty resolved; resolve cost + its explicit source, and run sanity check.
+                            // Resolved once, here, permanently — never silently re-derived later
+                            // against a possibly-changed Master price (design review point 5).
+                            $masterHasCost = $item['last_buy_price'] !== null;
                             if ($rawCost !== null && $rawCost !== '') {
                                 if (!is_numeric($rawCost) || (float) $rawCost < 0) {
                                     $status = 'WARNING';
-                                    $message = "unit_cost '{$rawCost}' tidak valid, menggunakan last_buy_price Master Barang.";
-                                    $parsedCost = (float) $item['last_buy_price'];
+                                    if ($masterHasCost) {
+                                        $message = "unit_cost '{$rawCost}' tidak valid, menggunakan last_buy_price Master Barang.";
+                                        $parsedCost = (float) $item['last_buy_price'];
+                                        $unitCostSource = 'MASTER_LAST_BUY_PRICE';
+                                    } else {
+                                        $message = "unit_cost '{$rawCost}' tidak valid dan Master Barang juga tidak memiliki last_buy_price — unit cost akan NULL (bukan 0).";
+                                        $parsedCost = null;
+                                        $unitCostSource = 'NONE';
+                                    }
                                 } else {
                                     $parsedCost = (float) $rawCost;
+                                    $unitCostSource = 'IMPORT';
                                 }
-                            } else {
+                            } elseif ($masterHasCost) {
                                 $parsedCost = (float) $item['last_buy_price'];
+                                $unitCostSource = 'MASTER_LAST_BUY_PRICE';
+                            } else {
+                                $parsedCost = null;
+                                $unitCostSource = 'NONE';
                             }
 
                             if ($status === null) {
@@ -175,7 +191,7 @@ final class StockImportService
 
                 $rowStmt->execute([
                     $batchId, $rowNumber, $rawSku, $rawQty, $rawUnit, $rawCost,
-                    $itemId, $parsedQtyBase, $parsedCost, $status, $message,
+                    $itemId, $parsedQtyBase, $parsedCost, $unitCostSource, $status, $message,
                 ]);
             }
 

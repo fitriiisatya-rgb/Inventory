@@ -24,7 +24,7 @@ if (!$sessionId) {
     Response::error('Item sesi tidak ditemukan.', 404);
 }
 
-$assignStmt = $pdo->prepare("SELECT team FROM stock_opname_session_counters WHERE session_id = ? AND user_id = ? AND status = 'ACTIVE'");
+$assignStmt = $pdo->prepare("SELECT team FROM stock_opname_session_counters WHERE session_id = ? AND user_id = ? AND status = 'ACTIVE' LIMIT 1");
 $assignStmt->execute([$sessionId, $user['id']]);
 $team = $assignStmt->fetchColumn();
 if (!$team) {

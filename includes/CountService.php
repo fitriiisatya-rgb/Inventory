@@ -25,7 +25,7 @@ final class CountLockException extends RuntimeException
  */
 final class CountService
 {
-    public function __construct(private PDO $pdo, private ItemLockService $locks)
+    public function __construct(private PDO $pdo, private ItemLockService $locks, private PhotoEvidenceService $evidence)
     {
     }
 
@@ -189,6 +189,18 @@ final class CountService
                     $countId, json_encode($oldState, JSON_UNESCAPED_UNICODE), json_encode($newState, JSON_UNESCAPED_UNICODE),
                     $reason, $userId, $_SERVER['REMOTE_ADDR'] ?? null, substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255),
                 ]);
+
+                // A condition edited from >0 down to 0 supersedes its photos
+                // (kept as history, no longer "current" evidence) rather than
+                // deleting them (design review points 22-23). A condition
+                // still >0 after the edit keeps its existing ACTIVE photos —
+                // recomputeEvidenceStatus() below re-derives whether that's
+                // still enough.
+                foreach (['damaged', 'expired', 'deadstock'] as $cond) {
+                    if ($oldState["{$cond}_base_qty"] > 0 && $conditions[$cond]['base'] <= 0) {
+                        $this->evidence->supersedeCondition($countId, strtoupper($cond), 'Qty diubah menjadi 0 saat edit hitungan');
+                    }
+                }
             } else {
                 try {
                     $this->pdo->prepare(
@@ -229,7 +241,13 @@ final class CountService
                 ]);
             }
 
-            $this->locks->release($sessionItemId, $team, $userId);
+            // A count is not "done" just because it was saved (design review
+            // point 15) — the lock is released only once every condition
+            // with qty > 0 actually has its evidence, never on save alone.
+            $evidenceStatus = $this->evidence->recomputeEvidenceStatus($countId);
+            if ($evidenceStatus === 'COMPLETE') {
+                $this->locks->release($sessionItemId, $team, $userId);
+            }
             $this->pdo->commit();
         } catch (Throwable $e) {
             if ($this->pdo->inTransaction()) {
@@ -246,6 +264,7 @@ final class CountService
             'physical_base_qty' => $physicalBase,
             'available_base_qty' => $goodBase,
             'evidence_required' => $evidenceRequired,
+            'evidence_status' => $evidenceStatus,
         ];
     }
 }

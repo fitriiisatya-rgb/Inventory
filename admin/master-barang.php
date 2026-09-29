@@ -20,7 +20,7 @@ require __DIR__ . '/../includes/layout_header.php';
     <label>Mid Unit (opsional) <input type="text" name="mid_unit" placeholder="Kg"></label>
     <label>Mid Content (mid unit per 1 buy unit) <input type="number" step="any" name="mid_content"></label>
     <label>Base Unit <input type="text" name="base_unit" placeholder="Gr" required></label>
-    <label>Last Buy Price (per base unit) <input type="number" step="any" name="last_buy_price"></label>
+    <label>Last Buy Price per base unit (opsional — kosongkan jika belum diketahui, jangan isi 0) <input type="number" step="any" name="last_buy_price"></label>
     <button type="submit">Simpan</button>
   </form>
   <div id="msg"></div>

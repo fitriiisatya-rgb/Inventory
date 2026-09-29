@@ -16,6 +16,7 @@ require __DIR__ . '/../includes/layout_header.php';
         <option value="SEMUA">Semua</option>
         <option value="BELUM_DIHITUNG">Belum Dihitung</option>
         <option value="SUDAH_DIHITUNG">Sudah Dihitung</option>
+        <option value="EVIDENCE_REQUIRED">Belum Lengkap (Foto)</option>
         <option value="SEDANG_DIHITUNG">Sedang Dihitung</option>
         <option value="HITUNG_ULANG">Hitung Ulang</option>
       </select>
@@ -35,7 +36,9 @@ require __DIR__ . '/../includes/layout_header.php';
 
 <div class="card" id="inputCard" style="display:none;">
   <h3 id="inputTitle"></h3>
+  <div id="conversionSummary" style="color:#64748b; margin-bottom:10px;"></div>
   <div id="inputMsg"></div>
+  <h4>Stok Baik</h4>
   <div id="levelFields"></div>
 
   <h4>Kondisi Barang</h4>
@@ -51,9 +54,15 @@ require __DIR__ . '/../includes/layout_header.php';
   </div>
 </div>
 
+<div class="card" id="previewModal" style="display:none;">
+  <button class="secondary" onclick="document.getElementById('previewModal').style.display='none';">Tutup</button>
+  <div style="text-align:center; margin-top:10px;"><img id="previewImg" style="max-width:100%; max-height:70vh;"></div>
+</div>
+
 <script>
 const sessionId = <?= (int) $sessionId ?>;
 let currentItem = null;
+let currentCountId = null;
 let heartbeatTimer = null;
 
 async function loadCategories() {
@@ -64,10 +73,12 @@ async function loadCategories() {
 
 function statusLabel(s) {
   return { BELUM_DIHITUNG: 'Belum Dihitung', SEDANG_DIHITUNG: 'Sedang Dihitung', SUDAH_DIHITUNG: 'Sudah Dihitung',
+    EVIDENCE_REQUIRED: 'Belum Lengkap — Foto Wajib',
     HITUNG_ULANG: 'Hitung Ulang', NOT_COUNTABLE: 'Tidak Dapat Dihitung' }[s] || s;
 }
 function statusClass(s) {
   return { BELUM_DIHITUNG: 'inactive', SEDANG_DIHITUNG: 'warning', SUDAH_DIHITUNG: 'active',
+    EVIDENCE_REQUIRED: 'warning',
     HITUNG_ULANG: 'warning', NOT_COUNTABLE: 'inactive' }[s] || 'inactive';
 }
 
@@ -90,26 +101,51 @@ async function loadItems() {
 
 function levelFieldHtml(level) {
   const labels = { buy: 'good_buy_qty', mid: 'good_mid_qty', base: 'good_base_input_qty' };
-  return `<label>${SO.escapeHtml(level.unit)} (${level.level})<br>
-    <input type="number" step="any" min="0" id="field_${labels[level.level]}" value="0"></label>`;
+  return `<label>${SO.escapeHtml(level.unit)}<br>
+    <input type="number" step="any" min="0" inputmode="decimal" id="field_${labels[level.level]}" value="0" style="font-size:18px; width:90px;"></label>`;
+}
+
+function conversionSummaryText(item) {
+  if (item.levels.length === 3) {
+    return `1 ${item.buy_unit} = ${item.mid_content} ${item.mid_unit} = ${item.buy_content} ${item.base_unit}`;
+  }
+  if (item.levels.length === 2) {
+    return `1 ${item.buy_unit} = ${item.buy_content} ${item.base_unit}`;
+  }
+  return `Satuan dasar: ${item.base_unit}`;
 }
 
 function conditionFieldHtml(cond, label, item) {
   const unitOptions = item.levels.map(l => `<option value="${SO.escapeHtml(l.unit)}">${SO.escapeHtml(l.unit)}</option>`).join('');
-  return `<div style="margin-bottom:8px;"><strong>${label}</strong><br>
-    <input type="number" step="any" min="0" id="field_${cond}_qty" value="0" style="width:100px;">
-    <select id="field_${cond}_unit">${unitOptions}</select></div>`;
+  return `<div style="margin-bottom:14px; border:1px solid #e2e8f0; border-radius:8px; padding:10px;" id="conditionBlock_${cond}">
+    <strong>${label}</strong><br>
+    <input type="number" step="any" min="0" inputmode="decimal" id="field_${cond}_qty" value="0" style="width:100px; font-size:16px;" onchange="onConditionQtyChange('${cond}')">
+    <select id="field_${cond}_unit">${unitOptions}</select>
+    <div id="photoZone_${cond}" style="margin-top:8px; display:none;">
+      <input type="file" accept="image/*" capture="environment" id="photoInput_${cond}" style="display:none;" onchange="handlePhotoSelect('${cond}')">
+      <button type="button" class="secondary" onclick="document.getElementById('photoInput_${cond}').click();">📷 Tambah Foto</button>
+      <span id="photoUploadStatus_${cond}"></span>
+      <div id="thumbs_${cond}" style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;"></div>
+    </div>
+  </div>`;
+}
+
+function onConditionQtyChange(cond) {
+  const qty = parseFloat(document.getElementById(`field_${cond}_qty`).value || '0');
+  document.getElementById(`photoZone_${cond}`).style.display = qty > 0 ? 'block' : 'none';
 }
 
 async function openItem(sessionItemId) {
   try {
-    const lockRes = await SO.api('/api/counter/lock.php', { method: 'POST', body: JSON.stringify({ session_item_id: sessionItemId }) });
+    await SO.api('/api/counter/lock.php', { method: 'POST', body: JSON.stringify({ session_item_id: sessionItemId }) });
   } catch (err) {
     alert(err.message);
     return;
   }
   currentItem = window.__rows[sessionItemId];
+  currentCountId = currentItem.own_count ? currentItem.own_count.count_id : null;
   document.getElementById('inputTitle').textContent = `${currentItem.sku} — ${currentItem.name}`;
+  document.getElementById('conversionSummary').textContent = conversionSummaryText(currentItem);
   document.getElementById('inputMsg').innerHTML = '';
   document.getElementById('levelFields').innerHTML = currentItem.levels.map(levelFieldHtml).join('');
   document.getElementById('conditionFields').innerHTML =
@@ -128,14 +164,124 @@ async function openItem(sessionItemId) {
     document.getElementById('field_expired_qty').value = c.expired_qty;
     document.getElementById('field_deadstock_qty').value = c.deadstock_qty;
     document.getElementById('noteField').value = c.note || '';
+    ['damaged', 'expired', 'deadstock'].forEach(onConditionQtyChange);
+    if (c.evidence_status === 'EVIDENCE_REQUIRED' && currentCountId) {
+      showEvidenceRequiredBanner();
+      refreshAllThumbs();
+    }
   }
 
   document.getElementById('itemListCard').style.display = 'none';
   document.getElementById('inputCard').style.display = 'block';
 
   heartbeatTimer = setInterval(() => {
-    SO.api('/api/counter/heartbeat.php', { method: 'POST', body: JSON.stringify({ session_item_id: sessionItemId }) }).catch(() => {});
+    SO.api('/api/counter/heartbeat.php', { method: 'POST', body: JSON.stringify({ session_item_id: sessionItemId } ) }).catch(() => {});
   }, 90000);
+}
+
+function showEvidenceRequiredBanner() {
+  document.getElementById('inputMsg').innerHTML = '<div class="warning-box">Belum Lengkap — Foto Wajib untuk kondisi dengan qty &gt; 0. Hitungan ini belum dianggap selesai sampai foto diupload.</div>';
+}
+
+async function refreshAllThumbs() {
+  if (!currentCountId) return;
+  for (const cond of ['damaged', 'expired', 'deadstock']) {
+    await refreshThumbs(cond);
+  }
+}
+
+async function refreshThumbs(cond) {
+  if (!currentCountId) return;
+  const { data } = await SO.api('/api/photos/list.php?count_id=' + currentCountId);
+  const mine = data.filter(p => p.condition_type === cond.toUpperCase() && p.status === 'ACTIVE');
+  document.getElementById(`thumbs_${cond}`).innerHTML = mine.map(p => `
+    <div style="position:relative;">
+      <img src="${p.url}" style="width:70px;height:70px;object-fit:cover;border-radius:6px;cursor:pointer;" onclick="previewPhoto('${p.url}')">
+      <button type="button" onclick="removePhoto(${p.id}, '${cond}')" style="position:absolute; top:-6px; right:-6px; background:#ef4444; color:#fff; border:none; border-radius:50%; width:20px; height:20px; font-size:12px; line-height:1; cursor:pointer;">×</button>
+    </div>`).join('');
+}
+
+function previewPhoto(url) {
+  document.getElementById('previewImg').src = url;
+  document.getElementById('previewModal').style.display = 'block';
+}
+
+async function removePhoto(photoId, cond) {
+  if (!confirm('Hapus foto ini?')) return;
+  try {
+    await SO.api('/api/counter/photos/delete.php', { method: 'POST', body: JSON.stringify({ photo_id: photoId }) });
+    refreshThumbs(cond);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// Client-side compression before upload (design review point 17): resize
+// to a max dimension and re-encode as JPEG. The server never trusts this
+// and re-validates/re-encodes everything itself regardless.
+function compressImage(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const reader = new FileReader();
+    reader.onload = (e) => { img.src = e.target.result; };
+    reader.onerror = reject;
+    img.onload = () => {
+      const maxDim = 1600;
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        const scale = maxDim / Math.max(width, height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.8);
+    };
+    img.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handlePhotoSelect(cond) {
+  const input = document.getElementById(`photoInput_${cond}`);
+  const file = input.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById(`photoUploadStatus_${cond}`);
+  statusEl.innerHTML = ' Mengompres & mengirim...';
+
+  if (!currentCountId) {
+    // No count row yet — save first so we have a count_id to attach the photo to.
+    try {
+      await doSave();
+    } catch (err) {
+      statusEl.innerHTML = ' <span style="color:#ef4444;">Simpan hitungan dahulu sebelum menambah foto.</span>';
+      return;
+    }
+  }
+
+  await uploadPhotoBlob(cond, file, statusEl);
+}
+
+async function uploadPhotoBlob(cond, file, statusEl) {
+  try {
+    const compressed = await compressImage(file);
+    const fd = new FormData();
+    fd.append('count_id', currentCountId);
+    fd.append('condition_type', cond.toUpperCase());
+    fd.append('file', compressed, 'photo.jpg');
+    const result = await SO.api('/api/counter/photos/upload.php', { method: 'POST', body: fd });
+    statusEl.innerHTML = ' <span style="color:#166534;">Terkirim.</span>';
+    await refreshThumbs(cond);
+    if (result.evidence_status === 'COMPLETE') {
+      document.getElementById('inputMsg').innerHTML = '<div class="warning-box" style="background:#dcfce7;color:#166534;">Semua bukti foto lengkap — hitungan ini SUDAH DIHITUNG.</div>';
+      setTimeout(() => closeInput(false), 1200);
+    }
+  } catch (err) {
+    statusEl.innerHTML = ` <span style="color:#ef4444;">Foto gagal dikirim.</span> <button type="button" class="secondary" onclick="document.getElementById('photoInput_${cond}').click();">Coba Lagi</button>`;
+    // Qty/count draft is untouched — it was already saved server-side
+    // before any photo upload was attempted.
+  }
 }
 
 async function closeInput(releaseLock) {
@@ -144,16 +290,25 @@ async function closeInput(releaseLock) {
     await SO.api('/api/counter/lock.php', { method: 'DELETE', body: JSON.stringify({ session_item_id: currentItem.session_item_id }) }).catch(() => {});
   }
   currentItem = null;
+  currentCountId = null;
   document.getElementById('inputCard').style.display = 'none';
   document.getElementById('itemListCard').style.display = 'block';
   loadItems();
 }
 
-document.getElementById('cancelBtn').addEventListener('click', () => closeInput(true));
+document.getElementById('cancelBtn').addEventListener('click', () => {
+  // If evidence is still pending the lock is intentionally kept (design
+  // review point 15) so nobody else on the team can grab it mid-flow —
+  // closing here just returns to the list, it does not release the lock.
+  closeInput(currentCountId === null);
+});
 
-document.getElementById('saveBtn').addEventListener('click', async () => {
-  const val = (id) => document.getElementById(id) ? parseFloat(document.getElementById(id).value || '0') : 0;
-  const body = {
+function val(id) {
+  return document.getElementById(id) ? parseFloat(document.getElementById(id).value || '0') : 0;
+}
+
+function buildSaveBody() {
+  return {
     session_item_id: currentItem.session_item_id,
     good_buy_qty: val('field_good_buy_qty'),
     good_mid_qty: val('field_good_mid_qty'),
@@ -167,14 +322,24 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
     note: document.getElementById('noteField').value,
     reason: document.getElementById('reasonField') ? document.getElementById('reasonField').value : undefined,
   };
+}
+
+async function doSave() {
+  const result = await SO.api('/api/counter/count.php', { method: 'POST', body: JSON.stringify(buildSaveBody()) });
+  currentCountId = result.data.count_id;
+  return result;
+}
+
+document.getElementById('saveBtn').addEventListener('click', async () => {
   try {
-    const result = await SO.api('/api/counter/count.php', { method: 'POST', body: JSON.stringify(body) });
-    if (result.data.evidence_required.length) {
-      document.getElementById('inputMsg').innerHTML = `<div class="warning-box">Kondisi ${result.data.evidence_required.join(', ')} memerlukan foto bukti (upload foto akan tersedia pada tahap berikutnya).</div>`;
+    const result = await doSave();
+    if (result.data.evidence_status === 'EVIDENCE_REQUIRED') {
+      showEvidenceRequiredBanner();
+      ['damaged', 'expired', 'deadstock'].forEach(onConditionQtyChange);
+      await refreshAllThumbs();
+    } else {
+      closeInput(false); // lock already released server-side
     }
-    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-    currentItem = null;
-    setTimeout(() => { document.getElementById('inputCard').style.display = 'none'; document.getElementById('itemListCard').style.display = 'block'; loadItems(); }, result.data.evidence_required.length ? 1500 : 0);
   } catch (err) {
     const issues = (err.data && err.data.issues) || [];
     document.getElementById('inputMsg').innerHTML = `<div class="error-box">${issues.length ? issues.join('<br>') : SO.escapeHtml(err.message)}</div>`;

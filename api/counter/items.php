@@ -24,7 +24,7 @@ if ($sessionId <= 0) {
 
 $pdo = Database::pdo();
 
-$assignStmt = $pdo->prepare("SELECT team FROM stock_opname_session_counters WHERE session_id = ? AND user_id = ? AND status = 'ACTIVE'");
+$assignStmt = $pdo->prepare("SELECT team FROM stock_opname_session_counters WHERE session_id = ? AND user_id = ? AND status = 'ACTIVE' LIMIT 1");
 $assignStmt->execute([$sessionId, $user['id']]);
 $team = $assignStmt->fetchColumn();
 if (!$team) {
@@ -102,6 +102,8 @@ foreach ($sessionItems as $si) {
         'locked_by_me' => $lockedByUserId !== false && (int) $lockedByUserId === $user['id'],
         'locked_by_other' => $lockedByUserId !== false && (int) $lockedByUserId !== $user['id'],
         'own_count' => $ownCount ? [
+            'count_id' => (int) $ownCount['id'],
+            'evidence_status' => $ownCount['evidence_status'],
             'good_buy_qty' => (float) $ownCount['good_buy_qty'],
             'good_mid_qty' => (float) $ownCount['good_mid_qty'],
             'good_base_input_qty' => (float) $ownCount['good_base_input_qty'],
