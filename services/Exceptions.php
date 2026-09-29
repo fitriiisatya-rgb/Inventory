@@ -241,6 +241,39 @@ final class ValidationException extends RuntimeException
 }
 
 /**
+ * PHASE V2.14.10.1 Gate 2: the two Stock Opname counting write-models
+ * (legacy write-once /count/{role} vs. append-only /findings) must never
+ * mix on one session. Thrown when legacy /count/{role} is attempted on a
+ * FINDINGS_V1 session, or /findings is attempted on a LEGACY_DUAL_COUNT
+ * session — the latter is never silently auto-converted. Error code:
+ * COUNTING_MODE_CONFLICT (409).
+ */
+final class CountingModeConflictException extends RuntimeException
+{
+    public function __construct(string $message)
+    {
+        parent::__construct("COUNTING_MODE_CONFLICT: {$message}");
+    }
+}
+
+/**
+ * PHASE V2.14.10.1 Gate 4: submitFinding() found, inside the very
+ * transaction that would insert the finding, that the caller no longer
+ * holds a live matching claim (lease expired, the token no longer matches,
+ * or someone else now owns it) — the insert never happens. Distinguishes
+ * a genuine stale-browser race from an ordinary validation failure so the
+ * frontend can react by re-claiming and retrying rather than showing a
+ * generic form error. Error code: CLAIM_LOST (409).
+ */
+final class ClaimConflictException extends RuntimeException
+{
+    public function __construct(string $message)
+    {
+        parent::__construct("CLAIM_LOST: {$message}");
+    }
+}
+
+/**
  * PHASE V2.5: OPENING is the authoritative go-live baseline — it is never
  * voidable through the generic correction flow, even by SUPERADMIN. If a
  * correction is ever genuinely required, it must go through a separate,

@@ -115,7 +115,7 @@ postOpeningIn($pdo, $itemA, $kgUnitId, $scmId, 100, 1000, $adminUserId);
 // 1 — brand-new session: never renders as legacy, even before assignment.
 // ============================================================
 echo "== 1: brand-new session is always DUAL_COUNT, never legacy, before P1/P2 assignment ==\n";
-$sessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemA]));
+$sessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemA], 'LEGACY_DUAL_COUNT'));
 $session = StockOpnameService::get($pdo, $sessionId);
 check('new session has p1_user_id/p2_user_id both null (the old, wrong signal)', $session['p1_user_id'] === null && $session['p2_user_id'] === null);
 check('new session has a real session_number', is_string($session['session_number']) && str_starts_with($session['session_number'], 'SO-'));
@@ -172,7 +172,7 @@ check('OPEN dual-count session can be cancelled', $cancelled['status'] === 'CANC
 
 $itemB = makeItem($pdo, $kgUnitId, 'HFB-B');
 postOpeningIn($pdo, $itemB, $kgUnitId, $scmId, 50, 500, $adminUserId);
-$postedSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemB]));
+$postedSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemB], 'LEGACY_DUAL_COUNT'));
 Database::transaction(fn (PDO $tx) => StockOpnameService::assignCounters($tx, $postedSessionId, ['p1_user_id' => $p1UserId, 'p2_user_id' => $p2UserId], $adminUserId));
 Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $postedSessionId, 'p1', $itemB, 50, $p1UserId));
 Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $postedSessionId, 'p2', $itemB, 50, $p2UserId));

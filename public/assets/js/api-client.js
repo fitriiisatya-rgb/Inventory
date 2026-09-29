@@ -325,8 +325,20 @@ const InvApi = (() => {
         assignOpnameTeam: (id, role, userIds) => request('POST', `/stock-opname/${id}/assign-team`, { role, user_ids: userIds }),
         claimOpnameItem: (id, role, itemId) => request('POST', `/stock-opname/${id}/claim`, { role, ...(itemId ? { item_id: itemId } : {}) }),
         releaseOpnameItem: (id, role, itemId, supervisorOverride = false) => request('POST', `/stock-opname/${id}/release`, { role, item_id: itemId, supervisor_override: supervisorOverride }),
+        // ---- PHASE V2.14.10.1: architecture safety corrective ----
+        // Gate 1: the session's FROZEN per-item unit snapshot — the only
+        // unit source a FINDINGS_V1 counting screen may read once the
+        // session has started (never GET /items/{id}/units again).
+        opnameItemUnits: (id, itemId) => request('GET', `/stock-opname/${id}/items/${itemId}/units`),
+        // Gate 5: on-demand detail behind the lightweight list's finding_count.
+        opnameMyFindingsForItem: (id, itemId) => request('GET', `/stock-opname/${id}/items/${itemId}/my-findings`),
+        opnameLineFindingsForSupervisor: (id, itemId) => request('GET', `/stock-opname/${id}/items/${itemId}/findings`),
+        // Gate 2: explicit, one-way upgrade of a legacy session to Team/Findings mode.
+        upgradeOpnameToFindings: (id) => request('POST', `/stock-opname/${id}/upgrade-to-findings`),
         // ---- PHASE V2.14.10: append-only multi-unit findings ("Tambah Temuan") ----
-        submitOpnameFinding: (id, role, itemId, unitInputs, conditions = {}) => request('POST', `/stock-opname/${id}/findings`, { role, item_id: itemId, unit_inputs: unitInputs, ...conditions }),
+        // Gate 4: claim_token is now required — claimOpnameItem()'s response
+        // carries claim_token, which the caller must pass straight through here.
+        submitOpnameFinding: (id, role, itemId, unitInputs, conditions = {}, claimToken) => request('POST', `/stock-opname/${id}/findings`, { role, item_id: itemId, unit_inputs: unitInputs, claim_token: claimToken, ...conditions }),
         voidOpnameFinding: (id, findingId, reason) => request('POST', `/stock-opname/${id}/findings/${findingId}/void`, { reason }),
         myOpnameSessions: () => request('GET', '/stock-opname/my-sessions'),
         // PHASE V2.14.9 — `conditions` is optional: {rusak_qty, expired_qty, deadstock_qty, notes}.

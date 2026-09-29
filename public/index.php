@@ -117,6 +117,8 @@ use App\Services\ImportValidationException;
 use App\Services\OpeningReconciliationService;
 use App\Services\MovementReconciliationReviewService;
 use App\Services\ValidationException;
+use App\Services\CountingModeConflictException;
+use App\Services\ClaimConflictException;
 use App\Services\FifoService;
 use App\Services\InventoryService;
 use App\Services\TransferService;
@@ -352,6 +354,10 @@ set_exception_handler(function (Throwable $e) use ($path) {
         VoidHasDownstreamDependenciesException::class       => ['code' => 422, 'label' => 'VOID_HAS_DOWNSTREAM_DEPENDENCIES'],
         TransferReversalHasDownstreamDependenciesException::class => ['code' => 422, 'label' => 'TRANSFER_REVERSAL_HAS_DOWNSTREAM_DEPENDENCIES'],
         ValidationException::class                => ['code' => 422, 'label' => $importPrefixed ? 'IMPORT_VALIDATION_FAILED' : 'VALIDATION_ERROR'],
+        // PHASE V2.14.10.1 — the two Stock Opname write-models must never
+        // mix; a claim must be currently valid, not merely presented.
+        CountingModeConflictException::class      => ['code' => 409, 'label' => 'COUNTING_MODE_CONFLICT'],
+        ClaimConflictException::class              => ['code' => 409, 'label' => 'CLAIM_LOST'],
     ];
     // PHASE V2.5: the two dependency exceptions carry a structured
     // `dependencies` list the frontend renders verbatim (spec: "Then list
@@ -2812,12 +2818,21 @@ $routes = [
 
         inv_require_so_warehouse_scope($user, $warehouseId);
 
+        // PHASE V2.14.10.1 Gate 2 — FINDINGS_V1 is the default for every
+        // session started through the real app; the ONLY other value ever
+        // accepted here is the literal 'LEGACY_DUAL_COUNT' (any other/
+        // missing value sanitizes to the safe default) — a deliberate,
+        // explicit opt-out for a caller not yet on the team/findings model,
+        // never a way to smuggle an unrecognized value into the column.
+        $countingModel = (($input['counting_model'] ?? 'FINDINGS_V1') === 'LEGACY_DUAL_COUNT') ? 'LEGACY_DUAL_COUNT' : 'FINDINGS_V1';
+
         $sessionId = Database::transaction(
             fn (PDO $tx) => StockOpnameService::start(
                 $tx,
                 $warehouseId,
                 $user['id'],
-                $input['item_ids'] ?? null
+                $input['item_ids'] ?? null,
+                $countingModel
             )
         );
 
@@ -3106,12 +3121,16 @@ $routes = [
     // Session-scoped: only an active team member of the POSTed role may
     // submit one (no global-permission/warehouse-scope check at all — see
     // inv_require_so_counter_or_permission()'s docblock, same reasoning as
-    // /count/{role} and /claim above). unit_inputs mirrors GET
-    // /items/{id}/units' own shape: [{unit_id, qty}, ...] — the client
-    // never invents a conversion factor, the server resolves it fresh
-    // against UnitConversionService at submission time. Same explicit-zero
-    // HTTP gate as V2.14.9.3's /count/{role} — rusak_qty/expired_qty/
-    // deadstock_qty must all be present in the JSON body.
+    // /count/{role} and /claim above). Same explicit-zero HTTP gate as
+    // V2.14.9.3's /count/{role} — rusak_qty/expired_qty/deadstock_qty must
+    // all be present in the JSON body.
+    // PHASE V2.14.10.1 Gate 1/7 — unit_inputs mirrors the session's FROZEN
+    // snapshot shape (GET .../items/{itemId}/units below), never live
+    // item master units; the server is authoritative for every conversion
+    // factor and duplicate/foreign unit_ids are rejected server-side.
+    // PHASE V2.14.10.1 Gate 4 — claim_token is required and verified
+    // inside the same transaction as the insert; a stale/mismatched token
+    // is refused with 409 CLAIM_LOST rather than silently writing.
     'POST /stock-opname/{id}/findings' => function (array $params) use ($pdo, $input) {
         $user = inv_require_auth();
         $sessionId = (int) $params['id'];
@@ -3139,6 +3158,10 @@ $routes = [
         if ($unitInputs === []) {
             throw new ValidationException(['unit_inputs (at least one {unit_id, qty}) is required']);
         }
+        $claimToken = (string) ($input['claim_token'] ?? '');
+        if (trim($claimToken) === '') {
+            throw new ValidationException(['claim_token is required']);
+        }
         foreach (['rusak_qty', 'expired_qty', 'deadstock_qty'] as $conditionField) {
             if (!array_key_exists($conditionField, $input)) {
                 inv_error(422, 'VALIDATION_ERROR', 'Rusak, Expired, dan Deadstock wajib dikirim. Gunakan 0 bila tidak ada.');
@@ -3150,9 +3173,85 @@ $routes = [
         if (array_key_exists('notes', $input)) { $conditions['notes'] = $input['notes']; }
 
         $result = Database::transaction(
-            fn (PDO $tx) => StockOpnameService::submitFinding($tx, $sessionId, strtolower($role), $itemId, $unitInputs, $conditions, (int) $user['id'])
+            fn (PDO $tx) => StockOpnameService::submitFinding($tx, $sessionId, strtolower($role), $itemId, $unitInputs, $conditions, (int) $user['id'], $claimToken)
         );
         inv_ok($result, 'Finding recorded');
+    },
+
+    // PHASE V2.14.10.1 Gate 1 — the session's FROZEN unit snapshot for one
+    // item: the ONLY unit source a FINDINGS_V1 counting screen may read
+    // once the session has started (never GET /items/{id}/units again).
+    // Session-scoped (any active team member of either role, or a
+    // privileged supervisor) — read-only, so no warehouse-scope check is
+    // needed beyond the session-scoped grant itself.
+    'GET /stock-opname/{id}/items/{itemId}/units' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        $sessionId = (int) $params['id'];
+        $itemId = (int) $params['itemId'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        $auth = inv_require_so_counter_or_permission($pdo, $user, $sessionId, 'STOCK_OPNAME_MANAGE');
+        if ($auth['mode'] === 'privileged') {
+            inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        }
+        inv_ok(StockOpnameService::getSnapshotUnitsForItem($pdo, $sessionId, $itemId), 'OK');
+    },
+
+    // PHASE V2.14.10.1 Gate 5 — on-demand detail behind the lightweight
+    // counter list's finding_count: a counter's OWN team's finding history
+    // for exactly one item, fetched only when they open its panel.
+    'GET /stock-opname/{id}/items/{itemId}/my-findings' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        $sessionId = (int) $params['id'];
+        $itemId = (int) $params['itemId'];
+        $role = StockOpnameService::assertIsActiveCounter($pdo, $sessionId, (int) $user['id']);
+        inv_ok(StockOpnameService::getMyFindingsForItem($pdo, $sessionId, $itemId, $role), 'OK');
+    },
+
+    // PHASE V2.14.10.1 Gate 5 — supervisor drilldown for one line, BOTH
+    // teams, INCLUDING voided entries: STOCK_OPNAME_SUPERVISE + warehouse-
+    // scoped, same tier as GET .../review, fetched only when a supervisor
+    // opens "Riwayat Temuan" for that specific SKU.
+    'GET /stock-opname/{id}/items/{itemId}/findings' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $itemId = (int) $params['itemId'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        inv_ok(StockOpnameService::getLineFindingsForSupervisor($pdo, $sessionId, $itemId), 'OK');
+    },
+
+    // PHASE V2.14.10.1 Gate 2 — explicit, one-way, supervisor-only upgrade
+    // of a LEGACY_DUAL_COUNT session to FINDINGS_V1 (see
+    // StockOpnameService::upgradeToFindingsMode()'s docblock for the exact
+    // zero-counts precondition and what it freezes). Same tier as
+    // assign-team — STOCK_OPNAME_MANAGE + warehouse-scoped.
+    'POST /stock-opname/{id}/upgrade-to-findings' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_MANAGE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::upgradeToFindingsMode($tx, $sessionId, (int) $user['id'])
+        );
+        inv_ok($result, 'Session upgraded to Team/Findings mode');
     },
 
     // PHASE V2.14.10 — supervisor-only correction: void (never rewrite) a

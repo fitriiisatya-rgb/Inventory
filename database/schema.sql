@@ -694,6 +694,15 @@ CREATE TABLE stock_opname_sessions (
     -- session-level status was added for that (the per-line match_status
     -- below carries that granularity instead).
     status          ENUM('OPEN','FINALIZED','POSTED','CANCELLED') NOT NULL DEFAULT 'OPEN',
+    -- PHASE V2.14.10.1 Gate 2: explicit write-model discriminator, never
+    -- inferred from whether findings happen to exist. A pre-existing row
+    -- (any session created before this phase) is LEGACY_DUAL_COUNT via this
+    -- column's DEFAULT; StockOpnameService::start() explicitly sets
+    -- FINDINGS_V1 on every session created from this phase onward. A
+    -- LEGACY_DUAL_COUNT session may be explicitly upgraded in place by a
+    -- supervisor (StockOpnameService::upgradeToFindingsMode()), only while
+    -- it has zero submitted P1/P2 counts.
+    counting_model  ENUM('LEGACY_DUAL_COUNT','FINDINGS_V1') NOT NULL DEFAULT 'LEGACY_DUAL_COUNT',
     created_by      INT UNSIGNED NOT NULL,
     -- PHASE V2.12A: independent blind counters — enforced distinct by
     -- chk_sos_p1_p2_different below AND by the service layer (Section 3).
@@ -749,6 +758,13 @@ CREATE TABLE stock_opname_lines (
     -- once a count lands, so no separate counted-by column was added.
     p1_claimed_by_user_id INT UNSIGNED NULL,
     p1_claimed_at         DATETIME NULL,
+    -- PHASE V2.14.10.1 Gate 4: opaque token minted fresh by claimItem() on
+    -- every successful claim; submitFinding() must present the exact
+    -- current token (verified inside the same transaction as the insert)
+    -- or the write is refused (CLAIM_LOST) — protects against a stale
+    -- browser tab saving under a claim that has since moved to someone
+    -- else or simply expired.
+    p1_claim_token        VARCHAR(36) NULL,
     p2_qty_base          DECIMAL(20,6) NULL,
     p2_user_id           INT UNSIGNED NULL,
     p2_submitted_at       DATETIME NULL,
@@ -758,6 +774,7 @@ CREATE TABLE stock_opname_lines (
     p2_notes             VARCHAR(255) NULL,
     p2_claimed_by_user_id INT UNSIGNED NULL,
     p2_claimed_at         DATETIME NULL,
+    p2_claim_token        VARCHAR(36) NULL,
     -- PHASE V2.12A: only ever populated for a MISMATCH line, by an
     -- authorized recount user (Section 9) — original P1/P2 above are never
     -- overwritten.
@@ -830,7 +847,11 @@ CREATE TABLE stock_opname_team_members (
     -- see the migration file's comment for why a DB constraint can't
     -- express it without losing removal history).
     UNIQUE KEY uq_sotm_session_role_user (session_id, team_role, user_id),
-    INDEX idx_sotm_session_active (session_id, active)
+    INDEX idx_sotm_session_active (session_id, active),
+    -- PHASE V2.14.10.1 Gate 9: supports "this role's active members for
+    -- this session" without falling back to idx_sotm_session_active's
+    -- coarser (session_id, active) scan.
+    INDEX idx_sotm_session_role_active (session_id, team_role, active)
 ) ENGINE=InnoDB;
 
 -- PHASE V2.14.10 — append-only counting EVENTS: "P1/P2 count is written
@@ -865,7 +886,11 @@ CREATE TABLE stock_opname_findings (
     CONSTRAINT fk_sof_line FOREIGN KEY (stock_opname_line_id) REFERENCES stock_opname_lines(id),
     CONSTRAINT fk_sof_user FOREIGN KEY (counter_user_id) REFERENCES users(id),
     CONSTRAINT fk_sof_voided_by FOREIGN KEY (voided_by) REFERENCES users(id),
-    INDEX idx_sof_line_role (stock_opname_line_id, team_role, voided_at)
+    INDEX idx_sof_line_role (stock_opname_line_id, team_role, voided_at),
+    -- PHASE V2.14.10.1 Gate 9: supports session-wide/team-progress
+    -- aggregation and a per-counter productivity query without a full scan.
+    INDEX idx_sof_session_role_void (session_id, team_role, voided_at),
+    INDEX idx_sof_counter_created (counter_user_id, created_at)
 ) ENGINE=InnoDB;
 
 -- Multi-unit breakdown of ONE finding (e.g. "5 Karton + 4 Pcs" is two rows
@@ -883,6 +908,38 @@ CREATE TABLE stock_opname_finding_units (
     CONSTRAINT fk_sofu_finding FOREIGN KEY (finding_id) REFERENCES stock_opname_findings(id),
     CONSTRAINT fk_sofu_unit FOREIGN KEY (unit_id) REFERENCES units(id),
     INDEX idx_sofu_finding (finding_id)
+) ENGINE=InnoDB;
+
+-- PHASE V2.14.10.1 Gate 1: FROZEN unit conversions for one Stock Opname
+-- session. Snapshotted ONCE — at session start (StockOpnameService::start())
+-- or at the moment a supervisor upgrades a legacy session to FINDINGS_V1
+-- (upgradeToFindingsMode()) — from whatever item_unit_conversions rows are
+-- active at that instant. Once a session is FINDINGS_V1, submitFinding()
+-- resolves every unit_id against THIS table only, never a live
+-- item_unit_conversions/UnitConversionService lookup, so a packaging change
+-- made mid-session can never change what an already-open session computes
+-- for either team, at any point in that session's lifetime. A brand-new
+-- session started after the change picks up the new factor naturally,
+-- because it snapshots fresh at its own start time. GET /items/{id}/units
+-- is used only to BUILD this snapshot — never read again by a counter once
+-- the session has started.
+CREATE TABLE stock_opname_line_units (
+    id                         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    session_id                 INT UNSIGNED NOT NULL,
+    stock_opname_line_id       BIGINT UNSIGNED NOT NULL,
+    item_id                    INT UNSIGNED NOT NULL,
+    unit_id                    INT UNSIGNED NOT NULL,
+    unit_code_snapshot         VARCHAR(32) NOT NULL,
+    unit_name_snapshot         VARCHAR(128) NOT NULL,
+    conversion_factor_snapshot DECIMAL(20,6) NOT NULL,
+    is_base_unit               TINYINT(1) NOT NULL DEFAULT 0,
+    snapshot_at                DATETIME NOT NULL,
+    CONSTRAINT fk_solu_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
+    CONSTRAINT fk_solu_line FOREIGN KEY (stock_opname_line_id) REFERENCES stock_opname_lines(id),
+    CONSTRAINT fk_solu_item FOREIGN KEY (item_id) REFERENCES items(id),
+    CONSTRAINT fk_solu_unit FOREIGN KEY (unit_id) REFERENCES units(id),
+    UNIQUE KEY uq_solu_line_unit (stock_opname_line_id, unit_id),
+    INDEX idx_solu_session (session_id)
 ) ENGINE=InnoDB;
 
 CREATE TABLE stock_adjustments (

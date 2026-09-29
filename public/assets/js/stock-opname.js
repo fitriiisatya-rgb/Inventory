@@ -106,6 +106,29 @@ const StockOpname = (() => {
                 // be misread as "legacy" and rendered the single-count
                 // form by mistake.
                 if (session.workflow_mode === 'DUAL_COUNT') {
+                    // PHASE V2.14.10.1 Gate 2 — a LEGACY_DUAL_COUNT session
+                    // is NEVER auto-converted; a supervisor must explicitly
+                    // upgrade it, and only while it still has zero
+                    // submitted P1/P2 counts (server-enforced — this button
+                    // is shown unconditionally whenever the mode is
+                    // eligible and the server is the final word).
+                    if (canSupervise() && (session.counting_model || 'LEGACY_DUAL_COUNT') === 'LEGACY_DUAL_COUNT') {
+                        const upgradeCard = UI.el('div', { class: 'card' }, [
+                            UI.el('div', { class: 'card-title' }, 'Mode Hitung: Legacy (Single Count per Role)'),
+                            UI.el('div', { style: 'color:var(--text3); font-size:0.85rem; margin-bottom:8px;' },
+                                'Upgrade ke Mode Tim/Findings mengizinkan banyak anggota per tim, satuan dinamis dari master barang, dan Tambah Temuan berulang. Hanya bisa dilakukan selama BELUM ADA hasil hitung P1/P2 yang tersimpan.'),
+                        ]);
+                        const upgradeBtn = UI.el('button', { class: 'btn btn-secondary' }, 'Upgrade ke Mode Tim/Findings');
+                        upgradeBtn.addEventListener('click', async () => {
+                            try {
+                                await InvApi.upgradeOpnameToFindings(session.id);
+                                UI.toast('Sesi berhasil di-upgrade ke Mode Tim/Findings.', 'success');
+                                await renderSession(session.id);
+                            } catch (err) { UI.handleApiError(err); }
+                        });
+                        upgradeCard.appendChild(upgradeBtn);
+                        body.appendChild(upgradeCard);
+                    }
                     body.appendChild(await buildAssignCountersCard(session));
                     if (canSupervise()) {
                         body.appendChild(await buildSupervisorReviewCard(session));
@@ -300,6 +323,13 @@ const StockOpname = (() => {
         const state = {
             view: initialView, filterText: '', filterStatus: 'ALL', filterItemStatus: 'ALL', filterCategory: 'ALL', page: 0,
             activeItemId: null, unitsCache: {},
+            // PHASE V2.14.10.1 Gate 4 — the claim_token from the most
+            // recent claimOpnameItem() call for the active item; required
+            // by submitOpnameFinding(). Gate 6 — panelMode is 'form' (a
+            // blank entry the counter is filling in) or 'summary' (history
+            // + aggregate shown after a save, offering only a non-writing
+            // "+Tambah Temuan" button).
+            activeClaimToken: null, panelMode: 'form',
         };
 
         const wrap = UI.el('div');
@@ -441,6 +471,8 @@ const StockOpname = (() => {
             try {
                 const claim = await InvApi.claimOpnameItem(state.view.session_id, state.view.role, itemId);
                 state.activeItemId = claim.item_id;
+                state.activeClaimToken = claim.claim_token;
+                state.panelMode = 'form';
                 await refetch();
                 await renderPanel();
                 panelHost.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -459,6 +491,8 @@ const StockOpname = (() => {
                 try { await InvApi.releaseOpnameItem(state.view.session_id, state.view.role, state.activeItemId); } catch (err) { /* best-effort */ }
             }
             state.activeItemId = null;
+            state.activeClaimToken = null;
+            state.panelMode = 'form';
             await refetch();
             renderPanelEmpty();
         }
@@ -468,6 +502,11 @@ const StockOpname = (() => {
             panelHost.appendChild(UI.el('div', { class: 'alert alert-info' }, 'Pilih barang dari daftar ("Hitung"), scan barcode, atau klik "Ambil Item Berikutnya" untuk mulai menghitung.'));
         }
 
+        // PHASE V2.14.10.1 Gate 5 — units and the team's finding history
+        // for this ONE item are fetched here, on demand, when the panel
+        // actually opens — never bundled into the bulk list request.
+        // Gate 1 — units come from the session's FROZEN snapshot
+        // (opnameItemUnits), never live GET /items/{id}/units.
         async function renderPanel() {
             const line = state.view.lines.find((l) => l.item_id === state.activeItemId);
             if (!line) { renderPanelEmpty(); return; }
@@ -475,7 +514,7 @@ const StockOpname = (() => {
             let units = state.unitsCache[state.activeItemId];
             if (!units) {
                 try {
-                    units = await InvApi.itemUnits(state.activeItemId);
+                    units = await InvApi.opnameItemUnits(state.view.session_id, state.activeItemId);
                     state.unitsCache[state.activeItemId] = units;
                 } catch (err) {
                     UI.handleApiError(err);
@@ -483,6 +522,15 @@ const StockOpname = (() => {
                 }
             }
             const baseUnitCode = line.base_unit_code;
+
+            let findings = [];
+            try {
+                findings = await InvApi.opnameMyFindingsForItem(state.view.session_id, state.activeItemId);
+            } catch (err) {
+                UI.handleApiError(err);
+            }
+            const totalAkumulasi = findings.reduce((sum, f) => sum + f.base_qty, 0);
+            const isAdditional = findings.length > 0;
 
             panelHost.innerHTML = '';
             panelHost.appendChild(UI.el('div', { class: 'card-title' }, `${line.sku} — ${line.name}`));
@@ -492,11 +540,65 @@ const StockOpname = (() => {
             closeBtn.addEventListener('click', closePanel);
             panelHost.appendChild(closeBtn);
 
+            // Riwayat Temuan — THIS TEAM's own history only (already
+            // structurally guaranteed by getMyFindingsForItem() never
+            // returning the other team's data at all). Shown in BOTH panel
+            // modes (form and summary).
+            const findingsHost = UI.el('div', { style: 'margin-top:10px; border:1px solid var(--border); border-radius:8px;' });
+            findingsHost.appendChild(UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center; padding:6px 10px; font-weight:600;' }, [
+                document.createTextNode('Riwayat Temuan (Tim)'),
+            ]));
+            if (findings.length === 0) {
+                findingsHost.appendChild(UI.el('div', { style: 'padding:8px 10px; color:var(--text3); font-size:0.85rem;' }, 'Belum ada temuan untuk barang ini.'));
+            } else {
+                findings.forEach((f, idx) => {
+                    const unitBreakdown = f.units.map((u) => `${UI.formatNumber(u.input_qty)} ${u.unit_code}`).join(' + ');
+                    findingsHost.appendChild(UI.el('div', { class: 'opname-finding-row' }, [
+                        UI.el('div', {}, `Temuan ${idx + 1}: ${unitBreakdown} = ${UI.formatNumber(f.base_qty)} ${baseUnitCode} — oleh ${f.counter_username}`),
+                        UI.el('div', { style: 'color:var(--text3);' }, f.created_at),
+                    ]));
+                });
+            }
+            findingsHost.appendChild(UI.el('div', { class: 'compact-summary', style: 'padding:8px 10px;' }, [
+                UI.el('div', {}, [document.createTextNode('Total Akumulasi Tim: '), UI.el('b', {}, `${UI.formatNumber(totalAkumulasi)} ${baseUnitCode}`)]),
+            ]));
+            panelHost.appendChild(findingsHost);
+
+            // PHASE V2.14.10.1 Gate 6 — SUMMARY mode: after any successful
+            // save, the panel shows ONLY the history/aggregate above and a
+            // "+Tambah Temuan" button that NEVER writes anything by
+            // itself — it only re-claims (a fresh claim_token) and swaps
+            // to a blank FORM mode. This is verified by an automated test
+            // asserting the finding row count is unchanged immediately
+            // after clicking it, before "Simpan Temuan" is ever pressed.
+            if (state.panelMode === 'summary') {
+                const addFindingBtn = UI.el('button', { class: 'btn btn-secondary' }, '+ Tambah Temuan');
+                addFindingBtn.addEventListener('click', async () => {
+                    try {
+                        const claim = await InvApi.claimOpnameItem(state.view.session_id, state.view.role, state.activeItemId);
+                        state.activeClaimToken = claim.claim_token;
+                        state.panelMode = 'form';
+                        await renderPanel();
+                    } catch (err) {
+                        UI.handleApiError(err);
+                        UI.toast((err && err.message) || 'Tidak dapat mengklaim ulang barang ini.', 'error');
+                    }
+                });
+                panelHost.appendChild(UI.el('div', { class: 'opname-sticky-actions' }, [addFindingBtn]));
+                return;
+            }
+
+            // FORM mode — a fresh, blank entry. Labeled "Temuan Baru" once
+            // at least one finding already exists (the Tambah Temuan case).
+            if (isAdditional) {
+                panelHost.appendChild(UI.el('div', { class: 'alert alert-info', style: 'margin-top:8px;' }, 'Temuan Baru'));
+            }
+
             const unitInputs = {};
             const unitInputsHost = UI.el('div', { style: 'margin-top:12px;' });
             units.forEach((u) => {
                 const input = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', placeholder: '0' });
-                unitInputs[u.id] = input;
+                unitInputs[u.unit_id] = input;
                 unitInputsHost.appendChild(UI.el('div', { class: 'opname-unit-input-row' }, [
                     UI.el('label', {}, `${u.code} (${u.name})`), input,
                 ]));
@@ -506,7 +608,7 @@ const StockOpname = (() => {
             const totalHost = UI.el('div', { class: 'opname-total-otomatis' });
             function recomputeTotalPreview() {
                 let total = 0;
-                units.forEach((u) => { total += (Number(unitInputs[u.id].value) || 0) * Number(u.conversion_to_base); });
+                units.forEach((u) => { total += (Number(unitInputs[u.unit_id].value) || 0) * Number(u.conversion_to_base); });
                 totalHost.textContent = `Total Otomatis (dalam satuan dasar: ${baseUnitCode}): ${UI.formatNumber(total)}`;
             }
             Object.values(unitInputs).forEach((inp) => inp.addEventListener('input', recomputeTotalPreview));
@@ -526,40 +628,20 @@ const StockOpname = (() => {
             ]));
             panelHost.appendChild(UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Keterangan'), notesInput]));
 
-            // Riwayat Temuan — THIS TEAM's own history only (already
-            // structurally guaranteed by getForCounter() never returning
-            // the other team's data at all).
-            const findingsHost = UI.el('div', { style: 'margin-top:10px; border:1px solid var(--border); border-radius:8px;' });
-            findingsHost.appendChild(UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center; padding:6px 10px; font-weight:600;' }, [
-                document.createTextNode('Riwayat Temuan (Tim)'),
-            ]));
-            if (line.findings.length === 0) {
-                findingsHost.appendChild(UI.el('div', { style: 'padding:8px 10px; color:var(--text3); font-size:0.85rem;' }, 'Belum ada temuan untuk barang ini.'));
-            } else {
-                line.findings.forEach((f, idx) => {
-                    const unitBreakdown = f.units.map((u) => `${UI.formatNumber(u.input_qty)} ${u.unit_code}`).join(' + ');
-                    findingsHost.appendChild(UI.el('div', { class: 'opname-finding-row' }, [
-                        UI.el('div', {}, `Temuan ${idx + 1}: ${unitBreakdown} = ${UI.formatNumber(f.base_qty)} ${baseUnitCode} — oleh ${f.counter_username}`),
-                        UI.el('div', { style: 'color:var(--text3);' }, f.created_at),
-                    ]));
-                });
-            }
-            const totalAkumulasi = line.findings.reduce((sum, f) => sum + f.base_qty, 0);
-            findingsHost.appendChild(UI.el('div', { class: 'compact-summary', style: 'padding:8px 10px;' }, [
-                UI.el('div', {}, [document.createTextNode('Total Akumulasi Tim: '), UI.el('b', {}, `${UI.formatNumber(totalAkumulasi)} ${baseUnitCode}`)]),
-            ]));
-            panelHost.appendChild(findingsHost);
-
             const alertBox = UI.el('div');
             panelHost.appendChild(alertBox);
 
-            async function submitFinding(keepPanelOpen) {
-                const inputsWithValues = units.filter((u) => Number(unitInputs[u.id].value) > 0);
-                if (inputsWithValues.length === 0) {
-                    UI.toast('Isi minimal satu satuan qty.', 'error');
-                    return;
-                }
-                const unitPayload = inputsWithValues.map((u) => ({ unit_id: u.id, qty: Number(unitInputs[u.id].value) }));
+            // PHASE V2.14.10.1 Gate 3 — every rendered unit row is sent,
+            // including a zero value: an untouched/blank input is a real
+            // "checked this unit, found none" answer, never silently
+            // dropped. The server enforces the actual zero-result rule
+            // (valid only for the very first finding on this line/role).
+            // Gate 4 — retries ONCE, transparently, on CLAIM_LOST: the
+            // claim is refreshed and the exact same payload resubmitted,
+            // so an expired-but-uncontested lease never forces the
+            // counter to re-type their entry.
+            async function saveFinding(retryOnClaimLost) {
+                const unitPayload = units.map((u) => ({ unit_id: u.unit_id, qty: Number(unitInputs[u.unit_id].value || 0) }));
                 const conditions = {
                     rusak_qty: Number(rusakInput.value || 0),
                     expired_qty: Number(expiredInput.value || 0),
@@ -568,25 +650,30 @@ const StockOpname = (() => {
                 };
                 alertBox.innerHTML = '';
                 try {
-                    await InvApi.submitOpnameFinding(state.view.session_id, state.view.role, state.activeItemId, unitPayload, conditions);
+                    await InvApi.submitOpnameFinding(state.view.session_id, state.view.role, state.activeItemId, unitPayload, conditions, state.activeClaimToken);
                     UI.toast('Temuan tersimpan.', 'success');
+                    state.activeClaimToken = null;
+                    state.panelMode = 'summary';
                     await refetch();
-                    if (keepPanelOpen) {
-                        await renderPanel(); // stays on same item, inputs reset (fresh DOM)
-                    } else {
-                        state.activeItemId = null;
-                        renderPanelEmpty();
-                    }
+                    await renderPanel();
                 } catch (err) {
+                    if (err && err.code === 'CLAIM_LOST' && retryOnClaimLost) {
+                        try {
+                            const claim = await InvApi.claimOpnameItem(state.view.session_id, state.view.role, state.activeItemId);
+                            state.activeClaimToken = claim.claim_token;
+                            await saveFinding(false);
+                            return;
+                        } catch (retryErr) {
+                            // fall through to the generic error display below
+                        }
+                    }
                     alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal menyimpan temuan.'));
                 }
             }
 
-            const addFindingBtn = UI.el('button', { class: 'btn btn-secondary' }, '+ Tambah Temuan');
-            const saveBtn = UI.el('button', { class: 'btn btn-primary' }, '💾 Simpan Hitungan');
-            addFindingBtn.addEventListener('click', () => submitFinding(true));
-            saveBtn.addEventListener('click', () => submitFinding(false));
-            panelHost.appendChild(UI.el('div', { class: 'opname-sticky-actions' }, [addFindingBtn, saveBtn]));
+            const saveBtn = UI.el('button', { class: 'btn btn-primary' }, isAdditional ? '💾 Simpan Temuan' : '💾 Simpan Hitungan');
+            saveBtn.addEventListener('click', () => saveFinding(true));
+            panelHost.appendChild(UI.el('div', { class: 'opname-sticky-actions' }, [saveBtn]));
         }
 
         renderChrome();
@@ -875,10 +962,12 @@ const StockOpname = (() => {
             resolveBtn.addEventListener('click', () => resolveConditionsItem(session.id, l));
             actionCell.appendChild(resolveBtn);
         }
-        // PHASE V2.14.10 — full finding drilldown (both teams, including
-        // voided entries) — supervisor-only data, already scoped that way
-        // by review() itself.
-        if ((l.p1_findings && l.p1_findings.length) || (l.p2_findings && l.p2_findings.length)) {
+        // PHASE V2.14.10.1 Gate 5 — review() now only carries a lightweight
+        // per-role finding_count (never the full arrays); the button shows
+        // whenever either count is non-zero, and the full BOTH-teams
+        // history (including voided) is fetched on demand only when a
+        // supervisor actually opens the drilldown.
+        if ((l.p1_finding_count || 0) > 0 || (l.p2_finding_count || 0) > 0) {
             const findingsBtn = UI.el('button', { class: 'btn btn-secondary btn-sm', style: 'margin-left:6px;' }, 'Riwayat Temuan');
             findingsBtn.addEventListener('click', () => showFindingsDrilldown(session.id, l));
             actionCell.appendChild(findingsBtn);
@@ -990,7 +1079,14 @@ const StockOpname = (() => {
     // View": "P1 finding details / P2 finding details ... who counted each
     // finding / timestamps"). Voiding here is the ONLY correction path —
     // a finding's own quantities are never editable.
-    function showFindingsDrilldown(sessionId, line) {
+    async function showFindingsDrilldown(sessionId, line) {
+        let both;
+        try {
+            both = await InvApi.opnameLineFindingsForSupervisor(sessionId, line.item_id);
+        } catch (err) {
+            UI.handleApiError(err);
+            return;
+        }
         function renderTeamFindings(role, findings, overlayRef) {
             if (!findings.length) return UI.el('div', { style: 'color:var(--text3); padding:6px 0;' }, `Belum ada temuan Tim ${role}.`);
             const host = UI.el('div');
@@ -1029,9 +1125,9 @@ const StockOpname = (() => {
         overlay.appendChild(content);
         document.body.appendChild(overlay);
         bodyHost.appendChild(UI.el('div', { class: 'card-title', style: 'font-size:0.9rem;' }, 'Tim P1'));
-        bodyHost.appendChild(renderTeamFindings('P1', line.p1_findings || [], overlay));
+        bodyHost.appendChild(renderTeamFindings('P1', both.p1 || [], overlay));
         bodyHost.appendChild(UI.el('div', { class: 'card-title', style: 'font-size:0.9rem; margin-top:12px;' }, 'Tim P2'));
-        bodyHost.appendChild(renderTeamFindings('P2', line.p2_findings || [], overlay));
+        bodyHost.appendChild(renderTeamFindings('P2', both.p2 || [], overlay));
         closeBtn.addEventListener('click', () => overlay.remove());
         overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) overlay.remove(); });
     }

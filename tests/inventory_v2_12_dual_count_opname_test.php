@@ -110,7 +110,7 @@ $itemB = makeItem($pdo, $kgUnitId, 'V212-B');
 postOpeningIn($pdo, $itemA, $kgUnitId, $scmId, 100, 1000, $adminUserId);
 postOpeningIn($pdo, $itemB, $kgUnitId, $scmId, 50, 2000, $adminUserId);
 
-$sessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemA, $itemB]));
+$sessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemA, $itemB], 'LEGACY_DUAL_COUNT'));
 $session = StockOpnameService::get($pdo, $sessionId);
 check('session opened with OPEN status', $session['status'] === 'OPEN');
 check('session has a session_number (SO-YYYYMMDD-####)', is_string($session['session_number']) && str_starts_with($session['session_number'], 'SO-'), (string) $session['session_number']);
@@ -123,7 +123,7 @@ check('session has exactly 2 lines with correct system qty snapshot', count($ses
 echo "\n== 2. warehouse isolation ==\n";
 $cibadakItem = makeItem($pdo, $kgUnitId, 'V212-CBD');
 postOpeningIn($pdo, $cibadakItem, $kgUnitId, $cibadakId, 30, 500, $adminUserId);
-$cibadakSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $cibadakId, $adminUserId, [$cibadakItem]));
+$cibadakSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $cibadakId, $adminUserId, [$cibadakItem], 'LEGACY_DUAL_COUNT'));
 $cibadakSession = StockOpnameService::get($pdo, $cibadakSessionId);
 check('CIBADAK session is independent, own warehouse_id', (int) $cibadakSession['warehouse_id'] === $cibadakId);
 check('SCM session still shows warehouse SCM (no cross-contamination)', (int) $session['warehouse_id'] === $scmId);
@@ -134,7 +134,7 @@ check('SCM session still shows warehouse SCM (no cross-contamination)', (int) $s
 echo "\n== 3. duplicate active session blocked ==\n";
 $dupErr = null;
 try {
-    Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemA]));
+    Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemA], 'LEGACY_DUAL_COUNT'));
 } catch (ValidationException $e) { $dupErr = $e->getMessage(); }
 check('a second OPEN session on the same (SCM) warehouse is rejected', $dupErr !== null, (string) $dupErr);
 
@@ -247,7 +247,7 @@ check('original P2 value (97) is preserved untouched', abs((float) $lineA2['p2_q
 echo "\n== 16. count zero distinct from uncounted ==\n";
 Database::transaction(fn (PDO $tx) => StockOpnameService::cancel($tx, $cibadakSessionId, 'freeing CIBADAK for the count-zero test', $adminUserId));
 $itemZero = makeItem($pdo, $kgUnitId, 'V212-ZERO');
-$zeroSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $cibadakId, $adminUserId, [$itemZero]));
+$zeroSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $cibadakId, $adminUserId, [$itemZero], 'LEGACY_DUAL_COUNT'));
 // no assignment/count yet — item is NOT_COUNTED
 $reviewZero1 = StockOpnameService::review($pdo, $zeroSessionId);
 check('an item with no P1/P2 submission at all is PENDING (not counted), not COUNTED_ZERO', $reviewZero1['lines'][0]['match_status'] === 'PENDING' && $reviewZero1['lines'][0]['p1_qty_base'] === null);
@@ -288,7 +288,7 @@ Database::transaction(fn (PDO $tx) => StockOpnameService::post($tx, $sessionId, 
 echo "\n== 20. positive adjustment via existing StockAdjustmentService ==\n";
 $itemPos = makeItem($pdo, $kgUnitId, 'V212-POS');
 postOpeningIn($pdo, $itemPos, $kgUnitId, $scmId, 20, 1500, $adminUserId);
-$posSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemPos]));
+$posSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemPos], 'LEGACY_DUAL_COUNT'));
 Database::transaction(fn (PDO $tx) => StockOpnameService::assignCounters($tx, $posSessionId, ['p1_user_id' => $p1UserId, 'p2_user_id' => $p2UserId], $adminUserId));
 Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $posSessionId, 'p1', $itemPos, 25.0, $p1UserId));
 Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $posSessionId, 'p2', $itemPos, 25.0, $p2UserId));
@@ -305,7 +305,7 @@ check('stock after posting reflects the physical count (25), via the real adjust
 echo "\n== 21/22. negative adjustment, posted via the existing adjustment service ==\n";
 $itemNeg = makeItem($pdo, $kgUnitId, 'V212-NEG');
 postOpeningIn($pdo, $itemNeg, $kgUnitId, $scmId, 40, 1800, $adminUserId);
-$negSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemNeg]));
+$negSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemNeg], 'LEGACY_DUAL_COUNT'));
 Database::transaction(fn (PDO $tx) => StockOpnameService::assignCounters($tx, $negSessionId, ['p1_user_id' => $p1UserId, 'p2_user_id' => $p2UserId], $adminUserId));
 Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $negSessionId, 'p1', $itemNeg, 33.0, $p1UserId));
 Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $negSessionId, 'p2', $itemNeg, 33.0, $p2UserId));
@@ -338,7 +338,7 @@ check('double-POST never created a second ADJUSTMENT transaction for the same se
 echo "\n== 24. period lock ==\n";
 $itemLocked = makeItem($pdo, $kgUnitId, 'V212-LOCK');
 postOpeningIn($pdo, $itemLocked, $kgUnitId, $scmId, 10, 1000, $adminUserId);
-$lockedSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemLocked]));
+$lockedSessionId = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $scmId, $adminUserId, [$itemLocked], 'LEGACY_DUAL_COUNT'));
 Database::transaction(fn (PDO $tx) => StockOpnameService::assignCounters($tx, $lockedSessionId, ['p1_user_id' => $p1UserId, 'p2_user_id' => $p2UserId], $adminUserId));
 Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $lockedSessionId, 'p1', $itemLocked, 9.0, $p1UserId));
 Database::transaction(fn (PDO $tx) => StockOpnameService::submitCount($tx, $lockedSessionId, 'p2', $itemLocked, 9.0, $p2UserId));
@@ -492,7 +492,7 @@ try {
     $cbdCsrf = $cbdLogin['body']['data']['csrf_token'] ?? '';
 
     // Open a fresh SCM session over HTTP for the permission/isolation checks.
-    $httpOpen = httpCall('POST', "{$base}/stock-opname", ['warehouse_id' => $scmId, 'item_ids' => [$itemA]], $adminJar, $adminCsrf);
+    $httpOpen = httpCall('POST', "{$base}/stock-opname", ['warehouse_id' => $scmId, 'item_ids' => [$itemA], 'counting_model' => 'LEGACY_DUAL_COUNT'], $adminJar, $adminCsrf);
     $httpSessionId = $httpOpen['body']['data']['session_id'] ?? null;
     check('HTTP: SUPERADMIN can open a new SCM session (previous ones are POSTED/CANCELLED, warehouse free)', $httpOpen['status'] === 200, json_encode($httpOpen['body']));
 

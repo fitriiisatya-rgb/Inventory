@@ -46,8 +46,27 @@ final class StockOpnameService
     // permanently blocks a teammate from picking up that SKU.
     private const CLAIM_LEASE_SECONDS = 900;
 
-    public static function start(PDO $pdo, int $warehouseId, int $createdBy, ?array $itemIds = null): int
+    /**
+     * PHASE V2.14.10.1 Gate 2 — $countingModel is explicit, never inferred:
+     * every caller of start() states up front which write-model this
+     * session will use. Defaults to FINDINGS_V1 (the going-forward model
+     * for any new session created through the real app's "Mulai Opname"
+     * action) — a caller that genuinely needs the legacy write-once P1/P2
+     * model on a BRAND NEW session (e.g. an integration not yet migrated,
+     * or a test exercising that model specifically) passes
+     * 'LEGACY_DUAL_COUNT' explicitly. A pre-existing session (created
+     * before this phase) is never touched by this parameter at all — it
+     * keeps LEGACY_DUAL_COUNT via the column's own DEFAULT — and the only
+     * way one of those moves to FINDINGS_V1 is the explicit, one-way
+     * upgradeToFindingsMode() (only while it still has zero submitted
+     * counts).
+     */
+    public static function start(PDO $pdo, int $warehouseId, int $createdBy, ?array $itemIds = null, string $countingModel = 'FINDINGS_V1'): int
     {
+        if (!in_array($countingModel, ['LEGACY_DUAL_COUNT', 'FINDINGS_V1'], true)) {
+            throw new ValidationException(['counting_model must be LEGACY_DUAL_COUNT or FINDINGS_V1']);
+        }
+
         // PHASE V2.13: start() never posts a FIFO transaction itself, so it
         // is not covered by FifoService's own guard — an inactive warehouse
         // must not be allowed to begin a physical-count workflow either.
@@ -61,12 +80,12 @@ final class StockOpnameService
         $scope = $itemIds === null ? 'ALL_ACTIVE_STOCK' : 'SELECTED_ITEMS';
         $sessionNumber = NumberingService::next($pdo, 'SO', $now);
         $stmt = $pdo->prepare(
-            'INSERT INTO stock_opname_sessions (warehouse_id, session_date, session_uuid, session_number, scope, status, created_by, created_at)
-             VALUES (:wh, :date, :uuid, :session_number, :scope, \'OPEN\', :created_by, :now)'
+            'INSERT INTO stock_opname_sessions (warehouse_id, session_date, session_uuid, session_number, scope, status, counting_model, created_by, created_at)
+             VALUES (:wh, :date, :uuid, :session_number, :scope, \'OPEN\', :counting_model, :created_by, :now)'
         );
         $stmt->execute([
             'wh' => $warehouseId, 'date' => substr($now, 0, 10), 'uuid' => $uuid,
-            'session_number' => $sessionNumber, 'scope' => $scope, 'created_by' => $createdBy, 'now' => $now,
+            'session_number' => $sessionNumber, 'scope' => $scope, 'counting_model' => $countingModel, 'created_by' => $createdBy, 'now' => $now,
         ]);
         $sessionId = (int) $pdo->lastInsertId();
 
@@ -86,9 +105,146 @@ final class StockOpnameService
             $lineStmt->execute(['session_id' => $sessionId, 'item_id' => $itemId, 'system_qty' => $stock['qty_base'], 'cost' => $cost]);
         }
 
-        AuditService::log($pdo, $createdBy, 'system', 'STOCK_OPNAME_START', 'stock_opname_sessions', $sessionId, null, ['warehouse_id' => $warehouseId, 'item_count' => count($itemIds), 'scope' => $scope, 'session_number' => $sessionNumber], null);
+        // PHASE V2.14.10.1 Gate 1 — freeze every session item's unit
+        // conversions RIGHT NOW, at session creation, before anyone can
+        // start counting. Only meaningful for FINDINGS_V1 — a
+        // LEGACY_DUAL_COUNT session never uses findings/units at all and
+        // gets its snapshot later, if and when it is explicitly upgraded
+        // (see upgradeToFindingsMode()).
+        if ($countingModel === 'FINDINGS_V1') {
+            self::snapshotSessionUnits($pdo, $sessionId, $now);
+        }
+
+        AuditService::log($pdo, $createdBy, 'system', 'STOCK_OPNAME_START', 'stock_opname_sessions', $sessionId, null, ['warehouse_id' => $warehouseId, 'item_count' => count($itemIds), 'scope' => $scope, 'session_number' => $sessionNumber, 'counting_model' => $countingModel], null);
 
         return $sessionId;
+    }
+
+    /**
+     * PHASE V2.14.10.1 Gate 1 — snapshot EVERY unit currently valid (as of
+     * $asOf) for every item already on this session's lines into
+     * stock_opname_line_units, once. This is the ONLY unit source
+     * submitFinding() ever reads once a session is FINDINGS_V1 — a
+     * mid-session change to item_unit_conversions can never alter what an
+     * already-open session computes for either team, because this table is
+     * never re-read from the live conversions after this call. A new
+     * session started after a conversion change naturally picks up the new
+     * factor, since it snapshots fresh at its own start/upgrade time.
+     * Idempotent (ON DUPLICATE KEY UPDATE no-op) so a defensive re-call
+     * (e.g. a retried upgrade) can never duplicate or corrupt a snapshot
+     * already taken.
+     */
+    private static function snapshotSessionUnits(PDO $pdo, int $sessionId, string $asOf): void
+    {
+        $lines = $pdo->prepare('SELECT id, item_id FROM stock_opname_lines WHERE session_id = :sid');
+        $lines->execute(['sid' => $sessionId]);
+        $lines = $lines->fetchAll();
+        if ($lines === []) {
+            return;
+        }
+
+        $convStmt = $pdo->prepare(
+            'SELECT c.unit_id, u.code, u.name, c.conversion_to_base, i.base_unit_id
+             FROM item_unit_conversions c
+             JOIN units u ON u.id = c.unit_id
+             JOIN items i ON i.id = c.item_id
+             WHERE c.item_id = :item_id AND c.valid_from <= :as_of AND (c.valid_to IS NULL OR c.valid_to > :as_of2)'
+        );
+        $insert = $pdo->prepare(
+            'INSERT INTO stock_opname_line_units
+                (session_id, stock_opname_line_id, item_id, unit_id, unit_code_snapshot, unit_name_snapshot, conversion_factor_snapshot, is_base_unit, snapshot_at)
+             VALUES (:sid, :line_id, :item_id, :unit_id, :code, :name, :factor, :is_base, :now)
+             ON DUPLICATE KEY UPDATE unit_id = unit_id'
+        );
+        foreach ($lines as $line) {
+            $convStmt->execute(['item_id' => $line['item_id'], 'as_of' => $asOf, 'as_of2' => $asOf]);
+            foreach ($convStmt->fetchAll() as $c) {
+                $insert->execute([
+                    'sid' => $sessionId, 'line_id' => $line['id'], 'item_id' => $line['item_id'],
+                    'unit_id' => $c['unit_id'], 'code' => $c['code'], 'name' => $c['name'],
+                    'factor' => $c['conversion_to_base'],
+                    'is_base' => ((int) $c['unit_id'] === (int) $c['base_unit_id']) ? 1 : 0,
+                    'now' => $asOf,
+                ]);
+            }
+        }
+    }
+
+    /**
+     * PHASE V2.14.10.1 Gate 2 — explicit, supervisor-only, one-way upgrade
+     * of a LEGACY_DUAL_COUNT session (every pre-V2.14.10.1 session, and any
+     * V2.14.10 team session that hasn't been touched by this action) to
+     * FINDINGS_V1 — the append-only multi-unit team model. Deliberately
+     * NEVER automatic (Gate 2's "CURRENT OPEN SESSION" requirement):
+     *   - refused unless the session is still OPEN.
+     *   - refused unless BOTH sides have zero submitted counts so far
+     *     (p1_qty_base and p2_qty_base are NULL on every line) — an upgrade
+     *     after any real counting has started would leave that legacy
+     *     write-once data orphaned from the new append-only model, so it is
+     *     never allowed; the caller must instead let this session finish on
+     *     LEGACY_DUAL_COUNT or start a fresh session.
+     *   - freezes the unit-conversion snapshot (Gate 1) as of THIS moment
+     *     (not the session's original start time), since counting under
+     *     the new model begins now.
+     *   - keeps the exact same session id and lines — never a cancel/
+     *     recreate — so anything already referencing this session (team
+     *     assignments, audit history) stays valid.
+     *   - idempotent replay: calling it again on an already-FINDINGS_V1
+     *     session is a no-op, not an error.
+     */
+    public static function upgradeToFindingsMode(PDO $pdo, int $sessionId, int $userId): array
+    {
+        $session = self::requireStatus($pdo, $sessionId, 'OPEN');
+        if ($session['counting_model'] === 'FINDINGS_V1') {
+            return self::get($pdo, $sessionId); // idempotent replay
+        }
+
+        $counted = $pdo->prepare(
+            'SELECT COUNT(*) FROM stock_opname_lines WHERE session_id = :id AND (p1_qty_base IS NOT NULL OR p2_qty_base IS NOT NULL)'
+        );
+        $counted->execute(['id' => $sessionId]);
+        if ((int) $counted->fetchColumn() > 0) {
+            throw new ValidationException(['cannot upgrade to Team/Findings mode — this session already has at least one submitted P1 or P2 count; finish it under the legacy model or start a new session instead']);
+        }
+
+        $now = date('Y-m-d H:i:s');
+        $pdo->prepare("UPDATE stock_opname_sessions SET counting_model = 'FINDINGS_V1' WHERE id = :id")->execute(['id' => $sessionId]);
+        self::snapshotSessionUnits($pdo, $sessionId, $now);
+
+        AuditService::log($pdo, $userId, 'system', 'STOCK_OPNAME_UPGRADE_FINDINGS_MODE', 'stock_opname_sessions', $sessionId, ['counting_model' => $session['counting_model']], ['counting_model' => 'FINDINGS_V1'], null);
+
+        return self::get($pdo, $sessionId);
+    }
+
+    /**
+     * PHASE V2.14.10.1 Gate 1 — the frozen unit list for one item within
+     * one session, for the counter UI to render dynamic unit inputs from.
+     * This is the ONLY unit source a FINDINGS_V1 counting screen may use
+     * once the session has started — never GET /items/{id}/units again.
+     *
+     * @return array<int, array{unit_id:int, code:string, name:string, conversion_to_base:float, is_base_unit:bool}>
+     */
+    public static function getSnapshotUnitsForItem(PDO $pdo, int $sessionId, int $itemId): array
+    {
+        $line = $pdo->prepare('SELECT id FROM stock_opname_lines WHERE session_id = :sid AND item_id = :item');
+        $line->execute(['sid' => $sessionId, 'item' => $itemId]);
+        $lineId = $line->fetchColumn();
+        if ($lineId === false) {
+            throw new ValidationException(["item {$itemId} is not part of this opname session's scope"]);
+        }
+
+        $stmt = $pdo->prepare(
+            'SELECT unit_id, unit_code_snapshot, unit_name_snapshot, conversion_factor_snapshot, is_base_unit
+             FROM stock_opname_line_units WHERE stock_opname_line_id = :id ORDER BY conversion_factor_snapshot DESC'
+        );
+        $stmt->execute(['id' => $lineId]);
+        return array_map(static fn (array $r): array => [
+            'unit_id' => (int) $r['unit_id'],
+            'code' => $r['unit_code_snapshot'],
+            'name' => $r['unit_name_snapshot'],
+            'conversion_to_base' => (float) $r['conversion_factor_snapshot'],
+            'is_base_unit' => (bool) $r['is_base_unit'],
+        ], $stmt->fetchAll());
     }
 
     public static function get(PDO $pdo, int $sessionId): array
@@ -125,6 +281,11 @@ final class StockOpnameService
         $isLegacy = $session['session_number'] === null;
         $session['is_legacy'] = $isLegacy;
         $session['workflow_mode'] = $isLegacy ? 'LEGACY_SINGLE' : 'DUAL_COUNT';
+        // PHASE V2.14.10.1 Gate 2 — orthogonal to workflow_mode above: a
+        // session predating this column (impossible in practice, since the
+        // ALTER's DEFAULT backfills every row) would read as
+        // LEGACY_DUAL_COUNT here too, which is the correct, safe default.
+        $session['counting_model'] = $session['counting_model'] ?? 'LEGACY_DUAL_COUNT';
     }
 
     /**
@@ -141,7 +302,7 @@ final class StockOpnameService
         if (!in_array($role, ['p1', 'p2'], true)) {
             throw new ValidationException(['role must be p1 or p2']);
         }
-        $session = $pdo->prepare('SELECT id, warehouse_id, session_date, session_number, scope, status, p1_user_id, p2_user_id FROM stock_opname_sessions WHERE id = :id');
+        $session = $pdo->prepare('SELECT id, warehouse_id, session_date, session_number, scope, status, counting_model, p1_user_id, p2_user_id FROM stock_opname_sessions WHERE id = :id');
         $session->execute(['id' => $sessionId]);
         $session = $session->fetch();
         if (!$session) {
@@ -157,6 +318,14 @@ final class StockOpnameService
         $myUserCol = "{$role}_user_id";
         $myClaimedByCol = "{$role}_claimed_by_user_id";
         $myClaimedAtCol = "{$role}_claimed_at";
+        // PHASE V2.14.10.1 Gate 5 — finding_count is computed ONCE for the
+        // whole list via this GROUP BY subquery (a single extra query
+        // total), never per-line: the earlier design called
+        // getFindingsForLine() once per row here, an O(n) query/payload
+        // pattern that would grow badly at 1000+ SKUs. This list carries
+        // only the COUNT — the full finding history is fetched on demand
+        // via getMyFindingsForItem() (GET .../my-findings), only for the
+        // one line a counter actually opens.
         $lines = $pdo->prepare(
             "SELECT sol.id, sol.item_id, i.sku, i.name, i.category_id, i.status AS item_status,
                     i.base_unit_id, bu.code AS base_unit_code,
@@ -164,15 +333,22 @@ final class StockOpnameService
                     sol.{$myRusakCol} AS my_rusak_qty, sol.{$myExpiredCol} AS my_expired_qty,
                     sol.{$myDeadstockCol} AS my_deadstock_qty, sol.{$myNotesCol} AS my_notes,
                     sol.is_excluded, sol.{$myUserCol} AS my_counted_by_user_id, cu.username AS my_counted_by_username,
-                    sol.{$myClaimedByCol} AS my_claimed_by_user_id, sol.{$myClaimedAtCol} AS my_claimed_at, clu.username AS my_claimed_by_username
+                    sol.{$myClaimedByCol} AS my_claimed_by_user_id, sol.{$myClaimedAtCol} AS my_claimed_at, clu.username AS my_claimed_by_username,
+                    COALESCE(fc.cnt, 0) AS finding_count
              FROM stock_opname_lines sol
              JOIN items i ON i.id = sol.item_id
              JOIN units bu ON bu.id = i.base_unit_id
              LEFT JOIN users cu ON cu.id = sol.{$myUserCol}
              LEFT JOIN users clu ON clu.id = sol.{$myClaimedByCol}
+             LEFT JOIN (
+                 SELECT stock_opname_line_id, COUNT(*) AS cnt
+                 FROM stock_opname_findings
+                 WHERE session_id = :sid2 AND team_role = :role_upper AND voided_at IS NULL
+                 GROUP BY stock_opname_line_id
+             ) fc ON fc.stock_opname_line_id = sol.id
              WHERE sol.session_id = :id ORDER BY i.name"
         );
-        $lines->execute(['id' => $sessionId]);
+        $lines->execute(['id' => $sessionId, 'sid2' => $sessionId, 'role_upper' => strtoupper($role)]);
         $rows = $lines->fetchAll();
 
         // PHASE V2.14.10 — a claim is only ever meaningful while it's
@@ -198,7 +374,7 @@ final class StockOpnameService
         // independently of whether it already has findings, since Tambah
         // Temuan re-claims an already-counted line too (claimItem() no
         // longer requires my_qty_base IS NULL to claim).
-        $formatted = array_map(function (array $r) use ($pdo, $role, $userId, $leaseExpiry): array {
+        $formatted = array_map(function (array $r) use ($userId, $leaseExpiry): array {
             $claimLive = $r['my_claimed_by_user_id'] !== null && $r['my_claimed_at'] !== null && $r['my_claimed_at'] >= $leaseExpiry;
             return [
                 'id' => (int) $r['id'],
@@ -227,12 +403,11 @@ final class StockOpnameService
                 'is_excluded' => (bool) $r['is_excluded'],
                 'claimed_by_me' => $claimLive && (int) $r['my_claimed_by_user_id'] === $userId,
                 'claimed_by_teammate_username' => ($claimLive && (int) $r['my_claimed_by_user_id'] !== $userId) ? $r['my_claimed_by_username'] : null,
-                // PHASE V2.14.10 — MY team's own finding history only
-                // (never the other team's), so a counter can see "has my
-                // team already found this?" before deciding to claim or
-                // Tambah Temuan — voided findings are omitted here (a
-                // counter never needs them to make their own next call).
-                'findings' => self::getFindingsForLine($pdo, (int) $r['id'], $role, false),
+                // PHASE V2.14.10.1 Gate 5 — a lightweight count only (never
+                // the full finding array here — see GET .../my-findings for
+                // the on-demand detail a counter opens for one item at a
+                // time before deciding to claim or Tambah Temuan).
+                'finding_count' => (int) $r['finding_count'],
             ];
         }, $rows);
 
@@ -244,10 +419,53 @@ final class StockOpnameService
             'session_date' => $session['session_date'],
             'scope' => $session['scope'],
             'status' => $session['status'],
+            'counting_model' => $session['counting_model'] ?? 'LEGACY_DUAL_COUNT',
             'role' => $role,
             'team' => self::getTeamMembers($pdo, $sessionId, $role),
             'progress' => ['counted' => $counted, 'total' => count($formatted)],
             'lines' => $formatted,
+        ];
+    }
+
+    /**
+     * PHASE V2.14.10.1 Gate 5 — the on-demand detail endpoint behind
+     * getForCounter()'s lightweight finding_count: fetched only when a
+     * counter actually opens one item's panel, never bundled into the bulk
+     * list. Own team's findings only — same blindness contract as
+     * getForCounter() itself.
+     */
+    public static function getMyFindingsForItem(PDO $pdo, int $sessionId, int $itemId, string $role): array
+    {
+        if (!in_array($role, ['p1', 'p2'], true)) {
+            throw new ValidationException(['role must be p1 or p2']);
+        }
+        $line = $pdo->prepare('SELECT id FROM stock_opname_lines WHERE session_id = :sid AND item_id = :item');
+        $line->execute(['sid' => $sessionId, 'item' => $itemId]);
+        $lineId = $line->fetchColumn();
+        if ($lineId === false) {
+            throw new ValidationException(["item {$itemId} is not part of this opname session's scope"]);
+        }
+        return self::getFindingsForLine($pdo, (int) $lineId, $role, false);
+    }
+
+    /**
+     * PHASE V2.14.10.1 Gate 5 — supervisor drilldown for ONE line, BOTH
+     * teams, INCLUDING voided entries: loaded on demand when a supervisor
+     * opens "Riwayat Temuan" for a specific SKU, never bundled into
+     * review()'s bulk line list (which only ever carries a lightweight
+     * per-role finding_count — see review()).
+     */
+    public static function getLineFindingsForSupervisor(PDO $pdo, int $sessionId, int $itemId): array
+    {
+        $line = $pdo->prepare('SELECT id FROM stock_opname_lines WHERE session_id = :sid AND item_id = :item');
+        $line->execute(['sid' => $sessionId, 'item' => $itemId]);
+        $lineId = $line->fetchColumn();
+        if ($lineId === false) {
+            throw new ValidationException(["item {$itemId} is not part of this opname session's scope"]);
+        }
+        return [
+            'p1' => self::getFindingsForLine($pdo, (int) $lineId, 'p1', true),
+            'p2' => self::getFindingsForLine($pdo, (int) $lineId, 'p2', true),
         ];
     }
 
@@ -548,8 +766,15 @@ final class StockOpnameService
         $qtyCol = "{$role}_qty_base";
         $claimByCol = "{$role}_claimed_by_user_id";
         $claimAtCol = "{$role}_claimed_at";
+        $claimTokenCol = "{$role}_claim_token";
         $now = date('Y-m-d H:i:s');
         $leaseExpiry = date('Y-m-d H:i:s', time() - self::CLAIM_LEASE_SECONDS);
+        // PHASE V2.14.10.1 Gate 4 — a fresh, unguessable token minted on
+        // EVERY successful claim (including a re-claim by the same owner,
+        // e.g. opening "Tambah Temuan" again) — submitFinding() must
+        // present this exact token, verified inside its own transaction,
+        // before it may write. Never reused across two different claims.
+        $token = self::uuid();
 
         if ($itemId !== null) {
             $candidateIds = [$itemId];
@@ -579,17 +804,17 @@ final class StockOpnameService
             // The only real exclusivity guard is the claim itself.
             $claim = $pdo->prepare(
                 "UPDATE stock_opname_lines
-                 SET {$claimByCol} = :me, {$claimAtCol} = :now
+                 SET {$claimByCol} = :me, {$claimAtCol} = :now, {$claimTokenCol} = :token
                  WHERE session_id = :sid AND item_id = :item AND is_excluded = 0
                    AND ({$claimByCol} IS NULL OR {$claimByCol} = :me2 OR {$claimAtCol} < :lease)"
             );
-            $claim->execute(['me' => $userId, 'now' => $now, 'sid' => $sessionId, 'item' => $tryItemId, 'me2' => $userId, 'lease' => $leaseExpiry]);
+            $claim->execute(['me' => $userId, 'now' => $now, 'token' => $token, 'sid' => $sessionId, 'item' => $tryItemId, 'me2' => $userId, 'lease' => $leaseExpiry]);
             if ($claim->rowCount() === 1) {
                 $line = $pdo->prepare('SELECT sol.id, sol.item_id, i.sku, i.name FROM stock_opname_lines sol JOIN items i ON i.id = sol.item_id WHERE sol.session_id = :sid AND sol.item_id = :item');
                 $line->execute(['sid' => $sessionId, 'item' => $tryItemId]);
                 $line = $line->fetch();
                 AuditService::log($pdo, $userId, 'system', 'STOCK_OPNAME_CLAIM', 'stock_opname_lines', (int) $line['id'], null, ['item_id' => $tryItemId, 'role' => $role], null);
-                return ['id' => (int) $line['id'], 'item_id' => (int) $line['item_id'], 'sku' => $line['sku'], 'name' => $line['name'], 'claimed_at' => $now];
+                return ['id' => (int) $line['id'], 'item_id' => (int) $line['item_id'], 'sku' => $line['sku'], 'name' => $line['name'], 'claimed_at' => $now, 'claim_token' => $token];
             }
         }
 
@@ -625,6 +850,7 @@ final class StockOpnameService
         self::requireStatus($pdo, $sessionId, 'OPEN');
         $claimByCol = "{$role}_claimed_by_user_id";
         $claimAtCol = "{$role}_claimed_at";
+        $claimTokenCol = "{$role}_claim_token";
 
         $line = $pdo->prepare("SELECT id FROM stock_opname_lines WHERE session_id = :sid AND item_id = :item");
         $line->execute(['sid' => $sessionId, 'item' => $itemId]);
@@ -633,7 +859,7 @@ final class StockOpnameService
             throw new ValidationException(["item {$itemId} is not part of this opname session's scope"]);
         }
 
-        $sql = "UPDATE stock_opname_lines SET {$claimByCol} = NULL, {$claimAtCol} = NULL WHERE session_id = :sid AND item_id = :item";
+        $sql = "UPDATE stock_opname_lines SET {$claimByCol} = NULL, {$claimAtCol} = NULL, {$claimTokenCol} = NULL WHERE session_id = :sid AND item_id = :item";
         $params = ['sid' => $sessionId, 'item' => $itemId];
         if (!$isSupervisorOverride) {
             $sql .= " AND {$claimByCol} = :me";
@@ -731,7 +957,18 @@ final class StockOpnameService
         }
         [$rusakQty, $expiredQty, $deadstockQty, $notes] = self::validateConditions($conditions, $qtyBase);
 
-        self::requireStatus($pdo, $sessionId, 'OPEN');
+        $session = self::requireStatus($pdo, $sessionId, 'OPEN');
+
+        // PHASE V2.14.10.1 Gate 2 — the two write-models must never mix on
+        // one session: a FINDINGS_V1 session (this release's default for
+        // every NEW session, or a legacy session explicitly upgraded via
+        // upgradeToFindingsMode()) never accepts a legacy write-once
+        // submission — the caller must use POST .../findings instead. This
+        // is never inferred from whether findings happen to exist; it is
+        // read directly off the explicit counting_model column.
+        if (($session['counting_model'] ?? 'LEGACY_DUAL_COUNT') === 'FINDINGS_V1') {
+            throw new CountingModeConflictException("session {$sessionId} uses FINDINGS_V1 (team append-only findings) — legacy count/{$role} is not available; use POST /stock-opname/{$sessionId}/findings instead");
+        }
 
         // PHASE V2.14.10 — team-based authorization: $userId must be an
         // ACTIVE member of THIS role's team (real stock_opname_team_members
@@ -798,14 +1035,46 @@ final class StockOpnameService
      * recount/finalize/post pipeline needs no changes at all — it only
      * ever reads those columns, exactly as before.
      *
-     * Multi-unit: $unitInputs is one or more {unit_id, qty} pairs (e.g. 5
-     * Karton + 4 Pcs in the SAME finding); each is resolved against
-     * UnitConversionService's ACTIVE conversion for this item at the
-     * moment of submission and snapshotted verbatim onto
-     * stock_opname_finding_units — a later packaging change on the item
-     * never retroactively alters this finding's math (identical
+     * PHASE V2.14.10.1 Gate 1 — multi-unit: $unitInputs is one or more
+     * {unit_id, qty} pairs (e.g. 5 Karton + 4 Pcs in the SAME finding);
+     * each is resolved ONLY against this session's FROZEN
+     * stock_opname_line_units snapshot (never a live
+     * item_unit_conversions/UnitConversionService lookup — a packaging
+     * change made mid-session can never alter what this session computes)
+     * and snapshotted verbatim onto stock_opname_finding_units (identical
      * "conversion snapshot" contract inventory_transaction_lines already
      * uses for every other posted transaction in this app).
+     *
+     * PHASE V2.14.10.1 Gate 2 — refuses to run at all unless this session
+     * is FINDINGS_V1; never silently converts a LEGACY_DUAL_COUNT session.
+     *
+     * PHASE V2.14.10.1 Gate 3 — a unit input's qty may legitimately be zero
+     * (a real "checked this unit, found none" result) and is never skipped:
+     * the FIRST active finding for this (line, role) may total base_qty=0
+     * — a genuine "I physically checked this SKU and found zero" result,
+     * which counts as COUNTED (not NOT_COUNTED — see recomputeAggregate(),
+     * which already writes a real 0.000000, never NULL, once any finding
+     * row exists). An ADDITIONAL finding (this role already has at least
+     * one active finding on this line) must total base_qty > 0 — a repeated
+     * zero-finding is never allowed, since it carries no new information.
+     *
+     * PHASE V2.14.10.1 Gate 4 — $claimToken must match the live claim this
+     * exact (line, role, user) currently holds, checked with the line row
+     * LOCKED (SELECT ... FOR UPDATE) inside this same transaction: a stale
+     * browser tab whose claim has since expired or moved to a teammate is
+     * refused (ClaimConflictException, CLAIM_LOST) before any write.
+     *
+     * PHASE V2.14.10.1 Gate 7 — unit_inputs must not repeat a unit_id, and
+     * every unit_id must belong to this line's frozen snapshot (Gate 1) —
+     * an unknown/foreign unit is rejected, never silently accepted.
+     *
+     * PHASE V2.14.10.1 Gate 8 — this insert changes the role's aggregate,
+     * so any previously-recorded final_notes (a supervisor's free-text
+     * note, necessarily written against the PRIOR total) is cleared here;
+     * final_rusak_qty/final_expired_qty/final_deadstock_qty need no
+     * explicit clear because resolveConditionAgreement() below
+     * unconditionally recomputes all three on every call, so they can
+     * never go stale by construction.
      *
      * Condition validation (Rusak/Expired/Deadstock) is PER-FINDING — each
      * value must be explicit, numeric, >= 0, and <= THIS finding's own
@@ -815,20 +1084,29 @@ final class StockOpnameService
      * @param array<int, array{unit_id:mixed, qty:mixed}> $unitInputs
      * @param array{rusak_qty?:mixed,expired_qty?:mixed,deadstock_qty?:mixed,notes?:mixed} $conditions
      */
-    public static function submitFinding(PDO $pdo, int $sessionId, string $role, int $itemId, array $unitInputs, array $conditions, int $userId): array
+    public static function submitFinding(PDO $pdo, int $sessionId, string $role, int $itemId, array $unitInputs, array $conditions, int $userId, string $claimToken): array
     {
         if (!in_array($role, ['p1', 'p2'], true)) {
             throw new ValidationException(['role must be p1 or p2']);
         }
-        self::requireStatus($pdo, $sessionId, 'OPEN');
+        $session = self::requireStatus($pdo, $sessionId, 'OPEN');
+        if (($session['counting_model'] ?? 'LEGACY_DUAL_COUNT') !== 'FINDINGS_V1') {
+            throw new CountingModeConflictException("session {$sessionId} uses LEGACY_DUAL_COUNT — findings are not available on this session and it is never silently auto-converted; use POST /stock-opname/{$sessionId}/count/{$role} instead, or ask a supervisor to upgrade this session first");
+        }
         if (!self::isActiveTeamMember($pdo, $sessionId, $role, $userId)) {
             throw new ValidationException(['you are not an assigned ' . strtoupper($role) . ' counter for this session']);
         }
         if ($unitInputs === []) {
             throw new ValidationException(['at least one unit quantity is required']);
         }
+        if (trim($claimToken) === '') {
+            throw new ValidationException(['claim_token is required — claim this item before saving']);
+        }
 
-        $line = $pdo->prepare('SELECT * FROM stock_opname_lines WHERE session_id = :sid AND item_id = :item');
+        // PHASE V2.14.10.1 Gate 4 — lock the line row for the remainder of
+        // this transaction so a concurrent claim/submit on the SAME line
+        // cannot interleave with the ownership check below.
+        $line = $pdo->prepare('SELECT * FROM stock_opname_lines WHERE session_id = :sid AND item_id = :item FOR UPDATE');
         $line->execute(['sid' => $sessionId, 'item' => $itemId]);
         $line = $line->fetch();
         if (!$line) {
@@ -838,14 +1116,39 @@ final class StockOpnameService
             throw new ValidationException(['this item has already been excluded from the session by a supervisor']);
         }
 
-        $now = date('Y-m-d H:i:s');
+        $claimByCol = "{$role}_claimed_by_user_id";
+        $claimAtCol = "{$role}_claimed_at";
+        $claimTokenCol = "{$role}_claim_token";
+        $leaseExpiry = date('Y-m-d H:i:s', time() - self::CLAIM_LEASE_SECONDS);
+        if ((int) ($line[$claimByCol] ?? 0) !== $userId
+            || $line[$claimTokenCol] === null || !hash_equals((string) $line[$claimTokenCol], $claimToken)
+            || $line[$claimAtCol] === null || $line[$claimAtCol] < $leaseExpiry
+        ) {
+            throw new ClaimConflictException('you no longer hold a valid claim on this item — claim it again before saving');
+        }
+
+        // PHASE V2.14.10.1 Gate 1/7 — resolve every unit against THIS
+        // line's frozen snapshot only, reject a duplicate unit_id, reject
+        // any unit not present in the snapshot.
+        $snapshotStmt = $pdo->prepare('SELECT unit_id, conversion_factor_snapshot FROM stock_opname_line_units WHERE stock_opname_line_id = :id');
+        $snapshotStmt->execute(['id' => $line['id']]);
+        $snapshot = [];
+        foreach ($snapshotStmt->fetchAll() as $s) {
+            $snapshot[(int) $s['unit_id']] = (float) $s['conversion_factor_snapshot'];
+        }
+
         $resolvedUnits = [];
+        $seenUnitIds = [];
         $baseQtyTotal = 0.0;
         foreach ($unitInputs as $u) {
             $unitId = (int) ($u['unit_id'] ?? 0);
             if ($unitId <= 0) {
                 throw new ValidationException(['unit_id is required for each unit quantity']);
             }
+            if (isset($seenUnitIds[$unitId])) {
+                throw new ValidationException(["unit {$unitId} was supplied more than once in the same finding — each unit may appear at most once"]);
+            }
+            $seenUnitIds[$unitId] = true;
             if (!isset($u['qty']) || !is_numeric($u['qty'])) {
                 throw new ValidationException(['a valid numeric qty is required for each unit quantity']);
             }
@@ -853,24 +1156,32 @@ final class StockOpnameService
             if ($qty < 0) {
                 throw new ValidationException(['quantity cannot be negative']);
             }
-            if ($qty == 0.0) {
-                continue; // an untouched unit input row contributes nothing — not an error
+            if (!array_key_exists($unitId, $snapshot)) {
+                throw new ValidationException(["unit {$unitId} is not part of this session's frozen unit snapshot for this item"]);
             }
-            $conversion = UnitConversionService::getActiveConversion($pdo, $itemId, $unitId, $now);
-            if ($conversion === null) {
-                throw new ValidationException(["unit {$unitId} is not a currently valid unit for this item"]);
-            }
-            $factor = (float) $conversion['conversion_to_base'];
+            // PHASE V2.14.10.1 Gate 3 — a zero-quantity unit row is a real,
+            // deliberate input (part of an explicit "checked, found none"
+            // result) and is NEVER skipped/dropped here; it is still
+            // recorded as a stock_opname_finding_units row, contributing
+            // 0 to the total.
+            $factor = $snapshot[$unitId];
             $contribution = round($qty * $factor, 6);
             $baseQtyTotal = round($baseQtyTotal + $contribution, 6);
             $resolvedUnits[] = ['unit_id' => $unitId, 'input_qty' => $qty, 'factor' => $factor, 'contribution' => $contribution];
         }
         if ($resolvedUnits === []) {
-            throw new ValidationException(['at least one non-zero unit quantity is required for a finding']);
+            throw new ValidationException(['at least one unit quantity is required for a finding']);
+        }
+
+        // PHASE V2.14.10.1 Gate 3 — first-active-finding zero exception.
+        $isFirstFinding = self::countActiveFindings($pdo, (int) $line['id'], $role) === 0;
+        if (!$isFirstFinding && $baseQtyTotal <= 0.0) {
+            throw new ValidationException(['an additional finding (Tambah Temuan) must record a total quantity greater than zero — the zero-count result is only valid for the very first finding on an item']);
         }
 
         [$rusakQty, $expiredQty, $deadstockQty, $notes] = self::validateConditions($conditions, $baseQtyTotal);
 
+        $now = date('Y-m-d H:i:s');
         $insertFinding = $pdo->prepare(
             'INSERT INTO stock_opname_findings
                 (session_id, stock_opname_line_id, team_role, counter_user_id, base_qty, rusak_qty, expired_qty, deadstock_qty, notes, created_at)
@@ -893,12 +1204,18 @@ final class StockOpnameService
             ]);
         }
 
-        // The editing session that produced this finding is over — release
-        // whatever claim currently sits on this (line, role), whoever holds
-        // it (Tambah Temuan is a deliberate new event, not a contested edit).
-        $claimByCol = "{$role}_claimed_by_user_id";
-        $claimAtCol = "{$role}_claimed_at";
-        $pdo->prepare("UPDATE stock_opname_lines SET {$claimByCol} = NULL, {$claimAtCol} = NULL WHERE id = :id")->execute(['id' => $line['id']]);
+        // PHASE V2.14.10.1 Gate 4 — clear the claim ONLY if it still
+        // matches this exact caller+token (belt-and-suspenders: the
+        // FOR UPDATE lock above already guarantees this, but the WHERE
+        // clause documents the exact contract and stays correct even if
+        // the locking strategy above ever changes).
+        $pdo->prepare("UPDATE stock_opname_lines SET {$claimByCol} = NULL, {$claimAtCol} = NULL, {$claimTokenCol} = NULL WHERE id = :id AND {$claimByCol} = :me AND {$claimTokenCol} = :token")
+            ->execute(['id' => $line['id'], 'me' => $userId, 'token' => $claimToken]);
+
+        // PHASE V2.14.10.1 Gate 8 — this finding just changed the role's
+        // aggregate; a supervisor free-text note recorded against the
+        // PRIOR total is now stale and must not silently survive.
+        $pdo->prepare('UPDATE stock_opname_lines SET final_notes = NULL WHERE id = :id')->execute(['id' => $line['id']]);
 
         self::recomputeAggregate($pdo, (int) $line['id'], $role);
         self::resolveMatchStatus($pdo, (int) $line['id']);
@@ -911,6 +1228,14 @@ final class StockOpnameService
         ], null);
 
         return self::getForCounter($pdo, $sessionId, $role, $userId);
+    }
+
+    /** PHASE V2.14.10.1 Gate 3 — non-voided finding count for (line, role), used to decide the zero-result exception (first finding only). */
+    private static function countActiveFindings(PDO $pdo, int $lineId, string $role): int
+    {
+        $stmt = $pdo->prepare('SELECT COUNT(*) FROM stock_opname_findings WHERE stock_opname_line_id = :id AND team_role = :role AND voided_at IS NULL');
+        $stmt->execute(['id' => $lineId, 'role' => strtoupper($role)]);
+        return (int) $stmt->fetchColumn();
     }
 
     /**
@@ -1425,17 +1750,32 @@ final class StockOpnameService
             throw new NotFoundException('opname session not found');
         }
 
+        // PHASE V2.14.10.1 Gate 5 — p1_finding_count/p2_finding_count are
+        // computed via these two GROUP BY subqueries (two extra queries
+        // total, not one per line); the full per-line finding history
+        // (formerly eager-loaded here as p1_findings/p2_findings for EVERY
+        // line) now lives behind getLineFindingsForSupervisor(), fetched
+        // only for the one line a supervisor actually opens.
         $lines = $pdo->prepare(
             'SELECT sol.*, i.sku, i.name, i.category_id, i.status AS item_status, u.code AS unit_code,
-                    p1u.username AS p1_counter_username, p2u.username AS p2_counter_username
+                    p1u.username AS p1_counter_username, p2u.username AS p2_counter_username,
+                    COALESCE(f1.cnt, 0) AS p1_finding_count, COALESCE(f2.cnt, 0) AS p2_finding_count
              FROM stock_opname_lines sol
              JOIN items i ON i.id = sol.item_id
              LEFT JOIN units u ON u.id = i.base_unit_id
              LEFT JOIN users p1u ON p1u.id = sol.p1_user_id
              LEFT JOIN users p2u ON p2u.id = sol.p2_user_id
+             LEFT JOIN (
+                 SELECT stock_opname_line_id, COUNT(*) AS cnt FROM stock_opname_findings
+                 WHERE session_id = :sid1 AND team_role = \'P1\' AND voided_at IS NULL GROUP BY stock_opname_line_id
+             ) f1 ON f1.stock_opname_line_id = sol.id
+             LEFT JOIN (
+                 SELECT stock_opname_line_id, COUNT(*) AS cnt FROM stock_opname_findings
+                 WHERE session_id = :sid2 AND team_role = \'P2\' AND voided_at IS NULL GROUP BY stock_opname_line_id
+             ) f2 ON f2.stock_opname_line_id = sol.id
              WHERE sol.session_id = :id ORDER BY i.name'
         );
-        $lines->execute(['id' => $sessionId]);
+        $lines->execute(['id' => $sessionId, 'sid1' => $sessionId, 'sid2' => $sessionId]);
         $rows = $lines->fetchAll();
 
         $summary = [
@@ -1521,12 +1861,13 @@ final class StockOpnameService
                     'final_deadstock_qty' => $r['final_deadstock_qty'],
                     'final_notes' => $r['final_notes'],
                     'requires_condition_resolution' => self::conditionRequiresResolution($r),
-                    // PHASE V2.14.10 — full finding drilldown for the
-                    // supervisor, BOTH teams, INCLUDING voided entries (the
-                    // audit trail a supervisor needs is deliberately more
-                    // complete than a counter's own working view).
-                    'p1_findings' => self::getFindingsForLine($pdo, (int) $r['id'], 'p1', true),
-                    'p2_findings' => self::getFindingsForLine($pdo, (int) $r['id'], 'p2', true),
+                    // PHASE V2.14.10.1 Gate 5 — lightweight counts only;
+                    // the supervisor's "Riwayat Temuan" drilldown fetches
+                    // the full BOTH-teams history (including voided) on
+                    // demand via getLineFindingsForSupervisor(), never
+                    // bundled into this bulk list.
+                    'p1_finding_count' => (int) $r['p1_finding_count'],
+                    'p2_finding_count' => (int) $r['p2_finding_count'],
                 ];
             }, $rows),
         ];
