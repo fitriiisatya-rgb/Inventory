@@ -7,3 +7,4 @@ uploads/opname/*
 backups/*
 !backups/.gitkeep
 !backups/.htaccess
+/release_*.zip
