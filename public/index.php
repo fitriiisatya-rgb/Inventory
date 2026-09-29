@@ -3121,13 +3121,18 @@ $routes = [
     // Session-scoped: only an active team member of the POSTed role may
     // submit one (no global-permission/warehouse-scope check at all — see
     // inv_require_so_counter_or_permission()'s docblock, same reasoning as
-    // /count/{role} and /claim above). Same explicit-zero HTTP gate as
-    // V2.14.9.3's /count/{role} — rusak_qty/expired_qty/deadstock_qty must
-    // all be present in the JSON body.
-    // PHASE V2.14.10.1 Gate 1/7 — unit_inputs mirrors the session's FROZEN
-    // snapshot shape (GET .../items/{itemId}/units below), never live
-    // item master units; the server is authoritative for every conversion
-    // factor and duplicate/foreign unit_ids are rejected server-side.
+    // /count/{role} and /claim above).
+    // PHASE V2.14.11 CORRECTION — every condition (GOOD/DAMAGED/EXPIRED/
+    // DEADSTOCK) now carries its OWN multi-unit breakdown, not just GOOD:
+    // the body's `conditions` object must supply all four keys, each an
+    // array of {unit_id, qty} (explicit-zero — the same "must be sent,
+    // 0 if none" rule V2.14.9.3 enforced for the old scalar fields,
+    // generalized to every condition's unit array).
+    // PHASE V2.14.10.1 Gate 1/7 — every unit_id mirrors the session's
+    // FROZEN snapshot shape (GET .../items/{itemId}/units below), never
+    // live item master units; the server is authoritative for every
+    // conversion factor and duplicate/foreign unit_ids are rejected
+    // server-side.
     // PHASE V2.14.10.1 Gate 4 — claim_token is required and verified
     // inside the same transaction as the insert; a stale/mismatched token
     // is refused with 409 CLAIM_LOST rather than silently writing.
@@ -3154,28 +3159,107 @@ $routes = [
         if ($itemId <= 0) {
             throw new ValidationException(['item_id is required']);
         }
-        $unitInputs = (array) ($input['unit_inputs'] ?? []);
-        if ($unitInputs === []) {
-            throw new ValidationException(['unit_inputs (at least one {unit_id, qty}) is required']);
-        }
         $claimToken = (string) ($input['claim_token'] ?? '');
         if (trim($claimToken) === '') {
             throw new ValidationException(['claim_token is required']);
         }
-        foreach (['rusak_qty', 'expired_qty', 'deadstock_qty'] as $conditionField) {
-            if (!array_key_exists($conditionField, $input)) {
-                inv_error(422, 'VALIDATION_ERROR', 'Rusak, Expired, dan Deadstock wajib dikirim. Gunakan 0 bila tidak ada.');
+        $conditionsInput = (array) ($input['conditions'] ?? []);
+        foreach (['GOOD', 'DAMAGED', 'EXPIRED', 'DEADSTOCK'] as $ct) {
+            if (!array_key_exists($ct, $conditionsInput) || !is_array($conditionsInput[$ct]) || $conditionsInput[$ct] === []) {
+                inv_error(422, 'VALIDATION_ERROR', "conditions.{$ct} is required (at least one {unit_id, qty} entry; qty 0 if none found)");
             }
         }
-        $conditions = [
-            'rusak_qty' => $input['rusak_qty'], 'expired_qty' => $input['expired_qty'], 'deadstock_qty' => $input['deadstock_qty'],
-        ];
-        if (array_key_exists('notes', $input)) { $conditions['notes'] = $input['notes']; }
+        $notes = array_key_exists('notes', $input) ? (string) $input['notes'] : null;
 
         $result = Database::transaction(
-            fn (PDO $tx) => StockOpnameService::submitFinding($tx, $sessionId, strtolower($role), $itemId, $unitInputs, $conditions, (int) $user['id'], $claimToken)
+            fn (PDO $tx) => StockOpnameService::submitFinding($tx, $sessionId, strtolower($role), $itemId, $conditionsInput, $notes, (int) $user['id'], $claimToken)
         );
         inv_ok($result, 'Finding recorded');
+    },
+
+    // PHASE V2.14.11 — photo evidence upload for one DAMAGED/EXPIRED/
+    // DEADSTOCK condition, attached later by submitFinding() (see that
+    // method's docblock). multipart/form-data (not JSON, like the generic
+    // /import/upload route): field "photo" is the file, role/condition_type/
+    // claim_token/caption are ordinary form fields. Same session-scoped
+    // counter authorization as /findings, and the service itself re-checks
+    // the exact same live-claim contract before accepting the file.
+    'POST /stock-opname/{id}/items/{itemId}/photos' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        $sessionId = (int) $params['id'];
+        $itemId = (int) $params['itemId'];
+        $role = (string) ($_POST['role'] ?? '');
+        if (!in_array(strtolower($role), ['p1', 'p2'], true)) {
+            throw new ValidationException(['role must be p1 or p2']);
+        }
+
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        $auth = inv_require_so_counter_or_permission($pdo, $user, $sessionId, 'STOCK_OPNAME_MANAGE');
+        if ($auth['mode'] === 'privileged') {
+            inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        }
+
+        $conditionType = (string) ($_POST['condition_type'] ?? '');
+        $claimToken = (string) ($_POST['claim_token'] ?? '');
+        $caption = isset($_POST['caption']) ? (string) $_POST['caption'] : null;
+        if (empty($_FILES['photo']) || ($_FILES['photo']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            inv_error(422, 'VALIDATION_ERROR', 'No photo uploaded (expected multipart/form-data field "photo")');
+        }
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnamePhotoService::upload($tx, $sessionId, strtolower($role), $itemId, $conditionType, (int) $user['id'], $claimToken, $_FILES['photo']['tmp_name'], $caption)
+        );
+        inv_ok($result, 'Photo uploaded');
+    },
+
+    // PHASE V2.14.11 — streams a stored photo's bytes back. storage/ sits
+    // outside the document root (see .htaccess), so this route is the
+    // ONLY way a photo is ever served; re-checks the same session-scoped
+    // counter-or-supervisor authorization as every other Stock Opname
+    // route rather than trusting a bare file path.
+    'GET /stock-opname/{id}/photos/{photoId}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        $sessionId = (int) $params['id'];
+        $photoId = (int) $params['photoId'];
+
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        $auth = inv_require_so_counter_or_permission($pdo, $user, $sessionId, 'STOCK_OPNAME_MANAGE');
+        if ($auth['mode'] === 'privileged') {
+            inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        }
+
+        $photo = $pdo->prepare('SELECT * FROM stock_opname_finding_photos WHERE id = :id AND session_id = :sid');
+        $photo->execute(['id' => $photoId, 'sid' => $sessionId]);
+        $photo = $photo->fetch();
+        if (!$photo) {
+            inv_error(404, 'NOT_FOUND', 'photo not found');
+        }
+        // PHASE V2.14.11 — blind-count boundary: a plain counter (non-
+        // privileged $auth mode) may only ever view a photo belonging to
+        // their OWN team's role, never the other team's evidence.
+        if ($auth['mode'] !== 'privileged' && strtolower($photo['team_role']) !== strtolower($auth['role'])) {
+            inv_error(403, 'FORBIDDEN', 'this photo belongs to the other team');
+        }
+
+        $path = StockOpnamePhotoService::absolutePath($photo['storage_path']);
+        if (!is_file($path)) {
+            inv_error(404, 'NOT_FOUND', 'photo file missing on disk');
+        }
+        header('Content-Type: ' . $photo['mime_type']);
+        header('Content-Length: ' . (string) filesize($path));
+        header('Cache-Control: private, max-age=3600');
+        readfile($path);
+        exit;
     },
 
     // PHASE V2.14.10.1 Gate 1 — the session's FROZEN unit snapshot for one

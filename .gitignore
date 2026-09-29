@@ -4,6 +4,8 @@ node_modules/
 storage/logs/*.log
 storage/imports/*
 !storage/imports/.gitkeep
+storage/stock_opname_photos/*
+!storage/stock_opname_photos/.gitkeep
 storage/v2_schema_precheck_snapshot.json
 storage/reports/category_distinct_values_*.csv
 storage/reports/control_totals_*.json

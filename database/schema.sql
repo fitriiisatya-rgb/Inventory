@@ -867,47 +867,103 @@ CREATE TABLE stock_opname_team_members (
 -- insert/void. A line with zero finding rows (a legacy write-once
 -- submission via the original submitCount() path) is unaffected; that
 -- path and its meaning are completely unchanged.
+-- PHASE V2.14.11: finding_good_base_qty/finding_damaged_base_qty/
+-- finding_expired_base_qty/finding_deadstock_base_qty are CACHED ROLLUPS —
+-- the raw truth is stock_opname_finding_quantities below (condition_type
+-- x unit x qty). Written exactly once, in the SAME transaction as the
+-- quantity rows they summarize, by StockOpnameService::submitFinding()
+-- alone; no other writer ever touches them, so there is still exactly one
+-- source of truth, not two independently-mutable copies. round groups
+-- findings by counting pass (1 = initial counting; a Checkpoint B "Hitung
+-- Ulang" opens a new round rather than mutating round 1's history) —
+-- every V2.14.11 finding is written with round=1, no recount logic yet.
 CREATE TABLE stock_opname_findings (
-    id                   BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    session_id           INT UNSIGNED NOT NULL,
-    stock_opname_line_id BIGINT UNSIGNED NOT NULL,
-    team_role            ENUM('P1','P2') NOT NULL,
-    counter_user_id      INT UNSIGNED NOT NULL,
-    base_qty             DECIMAL(20,6) NOT NULL,
-    rusak_qty            DECIMAL(20,6) NOT NULL,
-    expired_qty          DECIMAL(20,6) NOT NULL,
-    deadstock_qty        DECIMAL(20,6) NOT NULL,
-    notes                VARCHAR(255) NULL,
-    created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    voided_by            INT UNSIGNED NULL,
-    voided_at            DATETIME NULL,
-    void_reason          VARCHAR(255) NULL,
+    id                         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    session_id                 INT UNSIGNED NOT NULL,
+    stock_opname_line_id       BIGINT UNSIGNED NOT NULL,
+    team_role                  ENUM('P1','P2') NOT NULL,
+    counter_user_id            INT UNSIGNED NOT NULL,
+    round                      SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+    -- Denormalized identity captured AT CREATION TIME so a finding stays
+    -- attributable even if the user is later renamed/deactivated;
+    -- counter_user_id's FK remains the authoritative link.
+    counter_username_snapshot  VARCHAR(100) NULL,
+    finding_good_base_qty      DECIMAL(20,6) NOT NULL DEFAULT 0,
+    finding_damaged_base_qty   DECIMAL(20,6) NOT NULL DEFAULT 0,
+    finding_expired_base_qty   DECIMAL(20,6) NOT NULL DEFAULT 0,
+    finding_deadstock_base_qty DECIMAL(20,6) NOT NULL DEFAULT 0,
+    notes                      VARCHAR(255) NULL,
+    created_at                 DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    voided_by                  INT UNSIGNED NULL,
+    voided_at                  DATETIME NULL,
+    void_reason                VARCHAR(255) NULL,
     CONSTRAINT fk_sof_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
     CONSTRAINT fk_sof_line FOREIGN KEY (stock_opname_line_id) REFERENCES stock_opname_lines(id),
     CONSTRAINT fk_sof_user FOREIGN KEY (counter_user_id) REFERENCES users(id),
     CONSTRAINT fk_sof_voided_by FOREIGN KEY (voided_by) REFERENCES users(id),
     INDEX idx_sof_line_role (stock_opname_line_id, team_role, voided_at),
+    INDEX idx_sof_line_role_round (stock_opname_line_id, team_role, round, voided_at),
     -- PHASE V2.14.10.1 Gate 9: supports session-wide/team-progress
     -- aggregation and a per-counter productivity query without a full scan.
     INDEX idx_sof_session_role_void (session_id, team_role, voided_at),
     INDEX idx_sof_counter_created (counter_user_id, created_at)
 ) ENGINE=InnoDB;
 
--- Multi-unit breakdown of ONE finding (e.g. "5 Karton + 4 Pcs" is two rows
--- under one finding) — mirrors inventory_transaction_lines' proven
--- snapshot pattern exactly (input_qty/input_unit_id/
--- conversion_factor_snapshot/base_qty) so a later item_unit_conversions
--- change never retroactively alters an already-saved finding's math.
-CREATE TABLE stock_opname_finding_units (
+-- PHASE V2.14.11: raw multi-unit breakdown of ONE finding, PER CONDITION —
+-- e.g. GOOD "5 Karton + 4 Pcs" is two rows, DAMAGED "2 Kg" is a third, all
+-- under the same finding_id, distinguished by condition_type. Renamed from
+-- V2.14.10's GOOD-only stock_opname_finding_units so DAMAGED/EXPIRED/
+-- DEADSTOCK get the exact same reconstructable-raw-input guarantee GOOD
+-- always had — mirrors inventory_transaction_lines' proven snapshot
+-- pattern (input_qty/unit_id/conversion_factor_snapshot/base_qty) so a
+-- later item_unit_conversions change never retroactively alters an
+-- already-saved finding's math.
+CREATE TABLE stock_opname_finding_quantities (
     id                         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     finding_id                 BIGINT UNSIGNED NOT NULL,
+    condition_type             ENUM('GOOD','DAMAGED','EXPIRED','DEADSTOCK') NOT NULL,
     unit_id                    INT UNSIGNED NOT NULL,
+    unit_code_snapshot         VARCHAR(32) NOT NULL,
+    unit_name_snapshot         VARCHAR(128) NOT NULL,
     input_qty                  DECIMAL(20,6) NOT NULL,
     conversion_factor_snapshot DECIMAL(20,6) NOT NULL,
     base_qty_contribution      DECIMAL(20,6) NOT NULL,
-    CONSTRAINT fk_sofu_finding FOREIGN KEY (finding_id) REFERENCES stock_opname_findings(id),
-    CONSTRAINT fk_sofu_unit FOREIGN KEY (unit_id) REFERENCES units(id),
-    INDEX idx_sofu_finding (finding_id)
+    CONSTRAINT fk_sofq_finding FOREIGN KEY (finding_id) REFERENCES stock_opname_findings(id),
+    CONSTRAINT fk_sofq_unit FOREIGN KEY (unit_id) REFERENCES units(id),
+    INDEX idx_sofq_finding (finding_id),
+    INDEX idx_sofq_finding_condition (finding_id, condition_type)
+) ENGINE=InnoDB;
+
+-- PHASE V2.14.11: photo evidence, attached to a specific finding AND a
+-- specific positive condition on that finding — never one generic photo
+-- for a whole finding, and never for GOOD (only DAMAGED/EXPIRED/DEADSTOCK
+-- require evidence). finding_id is nullable because
+-- StockOpnamePhotoService uploads a photo BEFORE the finding it will
+-- belong to exists (the mobile flow attaches photos while filling the
+-- count card); StockOpnameService::submitFinding() atomically claims
+-- every still-unattached photo matching this exact session/item/role/
+-- condition/uploader when the finding is created. An upload nobody
+-- attaches (an abandoned form) stays a harmless orphan row.
+CREATE TABLE stock_opname_finding_photos (
+    id                    BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    session_id            INT UNSIGNED NOT NULL,
+    stock_opname_line_id  BIGINT UNSIGNED NOT NULL,
+    team_role             ENUM('P1','P2') NOT NULL,
+    condition_type        ENUM('DAMAGED','EXPIRED','DEADSTOCK') NOT NULL,
+    finding_id            BIGINT UNSIGNED NULL,
+    uploaded_by           INT UNSIGNED NOT NULL,
+    storage_path          VARCHAR(255) NOT NULL,
+    mime_type             VARCHAR(100) NOT NULL,
+    byte_size             INT UNSIGNED NOT NULL,
+    caption               VARCHAR(255) NULL,
+    uploaded_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    attached_at           DATETIME NULL,
+    CONSTRAINT fk_sofp_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
+    CONSTRAINT fk_sofp_line FOREIGN KEY (stock_opname_line_id) REFERENCES stock_opname_lines(id),
+    CONSTRAINT fk_sofp_finding FOREIGN KEY (finding_id) REFERENCES stock_opname_findings(id),
+    CONSTRAINT fk_sofp_uploaded_by FOREIGN KEY (uploaded_by) REFERENCES users(id),
+    INDEX idx_sofp_pending_claim (session_id, stock_opname_line_id, team_role, condition_type, uploaded_by, finding_id),
+    INDEX idx_sofp_finding (finding_id, condition_type)
 ) ENGINE=InnoDB;
 
 -- PHASE V2.14.10.1 Gate 1: FROZEN unit conversions for one Stock Opname

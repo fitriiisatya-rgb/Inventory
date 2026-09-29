@@ -1048,43 +1048,44 @@ final class StockOpnameService
      * PHASE V2.14.10.1 Gate 2 — refuses to run at all unless this session
      * is FINDINGS_V1; never silently converts a LEGACY_DUAL_COUNT session.
      *
-     * PHASE V2.14.10.1 Gate 3 — a unit input's qty may legitimately be zero
-     * (a real "checked this unit, found none" result) and is never skipped:
-     * the FIRST active finding for this (line, role) may total base_qty=0
-     * — a genuine "I physically checked this SKU and found zero" result,
-     * which counts as COUNTED (not NOT_COUNTED — see recomputeAggregate(),
-     * which already writes a real 0.000000, never NULL, once any finding
-     * row exists). An ADDITIONAL finding (this role already has at least
-     * one active finding on this line) must total base_qty > 0 — a repeated
-     * zero-finding is never allowed, since it carries no new information.
+     * PHASE V2.14.11 CORRECTION — every condition (GOOD/DAMAGED/EXPIRED/
+     * DEADSTOCK), not just GOOD, now carries its OWN independent multi-unit
+     * breakdown: $conditionInputs must supply all four keys, each an array
+     * of one or more {unit_id, qty} pairs (the explicit-zero philosophy
+     * V2.14.9.2 established for the legacy scalar fields, generalized: a
+     * condition with nothing found is an explicit single {unit_id, qty:0}
+     * row, never an omitted key). PHYSICAL = GOOD + DAMAGED + EXPIRED +
+     * DEADSTOCK (a straight sum of independent categories, not "Rusak is a
+     * subset of Good" as the old scalar model implied) — see
+     * resolveConditionUnits() for the shared per-condition resolution
+     * logic and recomputeAggregate() for how the four totals roll onto
+     * stock_opname_lines' existing p{1,2}_qty_base/_rusak_qty/_expired_qty/
+     * _deadstock_qty cache columns, unchanged in shape, so finalize()/
+     * post()/review()/resolveConditionAgreement() need no changes at all.
      *
-     * PHASE V2.14.10.1 Gate 4 — $claimToken must match the live claim this
-     * exact (line, role, user) currently holds, checked with the line row
-     * LOCKED (SELECT ... FOR UPDATE) inside this same transaction: a stale
-     * browser tab whose claim has since expired or moved to a teammate is
-     * refused (ClaimConflictException, CLAIM_LOST) before any write.
+     * PHASE V2.14.10.1 Gate 1 — every unit is resolved ONLY against this
+     * session's FROZEN stock_opname_line_units snapshot, never a live
+     * item_unit_conversions lookup. Gate 2 — refuses to run unless this
+     * session is FINDINGS_V1. Gate 3 — the FIRST active finding for this
+     * (line, role) may total physical=0 (a genuine "checked, found
+     * nothing" result); an ADDITIONAL finding must total physical > 0.
+     * Gate 4 — $claimToken must match the live claim this exact (line,
+     * role, user) currently holds, verified with the line row LOCKED
+     * (SELECT ... FOR UPDATE) inside this same transaction. Gate 7 — a
+     * unit_id may not repeat WITHIN one condition's own array (repeating
+     * the same unit across two DIFFERENT conditions, e.g. Kg in both GOOD
+     * and DAMAGED, is fine — they are independent categories).
      *
-     * PHASE V2.14.10.1 Gate 7 — unit_inputs must not repeat a unit_id, and
-     * every unit_id must belong to this line's frozen snapshot (Gate 1) —
-     * an unknown/foreign unit is rejected, never silently accepted.
+     * PHOTO REQUIREMENT — for every condition among DAMAGED/EXPIRED/
+     * DEADSTOCK whose total is > 0, at least one photo must already be
+     * uploaded and unattached for this exact (session, line, role,
+     * condition_type, uploader) — see StockOpnamePhotoService::upload().
+     * Enforced here, server-side, before the finding is ever created; a
+     * missing photo refuses the ENTIRE finding (nothing partially saved).
      *
-     * PHASE V2.14.10.1 Gate 8 — this insert changes the role's aggregate,
-     * so any previously-recorded final_notes (a supervisor's free-text
-     * note, necessarily written against the PRIOR total) is cleared here;
-     * final_rusak_qty/final_expired_qty/final_deadstock_qty need no
-     * explicit clear because resolveConditionAgreement() below
-     * unconditionally recomputes all three on every call, so they can
-     * never go stale by construction.
-     *
-     * Condition validation (Rusak/Expired/Deadstock) is PER-FINDING — each
-     * value must be explicit, numeric, >= 0, and <= THIS finding's own
-     * base_qty (never the running team total); reuses validateConditions()
-     * unchanged, so the V2.14.9.2 explicit-zero rule applies identically.
-     *
-     * @param array<int, array{unit_id:mixed, qty:mixed}> $unitInputs
-     * @param array{rusak_qty?:mixed,expired_qty?:mixed,deadstock_qty?:mixed,notes?:mixed} $conditions
+     * @param array{GOOD:array<int,array{unit_id:mixed,qty:mixed}>, DAMAGED:array<int,array{unit_id:mixed,qty:mixed}>, EXPIRED:array<int,array{unit_id:mixed,qty:mixed}>, DEADSTOCK:array<int,array{unit_id:mixed,qty:mixed}>} $conditionInputs
      */
-    public static function submitFinding(PDO $pdo, int $sessionId, string $role, int $itemId, array $unitInputs, array $conditions, int $userId, string $claimToken): array
+    public static function submitFinding(PDO $pdo, int $sessionId, string $role, int $itemId, array $conditionInputs, ?string $notes, int $userId, string $claimToken): array
     {
         if (!in_array($role, ['p1', 'p2'], true)) {
             throw new ValidationException(['role must be p1 or p2']);
@@ -1096,12 +1097,15 @@ final class StockOpnameService
         if (!self::isActiveTeamMember($pdo, $sessionId, $role, $userId)) {
             throw new ValidationException(['you are not an assigned ' . strtoupper($role) . ' counter for this session']);
         }
-        if ($unitInputs === []) {
-            throw new ValidationException(['at least one unit quantity is required']);
+        foreach (['GOOD', 'DAMAGED', 'EXPIRED', 'DEADSTOCK'] as $ct) {
+            if (!isset($conditionInputs[$ct]) || !is_array($conditionInputs[$ct]) || $conditionInputs[$ct] === []) {
+                throw new ValidationException(["{$ct} is required (use a single entry with qty 0 if none found)"]);
+            }
         }
         if (trim($claimToken) === '') {
             throw new ValidationException(['claim_token is required — claim this item before saving']);
         }
+        $notes = $notes !== null && trim($notes) !== '' ? substr(trim($notes), 0, 255) : null;
 
         // PHASE V2.14.10.1 Gate 4 — lock the line row for the remainder of
         // this transaction so a concurrent claim/submit on the SAME line
@@ -1127,81 +1131,101 @@ final class StockOpnameService
             throw new ClaimConflictException('you no longer hold a valid claim on this item — claim it again before saving');
         }
 
-        // PHASE V2.14.10.1 Gate 1/7 — resolve every unit against THIS
-        // line's frozen snapshot only, reject a duplicate unit_id, reject
-        // any unit not present in the snapshot.
-        $snapshotStmt = $pdo->prepare('SELECT unit_id, conversion_factor_snapshot FROM stock_opname_line_units WHERE stock_opname_line_id = :id');
+        // PHASE V2.14.10.1 Gate 1 — resolve every unit against THIS line's
+        // frozen snapshot only.
+        $snapshotStmt = $pdo->prepare('SELECT unit_id, conversion_factor_snapshot, unit_code_snapshot, unit_name_snapshot FROM stock_opname_line_units WHERE stock_opname_line_id = :id');
         $snapshotStmt->execute(['id' => $line['id']]);
         $snapshot = [];
         foreach ($snapshotStmt->fetchAll() as $s) {
-            $snapshot[(int) $s['unit_id']] = (float) $s['conversion_factor_snapshot'];
+            $snapshot[(int) $s['unit_id']] = $s;
         }
 
-        $resolvedUnits = [];
-        $seenUnitIds = [];
-        $baseQtyTotal = 0.0;
-        foreach ($unitInputs as $u) {
-            $unitId = (int) ($u['unit_id'] ?? 0);
-            if ($unitId <= 0) {
-                throw new ValidationException(['unit_id is required for each unit quantity']);
-            }
-            if (isset($seenUnitIds[$unitId])) {
-                throw new ValidationException(["unit {$unitId} was supplied more than once in the same finding — each unit may appear at most once"]);
-            }
-            $seenUnitIds[$unitId] = true;
-            if (!isset($u['qty']) || !is_numeric($u['qty'])) {
-                throw new ValidationException(['a valid numeric qty is required for each unit quantity']);
-            }
-            $qty = (float) $u['qty'];
-            if ($qty < 0) {
-                throw new ValidationException(['quantity cannot be negative']);
-            }
-            if (!array_key_exists($unitId, $snapshot)) {
-                throw new ValidationException(["unit {$unitId} is not part of this session's frozen unit snapshot for this item"]);
-            }
-            // PHASE V2.14.10.1 Gate 3 — a zero-quantity unit row is a real,
-            // deliberate input (part of an explicit "checked, found none"
-            // result) and is NEVER skipped/dropped here; it is still
-            // recorded as a stock_opname_finding_units row, contributing
-            // 0 to the total.
-            $factor = $snapshot[$unitId];
-            $contribution = round($qty * $factor, 6);
-            $baseQtyTotal = round($baseQtyTotal + $contribution, 6);
-            $resolvedUnits[] = ['unit_id' => $unitId, 'input_qty' => $qty, 'factor' => $factor, 'contribution' => $contribution];
+        $resolvedByCondition = [];
+        $totalsByCondition = [];
+        foreach (['GOOD', 'DAMAGED', 'EXPIRED', 'DEADSTOCK'] as $ct) {
+            [$resolved, $total] = self::resolveConditionUnits($conditionInputs[$ct], $snapshot, $ct);
+            $resolvedByCondition[$ct] = $resolved;
+            $totalsByCondition[$ct] = $total;
         }
-        if ($resolvedUnits === []) {
-            throw new ValidationException(['at least one unit quantity is required for a finding']);
-        }
+        $physicalTotal = round(array_sum($totalsByCondition), 6);
 
-        // PHASE V2.14.10.1 Gate 3 — first-active-finding zero exception.
+        // PHASE V2.14.10.1 Gate 3 — first-active-finding zero exception,
+        // now over the PHYSICAL total (GOOD+DAMAGED+EXPIRED+DEADSTOCK),
+        // not just GOOD alone.
         $isFirstFinding = self::countActiveFindings($pdo, (int) $line['id'], $role) === 0;
-        if (!$isFirstFinding && $baseQtyTotal <= 0.0) {
-            throw new ValidationException(['an additional finding (Tambah Temuan) must record a total quantity greater than zero — the zero-count result is only valid for the very first finding on an item']);
+        if (!$isFirstFinding && $physicalTotal <= 0.0) {
+            throw new ValidationException(['an additional finding (Tambah Temuan) must record a total physical quantity greater than zero — the zero-count result is only valid for the very first finding on an item']);
         }
 
-        [$rusakQty, $expiredQty, $deadstockQty, $notes] = self::validateConditions($conditions, $baseQtyTotal);
+        // PHOTO REQUIREMENT — checked before any write. A photo already
+        // uploaded (StockOpnamePhotoService::upload()) and not yet
+        // attached to a finding, for this exact session/line/role/
+        // condition/uploader, counts as available evidence.
+        $photoCheck = $pdo->prepare(
+            'SELECT COUNT(*) FROM stock_opname_finding_photos
+             WHERE session_id = :sid AND stock_opname_line_id = :line_id AND team_role = :role
+               AND condition_type = :ct AND uploaded_by = :uid AND finding_id IS NULL'
+        );
+        foreach (['DAMAGED', 'EXPIRED', 'DEADSTOCK'] as $ct) {
+            if ($totalsByCondition[$ct] <= 0.0) {
+                continue;
+            }
+            $photoCheck->execute(['sid' => $sessionId, 'line_id' => $line['id'], 'role' => strtoupper($role), 'ct' => $ct, 'uid' => $userId]);
+            if ((int) $photoCheck->fetchColumn() === 0) {
+                throw new ValidationException(["{$ct} photo evidence is required when its quantity is greater than zero — attach at least one photo before saving"]);
+            }
+        }
+
+        $counterUsername = $pdo->prepare('SELECT username FROM users WHERE id = :id');
+        $counterUsername->execute(['id' => $userId]);
+        $counterUsername = (string) $counterUsername->fetchColumn();
 
         $now = date('Y-m-d H:i:s');
         $insertFinding = $pdo->prepare(
             'INSERT INTO stock_opname_findings
-                (session_id, stock_opname_line_id, team_role, counter_user_id, base_qty, rusak_qty, expired_qty, deadstock_qty, notes, created_at)
-             VALUES (:sid, :line_id, :role, :user, :qty, :rusak, :expired, :deadstock, :notes, :now)'
+                (session_id, stock_opname_line_id, team_role, counter_user_id, round, counter_username_snapshot,
+                 finding_good_base_qty, finding_damaged_base_qty, finding_expired_base_qty, finding_deadstock_base_qty,
+                 notes, created_at)
+             VALUES (:sid, :line_id, :role, :user, 1, :username,
+                     :good, :damaged, :expired, :deadstock,
+                     :notes, :now)'
         );
         $insertFinding->execute([
-            'sid' => $sessionId, 'line_id' => $line['id'], 'role' => strtoupper($role), 'user' => $userId,
-            'qty' => $baseQtyTotal, 'rusak' => $rusakQty, 'expired' => $expiredQty, 'deadstock' => $deadstockQty, 'notes' => $notes, 'now' => $now,
+            'sid' => $sessionId, 'line_id' => $line['id'], 'role' => strtoupper($role), 'user' => $userId, 'username' => $counterUsername,
+            'good' => $totalsByCondition['GOOD'], 'damaged' => $totalsByCondition['DAMAGED'],
+            'expired' => $totalsByCondition['EXPIRED'], 'deadstock' => $totalsByCondition['DEADSTOCK'],
+            'notes' => $notes, 'now' => $now,
         ]);
         $findingId = (int) $pdo->lastInsertId();
 
-        $insertUnit = $pdo->prepare(
-            'INSERT INTO stock_opname_finding_units (finding_id, unit_id, input_qty, conversion_factor_snapshot, base_qty_contribution)
-             VALUES (:finding_id, :unit_id, :qty, :factor, :contribution)'
+        $insertQty = $pdo->prepare(
+            'INSERT INTO stock_opname_finding_quantities
+                (finding_id, condition_type, unit_id, unit_code_snapshot, unit_name_snapshot, input_qty, conversion_factor_snapshot, base_qty_contribution)
+             VALUES (:finding_id, :ct, :unit_id, :code, :name, :qty, :factor, :contribution)'
         );
-        foreach ($resolvedUnits as $ru) {
-            $insertUnit->execute([
-                'finding_id' => $findingId, 'unit_id' => $ru['unit_id'], 'qty' => $ru['input_qty'],
-                'factor' => $ru['factor'], 'contribution' => $ru['contribution'],
-            ]);
+        foreach ($resolvedByCondition as $ct => $units) {
+            foreach ($units as $ru) {
+                $insertQty->execute([
+                    'finding_id' => $findingId, 'ct' => $ct, 'unit_id' => $ru['unit_id'],
+                    'code' => $ru['unit_code'], 'name' => $ru['unit_name'],
+                    'qty' => $ru['input_qty'], 'factor' => $ru['factor'], 'contribution' => $ru['contribution'],
+                ]);
+            }
+        }
+
+        // Attach every pending (unattached) photo for the conditions this
+        // finding actually reported > 0 for — a photo uploaded for a
+        // condition the counter later zeroed back out stays an orphan.
+        $attachPhotos = $pdo->prepare(
+            'UPDATE stock_opname_finding_photos SET finding_id = :fid, attached_at = :now
+             WHERE session_id = :sid AND stock_opname_line_id = :line_id AND team_role = :role
+               AND condition_type = :ct AND uploaded_by = :uid AND finding_id IS NULL'
+        );
+        foreach (['DAMAGED', 'EXPIRED', 'DEADSTOCK'] as $ct) {
+            if ($totalsByCondition[$ct] <= 0.0) {
+                continue;
+            }
+            $attachPhotos->execute(['fid' => $findingId, 'now' => $now, 'sid' => $sessionId, 'line_id' => $line['id'], 'role' => strtoupper($role), 'ct' => $ct, 'uid' => $userId]);
         }
 
         // PHASE V2.14.10.1 Gate 4 — clear the claim ONLY if it still
@@ -1222,12 +1246,65 @@ final class StockOpnameService
         self::resolveConditionAgreement($pdo, (int) $line['id']);
 
         AuditService::log($pdo, $userId, 'system', 'STOCK_OPNAME_FINDING_CREATE', 'stock_opname_findings', $findingId, null, [
-            'item_id' => $itemId, 'role' => strtoupper($role), 'base_qty' => $baseQtyTotal,
-            'rusak_qty' => $rusakQty, 'expired_qty' => $expiredQty, 'deadstock_qty' => $deadstockQty,
-            'units' => array_map(static fn (array $r) => ['unit_id' => $r['unit_id'], 'qty' => $r['input_qty'], 'factor' => $r['factor']], $resolvedUnits),
+            'item_id' => $itemId, 'role' => strtoupper($role), 'physical_total' => $physicalTotal,
+            'good' => $totalsByCondition['GOOD'], 'damaged' => $totalsByCondition['DAMAGED'],
+            'expired' => $totalsByCondition['EXPIRED'], 'deadstock' => $totalsByCondition['DEADSTOCK'],
+            'units' => array_map(static fn (array $byCondition) => array_map(
+                static fn (array $r) => ['unit_id' => $r['unit_id'], 'qty' => $r['input_qty'], 'factor' => $r['factor']], $byCondition
+            ), $resolvedByCondition),
         ], null);
 
         return self::getForCounter($pdo, $sessionId, $role, $userId);
+    }
+
+    /**
+     * PHASE V2.14.11 — shared per-condition unit resolution: validates one
+     * condition's {unit_id, qty} array against the line's frozen snapshot
+     * (Gate 1), rejects a unit repeated within THIS SAME condition (Gate
+     * 7 — repeating a unit across two DIFFERENT conditions is fine, they
+     * are independent categories), rejects a negative or non-numeric qty,
+     * and computes that condition's base-unit total. A zero-qty entry is
+     * never skipped — it is a real, deliberate "checked, found none" input
+     * for that unit, same as the original GOOD-only Gate 3 rule.
+     *
+     * @param array<int,array{unit_id:mixed,qty:mixed}> $inputs
+     * @param array<int,array{unit_id:mixed,conversion_factor_snapshot:mixed,unit_code_snapshot:string,unit_name_snapshot:string}> $snapshot keyed by unit_id
+     * @return array{0:array<int,array{unit_id:int,unit_code:string,unit_name:string,input_qty:float,factor:float,contribution:float}>,1:float}
+     */
+    private static function resolveConditionUnits(array $inputs, array $snapshot, string $conditionLabel): array
+    {
+        $resolved = [];
+        $seenUnitIds = [];
+        $total = 0.0;
+        foreach ($inputs as $u) {
+            $unitId = (int) ($u['unit_id'] ?? 0);
+            if ($unitId <= 0) {
+                throw new ValidationException(["{$conditionLabel}: unit_id is required for each unit quantity"]);
+            }
+            if (isset($seenUnitIds[$unitId])) {
+                throw new ValidationException(["{$conditionLabel}: unit {$unitId} was supplied more than once — each unit may appear at most once per condition"]);
+            }
+            $seenUnitIds[$unitId] = true;
+            if (!isset($u['qty']) || !is_numeric($u['qty'])) {
+                throw new ValidationException(["{$conditionLabel}: a valid numeric qty is required for each unit quantity"]);
+            }
+            $qty = (float) $u['qty'];
+            if ($qty < 0) {
+                throw new ValidationException(["{$conditionLabel}: quantity cannot be negative"]);
+            }
+            if (!array_key_exists($unitId, $snapshot)) {
+                throw new ValidationException(["{$conditionLabel}: unit {$unitId} is not part of this session's frozen unit snapshot for this item"]);
+            }
+            $s = $snapshot[$unitId];
+            $factor = (float) $s['conversion_factor_snapshot'];
+            $contribution = round($qty * $factor, 6);
+            $total = round($total + $contribution, 6);
+            $resolved[] = [
+                'unit_id' => $unitId, 'unit_code' => $s['unit_code_snapshot'], 'unit_name' => $s['unit_name_snapshot'],
+                'input_qty' => $qty, 'factor' => $factor, 'contribution' => $contribution,
+            ];
+        }
+        return [$resolved, $total];
     }
 
     /** PHASE V2.14.10.1 Gate 3 — non-voided finding count for (line, role), used to decide the zero-result exception (first finding only). */
@@ -1308,8 +1385,8 @@ final class StockOpnameService
         }
 
         $agg = $pdo->prepare(
-            "SELECT COUNT(*) AS cnt, COALESCE(SUM(base_qty),0) AS qty, COALESCE(SUM(rusak_qty),0) AS rusak,
-                    COALESCE(SUM(expired_qty),0) AS expired, COALESCE(SUM(deadstock_qty),0) AS deadstock
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(finding_good_base_qty),0) AS qty, COALESCE(SUM(finding_damaged_base_qty),0) AS rusak,
+                    COALESCE(SUM(finding_expired_base_qty),0) AS expired, COALESCE(SUM(finding_deadstock_base_qty),0) AS deadstock
              FROM stock_opname_findings WHERE stock_opname_line_id = :id AND team_role = :role AND voided_at IS NULL"
         );
         $agg->execute(['id' => $lineId, 'role' => strtoupper($role)]);
@@ -1347,12 +1424,13 @@ final class StockOpnameService
      * $includeVoided is true only for the supervisor path — a counter
      * never needs to see a voided entry to make their own next decision.
      *
-     * @return array<int, array{id:int, base_qty:float, rusak_qty:float, expired_qty:float, deadstock_qty:float, notes:?string, counter_username:string, created_at:string, is_voided:bool, void_reason:?string, units:array<int,array{unit_code:string, input_qty:float}>}>
+     * @return array<int, array{id:int, good_qty:float, damaged_qty:float, expired_qty:float, deadstock_qty:float, notes:?string, counter_username:string, created_at:string, is_voided:bool, void_reason:?string, quantities:array<string,array<int,array{unit_code:string, input_qty:float}>>, photos:array<string,array<int,array{id:int,storage_path:string,caption:?string}>>}>
      */
     private static function getFindingsForLine(PDO $pdo, int $lineId, string $role, bool $includeVoided = false): array
     {
-        $sql = "SELECT f.id, f.base_qty, f.rusak_qty, f.expired_qty, f.deadstock_qty, f.notes, f.created_at,
-                       f.voided_at, f.void_reason, u.username AS counter_username
+        $sql = "SELECT f.id, f.finding_good_base_qty, f.finding_damaged_base_qty, f.finding_expired_base_qty, f.finding_deadstock_base_qty,
+                       f.notes, f.created_at, f.voided_at, f.void_reason,
+                       COALESCE(f.counter_username_snapshot, u.username) AS counter_username
                 FROM stock_opname_findings f
                 JOIN users u ON u.id = f.counter_user_id
                 WHERE f.stock_opname_line_id = :id AND f.team_role = :role";
@@ -1364,26 +1442,38 @@ final class StockOpnameService
         $stmt->execute(['id' => $lineId, 'role' => strtoupper($role)]);
         $findings = $stmt->fetchAll();
 
-        $unitsStmt = $pdo->prepare(
-            'SELECT fu.finding_id, fu.input_qty, un.code AS unit_code
-             FROM stock_opname_finding_units fu JOIN units un ON un.id = fu.unit_id
-             WHERE fu.finding_id = :id ORDER BY fu.id ASC'
+        $qtyStmt = $pdo->prepare(
+            'SELECT condition_type, input_qty, unit_code_snapshot AS unit_code
+             FROM stock_opname_finding_quantities WHERE finding_id = :id ORDER BY id ASC'
+        );
+        $photoStmt = $pdo->prepare(
+            'SELECT id, condition_type, storage_path, caption FROM stock_opname_finding_photos WHERE finding_id = :id ORDER BY id ASC'
         );
 
-        return array_map(static function (array $f) use ($unitsStmt): array {
-            $unitsStmt->execute(['id' => $f['id']]);
+        return array_map(static function (array $f) use ($qtyStmt, $photoStmt): array {
+            $qtyStmt->execute(['id' => $f['id']]);
+            $quantities = ['GOOD' => [], 'DAMAGED' => [], 'EXPIRED' => [], 'DEADSTOCK' => []];
+            foreach ($qtyStmt->fetchAll() as $q) {
+                $quantities[$q['condition_type']][] = ['unit_code' => $q['unit_code'], 'input_qty' => (float) $q['input_qty']];
+            }
+            $photoStmt->execute(['id' => $f['id']]);
+            $photos = ['DAMAGED' => [], 'EXPIRED' => [], 'DEADSTOCK' => []];
+            foreach ($photoStmt->fetchAll() as $p) {
+                $photos[$p['condition_type']][] = ['id' => (int) $p['id'], 'storage_path' => $p['storage_path'], 'caption' => $p['caption']];
+            }
             return [
                 'id' => (int) $f['id'],
-                'base_qty' => (float) $f['base_qty'],
-                'rusak_qty' => (float) $f['rusak_qty'],
-                'expired_qty' => (float) $f['expired_qty'],
-                'deadstock_qty' => (float) $f['deadstock_qty'],
+                'good_qty' => (float) $f['finding_good_base_qty'],
+                'damaged_qty' => (float) $f['finding_damaged_base_qty'],
+                'expired_qty' => (float) $f['finding_expired_base_qty'],
+                'deadstock_qty' => (float) $f['finding_deadstock_base_qty'],
                 'notes' => $f['notes'],
                 'counter_username' => $f['counter_username'],
                 'created_at' => $f['created_at'],
                 'is_voided' => $f['voided_at'] !== null,
                 'void_reason' => $f['void_reason'],
-                'units' => array_map(static fn (array $u): array => ['unit_code' => $u['unit_code'], 'input_qty' => (float) $u['input_qty']], $unitsStmt->fetchAll()),
+                'quantities' => $quantities,
+                'photos' => $photos,
             ];
         }, $findings);
     }
