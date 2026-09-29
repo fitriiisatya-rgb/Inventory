@@ -31,6 +31,8 @@ $navUser = Auth::user();
     <?php endif; ?>
     <?php if (Permissions::can($navUser['role'], 'master.manage')): ?>
       <a href="/admin/legacy-import.php">Tools: Import Legacy</a>
+      <a href="/admin/system-check.php">System Check</a>
+      <a href="/admin/go-live-checklist.php">Go-Live Checklist</a>
     <?php endif; ?>
   </nav>
   <div>
