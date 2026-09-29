@@ -17,6 +17,8 @@ require __DIR__ . '/../includes/layout_header.php';
   <div class="inline" style="margin-bottom:8px;">
     <label><input type="checkbox" id="mismatchOnly"> Tampilkan MISMATCH/CONDITION_MISMATCH saja</label>
     <a href="/api/sessions/export_excel.php?session_id=<?= (int) $sessionId ?>" id="exportLink">⬇ Download Excel</a>
+    &nbsp;|&nbsp;
+    <a href="/admin/session-print.php?session_id=<?= (int) $sessionId ?>" target="_blank">🖨 Print / PDF</a>
   </div>
   <table>
     <thead><tr>

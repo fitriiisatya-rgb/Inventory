@@ -13,7 +13,12 @@ final class SessionReportService
     {
     }
 
-    public function buildWorkbook(int $sessionId): ExcelExportService
+    /**
+     * Shared raw data behind both the Excel workbook and the print/PDF
+     * view — one query path, two renderings.
+     * @return array{session:array, rows:array<int,array>, petugas:array<int,array>}
+     */
+    public function getReportData(int $sessionId): array
     {
         $session = $this->findSession($sessionId);
         if (!$session) {
@@ -25,6 +30,15 @@ final class SessionReportService
             $r['final'] = $this->fin->currentFinal((int) $r['session_item']['id']);
             return $r;
         }, $rows);
+
+        return ['session' => $session, 'rows' => $withFinal, 'petugas' => $this->petugasList($sessionId)];
+    }
+
+    public function buildWorkbook(int $sessionId): ExcelExportService
+    {
+        $data = $this->getReportData($sessionId);
+        $session = $data['session'];
+        $withFinal = $data['rows'];
 
         $excel = new ExcelExportService();
         $excel->addSheet('Ringkasan', ...$this->ringkasanSheet($session, $withFinal));
@@ -167,10 +181,13 @@ final class SessionReportService
         return [$header, $body];
     }
 
-    /** @return array{0:array<int,string>,1:array<int,array<int,mixed>>} */
-    private function petugasSheet(int $sessionId): array
+    /**
+     * Every user who actually PARTICIPATED (has at least one count row)
+     * in this session — the set the signature section on the printed
+     * report is required to list, not just whoever is currently assigned.
+     */
+    private function petugasList(int $sessionId): array
     {
-        $header = ['Username', 'Nama Lengkap', 'Team (terakhir)', 'Jumlah Item Dihitung', 'Hitungan Pertama', 'Hitungan Terakhir'];
         $stmt = $this->pdo->prepare(
             'SELECT c.user_id, c.user_name_snapshot, u.username,
                     (SELECT sc.team FROM stock_opname_session_counters sc
@@ -184,8 +201,15 @@ final class SessionReportService
              ORDER BY u.username'
         );
         $stmt->execute([$sessionId, $sessionId]);
+        return $stmt->fetchAll();
+    }
+
+    /** @return array{0:array<int,string>,1:array<int,array<int,mixed>>} */
+    private function petugasSheet(int $sessionId): array
+    {
+        $header = ['Username', 'Nama Lengkap', 'Team (terakhir)', 'Jumlah Item Dihitung', 'Hitungan Pertama', 'Hitungan Terakhir'];
         $body = [];
-        foreach ($stmt->fetchAll() as $row) {
+        foreach ($this->petugasList($sessionId) as $row) {
             $body[] = [
                 $row['username'], $row['user_name_snapshot'], $row['team'],
                 (int) $row['item_count'], $row['first_count'], $row['last_count'],
