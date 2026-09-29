@@ -29,6 +29,9 @@ $navUser = Auth::user();
     <?php if (Permissions::can($navUser['role'], 'counter.count')): ?>
       <a href="/counter/index.php">Hitung Stok</a>
     <?php endif; ?>
+    <?php if (Permissions::can($navUser['role'], 'master.manage')): ?>
+      <a href="/admin/legacy-import.php">Tools: Import Legacy</a>
+    <?php endif; ?>
   </nav>
   <div>
     <?= htmlspecialchars($navUser['full_name']) ?> (<?= htmlspecialchars($navUser['role']) ?>)

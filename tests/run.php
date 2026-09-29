@@ -18,6 +18,7 @@ require __DIR__ . '/StockImportTest.php';
 require __DIR__ . '/EngineTest.php';
 require __DIR__ . '/PhotoEvidenceTest.php';
 require __DIR__ . '/FinalizationTest.php';
+require __DIR__ . '/LegacyMigrationTest.php';
 
 // Auth runs first: it triggers session_regenerate_id(), which sends a
 // cookie header — harmless in a real request (login always precedes any
@@ -29,5 +30,6 @@ test_stock_import();
 test_engine();
 test_photo_evidence();
 test_finalization();
+test_legacy_migration();
 
 exit(T::summary());

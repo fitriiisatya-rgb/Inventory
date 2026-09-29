@@ -1,0 +1,27 @@
+# Database backups — a full SQL dump includes password hashes and every
+# other row in the system, so this directory must never be reachable over
+# HTTP under any circumstance (unlike uploads/opname, there is no
+# "controlled view endpoint" for this data at all — it is admin-download
+# only, via the filesystem/hosting control panel).
+
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+    Order deny,allow
+    Deny from all
+</IfModule>
+
+<IfModule mod_php.c>
+    php_flag engine off
+</IfModule>
+<FilesMatch ".*">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order deny,allow
+        Deny from all
+    </IfModule>
+</FilesMatch>
+Options -Indexes -ExecCGI

@@ -4,3 +4,6 @@ config/config.php
 uploads/opname/*
 !uploads/opname/.gitkeep
 !uploads/opname/.htaccess
+backups/*
+!backups/.gitkeep
+!backups/.htaccess

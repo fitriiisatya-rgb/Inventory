@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Export Data Legacy (localStorage)</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; max-width: 780px; margin: 24px auto; padding: 0 16px; color: #1f2937; line-height: 1.5; }
+  h1 { font-size: 22px; }
+  h2 { font-size: 17px; margin-top: 28px; border-top: 1px solid #e5e7eb; padding-top: 16px; }
+  .box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 16px; margin: 10px 0; }
+  .warn { background: #fffbeb; border-color: #fde68a; }
+  code, pre { background: #0f172a; color: #e2e8f0; border-radius: 6px; }
+  pre { padding: 12px; overflow-x: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  code.inline { padding: 2px 5px; font-size: 90%; }
+  button { background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 8px 14px; font-size: 14px; cursor: pointer; margin: 4px 6px 4px 0; }
+  button.secondary { background: #64748b; }
+  button:hover { opacity: .9; }
+  #status { margin-top: 10px; font-size: 14px; }
+  .step { font-weight: 600; color: #2563eb; }
+  a.bookmarklet { display: inline-block; background: #eef2ff; border: 1px dashed #6366f1; padding: 8px 14px; border-radius: 6px; color: #3730a3; text-decoration: none; font-weight: 600; margin: 8px 0; }
+</style>
+</head>
+<body>
+<h1>Export Data Legacy (localStorage)</h1>
+<p>Aplikasi legacy menyimpan datanya di <b>localStorage browser</b>, bukan di server. Alat ini membaca <em>semua</em> key localStorage yang ada dan menghasilkan satu file JSON yang bisa diupload ke wizard <b>Tools &rarr; Import Data Legacy</b> pada aplikasi baru.</p>
+
+<div class="box warn">
+<b>Penting — soal origin (asal domain/file):</b> localStorage terikat ke origin (domain+port) yang sedang dibuka di tab browser. Halaman ini <b>hanya bisa membaca localStorage aplikasi legacy jika dibuka dari origin yang sama</b> (mis. taruh file ini di folder yang sama dengan aplikasi legacy, lalu buka melalui server yang sama). Kalau itu merepotkan, gunakan <b>Cara 1 (Bookmarklet)</b> atau <b>Cara 2 (Console)</b> di bawah — keduanya dijalankan langsung di tab aplikasi legacy yang sedang terbuka, jadi originnya otomatis benar.
+</div>
+
+<h2>Cara 1 — Bookmarklet (paling mudah)</h2>
+<p><span class="step">1.</span> Seret tombol biru di bawah ini ke bar bookmark browser Anda (atau klik kanan &rarr; copy link, lalu buat bookmark baru dan tempel sebagai URL-nya).</p>
+<p><span class="step">2.</span> Buka aplikasi legacy di tab browser seperti biasa.</p>
+<p><span class="step">3.</span> Klik bookmarklet tersebut. File JSON akan otomatis ter-download.</p>
+<p><a class="bookmarklet" id="bookmarkletLink" href="#">⬇ Export Data Legacy</a></p>
+
+<h2>Cara 2 — DevTools Console (kalau Cara 1 tidak bisa)</h2>
+<p><span class="step">1.</span> Buka aplikasi legacy di tab browser.</p>
+<p><span class="step">2.</span> Tekan <code class="inline">F12</code> (atau klik kanan &rarr; Inspect) untuk membuka DevTools, lalu pilih tab <b>Console</b>.</p>
+<p><span class="step">3.</span> Salin script di bawah ini, tempel ke Console, tekan Enter.</p>
+<pre id="consoleScript"></pre>
+<button onclick="copyConsoleScript()">Copy Script</button>
+<div id="copyStatus"></div>
+
+<h2>Cara 3 — Jalankan langsung dari halaman ini (hanya jika origin sama)</h2>
+<p>Jika halaman ini benar-benar dibuka dari origin yang sama dengan aplikasi legacy, tombol ini akan langsung bekerja:</p>
+<button class="secondary" onclick="runExport()">Run Export Now</button>
+<div id="status"></div>
+
+<h2>Setelah file JSON terdownload</h2>
+<p>Buka aplikasi baru &rarr; login sebagai SUPERADMIN &rarr; menu <b>Tools &rarr; Import Data Legacy</b> &rarr; upload file JSON hasil export ini. Wizard akan menampilkan daftar key yang ditemukan di dalam file dan meminta Anda memilih mana yang berisi data <b>Master Barang</b> dan mana yang berisi data <b>Stock</b>, lalu menampilkan preview sebelum commit apa pun ke database. Tidak ada perubahan yang dilakukan pada aplikasi legacy oleh alat ini — hanya membaca (read-only).</p>
+
+<script>
+// The exact same export routine is used for the bookmarklet, the console
+// snippet, and the direct "Run Export Now" button — one source of truth,
+// three delivery mechanisms, since only one of them will actually be
+// runnable in the legacy app's own origin depending on how it's hosted.
+function exportPayloadSource() {
+  return "(function(){var dump={};for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);var raw=localStorage.getItem(k);var parsed;try{parsed=JSON.parse(raw);}catch(e){parsed=raw;}dump[k]=parsed;}var meta={exported_at:new Date().toISOString(),origin:location.href,key_count:Object.keys(dump).length};var payload={meta:meta,data:dump};var blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});var url=URL.createObjectURL(blob);var a=document.createElement('a');a.href=url;a.download='legacy_export_'+Date.now()+'.json';document.body.appendChild(a);a.click();document.body.removeChild(a);alert('Export selesai: '+meta.key_count+' localStorage key ditemukan ('+meta.origin+'). File JSON sudah ter-download.');})();";
+}
+
+document.getElementById('bookmarkletLink').href = 'javascript:' + encodeURIComponent(exportPayloadSource());
+document.getElementById('consoleScript').textContent = exportPayloadSource();
+
+function copyConsoleScript() {
+  navigator.clipboard.writeText(exportPayloadSource()).then(function () {
+    document.getElementById('copyStatus').textContent = 'Tersalin ke clipboard.';
+  }, function () {
+    document.getElementById('copyStatus').textContent = 'Gagal menyalin otomatis — silakan seleksi teks di atas secara manual.';
+  });
+}
+
+function runExport() {
+  try {
+    // eslint-disable-next-line no-eval
+    eval(exportPayloadSource());
+    document.getElementById('status').textContent = 'Export dijalankan pada origin: ' + location.href;
+  } catch (e) {
+    document.getElementById('status').textContent = 'Gagal: ' + e.message;
+  }
+}
+</script>
+</body>
+</html>

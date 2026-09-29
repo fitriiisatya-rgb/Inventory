@@ -86,6 +86,7 @@ CREATE TABLE items (
     last_buy_price  DECIMAL(18,2)  NULL DEFAULT NULL,    -- price per BASE unit; NULL = never recorded, never coerced to 0
     status          ENUM('ACTIVE','INACTIVE') NOT NULL DEFAULT 'ACTIVE',
     note            TEXT NULL,
+    migration_source ENUM('MANUAL','LEGACY') NOT NULL DEFAULT 'MANUAL',   -- added migration 0005
 
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -126,6 +127,7 @@ CREATE TABLE stock_import_batches (
     id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     location_id     BIGINT UNSIGNED NOT NULL,
     file_name       VARCHAR(255) NOT NULL,
+    source_type     ENUM('MANUAL','LEGACY') NOT NULL DEFAULT 'MANUAL',   -- added migration 0005
     status          ENUM('PREVIEWED','COMMITTED','CANCELLED') NOT NULL DEFAULT 'PREVIEWED',
     total_rows      INT UNSIGNED NOT NULL DEFAULT 0,
     matched_count   INT UNSIGNED NOT NULL DEFAULT 0,
@@ -178,6 +180,27 @@ CREATE TABLE item_stock_adjustments (
     CONSTRAINT fk_adj_stock FOREIGN KEY (item_stock_id) REFERENCES item_stock(id),
     CONSTRAINT fk_adj_batch FOREIGN KEY (import_batch_id) REFERENCES stock_import_batches(id),
     CONSTRAINT fk_adj_user  FOREIGN KEY (changed_by) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+-- One row per legacy migration run (Master or Stock), added migration
+-- 0005. Legacy stock always flows through stock_import_batches (the
+-- existing, already-audited pipeline) — this table never writes
+-- item_stock directly, it only records the aggregate counts and links
+-- to whichever batch(es) a STOCK migration committed through.
+CREATE TABLE legacy_migrations (
+    id                      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    type                    ENUM('MASTER','STOCK') NOT NULL,
+    source_file             VARCHAR(255) NOT NULL,
+    imported_by             BIGINT UNSIGNED NOT NULL,
+    imported_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    total_rows              INT UNSIGNED NOT NULL DEFAULT 0,
+    valid_rows              INT UNSIGNED NOT NULL DEFAULT 0,
+    warning_rows            INT UNSIGNED NOT NULL DEFAULT 0,
+    invalid_rows            INT UNSIGNED NOT NULL DEFAULT 0,
+    committed_rows          INT UNSIGNED NOT NULL DEFAULT 0,
+    detail                  JSON NULL,
+    KEY idx_legacy_migration_type (type),
+    CONSTRAINT fk_legacy_migration_user FOREIGN KEY (imported_by) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
 -- =====================================================================
