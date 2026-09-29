@@ -1,0 +1,12 @@
+# CLI-only scripts (migrate.php, create_admin.php, backup_database.php).
+# None of these check for an authenticated session — they trust whoever
+# invokes `php bin/foo.php` on the command line. Never let them be
+# reached over HTTP.
+
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+    Order deny,allow
+    Deny from all
+</IfModule>
