@@ -66,6 +66,8 @@ $mlUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='ML'")->fetchColu
 $ltrUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='LTR'")->fetchColumn();
 $pcsUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='PCS'")->fetchColumn();
 $kartonUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='KARTON'")->fetchColumn();
+$packUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='PACK'")->fetchColumn();
+$pailUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='PAIL'")->fetchColumn();
 
 $pdo->prepare("INSERT INTO warehouses (code, name, is_active) VALUES ('V21415PW', 'V2.14.11.5 Playwright WH', 1)")->execute();
 $whId = (int) $pdo->lastInsertId();
@@ -141,10 +143,25 @@ $itemAlready = makeItem($pdo, 'RM-AC-001', 'Susu Bubuk', $kgUnitId, 'ACTIVE');
 // (factor 5 KG) secondary unit for the "CTN + Gram remainder" combined
 // example from the V2.14.11.6 spec.
 $itemKgGr = makeItemWithSecondUnit($pdo, 'RM-KG-GR', 'Keju Cheddar Blok', $kgUnitId, $grUnitId, 0.001);
+// PHASE V2.14.11.6 (expanded) — a THIRD real unit (KARTON, factor 5 KG)
+// on top of the real GR unit above: this is the exact "CTN=10, KG=3,
+// GR=250 -> 53.25 KG" example from the spec, with GR as a genuinely
+// configured/frozen unit (not synthetic) — the remainder must merge
+// into THIS row, never the KG row, so both CTN and KG stay independently
+// auditable in Riwayat Temuan alongside the GR entry.
+UnitConversionService::openNewVersion($pdo, $itemKgGr, $kartonUnitId, 5.0, '2020-01-01 00:00:00', null, 'tertiary unit');
 $itemLtrMl = makeItemWithSecondUnit($pdo, 'RM-LTR-ML', 'Susu Cair UHT', $ltrUnitId, $mlUnitId, 0.001);
 $itemPcsOnly = makeItem($pdo, 'RM-PC-001', 'Sendok Plastik', $pcsUnitId, 'ACTIVE');
 $itemKgOnly = makeItemWithSecondUnit($pdo, 'RM-KG-ONLY', 'Beras Curah', $kgUnitId, $kartonUnitId, 5.0);
-$itemLtrOnly = makeItem($pdo, 'RM-LTR-ONLY', 'Minyak Zaitun', $ltrUnitId, 'ACTIVE');
+// itemLtrOnly: LTR base + PAIL (factor 20 LTR) — deliberately NO ML
+// configured, the volume-family mirror of itemKgOnly's KARTON+KG (no
+// real GR) synthetic-remainder case.
+$itemLtrOnly = makeItemWithSecondUnit($pdo, 'RM-LTR-ONLY', 'Minyak Zaitun', $ltrUnitId, $pailUnitId, 20.0);
+// itemCtnPackPcs — base PCS + PACK (factor 6 PCS) + CTN (factor 48 PCS):
+// a 3-tier chain (CTN -> PACK -> PCS) with NO remainder control at all
+// (base is PCS, never KG/Liter).
+$itemCtnPackPcs = makeItemWithSecondUnit($pdo, 'RM-CTN-PACK-PCS', 'Sedotan Warna-Warni', $pcsUnitId, $packUnitId, 6.0);
+UnitConversionService::openNewVersion($pdo, $itemCtnPackPcs, $kartonUnitId, 48.0, '2020-01-01 00:00:00', null, 'tertiary unit');
 
 foreach ([$itemCoklat1, $itemCoklat2, $itemCoklatInactive, $itemPlain, $itemBarcode, $itemConflict, $itemAlready] as $it) {
     postOpeningIn($pdo, $it, $kgUnitId, $whId, 50, 1000, $admin['id']);
@@ -154,11 +171,12 @@ postOpeningIn($pdo, $itemLtrMl, $ltrUnitId, $whId, 40, 1500, $admin['id']);
 postOpeningIn($pdo, $itemPcsOnly, $pcsUnitId, $whId, 100, 200, $admin['id']);
 postOpeningIn($pdo, $itemKgOnly, $kgUnitId, $whId, 60, 800, $admin['id']);
 postOpeningIn($pdo, $itemLtrOnly, $ltrUnitId, $whId, 25, 1200, $admin['id']);
+postOpeningIn($pdo, $itemCtnPackPcs, $pcsUnitId, $whId, 500, 100, $admin['id']);
 
 $sessionOne = Database::transaction(fn (PDO $tx) => StockOpnameService::start(
     $tx, $whId, $admin['id'], [
         $itemCoklat1, $itemCoklat2, $itemCoklatInactive, $itemPlain, $itemBarcode, $itemConflict, $itemAlready,
-        $itemKgGr, $itemLtrMl, $itemPcsOnly, $itemKgOnly, $itemLtrOnly,
+        $itemKgGr, $itemLtrMl, $itemPcsOnly, $itemKgOnly, $itemLtrOnly, $itemCtnPackPcs,
     ]
 ));
 Database::transaction(fn (PDO $tx) => StockOpnameService::assignTeamMembers($tx, $sessionOne, 'p1', [$counterOne['id'], $counterOneB['id'], $counterMulti['id']], $admin['id']));
@@ -199,4 +217,5 @@ echo json_encode([
     'itemPlain' => $itemPlain, 'itemBarcode' => $itemBarcode, 'barcodeValue' => $barcodeValue,
     'itemConflict' => $itemConflict, 'itemAlready' => $itemAlready,
     'itemKgGr' => $itemKgGr, 'itemLtrMl' => $itemLtrMl, 'itemPcsOnly' => $itemPcsOnly, 'itemKgOnly' => $itemKgOnly, 'itemLtrOnly' => $itemLtrOnly,
+    'itemCtnPackPcs' => $itemCtnPackPcs,
 ], JSON_PRETTY_PRINT);

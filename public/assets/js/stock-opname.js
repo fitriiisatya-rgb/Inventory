@@ -1037,28 +1037,49 @@ const StockOpname = (() => {
             // anywhere). The 1000:1 conversion is a fixed metric constant,
             // applied only within the SAME physical quantity (mass or
             // volume) — never weight<->volume, and never for any other
-            // base unit (PCS/EA/UNIT/etc. never show this at all). It is
-            // never a second, independent quantity source: every keystroke
-            // merges, as a delta normalized into the base unit (qty/1000),
-            // straight into the BASE unit's own dynamic row above — exactly
-            // one raw entry per unit_id is ever sent to the server, and
-            // Total Otomatis (which already sums every row's qty *
-            // conversion_to_base) reflects it live for free.
+            // base unit (PCS/EA/UNIT/etc. never show this at all).
+            //
+            // Merge target: if this item ALSO happens to carry a real,
+            // separately-configured/frozen GR (or ML) unit of its own —
+            // i.e. its own row already exists above, exactly like CTN or
+            // any other unit — the remainder feeds THAT SAME row (a
+            // direct 1:1 add, since the row is already denominated in
+            // Gram/mL) rather than the base row, so there is never a
+            // second, parallel place a "gram total" could live. Only when
+            // no such real unit exists does it fall back to normalizing
+            // into the base row (qty/1000). Either way it is never an
+            // independent quantity source: exactly one raw entry per
+            // unit_id is ever sent to the server (the real GR/ML row's
+            // own raw quantity stays fully auditable in Riwayat Temuan
+            // when one exists), and Total Otomatis (which already sums
+            // every row's qty * conversion_to_base) reflects it live for
+            // free regardless of which row absorbed it.
             const baseUnitRow = units.find((u) => u.is_base_unit);
             const baseCode = baseUnitRow ? String(baseUnitRow.code).toUpperCase() : '';
+            const realGramRow = units.find((u) => /^(GR|GRAM)$/i.test(u.code));
+            const realMlRow = units.find((u) => /^ML$/i.test(u.code));
             let remainderLabel = null;
-            if (baseCode === 'KG') remainderLabel = 'Gram';
-            else if (/^(L|LTR|LITER)$/.test(baseCode)) remainderLabel = 'mL';
+            let remainderTargetRow = null;
+            let remainderDivisor = 1000;
+            if (baseCode === 'KG') {
+                remainderLabel = 'Gram';
+                remainderTargetRow = realGramRow || baseUnitRow;
+                remainderDivisor = realGramRow ? 1 : 1000;
+            } else if (/^(L|LTR|LITER)$/.test(baseCode)) {
+                remainderLabel = 'mL';
+                remainderTargetRow = realMlRow || baseUnitRow;
+                remainderDivisor = realMlRow ? 1 : 1000;
+            }
 
-            if (remainderLabel && baseUnitRow) {
+            if (remainderLabel && remainderTargetRow) {
                 const remainderQtyInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', placeholder: '0', class: 'opname-remainder-qty' });
                 let remainderLastValue = 0;
                 function applyRemainder() {
                     const newValue = Number(remainderQtyInput.value) || 0;
                     const delta = newValue - remainderLastValue;
                     remainderLastValue = newValue;
-                    const targetInput = unitInputs[baseUnitRow.unit_id];
-                    const merged = (Number(targetInput.value) || 0) + delta / 1000;
+                    const targetInput = unitInputs[remainderTargetRow.unit_id];
+                    const merged = (Number(targetInput.value) || 0) + delta / remainderDivisor;
                     // Round away binary-float noise (e.g. 333/1000) while
                     // keeping far more precision than a physical remainder
                     // ever needs.

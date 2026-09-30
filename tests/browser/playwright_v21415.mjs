@@ -326,6 +326,147 @@ try {
     await backToList(c1);
 
     // ============================================================
+    // 19 — MULTI UNIT COUNT INPUT (V2.14.11.6 expanded spec): every
+    // valid frozen unit — INCLUDING the base unit — is its own editable
+    // physical-count input, never collapsed into a read-only converted
+    // total; Total Otomatis stays output-only and live; the remainder
+    // control merges into a REAL GR/ML row when one exists rather than
+    // ever creating a parallel/duplicate channel.
+    // ============================================================
+    const skuKgGrCtn = skuMap[seed.itemKgGr];
+    const skuLtrPail = skuMap[seed.itemLtrOnly];
+    const skuCtnPackPcs = skuMap[seed.itemCtnPackPcs];
+
+    // 19.1/19.2/19.9 — a CTN+KG item renders BOTH as editable inputs, the
+    // base unit (KG) is never hidden, and Total Otomatis is a separate
+    // read-only output that never replaces it.
+    await search.fill(skuKgOnly);
+    await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
+    await suggestRows.first().click();
+    await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
+    const unitRowsKgOnly = c1.locator('.opname-unit-input-row');
+    check('19.1. a CTN+KG item renders BOTH CTN and KG as editable inputs', (await unitRowsKgOnly.count()) === 2);
+    const kartonInputKgOnly = c1.locator('.opname-unit-input-row', { hasText: /^KARTON\b/ }).locator('input');
+    const kgInputKgOnly = c1.locator('.opname-unit-input-row', { hasText: /^KG\b/ }).locator('input');
+    check('19.2. the base unit (KG) is never hidden — it is a real, independently editable input', await kgInputKgOnly.isEditable());
+    const totalTagName = await c1.locator('.opname-total-otomatis').evaluate((el) => el.tagName);
+    check('19.9a. Total Otomatis is rendered as plain output (a DIV), never an input element', totalTagName === 'DIV', totalTagName);
+
+    // 19.3 — CTN=10 + KG=3 => 53 KG.
+    await kartonInputKgOnly.fill('10');
+    await kgInputKgOnly.fill('3');
+    const total3 = await c1.locator('.opname-total-otomatis').innerText();
+    check('19.3. CTN=10 (x5 KG) + KG=3 calculates to 53 KG', /\b53\b/.test(total3) && !/53[.,]/.test(total3), total3);
+
+    // 19.4 — + 250 Gram remainder => 53.25 KG, live.
+    await c1.locator('.opname-remainder-qty').fill('250');
+    const total4 = await c1.locator('.opname-total-otomatis').innerText();
+    check('19.4. CTN=10 + KG=3 + 250 Gram remainder calculates to 53.25 KG, live', /53[.,]25/.test(total4), total4);
+    check('19.9b. re-filling the base (KG) input after Total Otomatis updated still works — it was never replaced by the output', await kgInputKgOnly.isEditable());
+    await backToList(c1);
+
+    // 19.5/19.6 — a LITER-base item (LTR + PAIL, no ML configured) shows
+    // Liter as an editable input, and Liter+mL remainder calculates
+    // correctly (2 PAIL x20 LTR + 3 LTR + 250 mL remainder = 43.25 LTR).
+    await search.fill(skuLtrPail);
+    await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
+    await suggestRows.first().click();
+    await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
+    const pailInput = c1.locator('.opname-unit-input-row', { hasText: /^PAIL\b/ }).locator('input');
+    const ltrInput = c1.locator('.opname-unit-input-row', { hasText: /^LTR\b/ }).locator('input');
+    check('19.5. a LITER-base item renders Liter as an editable input (never hidden)', await ltrInput.isEditable());
+    await pailInput.fill('2');
+    await ltrInput.fill('3');
+    await c1.locator('.opname-remainder-qty').fill('250');
+    const total6 = await c1.locator('.opname-total-otomatis').innerText();
+    check('19.6. PAIL=2 (x20 LTR) + LTR=3 + 250 mL remainder calculates to 43.25 LTR', /43[.,]25/.test(total6), total6);
+    await backToList(c1);
+
+    // 19.7 — a CTN -> PACK -> PCS chain renders all three real units.
+    await search.fill(skuCtnPackPcs);
+    await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
+    await suggestRows.first().click();
+    await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
+    check('19.7. a CTN+PACK+PCS item renders all three as editable inputs', (await c1.locator('.opname-unit-input-row').count()) === 3);
+    check('19.7b. a PCS-base item (even a 3-tier chain) shows no Gram/mL remainder', (await c1.locator('.opname-remainder-block').count()) === 0);
+    await backToList(c1);
+
+    // 19.8 — a plain PCS-only item shows exactly PCS.
+    await search.fill(skuPcsOnly);
+    await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
+    await suggestRows.first().click();
+    await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
+    const unitLabelsPcsOnly = await c1.locator('.opname-unit-input-row label').allInnerTexts();
+    check('19.8. a PCS-only item shows exactly one PCS input', unitLabelsPcsOnly.length === 1 && /^PCS\b/.test(unitLabelsPcsOnly[0]), JSON.stringify(unitLabelsPcsOnly));
+    await backToList(c1);
+
+    // 19.10/19.11/19.12 — itemKgGr now carries THREE real units (KARTON,
+    // KG, GR). The remainder must merge into the REAL GR row (never KG),
+    // so KARTON/KG/GR all stay independently auditable — no duplicate
+    // contribution, and history preserves every entered unit exactly as
+    // the spec's own example describes. The blind counter panel still
+    // never leaks supervisor-only concepts (P1/P2 behavior unchanged).
+    await search.fill(skuKgGrCtn);
+    await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
+    await suggestRows.first().click();
+    await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
+    const panelHtml19 = await c1.locator('.opname-counter-panel').innerHTML();
+    check('19.12. the counter panel still never leaks system/opponent quantities (P1/P2 blind-count behavior unchanged)', !/system_qty|mismatch|variance/i.test(panelHtml19));
+    const kartonInputKgGr = c1.locator('.opname-unit-input-row', { hasText: /^KARTON\b/ }).locator('input');
+    const kgInputKgGr = c1.locator('.opname-unit-input-row', { hasText: /^KG\b/ }).locator('input');
+    const grInputKgGr = c1.locator('.opname-unit-input-row', { hasText: /^GR\b/ }).locator('input');
+    await kartonInputKgGr.fill('10');
+    await kgInputKgGr.fill('3');
+    await c1.locator('.opname-remainder-qty').fill('250');
+    check('19.10a. the remainder merges into the REAL GR row (not KG) — KG stays exactly as typed (3)', (await kgInputKgGr.inputValue()) === '3');
+    check('19.10b. the real GR row now holds the merged remainder (250)', (await grInputKgGr.inputValue()) === '250');
+    const total1011 = await c1.locator('.opname-total-otomatis').innerText();
+    check('19.10c. total is still exactly right (10 KARTON x5 + 3 KG + 250 GR x0.001 = 53.25 KG) with no double-counting', /53[.,]25/.test(total1011), total1011);
+    await c1.waitForFunction(() => {
+        const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.includes('Simpan Hitungan') || b.textContent.includes('Simpan Temuan'));
+        return btn && !btn.disabled;
+    }, { timeout: 8000 });
+    await c1.locator('button:has-text("💾 Simpan Hitungan"), button:has-text("💾 Simpan Temuan")').click();
+    await c1.waitForSelector('.opname-history-toggle', { timeout: 8000 });
+    const findingsKgGrCtn = await c1.evaluate(async (args) => {
+        const res = await fetch(`/api/stock-opname/${args.sid}/items/${args.item}/my-findings`, { credentials: 'include' });
+        return (await res.json()).data;
+    }, { sid: seed.session_id, item: seed.itemKgGr });
+    const goodEntriesKgGrCtn = findingsKgGrCtn[findingsKgGrCtn.length - 1].quantities.GOOD;
+    check('19.10d. exactly one raw entry per unit is submitted — no duplicate contribution', new Set(goodEntriesKgGrCtn.map((q) => q.unit_code)).size === goodEntriesKgGrCtn.length, JSON.stringify(goodEntriesKgGrCtn));
+    check('19.10e. each real unit keeps its own exact raw quantity (10 KARTON, 3 KG, 250 GR)',
+        goodEntriesKgGrCtn.some((q) => q.unit_code === 'KARTON' && q.input_qty === 10)
+        && goodEntriesKgGrCtn.some((q) => q.unit_code === 'KG' && q.input_qty === 3)
+        && goodEntriesKgGrCtn.some((q) => q.unit_code === 'GR' && q.input_qty === 250),
+        JSON.stringify(goodEntriesKgGrCtn));
+    await c1.locator('.opname-history-toggle').click();
+    const historyText19 = await c1.locator('.opname-history-list').innerText();
+    check('19.11. Riwayat Temuan preserves every originally entered unit (10 KARTON + 3 KG + 250 GR), not just a collapsed KG total', /10 KARTON/.test(historyText19) && /3 KG/.test(historyText19) && /250 GR/.test(historyText19), historyText19);
+    await backToList(c1);
+
+    // 19.13 — zero horizontal scroll at 375/390/430px with the full
+    // multi-unit form (3 real unit rows + remainder block) open. itemKgGr
+    // was just counted above, so reopening it lands in SUMMARY mode
+    // first (requirement 14 from the earlier round) — "+ Tambah Temuan"
+    // opens the same full multi-unit form for this check.
+    await search.fill(skuKgGrCtn);
+    await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
+    await suggestRows.first().click();
+    await c1.waitForSelector('.opname-counter-panel .card-title', { timeout: 8000 });
+    const addFindingBtn19 = c1.locator('button:has-text("+ Tambah Temuan")');
+    if (await addFindingBtn19.isVisible()) await addFindingBtn19.click();
+    await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
+    for (const w of [375, 390, 430]) {
+        await c1.setViewportSize({ width: w, height: 844 });
+        await c1.waitForTimeout(100);
+        const overflow19 = await c1.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 2);
+        check(`19.13. no horizontal scroll at ${w}px with the full multi-unit count form open`, !overflow19);
+        await c1.screenshot({ path: path.join(screenshotDir, `19_${w}_multiunit_form.png`) });
+    }
+    await c1.setViewportSize({ width: 390, height: 844 });
+    await backToList(c1);
+
+    // ============================================================
     // 16 — zero horizontal scroll at 375/390/430px with the
     // suggestion dropdown open (the highest-overflow-risk moment).
     // ============================================================
