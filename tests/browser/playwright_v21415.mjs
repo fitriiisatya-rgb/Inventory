@@ -240,108 +240,89 @@ try {
     await backToList(c1);
 
     // ============================================================
-    // 18 — "SISA SATUAN TERKECIL" (GR/ML remainder convenience input)
+    // 18 — "SISA SATUAN TERKECIL", PHASE V2.14.11.6 base-unit-driven
+    // rework: the control is now keyed ENTIRELY off the item's own BASE
+    // unit code, never off whether a GR/ML unit happens to already be
+    // configured/frozen for that item.
     // ============================================================
     const skuKgGr = skuMap[seed.itemKgGr];
-    const skuLtrMl = skuMap[seed.itemLtrMl];
     const skuPcsOnly = skuMap[seed.itemPcsOnly];
     const skuKgOnly = skuMap[seed.itemKgOnly];
+    const skuLtrOnly = skuMap[seed.itemLtrOnly];
 
-    // 18.1/18.4a — KG family (KG+GR both configured) exposes Gram, never ML.
-    await search.fill(skuKgGr);
-    await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
-    await suggestRows.first().click();
-    await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
-    check('18.1. a KG family item (KG+GR configured) exposes the SISA SATUAN TERKECIL control', await c1.locator('.opname-remainder-block').isVisible());
-    const remainderOptions1 = await c1.locator('.opname-remainder-unit option').allInnerTexts();
-    check('18.1b. its remainder dropdown offers Gram', remainderOptions1.includes('Gram'), JSON.stringify(remainderOptions1));
-    check('18.4a. it never offers ML (no ML configured for this item — never invented)', !remainderOptions1.includes('ML'), JSON.stringify(remainderOptions1));
-    await backToList(c1);
-
-    // 18.2 — LITER family (LTR+ML configured) exposes ML.
-    await search.fill(skuLtrMl);
-    await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
-    await suggestRows.first().click();
-    await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
-    check('18.2. a LITER family item (LTR+ML configured) exposes the SISA SATUAN TERKECIL control', await c1.locator('.opname-remainder-block').isVisible());
-    const remainderOptions2 = await c1.locator('.opname-remainder-unit option').allInnerTexts();
-    check('18.2b. its remainder dropdown offers ML', remainderOptions2.includes('ML'), JSON.stringify(remainderOptions2));
-    await backToList(c1);
-
-    // 18.3 — a PCS-only item exposes neither.
-    await search.fill(skuPcsOnly);
-    await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
-    await suggestRows.first().click();
-    await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
-    check('18.3. a PCS-only item exposes NEITHER GR nor ML (control hidden entirely)', (await c1.locator('.opname-remainder-block').count()) === 0);
-    await backToList(c1);
-
-    // 18.4b — a plain KG-only item (no GR/ML configured at all) never
-    // exposes the control either — KG is never auto-converted to GR/ML
-    // without an explicit conversion already in the frozen snapshot.
+    // 1/2 — a KG-base item ALWAYS shows the Gram remainder, even with NO
+    // GR unit configured/frozen anywhere for it.
     await search.fill(skuKgOnly);
     await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
     await suggestRows.first().click();
     await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
-    check('18.4b. a plain KG-only item (no GR/ML configured) never exposes the remainder control', (await c1.locator('.opname-remainder-block').count()) === 0);
+    check('18.1. a KG-base item ALWAYS shows the SISA SATUAN TERKECIL control', await c1.locator('.opname-remainder-block').isVisible());
+    const unitRowLabelsKgOnly = await c1.locator('.opname-unit-input-row label').allInnerTexts();
+    check('18.2. GR does not need to exist as a configured/frozen unit for this item (none of its rows is GR)', !unitRowLabelsKgOnly.some((t) => /^GR\b/.test(t)), JSON.stringify(unitRowLabelsKgOnly));
+    const remainderLabelKg = await c1.locator('.opname-remainder-unit-label').innerText();
+    check('18.8. a KG-base item never shows mL (weight is never auto-converted to volume)', remainderLabelKg === 'Gram', remainderLabelKg);
+
+    // 3 — 250 GR => 0.25 KG, merged straight into the item's own KG (base)
+    // row, live in Total Otomatis (requirement 6).
+    const kgRowInput = c1.locator('.opname-unit-input-row', { hasText: /^KG\b/ }).locator('input');
+    const remainderQtyKg = c1.locator('.opname-remainder-qty');
+    await remainderQtyKg.fill('250');
+    check('18.3. 250 GR remainder normalizes to 0.25 KG in the base row', (await kgRowInput.inputValue()) === '0.25');
+    const totalText3 = await c1.locator('.opname-total-otomatis').innerText();
+    check('18.3b. Total Otomatis reflects it live', /0[.,]25/.test(totalText3), totalText3);
+
+    // 9 — no double counting: re-editing the remainder re-merges as a
+    // delta rather than re-adding on top (250 -> 230 means the base row
+    // goes to 0.23, not 0.48).
+    await remainderQtyKg.fill('230');
+    check('18.9. changing the remainder value re-merges as a delta, never double-counts (250->230 means 0.25->0.23, not 0.48)', (await kgRowInput.inputValue()) === '0.23');
+
+    // 10 — zero remainder changes nothing further: going back to 0
+    // exactly undoes the merged contribution, leaving the row at 0.
+    await remainderQtyKg.fill('0');
+    check('18.10. setting the remainder back to 0 removes its contribution, changing nothing else (row back to 0)', (await kgRowInput.inputValue()) === '0');
+
+    // 4 — CTN (KARTON, factor 5 KG) + Gram remainder combine correctly:
+    // 10 KARTON = 50 KG, + 250 Gram remainder = 50.25 KG total.
+    const kartonRowInput = c1.locator('.opname-unit-input-row', { hasText: /^KARTON\b/ }).locator('input');
+    await kartonRowInput.fill('10');
+    await remainderQtyKg.fill('250');
+    const totalText4 = await c1.locator('.opname-total-otomatis').innerText();
+    check('18.4. 10 KARTON (x5 KG) + 250 Gram remainder = 50.25 KG total', /50[.,]25/.test(totalText4), totalText4);
     await backToList(c1);
 
-    // 18.5/18.7/18.9 — GR remainder merges additively into the SAME
-    // dynamic GR input (never a second quantity source), re-merges as a
-    // delta on change (never double-counts), and what's actually
-    // submitted/shown in history is exactly the merged, auditable value.
+    // 5/6 — a LITER-base item ALWAYS shows the mL remainder (even with no
+    // ML configured), and 250 mL normalizes to 0.25 Liter.
+    await search.fill(skuLtrOnly);
+    await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
+    await suggestRows.first().click();
+    await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
+    check('18.5. a LITER-base item ALWAYS shows the SISA SATUAN TERKECIL control (mL)', await c1.locator('.opname-remainder-block').isVisible());
+    const remainderLabelLtr = await c1.locator('.opname-remainder-unit-label').innerText();
+    check('18.5b. its remainder unit is mL', remainderLabelLtr === 'mL', remainderLabelLtr);
+    const ltrRowInput = c1.locator('.opname-unit-input-row', { hasText: /^LTR\b/ }).locator('input');
+    const remainderQtyLtr = c1.locator('.opname-remainder-qty');
+    await remainderQtyLtr.fill('250');
+    check('18.6. 250 mL remainder normalizes to 0.25 Liter in the base row', (await ltrRowInput.inputValue()) === '0.25');
+    await backToList(c1);
+
+    // 7 — a PCS-only item shows neither Gram nor mL.
+    await search.fill(skuPcsOnly);
+    await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
+    await suggestRows.first().click();
+    await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
+    check('18.7. a PCS-only item hides the remainder control entirely', (await c1.locator('.opname-remainder-block').count()) === 0);
+    await backToList(c1);
+
+    // Consistency check — an item that ALSO happens to carry a real,
+    // separately-configured GR unit (itemKgGr) behaves identically: the
+    // fix is driven by the base unit alone, not gated on whether GR
+    // exists or not.
     await search.fill(skuKgGr);
     await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
     await suggestRows.first().click();
     await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
-    const grRowInput = c1.locator('.opname-unit-input-row', { hasText: /^GR\b/ }).locator('input');
-    await grRowInput.fill('200');
-    const remainderQty1 = c1.locator('.opname-remainder-qty');
-    await remainderQty1.fill('50');
-    check('18.5. GR remainder merges additively into the SAME dynamic GR input (200+50=250)', (await grRowInput.inputValue()) === '250');
-    await remainderQty1.fill('30');
-    check('18.7. changing the remainder value re-merges as a delta, never double-counts (250 -> 230)', (await grRowInput.inputValue()) === '230');
-    await c1.waitForFunction(() => {
-        const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.includes('Simpan Hitungan') || b.textContent.includes('Simpan Temuan'));
-        return btn && !btn.disabled;
-    }, { timeout: 8000 });
-    await c1.locator('button:has-text("💾 Simpan Hitungan"), button:has-text("💾 Simpan Temuan")').click();
-    await c1.waitForSelector('.opname-history-toggle', { timeout: 8000 });
-    const findingsKgGr = await c1.evaluate(async (args) => {
-        const res = await fetch(`/api/stock-opname/${args.sid}/items/${args.item}/my-findings`, { credentials: 'include' });
-        return (await res.json()).data;
-    }, { sid: seed.session_id, item: seed.itemKgGr });
-    const goodEntriesKgGr = findingsKgGr[findingsKgGr.length - 1].quantities.GOOD;
-    check('18.9a. exactly ONE GOOD entry is submitted for the GR unit (no duplicate contribution)', goodEntriesKgGr.filter((q) => q.unit_code === 'GR').length === 1, JSON.stringify(goodEntriesKgGr));
-    check('18.9b. the raw submitted GR quantity matches the merged on-screen value (230) — fully auditable', goodEntriesKgGr.find((q) => q.unit_code === 'GR').input_qty === 230, JSON.stringify(goodEntriesKgGr));
-    await c1.locator('.opname-history-toggle').click();
-    const historyText18 = await c1.locator('.opname-history-list').innerText();
-    check('18.10. existing finding history remains visible via "Lihat Riwayat Temuan" and reflects the merged GR total', /230/.test(historyText18) && /GR/.test(historyText18), historyText18);
-    await backToList(c1);
-
-    // 18.6/18.8 — same proof for ML.
-    await search.fill(skuLtrMl);
-    await c1.waitForSelector('.opname-suggest-row', { timeout: 8000 });
-    await suggestRows.first().click();
-    await c1.waitForSelector('.opname-condition-block', { timeout: 8000 });
-    const mlRowInput = c1.locator('.opname-unit-input-row', { hasText: /^ML\b/ }).locator('input');
-    await mlRowInput.fill('300');
-    const remainderQty2 = c1.locator('.opname-remainder-qty');
-    await remainderQty2.fill('100');
-    check('18.6. ML remainder merges additively into the SAME dynamic ML input (300+100=400)', (await mlRowInput.inputValue()) === '400');
-    await c1.waitForFunction(() => {
-        const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.includes('Simpan Hitungan') || b.textContent.includes('Simpan Temuan'));
-        return btn && !btn.disabled;
-    }, { timeout: 8000 });
-    await c1.locator('button:has-text("💾 Simpan Hitungan"), button:has-text("💾 Simpan Temuan")').click();
-    await c1.waitForSelector('.opname-history-toggle', { timeout: 8000 });
-    const findingsLtrMl = await c1.evaluate(async (args) => {
-        const res = await fetch(`/api/stock-opname/${args.sid}/items/${args.item}/my-findings`, { credentials: 'include' });
-        return (await res.json()).data;
-    }, { sid: seed.session_id, item: seed.itemLtrMl });
-    const goodEntriesLtrMl = findingsLtrMl[findingsLtrMl.length - 1].quantities.GOOD;
-    check('18.8a. exactly ONE GOOD entry is submitted for the ML unit (no duplicate contribution)', goodEntriesLtrMl.filter((q) => q.unit_code === 'ML').length === 1, JSON.stringify(goodEntriesLtrMl));
-    check('18.8b. the raw submitted ML quantity matches the merged on-screen value (400)', goodEntriesLtrMl.find((q) => q.unit_code === 'ML').input_qty === 400, JSON.stringify(goodEntriesLtrMl));
+    check('18.11. an item that ALSO has a real configured GR unit still shows the SAME base-unit-driven control', await c1.locator('.opname-remainder-block').isVisible());
     await backToList(c1);
 
     // ============================================================

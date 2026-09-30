@@ -437,7 +437,7 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 /* PHASE V2.14.11.5 item 18 — SISA SATUAN TERKECIL */
 .opname-remainder-block { padding: 10px 12px; border-radius: var(--radius-sm); background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); margin: 10px 0; }
 .opname-remainder-block .opname-remainder-qty { flex: 1 1 auto; }
-.opname-remainder-block .opname-remainder-unit { flex: 0 0 110px; width: 110px; }
+.opname-remainder-block .opname-remainder-unit-label { flex: 0 0 auto; font-weight: 600; color: var(--text2); padding: 0 4px; }
 .opname-remainder-hint { font-size: 0.72rem; color: var(--text3); margin-top: 6px; }
 .opname-condition-block { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; background: var(--bg3); }
 .opname-photo-thumbs { display: flex; flex-wrap: wrap; gap: 6px; }

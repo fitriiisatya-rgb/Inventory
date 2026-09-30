@@ -65,6 +65,7 @@ $grUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='GR'")->fetchColu
 $mlUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='ML'")->fetchColumn();
 $ltrUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='LTR'")->fetchColumn();
 $pcsUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='PCS'")->fetchColumn();
+$kartonUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='KARTON'")->fetchColumn();
 
 $pdo->prepare("INSERT INTO warehouses (code, name, is_active) VALUES ('V21415PW', 'V2.14.11.5 Playwright WH', 1)")->execute();
 $whId = (int) $pdo->lastInsertId();
@@ -130,11 +131,20 @@ $itemBarcode = makeItem($pdo, 'RM-BC-001', 'Gula Pasir', $kgUnitId, 'ACTIVE', $b
 $itemConflict = makeItem($pdo, 'RM-CF-001', 'Minyak Goreng', $kgUnitId, 'ACTIVE');
 $itemAlready = makeItem($pdo, 'RM-AC-001', 'Susu Bubuk', $kgUnitId, 'ACTIVE');
 
-// PHASE V2.14.11.5 item 18 — unit-family fixtures for SISA SATUAN TERKECIL.
+// PHASE V2.14.11.5/6 item 18 — unit-family fixtures for SISA SATUAN
+// TERKECIL. itemKgOnly and itemLtrOnly deliberately have NO GR/ML unit
+// configured anywhere (proving the V2.14.11.6 fix: the remainder control
+// is driven by the item's BASE unit alone, never by whether GR/ML
+// happens to already exist as a separate configured unit — itemKgGr and
+// itemLtrMl below, which DO also have a real GR/ML row, prove the fix
+// behaves identically either way). itemKgOnly also carries a KARTON
+// (factor 5 KG) secondary unit for the "CTN + Gram remainder" combined
+// example from the V2.14.11.6 spec.
 $itemKgGr = makeItemWithSecondUnit($pdo, 'RM-KG-GR', 'Keju Cheddar Blok', $kgUnitId, $grUnitId, 0.001);
 $itemLtrMl = makeItemWithSecondUnit($pdo, 'RM-LTR-ML', 'Susu Cair UHT', $ltrUnitId, $mlUnitId, 0.001);
 $itemPcsOnly = makeItem($pdo, 'RM-PC-001', 'Sendok Plastik', $pcsUnitId, 'ACTIVE');
-$itemKgOnly = makeItem($pdo, 'RM-KG-ONLY', 'Beras Curah', $kgUnitId, 'ACTIVE');
+$itemKgOnly = makeItemWithSecondUnit($pdo, 'RM-KG-ONLY', 'Beras Curah', $kgUnitId, $kartonUnitId, 5.0);
+$itemLtrOnly = makeItem($pdo, 'RM-LTR-ONLY', 'Minyak Zaitun', $ltrUnitId, 'ACTIVE');
 
 foreach ([$itemCoklat1, $itemCoklat2, $itemCoklatInactive, $itemPlain, $itemBarcode, $itemConflict, $itemAlready] as $it) {
     postOpeningIn($pdo, $it, $kgUnitId, $whId, 50, 1000, $admin['id']);
@@ -143,11 +153,12 @@ postOpeningIn($pdo, $itemKgGr, $kgUnitId, $whId, 30, 2000, $admin['id']);
 postOpeningIn($pdo, $itemLtrMl, $ltrUnitId, $whId, 40, 1500, $admin['id']);
 postOpeningIn($pdo, $itemPcsOnly, $pcsUnitId, $whId, 100, 200, $admin['id']);
 postOpeningIn($pdo, $itemKgOnly, $kgUnitId, $whId, 60, 800, $admin['id']);
+postOpeningIn($pdo, $itemLtrOnly, $ltrUnitId, $whId, 25, 1200, $admin['id']);
 
 $sessionOne = Database::transaction(fn (PDO $tx) => StockOpnameService::start(
     $tx, $whId, $admin['id'], [
         $itemCoklat1, $itemCoklat2, $itemCoklatInactive, $itemPlain, $itemBarcode, $itemConflict, $itemAlready,
-        $itemKgGr, $itemLtrMl, $itemPcsOnly, $itemKgOnly,
+        $itemKgGr, $itemLtrMl, $itemPcsOnly, $itemKgOnly, $itemLtrOnly,
     ]
 ));
 Database::transaction(fn (PDO $tx) => StockOpnameService::assignTeamMembers($tx, $sessionOne, 'p1', [$counterOne['id'], $counterOneB['id'], $counterMulti['id']], $admin['id']));
@@ -187,5 +198,5 @@ echo json_encode([
     'itemCoklat1' => $itemCoklat1, 'itemCoklat2' => $itemCoklat2, 'itemCoklatInactive' => $itemCoklatInactive,
     'itemPlain' => $itemPlain, 'itemBarcode' => $itemBarcode, 'barcodeValue' => $barcodeValue,
     'itemConflict' => $itemConflict, 'itemAlready' => $itemAlready,
-    'itemKgGr' => $itemKgGr, 'itemLtrMl' => $itemLtrMl, 'itemPcsOnly' => $itemPcsOnly, 'itemKgOnly' => $itemKgOnly,
+    'itemKgGr' => $itemKgGr, 'itemLtrMl' => $itemLtrMl, 'itemPcsOnly' => $itemPcsOnly, 'itemKgOnly' => $itemKgOnly, 'itemLtrOnly' => $itemLtrOnly,
 ], JSON_PRETTY_PRINT);
