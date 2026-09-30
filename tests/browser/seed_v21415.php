@@ -61,6 +61,10 @@ $pdo = Database::connection();
 $superRoleId = (int) $pdo->query("SELECT id FROM roles WHERE code='SUPERADMIN'")->fetchColumn();
 $counterRoleId = (int) $pdo->query("SELECT id FROM roles WHERE code='OPNAME_COUNTER'")->fetchColumn();
 $kgUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='KG'")->fetchColumn();
+$grUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='GR'")->fetchColumn();
+$mlUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='ML'")->fetchColumn();
+$ltrUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='LTR'")->fetchColumn();
+$pcsUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='PCS'")->fetchColumn();
 
 $pdo->prepare("INSERT INTO warehouses (code, name, is_active) VALUES ('V21415PW', 'V2.14.11.5 Playwright WH', 1)")->execute();
 $whId = (int) $pdo->lastInsertId();
@@ -100,6 +104,23 @@ function postOpeningIn(PDO $pdo, int $itemId, int $unitId, int $whId, float $qty
     ]));
 }
 
+// PHASE V2.14.11.5 item 18 — an item with a SECOND configured unit
+// conversion (e.g. base KG + GR), so StockOpnameService::start()'s own
+// snapshotSessionUnits() freezes BOTH units for this item (it snapshots
+// every currently-valid item_unit_conversions row, never just the base
+// — see that method). Nothing here invents a conversion StockOpnameService
+// itself wouldn't otherwise snapshot.
+function makeItemWithSecondUnit(PDO $pdo, string $skuTag, string $name, int $baseUnitId, int $secondUnitId, float $secondConversionToBase, string $status = 'ACTIVE'): int
+{
+    $sku = uid($skuTag);
+    $pdo->prepare('INSERT INTO items (sku, name, base_unit_id, minimum_stock, status) VALUES (:sku,:name,:unit,0,:status)')
+        ->execute(['sku' => $sku, 'name' => $name, 'unit' => $baseUnitId, 'status' => $status]);
+    $id = (int) $pdo->lastInsertId();
+    UnitConversionService::openNewVersion($pdo, $id, $baseUnitId, 1.0, '2020-01-01 00:00:00', null, 'base identity');
+    UnitConversionService::openNewVersion($pdo, $id, $secondUnitId, $secondConversionToBase, '2020-01-01 00:00:00', null, 'secondary unit');
+    return $id;
+}
+
 $itemCoklat1 = makeItem($pdo, 'RM-CK-001', 'Coklat Compound Dark 5kg', $kgUnitId, 'ACTIVE');
 $itemCoklat2 = makeItem($pdo, 'RM-CK-002', 'Coklat Bubuk Premium', $kgUnitId, 'ACTIVE');
 $itemCoklatInactive = makeItem($pdo, 'RM-CK-003', 'Dark Coklat Chips', $kgUnitId, 'INACTIVE');
@@ -109,12 +130,25 @@ $itemBarcode = makeItem($pdo, 'RM-BC-001', 'Gula Pasir', $kgUnitId, 'ACTIVE', $b
 $itemConflict = makeItem($pdo, 'RM-CF-001', 'Minyak Goreng', $kgUnitId, 'ACTIVE');
 $itemAlready = makeItem($pdo, 'RM-AC-001', 'Susu Bubuk', $kgUnitId, 'ACTIVE');
 
+// PHASE V2.14.11.5 item 18 — unit-family fixtures for SISA SATUAN TERKECIL.
+$itemKgGr = makeItemWithSecondUnit($pdo, 'RM-KG-GR', 'Keju Cheddar Blok', $kgUnitId, $grUnitId, 0.001);
+$itemLtrMl = makeItemWithSecondUnit($pdo, 'RM-LTR-ML', 'Susu Cair UHT', $ltrUnitId, $mlUnitId, 0.001);
+$itemPcsOnly = makeItem($pdo, 'RM-PC-001', 'Sendok Plastik', $pcsUnitId, 'ACTIVE');
+$itemKgOnly = makeItem($pdo, 'RM-KG-ONLY', 'Beras Curah', $kgUnitId, 'ACTIVE');
+
 foreach ([$itemCoklat1, $itemCoklat2, $itemCoklatInactive, $itemPlain, $itemBarcode, $itemConflict, $itemAlready] as $it) {
     postOpeningIn($pdo, $it, $kgUnitId, $whId, 50, 1000, $admin['id']);
 }
+postOpeningIn($pdo, $itemKgGr, $kgUnitId, $whId, 30, 2000, $admin['id']);
+postOpeningIn($pdo, $itemLtrMl, $ltrUnitId, $whId, 40, 1500, $admin['id']);
+postOpeningIn($pdo, $itemPcsOnly, $pcsUnitId, $whId, 100, 200, $admin['id']);
+postOpeningIn($pdo, $itemKgOnly, $kgUnitId, $whId, 60, 800, $admin['id']);
 
 $sessionOne = Database::transaction(fn (PDO $tx) => StockOpnameService::start(
-    $tx, $whId, $admin['id'], [$itemCoklat1, $itemCoklat2, $itemCoklatInactive, $itemPlain, $itemBarcode, $itemConflict, $itemAlready]
+    $tx, $whId, $admin['id'], [
+        $itemCoklat1, $itemCoklat2, $itemCoklatInactive, $itemPlain, $itemBarcode, $itemConflict, $itemAlready,
+        $itemKgGr, $itemLtrMl, $itemPcsOnly, $itemKgOnly,
+    ]
 ));
 Database::transaction(fn (PDO $tx) => StockOpnameService::assignTeamMembers($tx, $sessionOne, 'p1', [$counterOne['id'], $counterOneB['id'], $counterMulti['id']], $admin['id']));
 
@@ -153,4 +187,5 @@ echo json_encode([
     'itemCoklat1' => $itemCoklat1, 'itemCoklat2' => $itemCoklat2, 'itemCoklatInactive' => $itemCoklatInactive,
     'itemPlain' => $itemPlain, 'itemBarcode' => $itemBarcode, 'barcodeValue' => $barcodeValue,
     'itemConflict' => $itemConflict, 'itemAlready' => $itemAlready,
+    'itemKgGr' => $itemKgGr, 'itemLtrMl' => $itemLtrMl, 'itemPcsOnly' => $itemPcsOnly, 'itemKgOnly' => $itemKgOnly,
 ], JSON_PRETTY_PRINT);

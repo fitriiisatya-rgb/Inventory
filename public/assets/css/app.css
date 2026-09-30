@@ -434,6 +434,11 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 /* PHASE V2.14.11 */
 .opname-zero-confirm { padding: 8px 12px; border-radius: var(--radius-sm); background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3); font-size: 0.82rem; margin-bottom: 10px; }
 .opname-zero-confirm input[type="checkbox"] { width: auto; }
+/* PHASE V2.14.11.5 item 18 — SISA SATUAN TERKECIL */
+.opname-remainder-block { padding: 10px 12px; border-radius: var(--radius-sm); background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); margin: 10px 0; }
+.opname-remainder-block .opname-remainder-qty { flex: 1 1 auto; }
+.opname-remainder-block .opname-remainder-unit { flex: 0 0 110px; width: 110px; }
+.opname-remainder-hint { font-size: 0.72rem; color: var(--text3); margin-top: 6px; }
 .opname-condition-block { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; background: var(--bg3); }
 .opname-photo-thumbs { display: flex; flex-wrap: wrap; gap: 6px; }
 .opname-photo-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }

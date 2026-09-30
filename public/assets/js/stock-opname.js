@@ -1028,6 +1028,54 @@ const StockOpname = (() => {
             // input already focused, no extra "Hitung" tap needed.
             if (units.length > 0) unitInputs[units[0].unit_id].focus();
 
+            // PHASE V2.14.11.5 item 18 — "SISA SATUAN TERKECIL": a compact
+            // convenience input for a small GR/ML remainder, shown ONLY
+            // when the item's own FROZEN session unit snapshot already
+            // contains that exact unit (never derived/invented — e.g.
+            // KG is never auto-converted to GR or ML if the snapshot
+            // itself has no such unit, and weight is never auto-converted
+            // to volume). It is never a second, independent quantity
+            // source: every keystroke here is merged, as a delta, straight
+            // into the SAME dynamic unit row's own input above — exactly
+            // one raw entry per unit_id is ever sent to the server.
+            const gramUnit = units.find((u) => /^(GR|GRAM)$/i.test(u.code));
+            const mlUnit = units.find((u) => /^ML$/i.test(u.code));
+            const remainderTargets = [];
+            if (gramUnit) remainderTargets.push({ label: 'Gram', unit: gramUnit });
+            if (mlUnit) remainderTargets.push({ label: 'ML', unit: mlUnit });
+            if (remainderTargets.length > 0) {
+                const remainderQtyInput = UI.el('input', { type: 'number', step: 'any', min: '0', inputmode: 'decimal', placeholder: '0', class: 'opname-remainder-qty' });
+                const remainderUnitSelect = UI.el('select', {
+                    class: 'opname-remainder-unit',
+                    html: remainderTargets.map((t) => `<option value="${t.unit.unit_id}">${t.label}</option>`).join(''),
+                });
+                let remainderLastValue = 0;
+                let remainderLastUnitId = remainderTargets[0].unit.unit_id;
+                function applyRemainder() {
+                    const targetUnitId = Number(remainderUnitSelect.value);
+                    // Switching the target unit mid-entry starts a fresh
+                    // delta against the newly-selected unit rather than
+                    // retroactively touching the previously-targeted one.
+                    if (targetUnitId !== remainderLastUnitId) {
+                        remainderLastValue = 0;
+                        remainderLastUnitId = targetUnitId;
+                    }
+                    const newValue = Number(remainderQtyInput.value) || 0;
+                    const delta = newValue - remainderLastValue;
+                    remainderLastValue = newValue;
+                    const targetInput = unitInputs[targetUnitId];
+                    targetInput.value = Math.max(0, (Number(targetInput.value) || 0) + delta);
+                    targetInput.dispatchEvent(new Event('input'));
+                }
+                remainderQtyInput.addEventListener('input', applyRemainder);
+                remainderUnitSelect.addEventListener('change', applyRemainder);
+                panelHost.appendChild(UI.el('div', { class: 'form-group opname-remainder-block' }, [
+                    UI.el('label', {}, 'SISA SATUAN TERKECIL'),
+                    UI.el('div', { style: 'display:flex; gap:8px; align-items:center;' }, [remainderQtyInput, remainderUnitSelect]),
+                    UI.el('div', { class: 'opname-remainder-hint' }, 'Gunakan hanya untuk sisa stok dalam satuan terkecil.'),
+                ]));
+            }
+
             const totalHost = UI.el('div', { class: 'opname-total-otomatis' });
             // PHASE V2.14.11 — item 6 correction: a blank/untouched form is
             // NEVER silently treated as "stok fisik 0". Whenever the GOOD
