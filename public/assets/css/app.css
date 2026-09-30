@@ -460,13 +460,44 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
    syncItemStatusSeg() in stock-opname.js), and touch targets/font
    sizes are raised to avoid iOS auto-zoom and mis-taps.
    ============================================================ */
-.opname-counter-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.opname-toolbar-search { flex: 1 1 220px; }
+.opname-counter-toolbar { display: flex; flex-direction: column; align-items: stretch; gap: 10px; }
 .opname-toolbar-item-status { width: 160px; }
 .opname-toolbar-category { width: 180px; }
 .opname-toolbar-progress-filter { width: 170px; }
-.opname-toolbar-next, .opname-toolbar-scan { flex: 0 0 auto; }
 .opname-status-segmented { display: none; }
+
+/* ============================================================
+   PHASE V2.14.11.5 — autocomplete/typeahead search: the PRIMARY counting
+   workflow (type -> suggestions -> select -> count form), full-width and
+   prominent, with the browse list/filters demoted to a collapsed
+   secondary section below (see .opname-browse-section /
+   .opname-filter-section further down).
+   ============================================================ */
+.opname-search-wrap { position: relative; }
+.opname-blind-search { min-height: 48px; font-size: 16px; }
+.opname-suggest-list {
+    position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 30;
+    background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    max-height: 50vh; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    display: none;
+}
+.opname-suggest-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 10px 12px; min-height: 44px; border-bottom: 1px solid var(--border); cursor: pointer;
+}
+.opname-suggest-row:last-child { border-bottom: none; }
+.opname-suggest-row:hover, .opname-suggest-row.active { background: rgba(59,130,246,0.14); }
+.opname-suggest-identity { min-width: 0; overflow: hidden; }
+.opname-suggest-sku { font-weight: 700; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.opname-suggest-name { color: var(--text2); font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.opname-suggest-badges { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: 0 0 auto; }
+.opname-suggest-empty { padding: 12px; text-align: center; color: var(--text3); font-size: 0.85rem; }
+
+.opname-toolbar-next .btn { width: 100%; }
+.opname-browse-toggle { align-self: flex-start; }
+.opname-browse-section { margin-top: 10px; }
+.opname-filter-toggle { margin-bottom: 8px; }
+.opname-filter-section { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 
 .opname-mobile-cards { display: none; }
 .opname-item-card { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg3); padding: 12px; margin-bottom: 10px; }
@@ -491,17 +522,19 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
     .opname-counter-screen .compact-table-wrap { display: none; }
     .opname-mobile-cards { display: block; }
 
-    /* Requirement 3/4 — filter toolbar stacks to one full-width control
-       per row, with the primary action prominent directly below it. */
-    .opname-counter-toolbar { flex-direction: column; align-items: stretch; }
-    .opname-toolbar-search, .opname-toolbar-item-status, .opname-toolbar-category,
-    .opname-toolbar-progress-filter, .opname-toolbar-next, .opname-toolbar-scan { width: 100%; }
+    /* Requirement 3/4/11 — filter controls stack to one full-width
+       control per row inside the collapsed [Filter] section; the
+       item-status filter becomes a 3-button segmented control there
+       (the underlying <select> stays the single source of truth — see
+       syncItemStatusSeg() in stock-opname.js). */
+    .opname-toolbar-item-status, .opname-toolbar-category, .opname-toolbar-progress-filter { width: 100%; }
     .opname-toolbar-item-status select { display: none; }
     .opname-status-segmented { display: flex; gap: 6px; }
     .opname-status-seg-btn { flex: 1 1 0; min-height: 44px; }
     .opname-status-seg-btn.active { background: var(--accent); color: #fff; }
-    .opname-toolbar-next .btn { width: 100%; min-height: 48px; font-size: 1rem; }
+    .opname-toolbar-next .btn { min-height: 48px; font-size: 1rem; }
     .opname-toolbar-scan .btn { width: 100%; min-height: 44px; }
+    .opname-browse-toggle, .opname-filter-toggle { width: 100%; justify-content: center; }
 
     /* Requirement 10 — touch targets + iOS zoom avoidance (>=16px input
        font-size), scoped to this screen only — never a global input/

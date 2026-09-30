@@ -520,7 +520,12 @@ const StockOpname = (() => {
             // + aggregate shown after a save, offering only a non-writing
             // "+Tambah Temuan" button).
             activeClaimToken: null, panelMode: 'form',
+            // PHASE V2.14.11.5 — autocomplete dropdown state: the current
+            // (max 10) suggestion set for whatever is typed in searchInput,
+            // and which one (if any) arrow-key navigation has highlighted.
+            suggestItems: [], suggestIndex: -1,
         };
+        let suggestDebounceTimer = null;
 
         const wrap = UI.el('div', { class: 'opname-counter-screen' });
         const bannerHost = UI.el('div');
@@ -560,15 +565,29 @@ const StockOpname = (() => {
         const tbody = UI.el('tbody', {});
         const cardListHost = UI.el('div', { class: 'opname-mobile-cards' });
         const pagerHost = UI.el('div', { style: 'display:flex; justify-content:space-between; align-items:center; margin-top:10px; flex-wrap:wrap; gap:8px;' });
-        const listHost = UI.el('div', { class: 'opname-counter-list' }, [
-            UI.el('div', { class: 'card opname-counter-toolbar' }, [
-                UI.el('div', { class: 'opname-toolbar-search' }, [searchInput]),
-                UI.el('div', { class: 'opname-toolbar-item-status' }, [itemStatusSelect, itemStatusSegHost]),
-                UI.el('div', { class: 'opname-toolbar-category' }, [categorySelect]),
-                UI.el('div', { class: 'opname-toolbar-progress-filter' }, [filterSelect]),
-                UI.el('div', { class: 'opname-toolbar-next' }, [nextItemBtn]),
-                UI.el('div', { class: 'opname-toolbar-scan' }, [scanBtn]),
-            ]),
+
+        // PHASE V2.14.11.5 — autocomplete/typeahead dropdown attached to
+        // searchInput. Suggestions are computed from state.view.lines only
+        // (already-loaded, blind-safe data — see filteredLines()'s own
+        // blindness note above) — never a new endpoint, never system/
+        // opponent quantities.
+        const suggestHost = UI.el('div', { class: 'opname-suggest-list' });
+        const searchWrap = UI.el('div', { class: 'opname-search-wrap' }, [searchInput, suggestHost]);
+
+        // Requirement 9/11 — the full browse list (table/cards + its
+        // status/category/progress filters) is SECONDARY on mobile,
+        // collapsed by default behind two independent toggles: the list
+        // itself, and — nested one level further — the filter controls.
+        const browseToggleBtn = UI.el('button', { type: 'button', class: 'btn btn-secondary opname-browse-toggle' }, '▸ Lihat Daftar Barang');
+        const filterToggleBtn = UI.el('button', { type: 'button', class: 'btn btn-secondary btn-sm opname-filter-toggle' }, '▸ Filter');
+        const filterSectionHost = UI.el('div', { class: 'opname-filter-section', style: 'display:none;' }, [
+            UI.el('div', { class: 'opname-toolbar-item-status' }, [itemStatusSelect, itemStatusSegHost]),
+            UI.el('div', { class: 'opname-toolbar-category' }, [categorySelect]),
+            UI.el('div', { class: 'opname-toolbar-progress-filter' }, [filterSelect]),
+        ]);
+        const browseSectionHost = UI.el('div', { class: 'opname-browse-section', style: 'display:none;' }, [
+            filterToggleBtn,
+            filterSectionHost,
             UI.el('div', { class: 'compact-table-wrap' }, [
                 UI.el('table', { class: 'compact-table' }, [
                     UI.el('thead', {}, [UI.el('tr', {}, ['No', 'SKU / Barang', 'Kategori', 'Status', 'Terakhir Diinput', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
@@ -577,6 +596,26 @@ const StockOpname = (() => {
             ]),
             cardListHost,
             pagerHost,
+        ]);
+        filterToggleBtn.addEventListener('click', () => {
+            const opening = filterSectionHost.style.display === 'none';
+            filterSectionHost.style.display = opening ? 'block' : 'none';
+            filterToggleBtn.textContent = opening ? '▾ Filter' : '▸ Filter';
+        });
+        browseToggleBtn.addEventListener('click', () => {
+            const opening = browseSectionHost.style.display === 'none';
+            browseSectionHost.style.display = opening ? 'block' : 'none';
+            browseToggleBtn.textContent = opening ? '▾ Lihat Daftar Barang' : '▸ Lihat Daftar Barang';
+        });
+
+        const listHost = UI.el('div', { class: 'opname-counter-list' }, [
+            UI.el('div', { class: 'card opname-counter-toolbar' }, [
+                searchWrap,
+                UI.el('div', { class: 'opname-toolbar-next' }, [nextItemBtn]),
+                UI.el('div', { class: 'opname-toolbar-scan' }, [scanBtn]),
+                browseToggleBtn,
+            ]),
+            browseSectionHost,
         ]);
         const panelHost = UI.el('div', { class: 'opname-counter-panel card' });
 
@@ -600,6 +639,109 @@ const StockOpname = (() => {
                 if (state.filterCategory !== 'ALL' && String(l.category_id) !== state.filterCategory) return false;
                 return true;
             });
+        }
+
+        // PHASE V2.14.11.5 — autocomplete suggestions: pure SKU/name/
+        // barcode text search over state.view.lines, deliberately NEVER
+        // narrowed by the secondary browse list's own Aktif/Tidak
+        // Aktif/Kategori/progress filters (requirement 11 — both ACTIVE
+        // and INACTIVE items must always be searchable here, since the
+        // current session already covers every master SKU). Same
+        // blindness guarantee as filteredLines() — sku/name/item_status/
+        // barcode/is_counted_by_me/claimed_by_teammate_username are all
+        // that is ever read, never system_qty_base or the other team's
+        // values. Capped at 10 results (requirement 4).
+        function searchSuggestions(query) {
+            const q = query.trim().toLowerCase();
+            if (!q) return [];
+            return state.view.lines
+                .filter((l) => !l.is_excluded && (l.sku.toLowerCase().includes(q) || l.name.toLowerCase().includes(q) || itemBarcodeOf(l.item_id).includes(q)))
+                .slice(0, 10);
+        }
+
+        function suggestBadgeCountText(line) {
+            return line.is_counted_by_me ? 'SUDAH DIHITUNG' : 'BELUM DIHITUNG';
+        }
+
+        function buildSuggestionRowEl(line, idx) {
+            const row = UI.el('div', { class: 'opname-suggest-row', 'data-idx': String(idx) });
+            if (idx === state.suggestIndex) row.classList.add('active');
+            row.appendChild(UI.el('div', { class: 'opname-suggest-identity' }, [
+                UI.el('div', { class: 'opname-suggest-sku' }, line.sku),
+                UI.el('div', { class: 'opname-suggest-name' }, line.name),
+            ]));
+            const statusBadge = UI.el('span', { class: `badge ${line.item_status === 'INACTIVE' ? 'badge-cancelled' : 'badge-received'}` }, line.item_status === 'INACTIVE' ? 'TIDAK AKTIF' : 'AKTIF');
+            const countBadge = UI.el('span', { class: `badge ${line.is_counted_by_me ? 'badge-received' : 'badge-pending'}` }, suggestBadgeCountText(line));
+            row.appendChild(UI.el('div', { class: 'opname-suggest-badges' }, [statusBadge, countBadge]));
+            // mousedown (not click) fires before the input's blur, so a tap
+            // never loses the selection to a blur-triggered dropdown close.
+            row.addEventListener('mousedown', (e) => e.preventDefault());
+            row.addEventListener('click', () => chooseSuggestion(line.item_id));
+            return row;
+        }
+
+        function renderSuggestions() {
+            suggestHost.innerHTML = '';
+            if (state.suggestItems.length === 0) {
+                if (state.filterText.trim()) {
+                    suggestHost.style.display = 'block';
+                    suggestHost.appendChild(UI.el('div', { class: 'opname-suggest-empty' }, 'Barang tidak ditemukan.'));
+                } else {
+                    suggestHost.style.display = 'none';
+                }
+                return;
+            }
+            suggestHost.style.display = 'block';
+            state.suggestItems.forEach((line, idx) => suggestHost.appendChild(buildSuggestionRowEl(line, idx)));
+        }
+
+        function closeSuggestions() {
+            state.suggestItems = [];
+            state.suggestIndex = -1;
+            suggestHost.style.display = 'none';
+            suggestHost.innerHTML = '';
+        }
+
+        // Requirement 4 — debounce ~150-250ms so fast typing never fires a
+        // search per keystroke.
+        function scheduleSuggest() {
+            if (suggestDebounceTimer) clearTimeout(suggestDebounceTimer);
+            suggestDebounceTimer = setTimeout(() => {
+                state.suggestItems = searchSuggestions(state.filterText);
+                state.suggestIndex = -1;
+                renderSuggestions();
+            }, 200);
+        }
+
+        function chooseSuggestion(itemId) {
+            closeSuggestions();
+            jumpToItem(itemId);
+        }
+
+        // Requirement 6/7 — Enter's priority is: (1) an exact SKU match
+        // always wins outright regardless of arrow-key navigation, since a
+        // deliberately typed/scanned exact SKU is unambiguous; (2) a
+        // uniquely-resolving exact barcode opens directly, an ambiguous
+        // one shows an error and never guesses; (3) otherwise the
+        // arrow-highlighted suggestion, or the FIRST suggestion if the
+        // user never navigated.
+        function handleSearchEnter() {
+            const q = state.filterText.trim();
+            if (!q) return;
+            const qLower = q.toLowerCase();
+            const exactSku = state.view.lines.find((l) => !l.is_excluded && l.sku.toLowerCase() === qLower);
+            if (exactSku) { chooseSuggestion(exactSku.item_id); return; }
+
+            const barcodeMatches = state.view.lines.filter((l) => !l.is_excluded && itemBarcodeOf(l.item_id) === qLower);
+            if (barcodeMatches.length === 1) { chooseSuggestion(barcodeMatches[0].item_id); return; }
+            if (barcodeMatches.length > 1) {
+                UI.toast('Barcode tidak unik — beberapa barang cocok. Gunakan pencarian SKU/nama.', 'error');
+                return;
+            }
+
+            if (state.suggestItems.length === 0) return;
+            const idx = state.suggestIndex >= 0 ? state.suggestIndex : 0;
+            chooseSuggestion(state.suggestItems[idx].item_id);
         }
 
         function renderChrome() {
@@ -643,7 +785,30 @@ const StockOpname = (() => {
             pagerHost.appendChild(UI.el('div', { style: 'display:flex; gap:8px;' }, [prevBtn, nextBtn]));
         }
 
-        searchInput.addEventListener('input', () => { state.filterText = searchInput.value; state.page = 0; renderTable(); });
+        searchInput.addEventListener('input', () => {
+            state.filterText = searchInput.value;
+            state.page = 0;
+            renderTable();
+            scheduleSuggest();
+        });
+        searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (state.suggestItems.length === 0) return;
+                state.suggestIndex = Math.min(state.suggestItems.length - 1, state.suggestIndex + 1);
+                renderSuggestions();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (state.suggestItems.length === 0) return;
+                state.suggestIndex = Math.max(0, state.suggestIndex - 1);
+                renderSuggestions();
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                handleSearchEnter();
+            } else if (e.key === 'Escape') {
+                closeSuggestions();
+            }
+        });
         filterSelect.addEventListener('change', () => { state.filterStatus = filterSelect.value; state.page = 0; renderTable(); });
         itemStatusSelect.addEventListener('change', () => { state.filterItemStatus = itemStatusSelect.value; state.page = 0; syncItemStatusSeg(); renderTable(); });
         categorySelect.addEventListener('change', () => { state.filterCategory = categorySelect.value; state.page = 0; renderTable(); });
@@ -681,22 +846,37 @@ const StockOpname = (() => {
 
         // Claims $itemId (or, if omitted, whatever the server picks as
         // "next available" — see StockOpnameService::claimItem()) for THIS
-        // team, then opens the count panel on it. A conflict (someone on
-        // the same team currently holds a live claim) surfaces the exact
-        // server message ("sedang dihitung oleh ...") rather than silently
-        // opening the panel anyway.
+        // team, then opens the count panel on it.
+        //
+        // PHASE V2.14.11.5 — a claim conflict (someone on the SAME team
+        // currently holds a live claim on this exact item) shows the
+        // fixed, friendly message rather than the raw server text, and
+        // returns focus to the search box for an immediate retry/next
+        // search. Reopening an item that already has team findings opens
+        // in SUMMARY mode (history + "SUDAH DIHITUNG" + a non-writing
+        // "+ Tambah Temuan" button) rather than straight into a blank
+        // form — "Ambil Item Berikutnya" (itemId === null) never hits
+        // this branch, since its own candidate selection only ever offers
+        // genuinely uncounted lines server-side.
         async function selectItem(itemId) {
+            const line = itemId === null ? null : state.view.lines.find((l) => l.item_id === itemId);
             try {
                 const claim = await InvApi.claimOpnameItem(state.view.session_id, state.view.role, itemId);
                 state.activeItemId = claim.item_id;
                 state.activeClaimToken = claim.claim_token;
-                state.panelMode = 'form';
+                state.panelMode = (line && line.is_counted_by_me) ? 'summary' : 'form';
                 await refetch();
                 await renderPanel();
                 panelHost.scrollIntoView({ behavior: 'smooth', block: 'start' });
             } catch (err) {
                 UI.handleApiError(err);
-                UI.toast((err && err.message) || 'Barang tidak tersedia untuk diklaim.', 'error');
+                const msg = (err && err.message) || '';
+                if ((line && line.claimed_by_teammate_username) || /currently claimed by/i.test(msg)) {
+                    UI.toast('Barang sedang dihitung oleh anggota Tim P1/P2 lain.', 'error');
+                } else {
+                    UI.toast(msg || 'Barang tidak tersedia untuk diklaim.', 'error');
+                }
+                searchInput.focus();
             }
         }
 
@@ -752,7 +932,15 @@ const StockOpname = (() => {
 
             panelHost.innerHTML = '';
             panelHost.appendChild(UI.el('div', { class: 'card-title' }, `${line.sku} — ${line.name}`));
-            panelHost.appendChild(UI.el('div', { style: 'color:var(--text3); font-size:0.85rem; margin-bottom:8px;' }, `Kategori: ${categoryNameOf(line.category_id)}`));
+            const identityMetaEl = UI.el('div', { style: 'color:var(--text3); font-size:0.85rem; margin-bottom:8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;' }, [
+                document.createTextNode(`Kategori: ${categoryNameOf(line.category_id)}`),
+            ]);
+            // Requirement 14 — reopening an item that already has team
+            // findings always shows this at a glance, in BOTH panel modes
+            // (the collapsed-by-default summary AND the "Temuan Baru"
+            // form), never silently.
+            if (isAdditional) identityMetaEl.appendChild(UI.el('span', { class: 'badge badge-received' }, 'SUDAH DIHITUNG'));
+            panelHost.appendChild(identityMetaEl);
 
             const closeBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, '‹ Kembali ke Daftar');
             closeBtn.addEventListener('click', closePanel);
@@ -811,7 +999,8 @@ const StockOpname = (() => {
                         await renderPanel();
                     } catch (err) {
                         UI.handleApiError(err);
-                        UI.toast((err && err.message) || 'Tidak dapat mengklaim ulang barang ini.', 'error');
+                        const msg = (err && err.message) || '';
+                        UI.toast(/currently claimed by/i.test(msg) ? 'Barang sedang dihitung oleh anggota Tim P1/P2 lain.' : (msg || 'Tidak dapat mengklaim ulang barang ini.'), 'error');
                     }
                 });
                 panelHost.appendChild(UI.el('div', { class: 'opname-sticky-actions' }, [addFindingBtn]));
@@ -834,6 +1023,10 @@ const StockOpname = (() => {
                 ]));
             });
             panelHost.appendChild(unitInputsHost);
+            // Requirement 6 — selecting an item (search/tap/Enter) opens
+            // straight into an editable form with the first GOOD quantity
+            // input already focused, no extra "Hitung" tap needed.
+            if (units.length > 0) unitInputs[units[0].unit_id].focus();
 
             const totalHost = UI.el('div', { class: 'opname-total-otomatis' });
             // PHASE V2.14.11 — item 6 correction: a blank/untouched form is
@@ -1022,6 +1215,12 @@ const StockOpname = (() => {
                     state.panelMode = 'summary';
                     await refetch();
                     await renderPanel();
+                    // Requirement 12 — fast warehouse counting loop: after a
+                    // successful save, focus returns to the search box so
+                    // the next SKU can be typed immediately, with zero
+                    // extra taps (the summary view stays visible; only
+                    // keyboard focus moves).
+                    searchInput.focus();
                 } catch (err) {
                     if (err && err.code === 'CLAIM_LOST' && retryOnClaimLost) {
                         try {
@@ -1703,15 +1902,60 @@ const StockOpname = (() => {
         } catch (err) { UI.handleApiError(err); }
     }
 
+    // PHASE V2.14.11.5 — renders a counter's session directly into its OWN
+    // dedicated element, entirely separate from the admin "Stock Opname"
+    // tab's #opname-body. This is the actual fix for "OPNAME_COUNTER must
+    // never visually reach the admin page": the previous implementation
+    // reused #tab-opname/#opname-body as the mount point for "Stock Opname
+    // Saya", which — on a shared/kiosk browser where a SUPERADMIN had
+    // earlier opened the real admin tab in that same page session — left
+    // the admin skeleton (including the "Petugas Stock Opname" card)
+    // sitting in the DOM and visible once the counter's session got
+    // rendered inside it. This function never touches #tab-opname at all,
+    // so that DOM simply cannot leak into a counter's view regardless of
+    // browser history.
+    async function renderCounterSession(mountEl, sessionId) {
+        mountEl.innerHTML = '<div class="alert alert-info">Memuat sesi opname...</div>';
+        try {
+            const session = await InvApi.getOpname(sessionId);
+            mountEl.innerHTML = '';
+            if (session.role) {
+                mountEl.appendChild(buildBlindCountScreen(session));
+            } else {
+                // Defensive only — renderMySessions() only ever lists
+                // sessions where the caller IS that session's assigned P1/P2
+                // counter (StockOpnameService::mySessions()), so this
+                // should never actually happen; it exists purely so a
+                // future mismatch can never fall through to rendering
+                // supervisor/admin content in a counter's own tab.
+                mountEl.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Sesi ini tidak dapat dibuka sebagai Tim P1/P2.'));
+            }
+        } catch (err) {
+            UI.handleApiError(err);
+            mountEl.innerHTML = `<div class="alert alert-error">Gagal memuat sesi: ${(err && err.message) || ''}</div>`;
+        }
+    }
+
     // ============================================================
     // PHASE V2.14.10 — "STOCK OPNAME SAYA": deliberately reachable by ANY
     // active user regardless of global role/permission (see index.html's
     // sidebar link — no data-require-permission attribute at all). Lists
     // only sessions where the logged-in user personally has an active
-    // team membership; clicking one hands off straight into the SAME
-    // buildBlindCountScreen() the "Stock Opname" tab itself uses (via
-    // renderSession()), so there is exactly one counter-screen
-    // implementation, not two.
+    // team membership, and renders straight into buildBlindCountScreen()
+    // via renderCounterSession() above — the SAME counter-screen
+    // implementation the admin "Stock Opname" tab uses for its own
+    // assigned-counter callers, so there is exactly one implementation,
+    // not two.
+    //
+    // PHASE V2.14.11.5 — "Login -> Progress Tim -> Search Barang ->
+    // Counting" with zero extra taps for the common case: mySessions()
+    // already scopes to OPEN/FINALIZED sessions only (never POSTED/
+    // CANCELLED — see StockOpnameService::mySessions()), so `sessions`
+    // here already IS "active assigned sessions", no extra filtering
+    // needed. Exactly one -> open it immediately, no intermediate card.
+    // Zero -> a plain message. Two or more -> a minimal picker (this
+    // should be rare — one physical counter assigned to two concurrent
+    // open sessions).
     // ============================================================
     async function renderMySessions(container) {
         container.innerHTML = '<div class="alert alert-info">Memuat sesi Anda...</div>';
@@ -1725,51 +1969,41 @@ const StockOpname = (() => {
         }
 
         container.innerHTML = '';
-        container.appendChild(UI.el('div', { class: 'card' }, [
-            UI.el('div', { class: 'card-title' }, '🙋 Stock Opname Saya'),
-            UI.el('div', { style: 'color:var(--text3); font-size:0.85rem;' }, 'Hanya sesi yang secara eksplisit menugaskan Anda sebagai Tim P1/P2 muncul di sini.'),
-        ]));
 
         if (sessions.length === 0) {
-            container.appendChild(UI.el('div', { class: 'alert alert-info' }, 'Anda belum ditugaskan ke sesi Stock Opname manapun.'));
+            container.appendChild(UI.el('div', { class: 'card' }, [
+                UI.el('div', { class: 'card-title' }, '🙋 Stock Opname Saya'),
+                UI.el('div', { class: 'alert alert-info' }, 'Anda belum ditugaskan ke sesi Stock Opname aktif.'),
+            ]));
             return;
         }
 
+        const mountEl = UI.el('div', { id: 'opname-saya-session' });
+
+        if (sessions.length === 1) {
+            container.appendChild(mountEl);
+            await renderCounterSession(mountEl, sessions[0].session_id);
+            return;
+        }
+
+        container.appendChild(UI.el('div', { class: 'card' }, [
+            UI.el('div', { class: 'card-title' }, '🙋 Stock Opname Saya'),
+            UI.el('div', { style: 'color:var(--text3); font-size:0.85rem;' }, 'Anda ditugaskan ke lebih dari satu sesi aktif — pilih salah satu untuk mulai menghitung.'),
+        ]));
         sessions.forEach((s) => {
             const pct = s.progress.total > 0 ? Math.round((s.progress.counted / s.progress.total) * 100) : 0;
             const card = UI.el('div', { class: 'card' }, [
                 UI.el('div', { class: 'card-title' }, s.session_number || `Sesi #${s.session_id}`),
                 UI.el('div', {}, `Gudang: ${s.warehouse_name}`),
                 UI.el('div', {}, `Tim: ${s.role.toUpperCase()}`),
-                UI.el('div', {}, `Status: ${s.status}`),
                 UI.el('div', { style: 'margin:6px 0;' }, `Progress Tim: ${s.progress.counted} / ${s.progress.total} (${pct}%)`),
             ]);
             const goBtn = UI.el('button', { class: 'btn btn-primary btn-sm' }, s.progress.counted > 0 ? 'Lanjut Hitung' : 'Mulai Hitung');
-            goBtn.addEventListener('click', async () => {
-                // Reuses the exact same session-detail render path as the
-                // main "Stock Opname" tab — GET /stock-opname/{id} already
-                // resolves to this user's blind counter view server-side.
-                document.querySelectorAll('.sidebar-link').forEach((l) => l.classList.remove('active'));
-                document.querySelectorAll('.tab-content').forEach((t) => t.classList.remove('active'));
-                const opnameTab = document.getElementById('tab-opname');
-                opnameTab.classList.add('active');
-                const bc = document.getElementById('breadcrumb-current');
-                if (bc) bc.textContent = 'Stock Opname';
-                // Ensure #opname-body (renderSession()'s mount point) exists
-                // — a user who reaches "Stock Opname Saya" without ever
-                // opening the main "Stock Opname" tab first never had this
-                // skeleton built. Built directly (not via render()) to
-                // avoid render()'s own loadForWarehouse() side effect
-                // racing against the renderSession() call right below.
-                if (!document.getElementById('opname-body')) {
-                    opnameTab.innerHTML = '';
-                    opnameTab.appendChild(UI.el('div', { id: 'opname-body' }));
-                }
-                await renderSession(s.session_id);
-            });
+            goBtn.addEventListener('click', () => renderCounterSession(mountEl, s.session_id));
             card.appendChild(goBtn);
             container.appendChild(card);
         });
+        container.appendChild(mountEl);
     }
 
     return { render, renderMySessions };

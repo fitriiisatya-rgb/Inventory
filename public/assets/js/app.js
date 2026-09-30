@@ -137,6 +137,21 @@
         } else if (name === 'produksi') {
             Production.render(document.getElementById('tab-produksi'));
         } else if (name === 'opname') {
+            // PHASE V2.14.11.5 — a Petugas Stock Opname (OPNAME_COUNTER)
+            // must never render the Stock Opname ADMIN tab (Petugas
+            // Stock Opname management, warehouse session selector, P1/P2
+            // assignment, supervisor comparison, cancel/finalize) even if
+            // something ever calls activateTab('opname') for this role —
+            // the sidebar link is already hidden and login already lands
+            // on 'opname-saya', but this is a second, independent guard at
+            // the one place that actually renders that admin UI. Backend
+            // 403s on every admin route regardless; this is cosmetic
+            // defense-in-depth only.
+            const activeUser = Auth.user();
+            if (activeUser && activeUser.role_code === 'OPNAME_COUNTER') {
+                activateTab('opname-saya');
+                return;
+            }
             StockOpname.render(document.getElementById('tab-opname'));
         } else if (name === 'opname-saya') {
             StockOpname.renderMySessions(document.getElementById('tab-opname-saya'));

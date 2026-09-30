@@ -102,37 +102,54 @@ try {
     browser = await chromium.launch();
 
     // ============================================================
-    // A. Stock Opname Saya
+    // A. Stock Opname Saya — PHASE V2.14.11.5: exactly ONE active
+    // assigned session (this seed's own p1a) now skips the intermediate
+    // "Stock Opname Saya" card / Mulai Hitung button entirely — login
+    // lands directly in the counter screen (Login -> Progress Tim ->
+    // Search Barang -> Counting).
     // ============================================================
     const { context: p1aCtx, page: p1a } = await loginAs(browser, seed.p1a);
     await gotoTab(p1a, 'opname-saya', 'opname');
-    await p1a.waitForSelector('#tab-opname-saya .card-title:has-text("Stock Opname Saya")');
-    const sessionCards = await p1a.locator('#tab-opname-saya .card').count();
-    check('A. Stock Opname Saya shows only the assigned session (real login, real API)', sessionCards >= 2, `${sessionCards} cards (title + session)`);
+    await p1a.waitForSelector('#tab-opname-saya .opname-counter-toolbar', { timeout: 8000 });
+    const sessionCardCount = await p1a.locator('#tab-opname-saya .card-title:has-text("Stock Opname Saya")').count();
+    check('A. exactly one active session skips the intermediate card and opens counting directly', sessionCardCount === 0, `${sessionCardCount} intermediate cards`);
     const bodyTextA = await p1a.locator('#tab-opname-saya').innerText();
-    check('A2. session card shows warehouse/team/status/progress', bodyTextA.includes('Gudang:') && bodyTextA.includes('Tim: P1') && /Progress Tim/.test(bodyTextA));
+    check('A2. counter screen shows Progress Tim directly, no extra tap needed', /Progress Tim/.test(bodyTextA) && /Tim P1/.test(bodyTextA));
     await p1a.screenshot({ path: path.join(screenshotDir, 'A_stock_opname_saya_phone.png') });
-
-    // Enter the session
-    await p1a.locator('#tab-opname-saya .card button:has-text("Mulai Hitung")').first().click();
-    await p1a.waitForSelector('#opname-body .opname-counter-toolbar', { timeout: 8000 });
 
     // ============================================================
     // B. first finding — GOOD only, positive quantity, itemA
     // ============================================================
-    // PHASE V2.14.11.4 — the item list now renders BOTH a <tr> (desktop/
-    // tablet) and an .opname-item-card (mobile) for every line; CSS alone
-    // decides which is visible per viewport. Matching on whichever one is
-    // actually :visible keeps this helper correct at the default 390px
-    // phone viewport (card mode) and at the wider viewports used later in
-    // this same file (table mode) without needing two code paths.
+    // PHASE V2.14.11.5 — the browse list/table is now a collapsed
+    // secondary section; the PRIMARY way to open an item is the
+    // autocomplete search (type -> tap the first suggestion). Both the
+    // FORM panel (not-yet-counted item) and the SUMMARY panel
+    // (already-counted item — history + "+ Tambah Temuan", never a
+    // silent overwrite) always render .opname-history-toggle, so that is
+    // the reliable "the panel opened" signal regardless of which mode.
+    async function selectViaSearch(page, sku) {
+        const search = page.locator('.opname-blind-search');
+        await search.fill(sku);
+        await page.waitForSelector('.opname-suggest-row', { timeout: 8000 });
+        await page.locator('.opname-suggest-row').first().click();
+        // Both FORM and SUMMARY modes render .opname-history-toggle, so
+        // waiting on that alone can resolve against a STALE panel still
+        // showing the previously-selected item — wait for the panel's own
+        // title to name THIS sku instead, which only the freshly
+        // re-rendered panel ever does.
+        await page.waitForSelector(`.opname-counter-panel .card-title:has-text("${sku}")`, { timeout: 8000 });
+    }
+    // Opens the blank count FORM for an item, regardless of whether it
+    // was already counted (clicking "+ Tambah Temuan" if the summary
+    // view opened instead — the already-counted case).
     async function claimAndOpenPanel(page, sku) {
-        const row = page.locator('tr, .opname-item-card', { hasText: sku });
-        await row.locator('button:visible').first().click();
+        await selectViaSearch(page, sku);
+        const addFindingBtn = page.locator('button:has-text("+ Tambah Temuan")');
+        if (await addFindingBtn.isVisible()) await addFindingBtn.click();
         await page.waitForSelector('.opname-condition-block', { timeout: 8000 });
     }
-    // PHASE V2.14.11.4 — Riwayat Temuan is now collapsed by default after a
-    // save; expand it before asserting on .opname-finding-row content.
+    // Riwayat Temuan is collapsed by default; expand it before asserting
+    // on .opname-finding-row content.
     async function expandHistory(page) {
         const toggle = page.locator('.opname-history-toggle');
         await toggle.waitFor({ state: 'visible', timeout: 8000 });
@@ -231,28 +248,29 @@ try {
     await p1a.evaluate((args) => InvApi.releaseOpnameItem(args.sid, 'p1', args.item), { sid: seed.session_id, item: seed.itemA });
 
     // ============================================================
-    // G. blindness — separate P2 browser context, real login
+    // G. blindness — separate P2 browser context, real login. P2a also
+    // has exactly one active assigned session, so it opens directly too.
     // ============================================================
     const { context: p2aCtx, page: p2a } = await loginAs(browser, seed.p2a);
     await gotoTab(p2a, 'opname-saya', 'opname');
-    await p2a.locator('#tab-opname-saya .card button:has-text("Mulai Hitung")').first().click();
-    await p2a.waitForSelector('#opname-body .opname-counter-toolbar', { timeout: 8000 });
+    await p2a.waitForSelector('#tab-opname-saya .opname-counter-toolbar', { timeout: 8000 });
     await claimAndOpenPanel(p2a, skuC);
     const p2PanelHtml = await p2a.locator('.opname-counter-panel').innerHTML();
     check('G. P2 counter panel HTML never contains "system_qty"/"mismatch"/"variance"/P1 identity', !/system_qty|mismatch|variance/i.test(p2PanelHtml));
-    const p2FullPageText = await p2a.locator('#opname-body').innerText();
+    const p2FullPageText = await p2a.locator('#tab-opname-saya').innerText();
     check('G2. P2 screen never shows a "Selisih"/"Stok Sistem" label (supervisor-only concepts)', !/Selisih|Stok Sistem/i.test(p2FullPageText));
     await p2a.screenshot({ path: path.join(screenshotDir, 'G_p2_blind_view.png') });
 
     // ============================================================
     // H. same-team claim conflict — p1a already released itemA above; use
     // itemB (already counted, still claimable for a NEW finding — Tambah
-    // Temuan re-claims). p1b attempts the same claim concurrently.
+    // Temuan re-claims). p1b attempts the same claim concurrently. p1b
+    // also has exactly one active assigned session (the same one), so it
+    // opens directly too.
     // ============================================================
     const { context: p1bCtx, page: p1b } = await loginAs(browser, seed.p1b);
     await gotoTab(p1b, 'opname-saya', 'opname');
-    await p1b.locator('#tab-opname-saya .card button:has-text("Lanjut Hitung"), #tab-opname-saya .card button:has-text("Mulai Hitung")').first().click();
-    await p1b.waitForSelector('#opname-body .opname-counter-toolbar', { timeout: 8000 });
+    await p1b.waitForSelector('#tab-opname-saya .opname-counter-toolbar', { timeout: 8000 });
 
     // Via InvApi (real CSRF-attaching client), catching its ApiError so a
     // rejected claim reads as a status code rather than an uncaught throw —

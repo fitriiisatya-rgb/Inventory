@@ -117,11 +117,16 @@ try {
         const { context, page } = await loginAs(browser, seed.p1a, viewport);
 
         await gotoTab(page, 'opname-saya', 'opname');
-        await page.locator('#tab-opname-saya .card button:has-text("Mulai Hitung"), #tab-opname-saya .card button:has-text("Lanjut Hitung")').first().click();
-        await page.waitForSelector('#opname-body .opname-counter-toolbar', { timeout: 8000 });
+        // PHASE V2.14.11.5 — this seed's p1a has exactly one active
+        // assigned session, so login opens the counter screen directly
+        // (no intermediate card / Mulai Hitung button).
+        await page.waitForSelector('#tab-opname-saya .opname-counter-toolbar', { timeout: 8000 });
 
         // ---- 1. item list screen ----
         check(`[${label}px] no horizontal scroll — item list`, await noOverflow(page));
+        // The browse list is now a collapsed-by-default secondary section
+        // (requirement 9) — expand it before asserting on cards/table.
+        await page.locator('.opname-browse-toggle').click();
         check(`[${label}px] mobile card list is visible (not the desktop table)`,
             await page.locator('.opname-mobile-cards').isVisible() && !(await page.locator('.compact-table-wrap').isVisible()));
         const cardCount = await page.locator('.opname-item-card').count();
