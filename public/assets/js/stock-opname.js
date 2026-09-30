@@ -1098,23 +1098,35 @@ const StockOpname = (() => {
             }
 
             const totalHost = UI.el('div', { class: 'opname-total-otomatis' });
-            // PHASE V2.14.11 — item 6 correction: a blank/untouched form is
-            // NEVER silently treated as "stok fisik 0". Whenever the GOOD
-            // total preview is exactly 0, an explicit confirmation checkbox
-            // appears and must be checked before Simpan is enabled — the
-            // server independently re-validates the actual zero-count rule
-            // (first finding only) regardless of this client-side gate.
+            // PHASE V2.14.11.7 HOTFIX — physical qty = GOOD + DAMAGED +
+            // EXPIRED + DEADSTOCK (a straight sum of independent categories,
+            // same rule the backend already enforces in submitFinding()'s
+            // Gate 3). A blank/untouched form is still NEVER silently
+            // treated as "stok fisik 0" — the explicit confirmation
+            // checkbox appears and must be checked before Simpan is enabled
+            // ONLY when every one of the four conditions is exactly zero.
+            // Any single condition (including DEADSTOCK alone) being > 0 is
+            // itself a valid, complete physical count and never requires
+            // this checkbox. The server independently re-validates the
+            // actual zero-count rule (first finding only) regardless of
+            // this client-side gate.
             const zeroConfirmRow = UI.el('div', { class: 'opname-zero-confirm', style: 'display:none;' });
             const zeroConfirmCheckbox = UI.el('input', { type: 'checkbox', id: 'opname-zero-confirm-chk' });
             zeroConfirmRow.appendChild(UI.el('label', { style: 'display:flex; align-items:center; gap:8px;' }, [
-                zeroConfirmCheckbox, document.createTextNode('Saya konfirmasi: Stok fisik GOOD = 0 (bukan form kosong)'),
+                zeroConfirmCheckbox, document.createTextNode('Saya konfirmasi: Stok fisik GOOD + RUSAK + EXPIRED + DEADSTOCK = 0 (bukan form kosong)'),
             ]));
+            function hasAnyPhysicalQty() {
+                let goodTotal = 0;
+                units.forEach((u) => { goodTotal += (Number(unitInputs[u.unit_id].value) || 0) * Number(u.conversion_to_base); });
+                return goodTotal !== 0 || damagedBlock.qty() > 0 || expiredBlock.qty() > 0 || deadstockBlock.qty() > 0;
+            }
             function recomputeTotalPreview() {
                 let total = 0;
                 units.forEach((u) => { total += (Number(unitInputs[u.unit_id].value) || 0) * Number(u.conversion_to_base); });
                 totalHost.textContent = `Total Otomatis (dalam satuan dasar: ${baseUnitCode}): ${UI.formatNumber(total)}`;
-                zeroConfirmRow.style.display = total === 0 ? 'block' : 'none';
-                if (total !== 0) zeroConfirmCheckbox.checked = false;
+                const anyQty = hasAnyPhysicalQty();
+                zeroConfirmRow.style.display = anyQty ? 'none' : 'block';
+                if (anyQty) zeroConfirmCheckbox.checked = false;
                 updateSaveEnabled();
             }
             Object.values(unitInputs).forEach((inp) => inp.addEventListener('input', recomputeTotalPreview));
@@ -1241,9 +1253,7 @@ const StockOpname = (() => {
             // authority and re-validates everything from scratch.
             function updateSaveEnabled() {
                 let ok = true;
-                let totalGood = 0;
-                units.forEach((u) => { totalGood += (Number(unitInputs[u.unit_id].value) || 0) * Number(u.conversion_to_base); });
-                if (totalGood === 0 && !zeroConfirmCheckbox.checked) ok = false;
+                if (!hasAnyPhysicalQty() && !zeroConfirmCheckbox.checked) ok = false;
                 [damagedBlock, expiredBlock, deadstockBlock].forEach((b) => {
                     if (b.qty() > 0 && b.photoCount() === 0) ok = false;
                 });
