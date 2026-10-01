@@ -50,10 +50,22 @@
         document.getElementById('username-chip').textContent = user.username;
         document.getElementById('role-badge').textContent = user.role_code;
         Auth.applyRoleVisibility();
-        try {
-            await Master.loadAll();
-        } catch (err) {
-            UI.handleApiError(err);
+        // PHASE V2.16.3 — PRODUCTION SAFETY FIX: OPNAME_COUNTER intentionally
+        // holds zero global permissions (its authority comes entirely from
+        // its own session-scoped team assignment — see StockOpnameService's
+        // claim/finding methods), so loading the shared Master cache for
+        // this role hits at least one INVENTORY_VIEW-gated route (GET
+        // /item-barcodes) and fails with "Missing permission:
+        // INVENTORY_VIEW". The counter's own screens (Stock Opname Saya /
+        // buildBlindCountScreen) get their SKU/name/category/status
+        // directly from getForCounter()'s own per-line payload, never from
+        // Master — so this role never needs the shared cache at all.
+        if (user.role_code !== 'OPNAME_COUNTER') {
+            try {
+                await Master.loadAll();
+            } catch (err) {
+                UI.handleApiError(err);
+            }
         }
         // PHASE V2.14.11.3 — URGENT HOTFIX: a Petugas Stock Opname
         // (OPNAME_COUNTER) must land DIRECTLY on "Stock Opname Saya"

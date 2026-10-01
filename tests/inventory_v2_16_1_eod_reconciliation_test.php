@@ -190,10 +190,13 @@ function buildRealShapedScmFixture(): array
         }
     }
 
-    // Footer/formula garbage — a stray "No" value, blank Kode/Nama/Satuan,
-    // and a literal "#N/A" qty (never numeric) — must never be imported.
+    // PHASE V2.16.3 — 4 footer/non-data rows (matching the independently
+    // audited real workbook's actual footer row count), each failing the
+    // valid-item-row criteria a different way — none may ever be imported.
     $rows[] = [1053, null, null, null, null, null, null, null, '#N/A', '#N/A'];
     $rows[] = ['TOTAL', null, null, null, null, null, null, null, null, null];
+    $rows[] = [null, 'Catatan: data per akhir bulan', null, null, null, null, null, null, null, null];
+    $rows[] = [null, null, null, null, null, null, null, null, '#REF!', null];
 
     return ['rows' => $rows, 'codes' => ['grade_a' => $skuGradeA, 'grade_b' => $skuGradeB, 'kresek' => $skuKresek, 'polibag' => $skuPolibag]];
 }
@@ -209,7 +212,7 @@ check('1c. readScmWorkbook finds the SUBHEADER row (8) under Stok Akhir', $realP
 check('1d. readScmWorkbook sets data_start_row = 10 (skipping blank row 9)', $realParsed['data_start_row'] === 10, (string) $realParsed['data_start_row']);
 check('1e. readScmWorkbook sets data_end_row = 1023 (last real item, No 1014 SUMPIT)', $realParsed['data_end_row'] === 1023, (string) $realParsed['data_end_row']);
 check('1f. readScmWorkbook parses EXACTLY 1014 item rows, not 1015+', count($realParsed['rows']) === 1014, (string) count($realParsed['rows']));
-check('1g. readScmWorkbook excludes the footer/formula garbage rows (never a fake SKU)', $realParsed['excluded_footer_row_count'] === 2, (string) $realParsed['excluded_footer_row_count']);
+check('1g. readScmWorkbook excludes the footer/formula garbage rows (never a fake SKU) — 4 rows, matching the independently audited real workbook', $realParsed['excluded_footer_row_count'] === 4, (string) $realParsed['excluded_footer_row_count']);
 $footerCodes = array_column($realParsed['rows'], 'code');
 check('1h. the footer row\'s stray "No" value (1053) never appears as an imported code', !in_array('1053', $footerCodes, true) && !in_array(1053, $footerCodes, true));
 check('1i. GRADE A code/unit/qty preserved exactly (never stripped/altered)', $realParsed['rows'][0]['code'] === $realFixture['codes']['grade_a'] && $realParsed['rows'][0]['unit'] === 'Kg' && abs((float) $realParsed['rows'][0]['qty'] - 5.2) < 0.000001, json_encode($realParsed['rows'][0]));

@@ -22,8 +22,13 @@ $rows[] = ['No', 'Nama Barang', 'Kode Barang', 'Satuan', 'Isi', 'Harga', 'Stock 
 $rows[] = [null, null, null, null, null, null, null, null, 'QTY', 'Total stok']; // row 8
 $rows[] = $blankRow; // row 9
 $rows[] = [1, 'Item Playwright V2.16.2', $sku, 'KG', 1, 1000, 0, 0, (float) $qty, (float) $qty * 1000]; // row 10
-// A footer row (stray "No", blank Kode/Nama/Satuan, #N/A qty) — must
-// never be imported as a fake SKU.
-$rows[] = [99, null, null, null, null, null, null, null, '#N/A', '#N/A'];
+// PHASE V2.16.3 — 4 footer/non-data rows (matching the independently
+// audited real workbook's actual footer row count), each failing the
+// valid-item-row criteria in a different way — none may ever be
+// imported as a fake SKU.
+$rows[] = [99, null, null, null, null, null, null, null, '#N/A', '#N/A'];       // stray "No", formula error
+$rows[] = ['TOTAL', null, null, null, null, null, null, null, null, null];       // summary label row
+$rows[] = [null, 'Catatan: data per akhir bulan', null, null, null, null, null, null, null, null]; // free-text note row
+$rows[] = [null, null, null, null, null, null, null, null, '#REF!', null];       // another formula-error row
 
 ExcelWriterService::write($outPath, ['SCM' => ['headers' => array_fill(0, 10, null), 'rows' => $rows]]);
