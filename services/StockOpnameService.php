@@ -1108,8 +1108,17 @@ final class StockOpnameService
      *
      * @param array{GOOD:array<int,array{unit_id:mixed,qty:mixed}>, DAMAGED:array<int,array{unit_id:mixed,qty:mixed}>, EXPIRED:array<int,array{unit_id:mixed,qty:mixed}>, DEADSTOCK:array<int,array{unit_id:mixed,qty:mixed}>} $conditionInputs
      * @param array{DAMAGED?:string[], EXPIRED?:string[], DEADSTOCK?:string[]} $photoTokens upload_token(s) per condition, explicitly naming which pending uploads belong to THIS finding
+     * @param ?string $countedAt PHASE V2.16.1 — the moment this item was
+     *   ACTUALLY physically counted, independent of created_at (when this
+     *   row is saved — which for a backdated/late-entered finding, e.g.
+     *   entered the morning after a prior day's count, can be much
+     *   later). Defaults to "now" for ordinary live entry; a caller
+     *   entering yesterday's count passes the real counted timestamp
+     *   explicitly. Every pre-V2.16.1 call site (none of which supplies
+     *   this) gets counted_at == created_at exactly as before — fully
+     *   backward compatible.
      */
-    public static function submitFinding(PDO $pdo, int $sessionId, string $role, int $itemId, array $conditionInputs, ?string $notes, int $userId, string $claimToken, array $photoTokens = []): array
+    public static function submitFinding(PDO $pdo, int $sessionId, string $role, int $itemId, array $conditionInputs, ?string $notes, int $userId, string $claimToken, array $photoTokens = [], ?string $countedAt = null): array
     {
         if (!in_array($role, ['p1', 'p2'], true)) {
             throw new ValidationException(['role must be p1 or p2']);
@@ -1202,20 +1211,24 @@ final class StockOpnameService
         $counterUsername = (string) $counterUsername->fetchColumn();
 
         $now = date('Y-m-d H:i:s');
+        if ($countedAt !== null && strtotime($countedAt) === false) {
+            throw new ValidationException(["counted_at '{$countedAt}' is not a valid date/time"]);
+        }
+        $countedAtValue = $countedAt !== null ? date('Y-m-d H:i:s', strtotime($countedAt)) : $now;
         $insertFinding = $pdo->prepare(
             'INSERT INTO stock_opname_findings
                 (session_id, stock_opname_line_id, team_role, counter_user_id, round, counter_username_snapshot,
                  finding_good_base_qty, finding_damaged_base_qty, finding_expired_base_qty, finding_deadstock_base_qty,
-                 notes, created_at)
+                 notes, created_at, counted_at)
              VALUES (:sid, :line_id, :role, :user, 1, :username,
                      :good, :damaged, :expired, :deadstock,
-                     :notes, :now)'
+                     :notes, :now, :counted_at)'
         );
         $insertFinding->execute([
             'sid' => $sessionId, 'line_id' => $line['id'], 'role' => strtoupper($role), 'user' => $userId, 'username' => $counterUsername,
             'good' => $totalsByCondition['GOOD'], 'damaged' => $totalsByCondition['DAMAGED'],
             'expired' => $totalsByCondition['EXPIRED'], 'deadstock' => $totalsByCondition['DEADSTOCK'],
-            'notes' => $notes, 'now' => $now,
+            'notes' => $notes, 'now' => $now, 'counted_at' => $countedAtValue,
         ]);
         $findingId = (int) $pdo->lastInsertId();
 
@@ -1378,6 +1391,47 @@ final class StockOpnameService
     }
 
     /**
+     * PHASE V2.16.1 — controlled supervisor remediation for a finding
+     * that predates counted_at (every finding submitted before this
+     * phase) or whose counted_at was never set for some other reason.
+     * Deliberately requires a reason and a supervisor, and refuses to
+     * overwrite a counted_at that is already set — this is a one-time,
+     * audited backfill, never a silent "assume created_at" default and
+     * never a way to casually revise an already-recorded counted_at.
+     */
+    public static function backfillCountedAt(PDO $pdo, int $sessionId, int $findingId, string $countedAt, int $supervisorUserId, string $reason): array
+    {
+        if (trim($reason) === '') {
+            throw new ValidationException(['a backfill reason is required']);
+        }
+        if (strtotime($countedAt) === false) {
+            throw new ValidationException(["counted_at '{$countedAt}' is not a valid date/time"]);
+        }
+        $finding = $pdo->prepare('SELECT * FROM stock_opname_findings WHERE id = :id AND session_id = :sid');
+        $finding->execute(['id' => $findingId, 'sid' => $sessionId]);
+        $finding = $finding->fetch();
+        if (!$finding) {
+            throw new ValidationException(["finding {$findingId} not found in this session"]);
+        }
+        if ($finding['counted_at'] !== null) {
+            throw new ValidationException(["finding {$findingId} already has counted_at = {$finding['counted_at']} — backfill never overwrites an already-set value"]);
+        }
+
+        $now = date('Y-m-d H:i:s');
+        $countedAtValue = date('Y-m-d H:i:s', strtotime($countedAt));
+        $pdo->prepare(
+            'UPDATE stock_opname_findings
+                SET counted_at = :counted_at, counted_at_backfilled_by = :by, counted_at_backfilled_at = :now, counted_at_backfill_reason = :reason
+              WHERE id = :id'
+        )->execute(['counted_at' => $countedAtValue, 'by' => $supervisorUserId, 'now' => $now, 'reason' => $reason, 'id' => $findingId]);
+
+        AuditService::log($pdo, $supervisorUserId, 'system', 'STOCK_OPNAME_FINDING_COUNTED_AT_BACKFILL', 'stock_opname_findings', $findingId,
+            ['counted_at' => null], ['counted_at' => $countedAtValue], $reason);
+
+        return self::get($pdo, $sessionId);
+    }
+
+    /**
      * PHASE V2.14.10 — recomputes stock_opname_lines.p{role}_qty_base and
      * its Rusak/Expired/Deadstock aggregate columns as the SUM of that
      * role's non-voided findings for this line. If this role has NEVER
@@ -1448,7 +1502,7 @@ final class StockOpnameService
     private static function getFindingsForLine(PDO $pdo, int $lineId, string $role, bool $includeVoided = false): array
     {
         $sql = "SELECT f.id, f.finding_good_base_qty, f.finding_damaged_base_qty, f.finding_expired_base_qty, f.finding_deadstock_base_qty,
-                       f.notes, f.created_at, f.voided_at, f.void_reason,
+                       f.notes, f.created_at, f.counted_at, f.voided_at, f.void_reason,
                        COALESCE(f.counter_username_snapshot, u.username) AS counter_username
                 FROM stock_opname_findings f
                 JOIN users u ON u.id = f.counter_user_id
@@ -1489,6 +1543,7 @@ final class StockOpnameService
                 'notes' => $f['notes'],
                 'counter_username' => $f['counter_username'],
                 'created_at' => $f['created_at'],
+                'counted_at' => $f['counted_at'],
                 'is_voided' => $f['voided_at'] !== null,
                 'void_reason' => $f['void_reason'],
                 'quantities' => $quantities,

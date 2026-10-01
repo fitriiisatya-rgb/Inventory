@@ -351,6 +351,166 @@ final class StockOpnameFinalExportService
         return ['headers' => $headers, 'rows' => $rows, 'freeze_header' => true, 'autofilter' => true, 'col_widths' => [10, 18, 32, 40, 40, 16, 20, 30]];
     }
 
+    // ================================================================
+    // PHASE V2.16.1 — Section 17: the EOD reconciliation Final Excel,
+    // DISTINCT from the V2.16 Final SO export above (different column
+    // set: Baseline/Eligible IN-OUT-Scaling-Adjustment/Book Stock EOD/
+    // Physical EOD/Variance rather than SCM-reference/late-moves). Same
+    // draft/official split and the same POSTED/Checkpoint-B gate on
+    // official() — reads only, writes nothing.
+    // ================================================================
+
+    public static function draftReconciliationExport(PDO $pdo, int $sessionId, int $userId): string
+    {
+        return self::buildReconciliationExport($pdo, $sessionId, $userId, false);
+    }
+
+    public static function officialReconciliationExport(PDO $pdo, int $sessionId, int $userId): string
+    {
+        $session = self::loadSession($pdo, $sessionId);
+        if ($session['status'] !== 'POSTED') {
+            if (($session['counting_model'] ?? 'LEGACY_DUAL_COUNT') === 'FINDINGS_V1') {
+                throw new FindingsCheckpointBRequiredException(
+                    "official EOD Reconciliation export requires this FINDINGS_V1 session to be POSTED, which cannot happen until the Checkpoint B reconciliation/final-result workflow is completed — use the draft export in the meantime"
+                );
+            }
+            throw new ValidationException(["official EOD Reconciliation export requires the session to be POSTED (currently {$session['status']}) — use the draft export until then"]);
+        }
+        return self::buildReconciliationExport($pdo, $sessionId, $userId, true);
+    }
+
+    private static function buildReconciliationExport(PDO $pdo, int $sessionId, int $userId, bool $isOfficial): string
+    {
+        $session = self::loadSession($pdo, $sessionId);
+        $lines = self::loadLines($pdo, $sessionId);
+        $reconRows = StockOpnameBookStockService::reconciliation($pdo, $sessionId);
+        $baseline = $pdo->prepare("SELECT * FROM stock_opname_reference_batches WHERE session_id = :sid AND batch_kind = 'BASELINE' ORDER BY id DESC LIMIT 1");
+        $baseline->execute(['sid' => $sessionId]);
+        $baselineBatch = $baseline->fetch() ?: null;
+        $exportedBy = self::username($pdo, $userId);
+        $cutoff = StockOpnameBookStockService::soEodCutoff($session);
+
+        $sheets = [
+            'Ringkasan' => self::buildEodRingkasanSheet($pdo, $session, $baselineBatch, $reconRows, $cutoff, $exportedBy, $isOfficial),
+            'Rekonsiliasi Final' => self::buildEodReconciliationSheet($reconRows),
+            'Movement EOD' => self::buildMovementEodSheet($pdo, $sessionId),
+            'Audit Trail' => self::buildAuditTrailSheet($pdo, $sessionId, $lines),
+        ];
+
+        $dir = sys_get_temp_dir() . '/so_export';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+        $prefix = $isOfficial ? 'FINAL_EOD' : 'DRAFT_EOD';
+        $path = $dir . '/' . $prefix . '_' . ($session['session_number'] ?: "SO{$sessionId}") . '_' . bin2hex(random_bytes(4)) . '.xlsx';
+        ExcelWriterService::write($path, $sheets);
+        return $path;
+    }
+
+    private static function buildEodRingkasanSheet(PDO $pdo, array $session, ?array $baselineBatch, array $reconRows, string $cutoff, string $exportedBy, bool $isOfficial): array
+    {
+        $totalBook = 0.0;
+        $totalPhysical = 0.0;
+        $zeroVariance = 0;
+        $nonZeroVariance = 0;
+        $unresolved = 0;
+        foreach ($reconRows as $r) {
+            if ($r['book_stock_eod'] !== null) {
+                $totalBook += $r['book_stock_eod'];
+            }
+            if ($r['final_physical_eod'] !== null) {
+                $totalPhysical += $r['final_physical_eod'];
+            }
+            if ($r['variance'] === null) {
+                $unresolved++;
+            } elseif (abs($r['variance']) < 0.0000001) {
+                $zeroVariance++;
+            } else {
+                $nonZeroVariance++;
+            }
+        }
+
+        $rows = [];
+        if (!$isOfficial) {
+            $rows[] = ['DRAFT — BELUM FINAL', 'Dokumen ini BUKAN hasil resmi. Data dapat berubah sebelum sesi difinalisasi/diposting.'];
+            $rows[] = [null, null];
+        }
+        $rows = array_merge($rows, [
+            ['SO Number', $session['session_number']],
+            ['Session Date', $session['session_date']],
+            ['SO EOD Cutoff (exclusive)', $cutoff],
+            [null, null],
+            ['Baseline File', $baselineBatch['original_filename'] ?? '(belum diimpor)'],
+            ['Baseline Imported At', $baselineBatch['uploaded_at'] ?? null],
+            ['Baseline Coverage IN/OUT Through', $baselineBatch['baseline_inout_through'] ?? null],
+            ['Baseline Coverage Scaling Through', $baselineBatch['baseline_scaling_through'] ?? null],
+            ['Baseline Coverage Adjustment Through', $baselineBatch['baseline_adjustment_through'] ?? null],
+            ['Baseline Rows Matched', $baselineBatch['matched_count'] ?? null],
+            ['Baseline Rows Unmatched', $baselineBatch['unmatched_count'] ?? null],
+            ['Baseline Rows Unit Mismatch', $baselineBatch['unit_mismatch_count'] ?? null],
+            ['Baseline Rows Negative', $baselineBatch['negative_count'] ?? null],
+            [null, null],
+            ['Total SKU', count($reconRows)],
+            ['Variance = 0', $zeroVariance],
+            ['Variance <> 0', $nonZeroVariance],
+            ['Belum Dapat Direkonsiliasi (baseline/physical belum lengkap)', $unresolved],
+            [null, null],
+            ['Total Book Stock EOD', round($totalBook, 6)],
+            ['Total Final Physical EOD', round($totalPhysical, 6)],
+            ['Total Variance', round($totalPhysical - $totalBook, 6)],
+            [null, null],
+            ['Exported By', $exportedBy],
+            ['Exported At', date('Y-m-d H:i:s')],
+        ]);
+
+        return ['headers' => ['Field', 'Value'], 'rows' => $rows, 'freeze_header' => true, 'autofilter' => false, 'col_widths' => [36, 40]];
+    }
+
+    private static function buildEodReconciliationSheet(array $reconRows): array
+    {
+        $headers = [
+            'SKU', 'Nama Barang', 'Base Unit', 'Baseline Qty', 'Eligible IN', 'Eligible OUT', 'Eligible Scaling', 'Eligible Adjustment',
+            'Book Stock EOD', 'P1 Physical EOD', 'P2 Physical EOD', 'Recount',
+            'Final Good', 'Final Damaged', 'Final Expired', 'Final Deadstock', 'Final Total Physical EOD',
+            'Variance Physical vs Book',
+        ];
+        $out = [];
+        foreach ($reconRows as $r) {
+            $out[] = [
+                self::sanitize((string) $r['sku']), self::sanitize((string) $r['name']), $r['base_unit'],
+                $r['baseline_qty'], $r['eligible_in'], $r['eligible_out'], $r['eligible_scaling'], $r['eligible_adjustment'],
+                $r['book_stock_eod'],
+                $r['p1']['physical_eod'] ?? null, $r['p2']['physical_eod'] ?? null, $r['recount'],
+                $r['final_good'], $r['final_damaged'], $r['final_expired'], $r['final_deadstock'], $r['final_total_physical'],
+                $r['variance'],
+            ];
+        }
+        return ['headers' => $headers, 'rows' => $out, 'freeze_header' => true, 'autofilter' => true, 'col_widths' => array_fill(0, count($headers), 16)];
+    }
+
+    private static function buildMovementEodSheet(PDO $pdo, int $sessionId): array
+    {
+        $stmt = $pdo->prepare(
+            "SELECT m.*, i.sku AS resolved_sku
+               FROM stock_opname_reference_movements m
+               LEFT JOIN items i ON i.id = m.item_id
+              WHERE m.session_id = :sid
+              ORDER BY m.import_batch_id, m.id"
+        );
+        $stmt->execute(['sid' => $sessionId]);
+        $headers = ['Effective At', 'Created At', 'Document Reference', 'SKU (Source)', 'SKU (Resolved)', 'Type', 'Qty Base', 'Inclusion Status', 'Late Entry (EOD SO)', 'Reason'];
+        $out = [];
+        foreach ($stmt->fetchAll() as $m) {
+            $out[] = [
+                $m['effective_at'], $m['created_at'], $m['document_reference'] !== null ? self::sanitize((string) $m['document_reference']) : null,
+                $m['source_code'] !== null ? self::sanitize((string) $m['source_code']) : null, $m['resolved_sku'],
+                $m['movement_type'], (float) $m['qty_base'], $m['inclusion_status'], (int) $m['late_pre_cutoff'] === 1 ? 'YA' : '',
+                self::sanitize((string) $m['reason']),
+            ];
+        }
+        return ['headers' => $headers, 'rows' => $out, 'freeze_header' => true, 'autofilter' => true, 'col_widths' => [20, 20, 18, 16, 16, 12, 14, 20, 14, 30]];
+    }
+
     private static function sanitize(string $value): string
     {
         return ExcelWriterService::sanitizeCellText($value);

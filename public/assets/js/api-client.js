@@ -356,7 +356,7 @@ const InvApi = (() => {
         // uploadOpnamePhoto() returned) belong to THIS finding. A photo
         // never attaches just by matching session/item/role/condition —
         // it must be named here explicitly.
-        submitOpnameFinding: (id, role, itemId, conditions, notes, claimToken, photos) => request('POST', `/stock-opname/${id}/findings`, { role, item_id: itemId, conditions, notes: notes || null, claim_token: claimToken, photos: photos || { DAMAGED: [], EXPIRED: [], DEADSTOCK: [] } }),
+        submitOpnameFinding: (id, role, itemId, conditions, notes, claimToken, photos, countedAt) => request('POST', `/stock-opname/${id}/findings`, { role, item_id: itemId, conditions, notes: notes || null, claim_token: claimToken, photos: photos || { DAMAGED: [], EXPIRED: [], DEADSTOCK: [] }, counted_at: countedAt || null }),
         voidOpnameFinding: (id, findingId, reason) => request('POST', `/stock-opname/${id}/findings/${findingId}/void`, { reason }),
         myOpnameSessions: () => request('GET', '/stock-opname/my-sessions'),
         // PHASE V2.14.11.1 — photo evidence: uploaded BEFORE the finding it
@@ -403,6 +403,19 @@ const InvApi = (() => {
         opnameReferenceRecordMovement: (id, payload) => request('POST', `/stock-opname/${id}/reference-movements`, payload),
         opnameExportDraftUrl: (id) => `/api/stock-opname/${id}/export/draft`,
         opnameExportFinalUrl: (id) => `/api/stock-opname/${id}/export/final`,
+
+        // PHASE V2.16.1 — "STOK BUKU SO" EOD reconciliation.
+        opnameBaselineImport: (id, file, coverage) => upload(`/stock-opname/${id}/baseline-import`, file, {
+            baseline_inout_through: coverage.inoutThrough,
+            baseline_scaling_through: coverage.scalingThrough,
+            baseline_adjustment_through: coverage.adjustmentThrough,
+        }, 'file'),
+        opnameMovementImport: (id, file) => upload(`/stock-opname/${id}/movement-import`, file, {}, 'file'),
+        opnameEodReconciliation: (id) => request('GET', `/stock-opname/${id}/eod-reconciliation`),
+        opnameMovementStatusBreakdown: (id) => request('GET', `/stock-opname/${id}/movement-status-breakdown`),
+        opnameBackfillCountedAt: (id, findingId, countedAt, reason) => request('POST', `/stock-opname/${id}/findings/${findingId}/backfill-counted-at`, { counted_at: countedAt, reason }),
+        opnameExportEodDraftUrl: (id) => `/api/stock-opname/${id}/export/eod-draft`,
+        opnameExportEodFinalUrl: (id) => `/api/stock-opname/${id}/export/eod-final`,
 
         // ---- stock adjustments ----
         postAdjustment: (payload) => request('POST', '/stock-adjustments', payload),

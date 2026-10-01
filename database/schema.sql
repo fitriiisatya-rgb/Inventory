@@ -894,6 +894,19 @@ CREATE TABLE stock_opname_findings (
     finding_deadstock_base_qty DECIMAL(20,6) NOT NULL DEFAULT 0,
     notes                      VARCHAR(255) NULL,
     created_at                 DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- PHASE V2.16.1 — counted_at is the moment the item was ACTUALLY
+    -- physically counted, independent of created_at (when the record was
+    -- saved, which for a late-entered/backdated finding can be a day or
+    -- more after the real count). submitFinding() defaults this to "now"
+    -- for live entry, or accepts an explicit past timestamp when a
+    -- counter/supervisor is entering yesterday's result. NULL on every
+    -- finding that predates this phase — never silently assumed equal to
+    -- created_at; see counted_at_backfilled_* below for the controlled,
+    -- audited supervisor remediation path instead.
+    counted_at                 DATETIME NULL,
+    counted_at_backfilled_by   INT UNSIGNED NULL,
+    counted_at_backfilled_at   DATETIME NULL,
+    counted_at_backfill_reason VARCHAR(255) NULL,
     voided_by                  INT UNSIGNED NULL,
     voided_at                  DATETIME NULL,
     void_reason                VARCHAR(255) NULL,
@@ -1029,6 +1042,18 @@ CREATE TABLE stock_opname_reference_batches (
     needs_review_count  INT UNSIGNED NOT NULL DEFAULT 0,
     duplicate_count     INT UNSIGNED NOT NULL DEFAULT 0,
     status              ENUM('IMPORTED') NOT NULL DEFAULT 'IMPORTED',
+    -- PHASE V2.16.1: batch_kind distinguishes a BASELINE Stok SCM import
+    -- from a MOVEMENT (IN/OUT/Scaling/Adjustment) import — two separate
+    -- upload buttons sharing this same batch-audit table. The three
+    -- coverage columns are BASELINE-only metadata (NULL for a MOVEMENT
+    -- batch): the same baseline file's IN/OUT figures and SCALING figures
+    -- can genuinely be current through different dates, so EACH movement
+    -- stream gets its own "already included through" cutoff, admin-
+    -- confirmed at import time, never assumed identical.
+    batch_kind                   ENUM('BASELINE','MOVEMENT') NOT NULL DEFAULT 'BASELINE',
+    baseline_inout_through       DATETIME NULL,
+    baseline_scaling_through     DATETIME NULL,
+    baseline_adjustment_through  DATETIME NULL,
     CONSTRAINT fk_sorb_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
     CONSTRAINT fk_sorb_user FOREIGN KEY (uploaded_by) REFERENCES users(id),
     UNIQUE KEY uq_sorb_session_hash (session_id, file_hash),
@@ -1074,21 +1099,44 @@ CREATE TABLE stock_opname_reference_item_mappings (
     INDEX idx_sorim_code_active (source_code, is_active)
 ) ENGINE=InnoDB;
 
+-- PHASE V2.16.1: item_id/effective_at are nullable because an EXCLUDED
+-- row (unresolvable SKU, unparseable date) must still be stored for
+-- admin inspection (Section 15: "never silently ignore a row") — never
+-- rejected outright the way a single recordMovement() call still is.
+-- source_code/source_name/source_unit/source_qty_raw/
+-- source_effective_at_raw preserve the ORIGINAL file text verbatim so an
+-- excluded row remains fully diagnosable even when it couldn't be
+-- resolved to anything. movement_dedup_key + its UNIQUE key is the
+-- row-level duplicate-protection Section 16 asks for (file-hash alone,
+-- as V2.16's baseline import already has, catches a whole-file replay;
+-- this additionally catches the same single movement arriving via two
+-- different files).
 CREATE TABLE stock_opname_reference_movements (
-    id                 BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    session_id         INT UNSIGNED NOT NULL,
-    item_id            INT UNSIGNED NOT NULL,
-    movement_type      ENUM('IN','OUT','SCALING','ADJUSTMENT') NOT NULL,
-    qty_base           DECIMAL(20,6) NOT NULL,
-    effective_at       DATETIME NOT NULL,
-    document_reference VARCHAR(100) NULL,
-    reason             VARCHAR(255) NOT NULL,
-    late_pre_cutoff    TINYINT(1) NOT NULL DEFAULT 0,
-    created_by         INT UNSIGNED NOT NULL,
-    created_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    id                       BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    session_id               INT UNSIGNED NOT NULL,
+    item_id                  INT UNSIGNED NULL,
+    import_batch_id          BIGINT UNSIGNED NULL,
+    movement_type            ENUM('IN','OUT','SCALING','ADJUSTMENT') NOT NULL,
+    inclusion_status         ENUM('INCLUDED','ALREADY_IN_BASELINE','AFTER_SO_CUTOFF','UNMATCHED_ITEM','UNIT_MISMATCH','INVALID_DATE','DUPLICATE','NEEDS_REVIEW') NOT NULL DEFAULT 'INCLUDED',
+    source_code              VARCHAR(100) NULL,
+    source_name              VARCHAR(255) NULL,
+    source_unit              VARCHAR(60) NULL,
+    source_qty_raw           VARCHAR(60) NULL,
+    source_effective_at_raw  VARCHAR(60) NULL,
+    movement_dedup_key       CHAR(64) NULL,
+    source_row_reference     INT UNSIGNED NULL,
+    qty_base                 DECIMAL(20,6) NOT NULL,
+    effective_at             DATETIME NULL,
+    document_reference       VARCHAR(100) NULL,
+    reason                   VARCHAR(255) NOT NULL,
+    late_pre_cutoff          TINYINT(1) NOT NULL DEFAULT 0,
+    created_by               INT UNSIGNED NOT NULL,
+    created_at               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_sorm_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
     CONSTRAINT fk_sorm_item FOREIGN KEY (item_id) REFERENCES items(id),
+    CONSTRAINT fk_sorm_batch FOREIGN KEY (import_batch_id) REFERENCES stock_opname_reference_batches(id),
     CONSTRAINT fk_sorm_user FOREIGN KEY (created_by) REFERENCES users(id),
+    UNIQUE KEY uq_sorm_session_dedup (session_id, movement_dedup_key),
     INDEX idx_sorm_session_item (session_id, item_id)
 ) ENGINE=InnoDB;
 

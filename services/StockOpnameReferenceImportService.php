@@ -193,6 +193,21 @@ final class StockOpnameReferenceImportService
         return ['status' => 'MATCHED', 'item_id' => $itemId, 'base_unit_code' => $baseUnitCode, 'conversion_factor' => $factor];
     }
 
+    /**
+     * PHASE V2.16.1 — public entry point for StockOpnameBookStockService's
+     * baseline/movement importers, which only have a session ID on hand
+     * (not the full session row resolveRow() needs). Same resolution rules
+     * as the reference-row import path (exact SKU -> approved legacy
+     * mapping -> frozen per-session unit snapshot), never duplicated.
+     *
+     * @return array{status:string, item_id:?int, base_unit_code:?string, conversion_factor:?float}
+     */
+    public static function resolveMappingAndUnit(PDO $pdo, int $sessionId, string $code, string $unit): array
+    {
+        $session = self::loadSession($pdo, $sessionId);
+        return self::resolveRow($pdo, $session, $code, $unit);
+    }
+
     private static function matchExactSku(PDO $pdo, string $code): ?int
     {
         $stmt = $pdo->prepare('SELECT id FROM items WHERE sku = :code LIMIT 1');

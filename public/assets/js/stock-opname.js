@@ -272,6 +272,7 @@ const StockOpname = (() => {
             // server-side regardless of when the button is clicked.
             if (canSupervise()) {
                 body.appendChild(await buildReferenceScmCard(session));
+                body.appendChild(await buildStokBukuSoCard(session));
             }
 
             if (session.status === 'OPEN') {
@@ -427,6 +428,203 @@ const StockOpname = (() => {
             'Download Draft tersedia kapan saja (watermark "DRAFT — BELUM FINAL"). Download Excel Final SO hanya berhasil setelah sesi POSTED.'));
 
         await refreshBatches();
+        return card;
+    }
+
+    // ============================================================
+    // PHASE V2.16.1 — "STOK BUKU SO — 30 SEP 2026": the EOD reconciliation
+    // module, THREE sections per Section 14 of the spec:
+    //   A. Baseline SCM   — import the SCM workbook + admin-confirmed
+    //      per-stream coverage (never inferred from the file).
+    //   B. Movement Backdate — a SEPARATE bulk upload (never merged with
+    //      A) classifying every row with an always-visible inclusion
+    //      status; nothing is ever silently dropped.
+    //   C. Rekonsiliasi   — Baseline + IN - OUT +/- Scaling = Book Stock
+    //      EOD vs Physical EOD = Selisih SO, per SKU.
+    // REFERENCE/RECONCILIATION ONLY: never touches inventory_batches,
+    // never edits an existing finding, never unblocks Checkpoint B.
+    // ============================================================
+    async function buildStokBukuSoCard(session) {
+        const card = UI.el('div', { class: 'card' }, [
+            UI.el('div', { class: 'card-title' }, '📘 Stok Buku SO — Rekonsiliasi EOD'),
+            UI.el('div', { style: 'color:var(--text3); font-size:0.85rem; margin-bottom:10px;' },
+                `Cutoff EOD (eksklusif): tanggal sesi + 1 hari 00:00:00. Semua transaksi dengan effective_at di tanggal sesi WAJIB ikut stok buku SO ini, berapa pun created_at-nya.`),
+        ]);
+
+        // ---- Section A: Baseline SCM ----
+        const sectionA = UI.el('div', { style: 'border-top:1px solid var(--border); padding-top:10px; margin-top:4px;' }, [
+            UI.el('div', { style: 'font-weight:600; margin-bottom:6px;' }, 'A. Baseline Stok SCM'),
+        ]);
+        const baselineFileInput = UI.el('input', { type: 'file', accept: '.xlsx,.csv' });
+        const inoutThroughInput = UI.el('input', { type: 'datetime-local', title: 'Coverage IN/OUT Through' });
+        const scalingThroughInput = UI.el('input', { type: 'datetime-local', title: 'Coverage Scaling Through' });
+        const adjustmentThroughInput = UI.el('input', { type: 'datetime-local', title: 'Coverage Adjustment Through' });
+        const baselineImportBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Import Baseline');
+        const baselineAlert = UI.el('div');
+        const baselineSummaryHost = UI.el('div', { style: 'margin-top:8px; font-size:0.85rem;' });
+
+        async function refreshBaselineSummary() {
+            try {
+                const batches = await InvApi.opnameReferenceBatches(session.id);
+                const baseline = batches.find((b) => b.batch_kind === 'BASELINE');
+                baselineSummaryHost.innerHTML = '';
+                if (!baseline) {
+                    baselineSummaryHost.appendChild(UI.el('div', { style: 'color:var(--text3);' }, 'Belum ada baseline Stok SCM yang diimpor.'));
+                    return;
+                }
+                baselineSummaryHost.appendChild(UI.el('table', { class: 'compact-table' }, [
+                    UI.el('tbody', {}, [
+                        ['File', baseline.original_filename], ['Diimpor', baseline.uploaded_at],
+                        ['Coverage IN/OUT Through', baseline.baseline_inout_through], ['Coverage Scaling Through', baseline.baseline_scaling_through],
+                        ['Coverage Adjustment Through', baseline.baseline_adjustment_through],
+                        ['Baris', String(baseline.row_count)], ['Matched', String(baseline.matched_count)], ['Unmatched', String(baseline.unmatched_count)],
+                        ['Unit Mismatch', String(baseline.unit_mismatch_count)], ['Negative', String(baseline.negative_count)], ['Needs Review', String(baseline.needs_review_count)],
+                    ].map(([k, v]) => UI.el('tr', {}, [UI.el('td', { style: 'font-weight:600;' }, k), UI.el('td', {}, v == null ? '' : String(v))]))),
+                ]));
+            } catch (err) { UI.handleApiError(err); }
+        }
+
+        baselineImportBtn.addEventListener('click', async () => {
+            const file = baselineFileInput.files && baselineFileInput.files[0];
+            baselineAlert.innerHTML = '';
+            if (!file) {
+                baselineAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Pilih file baseline .xlsx atau .csv terlebih dahulu.'));
+                return;
+            }
+            if (!inoutThroughInput.value || !scalingThroughInput.value || !adjustmentThroughInput.value) {
+                baselineAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Konfirmasi coverage IN/OUT, Scaling, dan Adjustment wajib diisi sebelum import.'));
+                return;
+            }
+            baselineImportBtn.disabled = true;
+            try {
+                const result = await InvApi.opnameBaselineImport(session.id, file, {
+                    inoutThrough: inoutThroughInput.value, scalingThrough: scalingThroughInput.value, adjustmentThrough: adjustmentThroughInput.value,
+                });
+                UI.toast(`Baseline diimpor: ${result.matched_count} matched, ${result.unmatched_count} unmatched.`, 'success');
+                baselineFileInput.value = '';
+                await refreshBaselineSummary();
+            } catch (err) {
+                UI.handleApiError(err);
+                baselineAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal mengimpor baseline.'));
+            } finally {
+                baselineImportBtn.disabled = false;
+            }
+        });
+
+        sectionA.appendChild(UI.el('div', { style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap;' }, [baselineFileInput, baselineImportBtn]));
+        sectionA.appendChild(UI.el('div', { style: 'display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:6px;' }, [
+            UI.el('label', { style: 'font-size:0.8rem;' }, ['Coverage IN/OUT s.d.: ', inoutThroughInput]),
+            UI.el('label', { style: 'font-size:0.8rem;' }, ['Coverage Scaling s.d.: ', scalingThroughInput]),
+            UI.el('label', { style: 'font-size:0.8rem;' }, ['Coverage Adjustment s.d.: ', adjustmentThroughInput]),
+        ]));
+        sectionA.appendChild(baselineAlert);
+        sectionA.appendChild(baselineSummaryHost);
+        card.appendChild(sectionA);
+
+        // ---- Section B: Movement Backdate ----
+        const sectionB = UI.el('div', { style: 'border-top:1px solid var(--border); padding-top:10px; margin-top:14px;' }, [
+            UI.el('div', { style: 'font-weight:600; margin-bottom:6px;' }, 'B. Movement Backdate (IN/OUT/Scaling/Adjustment)'),
+        ]);
+        const moveFileInput = UI.el('input', { type: 'file', accept: '.xlsx,.csv' });
+        const moveImportBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Import Movement');
+        const moveAlert = UI.el('div');
+        const moveStatusHost = UI.el('div', { style: 'margin-top:8px; font-size:0.85rem;' });
+
+        async function refreshMovementStatus() {
+            try {
+                const counts = await InvApi.opnameMovementStatusBreakdown(session.id);
+                moveStatusHost.innerHTML = '';
+                const labels = {
+                    INCLUDED: 'Termasuk (Book Stock EOD)', ALREADY_IN_BASELINE: 'Sudah di Baseline (dikecualikan)',
+                    AFTER_SO_CUTOFF: 'Setelah Cutoff SO (dikecualikan)', UNMATCHED_ITEM: 'SKU Tidak Ditemukan',
+                    UNIT_MISMATCH: 'Satuan Tidak Cocok', INVALID_DATE: 'Tanggal/Data Tidak Valid',
+                    DUPLICATE: 'Duplikat', NEEDS_REVIEW: 'Perlu Ditinjau',
+                };
+                moveStatusHost.appendChild(UI.el('table', { class: 'compact-table' }, [
+                    UI.el('thead', {}, [UI.el('tr', {}, ['Status', 'Jumlah'].map((h) => UI.el('th', {}, h)))]),
+                    UI.el('tbody', {}, Object.keys(labels).map((k) => UI.el('tr', {}, [UI.el('td', {}, labels[k]), UI.el('td', {}, String(counts[k] || 0))]))),
+                ]));
+            } catch (err) { UI.handleApiError(err); }
+        }
+
+        moveImportBtn.addEventListener('click', async () => {
+            const file = moveFileInput.files && moveFileInput.files[0];
+            moveAlert.innerHTML = '';
+            if (!file) {
+                moveAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Pilih file movement .xlsx atau .csv terlebih dahulu.'));
+                return;
+            }
+            moveImportBtn.disabled = true;
+            try {
+                const result = await InvApi.opnameMovementImport(session.id, file);
+                UI.toast(`Movement diimpor: ${result.INCLUDED} termasuk, ${result.ALREADY_IN_BASELINE} sudah di baseline, ${result.AFTER_SO_CUTOFF} setelah cutoff.`, 'success');
+                moveFileInput.value = '';
+                await refreshMovementStatus();
+            } catch (err) {
+                UI.handleApiError(err);
+                moveAlert.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal mengimpor movement.'));
+            } finally {
+                moveImportBtn.disabled = false;
+            }
+        });
+
+        sectionB.appendChild(UI.el('div', { style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap;' }, [moveFileInput, moveImportBtn]));
+        sectionB.appendChild(UI.el('div', { style: 'color:var(--text3); font-size:0.78rem; margin-top:4px;' }, 'Baseline harus diimpor terlebih dahulu — coverage per stream baseline menentukan transaksi mana yang sudah termasuk dan mana yang perlu ditambahkan.'));
+        sectionB.appendChild(moveAlert);
+        sectionB.appendChild(moveStatusHost);
+        card.appendChild(sectionB);
+
+        // ---- Section C: Rekonsiliasi ----
+        const sectionC = UI.el('div', { style: 'border-top:1px solid var(--border); padding-top:10px; margin-top:14px;' }, [
+            UI.el('div', { style: 'font-weight:600; margin-bottom:6px;' }, 'C. Rekonsiliasi EOD per SKU'),
+        ]);
+        const reconHost = UI.el('div', { style: 'overflow-x:auto;' });
+        const refreshReconBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, '🔄 Refresh Rekonsiliasi');
+
+        async function refreshReconciliation() {
+            try {
+                const rows = await InvApi.opnameEodReconciliation(session.id);
+                reconHost.innerHTML = '';
+                if (!rows.length) {
+                    reconHost.appendChild(UI.el('div', { style: 'color:var(--text3); font-size:0.85rem;' }, 'Belum ada data untuk direkonsiliasi.'));
+                    return;
+                }
+                const fmt = (v) => (v === null || v === undefined ? '-' : (typeof v === 'number' ? v.toFixed(3) : String(v)));
+                reconHost.appendChild(UI.el('table', { class: 'compact-table' }, [
+                    UI.el('thead', {}, [UI.el('tr', {}, [
+                        'SKU', 'Nama', 'Baseline', 'Elig. IN', 'Elig. OUT', 'Elig. Scaling', 'Elig. Adj', 'Book Stock EOD',
+                        'P1 Phys EOD', 'P2 Phys EOD', 'Recount', 'Final Total Physical', 'Final Physical EOD', 'Selisih',
+                    ].map((h) => UI.el('th', {}, h)))]),
+                    UI.el('tbody', {}, rows.map((r) => {
+                        const varianceColor = r.variance === null ? '' : (Math.abs(r.variance) < 0.0000001 ? 'color:var(--success, #2e7d32);' : 'color:var(--danger, #c62828); font-weight:600;');
+                        return UI.el('tr', {}, [
+                            UI.el('td', {}, r.sku), UI.el('td', {}, r.name),
+                            UI.el('td', {}, fmt(r.baseline_qty)), UI.el('td', {}, fmt(r.eligible_in)), UI.el('td', {}, fmt(r.eligible_out)),
+                            UI.el('td', {}, fmt(r.eligible_scaling)), UI.el('td', {}, fmt(r.eligible_adjustment)), UI.el('td', {}, fmt(r.book_stock_eod)),
+                            UI.el('td', {}, fmt(r.p1 && r.p1.physical_eod)), UI.el('td', {}, fmt(r.p2 && r.p2.physical_eod)), UI.el('td', {}, fmt(r.recount)),
+                            UI.el('td', {}, fmt(r.final_total_physical)), UI.el('td', {}, fmt(r.final_physical_eod)),
+                            UI.el('td', { style: varianceColor }, fmt(r.variance)),
+                        ]);
+                    })),
+                ]));
+            } catch (err) { UI.handleApiError(err); }
+        }
+        refreshReconBtn.addEventListener('click', refreshReconciliation);
+
+        const eodDraftBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, '⬇️ Download Draft Rekonsiliasi');
+        eodDraftBtn.addEventListener('click', () => window.open(InvApi.opnameExportEodDraftUrl(session.id), '_blank'));
+        const eodFinalBtn = UI.el('button', { class: 'btn btn-primary btn-sm' }, '⬇️ Download Excel Final Rekonsiliasi');
+        eodFinalBtn.addEventListener('click', () => window.open(InvApi.opnameExportEodFinalUrl(session.id), '_blank'));
+
+        sectionC.appendChild(UI.el('div', { style: 'display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;' }, [refreshReconBtn, eodDraftBtn, eodFinalBtn]));
+        sectionC.appendChild(reconHost);
+        sectionC.appendChild(UI.el('div', { style: 'margin-top:4px; color:var(--text3); font-size:0.78rem;' },
+            'Download Draft tersedia kapan saja (watermark "DRAFT — BELUM FINAL"). Download Excel Final hanya berhasil setelah sesi POSTED.'));
+        card.appendChild(sectionC);
+
+        await refreshBaselineSummary();
+        await refreshMovementStatus();
+        await refreshReconciliation();
         return card;
     }
 
@@ -1329,6 +1527,20 @@ const StockOpname = (() => {
             const notesInput = UI.el('input', { type: 'text', placeholder: 'Keterangan (opsional)' });
             panelHost.appendChild(UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Keterangan'), notesInput]));
 
+            // PHASE V2.16.1 Section 9 — counted_at: the ACTUAL physical-count
+            // moment, distinct from created_at (this save). Defaults to "now"
+            // server-side when left unchecked — only a counter who is really
+            // entering yesterday's result needs to touch this.
+            const backdatedCheckbox = UI.el('input', { type: 'checkbox', id: 'opname-backdated-entry' });
+            const countedAtInput = UI.el('input', { type: 'datetime-local', style: 'display:none;' });
+            backdatedCheckbox.addEventListener('change', () => {
+                countedAtInput.style.display = backdatedCheckbox.checked ? '' : 'none';
+            });
+            panelHost.appendChild(UI.el('div', { class: 'form-group', style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap;' }, [
+                UI.el('label', { style: 'display:flex; gap:6px; align-items:center; font-size:0.85rem;' }, [backdatedCheckbox, 'Saya menghitung ini sebelumnya (entry terlambat)']),
+                countedAtInput,
+            ]));
+
             const alertBox = UI.el('div');
             panelHost.appendChild(alertBox);
 
@@ -1376,8 +1588,9 @@ const StockOpname = (() => {
                     DEADSTOCK: deadstockBlock.photoTokens(),
                 };
                 alertBox.innerHTML = '';
+                const countedAt = (backdatedCheckbox.checked && countedAtInput.value) ? countedAtInput.value : null;
                 try {
-                    await InvApi.submitOpnameFinding(state.view.session_id, state.view.role, state.activeItemId, conditions, notesInput.value || null, state.activeClaimToken, photos);
+                    await InvApi.submitOpnameFinding(state.view.session_id, state.view.role, state.activeItemId, conditions, notesInput.value || null, state.activeClaimToken, photos, countedAt);
                     UI.toast('Temuan tersimpan.', 'success');
                     state.activeClaimToken = null;
                     state.panelMode = 'summary';
@@ -1897,6 +2110,8 @@ const StockOpname = (() => {
                 const rowEl = UI.el('div', { class: `opname-finding-row${f.is_voided ? ' is-voided' : ''}` }, [
                     buildFindingSummaryEl(f, idx, null),
                     UI.el('div', { style: 'color:var(--text3);' }, `oleh ${f.counter_username} — ${f.created_at}${f.is_voided ? ` (VOID: ${f.void_reason})` : ''}`),
+                    UI.el('div', { style: 'color:var(--text3); font-size:0.8rem;' },
+                        f.counted_at ? `Dihitung pada: ${f.counted_at}` : 'Waktu hitung fisik (counted_at): belum tercatat'),
                 ]);
                 if (!f.is_voided) {
                     const voidBtn = UI.el('button', { class: 'btn btn-danger btn-sm' }, 'Void');
@@ -1911,6 +2126,33 @@ const StockOpname = (() => {
                         } catch (err) { UI.handleApiError(err); }
                     });
                     rowEl.appendChild(voidBtn);
+
+                    // PHASE V2.16.1 Section 9 — controlled, audited backfill
+                    // for a pre-V2.16.1 finding with no counted_at recorded.
+                    // Never offered once counted_at is already set — the
+                    // server itself refuses a second backfill either way.
+                    if (!f.counted_at) {
+                        const backfillBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Isi Waktu Hitung');
+                        backfillBtn.addEventListener('click', async () => {
+                            const values = await MasterCommon.formModal({
+                                title: `Isi counted_at — Temuan #${f.id}`,
+                                submitLabel: 'Simpan',
+                                initial: { counted_at: '', reason: '' },
+                                fields: [
+                                    { key: 'counted_at', label: 'Waktu hitung fisik sebenarnya (YYYY-MM-DD HH:MM:SS)', type: 'text' },
+                                    { key: 'reason', label: 'Alasan (wajib)', type: 'text' },
+                                ],
+                            });
+                            if (!values || !values.counted_at || !values.reason) return;
+                            try {
+                                await InvApi.opnameBackfillCountedAt(sessionId, f.id, values.counted_at, values.reason);
+                                UI.toast('counted_at berhasil diisi.', 'success');
+                                overlayRef.remove();
+                                await renderSession(sessionId);
+                            } catch (err) { UI.handleApiError(err); }
+                        });
+                        rowEl.appendChild(backfillBtn);
+                    }
                 }
                 host.appendChild(rowEl);
             });

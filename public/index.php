@@ -44,6 +44,7 @@ require_once __DIR__ . '/../services/StockOpnamePhotoService.php';
 require_once __DIR__ . '/../services/StockOpnameCounterAccountService.php';
 require_once __DIR__ . '/../services/StockOpnameReferenceImportService.php';
 require_once __DIR__ . '/../services/StockOpnameFinalExportService.php';
+require_once __DIR__ . '/../services/StockOpnameBookStockService.php';
 require_once __DIR__ . '/../services/TransferService.php';
 require_once __DIR__ . '/../services/ProductionService.php';
 require_once __DIR__ . '/../services/BookClosingService.php';
@@ -132,6 +133,7 @@ use App\Services\StockOpnamePhotoService;
 use App\Services\StockOpnameCounterAccountService;
 use App\Services\StockOpnameReferenceImportService;
 use App\Services\StockOpnameFinalExportService;
+use App\Services\StockOpnameBookStockService;
 use App\Services\StockAdjustmentService;
 use App\Services\ProductionService;
 use App\Services\BookClosingService;
@@ -3258,8 +3260,20 @@ $routes = [
             $photoTokens[$ct] = array_values(array_map('strval', $tokens));
         }
 
+        // PHASE V2.16.1 — optional explicit counted_at for a backdated
+        // entry (counter physically counted yesterday, is only saving the
+        // result now). Omitted/blank -> submitFinding() defaults to "now",
+        // exactly like before this phase.
+        $countedAt = null;
+        if (array_key_exists('counted_at', $input) && trim((string) $input['counted_at']) !== '') {
+            $countedAt = (string) $input['counted_at'];
+            if (strtotime($countedAt) === false) {
+                inv_error(422, 'VALIDATION_ERROR', 'counted_at must be a valid date/time');
+            }
+        }
+
         $result = Database::transaction(
-            fn (PDO $tx) => StockOpnameService::submitFinding($tx, $sessionId, strtolower($role), $itemId, $conditionsInput, $notes, (int) $user['id'], $claimToken, $photoTokens)
+            fn (PDO $tx) => StockOpnameService::submitFinding($tx, $sessionId, strtolower($role), $itemId, $conditionsInput, $notes, (int) $user['id'], $claimToken, $photoTokens, $countedAt)
         );
         inv_ok($result, 'Finding recorded');
     },
@@ -3491,6 +3505,37 @@ $routes = [
             fn (PDO $tx) => StockOpnameService::voidFinding($tx, $sessionId, $findingId, $reason, (int) $user['id'])
         );
         inv_ok($result, 'Finding voided');
+    },
+
+    // PHASE V2.16.1 Section 9 — supervisor-only, audited counted_at
+    // backfill for a pre-V2.16.1 finding that has none. Never overwrites
+    // an existing counted_at (see StockOpnameService::backfillCountedAt()'s
+    // own refusal) — this is remediation for history that predates the
+    // concept, not a general-purpose correction tool.
+    'POST /stock-opname/{id}/findings/{findingId}/backfill-counted-at' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $findingId = (int) $params['findingId'];
+
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+
+        $countedAt = (string) ($input['counted_at'] ?? '');
+        $reason = (string) ($input['reason'] ?? '');
+        if ($countedAt === '' || strtotime($countedAt) === false) {
+            inv_error(422, 'VALIDATION_ERROR', 'counted_at is required and must be a valid date/time');
+        }
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameService::backfillCountedAt($tx, $sessionId, $findingId, $countedAt, (int) $user['id'], $reason)
+        );
+        inv_ok($result, 'counted_at backfilled');
     },
 
     // PHASE V2.12A: blind, one-item-at-a-time submission (Section 6/16 —
@@ -3964,6 +4009,154 @@ $routes = [
         try {
             header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
             header('Content-Disposition: attachment; filename="final-so-' . $sessionId . '-' . date('Ymd_His') . '.xlsx"');
+            header('Content-Length: ' . filesize($path));
+            readfile($path);
+        } finally {
+            @unlink($path);
+        }
+    },
+
+    // ============================================================
+    // PHASE V2.16.1 — "STOK BUKU SO" EOD reconciliation. Same
+    // STOCK_OPNAME_SUPERVISE + warehouse-scope gate as V2.16 above; same
+    // REFERENCE/RECONCILIATION-ONLY guarantee (never touches
+    // inventory_batches/stock_adjustments/an existing finding).
+    // ============================================================
+    'POST /stock-opname/{id}/baseline-import' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+
+        if (empty($_FILES['file']) || ($_FILES['file']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            inv_error(422, 'VALIDATION_ERROR', 'No file uploaded (expected multipart/form-data field "file")');
+        }
+        $originalName = basename((string) $_FILES['file']['name']);
+        $ext = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+        if (!in_array($ext, ['csv', 'xlsx'], true)) {
+            inv_error(422, 'VALIDATION_ERROR', 'Only .xlsx or .csv files are accepted');
+        }
+        // Admin-confirmed coverage per movement stream (Section 3) — never
+        // inferred from the file itself.
+        $coverage = [
+            'inout_through' => (string) ($_POST['baseline_inout_through'] ?? ''),
+            'scaling_through' => (string) ($_POST['baseline_scaling_through'] ?? ''),
+            'adjustment_through' => (string) ($_POST['baseline_adjustment_through'] ?? ''),
+        ];
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameBookStockService::importBaseline($tx, $sessionId, $_FILES['file']['tmp_name'], $originalName, (int) $user['id'], $coverage)
+        );
+        inv_ok($result, 'Baseline Stok SCM imported');
+    },
+
+    'POST /stock-opname/{id}/movement-import' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+
+        if (empty($_FILES['file']) || ($_FILES['file']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            inv_error(422, 'VALIDATION_ERROR', 'No file uploaded (expected multipart/form-data field "file")');
+        }
+        $originalName = basename((string) $_FILES['file']['name']);
+        $ext = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+        if (!in_array($ext, ['csv', 'xlsx'], true)) {
+            inv_error(422, 'VALIDATION_ERROR', 'Only .xlsx or .csv files are accepted');
+        }
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameBookStockService::importMovements($tx, $sessionId, $_FILES['file']['tmp_name'], $originalName, (int) $user['id'])
+        );
+        inv_ok($result, 'Movement file imported');
+    },
+
+    'GET /stock-opname/{id}/eod-reconciliation' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        inv_ok(StockOpnameBookStockService::reconciliation($pdo, $sessionId), 'OK');
+    },
+
+    // Section 15/B UI — a never-silent breakdown of every imported
+    // movement row by its inclusion_status, so an excluded row is always
+    // inspectable rather than just absent from the Book Stock EOD total.
+    'GET /stock-opname/{id}/movement-status-breakdown' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        $stmt = $pdo->prepare('SELECT inclusion_status, COUNT(*) AS cnt FROM stock_opname_reference_movements WHERE session_id = :sid GROUP BY inclusion_status');
+        $stmt->execute(['sid' => $sessionId]);
+        $counts = array_fill_keys(['INCLUDED', 'ALREADY_IN_BASELINE', 'AFTER_SO_CUTOFF', 'UNMATCHED_ITEM', 'UNIT_MISMATCH', 'INVALID_DATE', 'DUPLICATE', 'NEEDS_REVIEW'], 0);
+        foreach ($stmt->fetchAll() as $r) {
+            $counts[$r['inclusion_status']] = (int) $r['cnt'];
+        }
+        inv_ok($counts, 'OK');
+    },
+
+    'GET /stock-opname/{id}/export/eod-draft' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        $path = StockOpnameFinalExportService::draftReconciliationExport($pdo, $sessionId, (int) $user['id']);
+        try {
+            header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            header('Content-Disposition: attachment; filename="draft-eod-reconciliation-' . $sessionId . '-' . date('Ymd_His') . '.xlsx"');
+            header('Content-Length: ' . filesize($path));
+            readfile($path);
+        } finally {
+            @unlink($path);
+        }
+    },
+
+    'GET /stock-opname/{id}/export/eod-final' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        $path = StockOpnameFinalExportService::officialReconciliationExport($pdo, $sessionId, (int) $user['id']);
+        try {
+            header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            header('Content-Disposition: attachment; filename="final-eod-reconciliation-' . $sessionId . '-' . date('Ymd_His') . '.xlsx"');
             header('Content-Length: ' . filesize($path));
             readfile($path);
         } finally {
