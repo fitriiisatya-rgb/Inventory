@@ -1009,6 +1009,89 @@ CREATE TABLE stock_opname_line_units (
     INDEX idx_solu_session (session_id)
 ) ENGINE=InnoDB;
 
+-- PHASE V2.16: Stock Opname Excel reference import + final SO export.
+-- REFERENCE/RECONCILIATION ONLY — never read by finalize()/post()/
+-- recomputeAggregate(), never writes inventory_batches/stock_adjustments/
+-- an existing finding. See database/migrations/
+-- 2026_10_01_v2_16_stock_opname_reference_import.sql for full rationale.
+CREATE TABLE stock_opname_reference_batches (
+    id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    session_id          INT UNSIGNED NOT NULL,
+    original_filename   VARCHAR(255) NOT NULL,
+    file_hash           CHAR(64) NOT NULL,
+    uploaded_by         INT UNSIGNED NOT NULL,
+    uploaded_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    row_count           INT UNSIGNED NOT NULL DEFAULT 0,
+    matched_count       INT UNSIGNED NOT NULL DEFAULT 0,
+    unmatched_count     INT UNSIGNED NOT NULL DEFAULT 0,
+    unit_mismatch_count INT UNSIGNED NOT NULL DEFAULT 0,
+    negative_count      INT UNSIGNED NOT NULL DEFAULT 0,
+    needs_review_count  INT UNSIGNED NOT NULL DEFAULT 0,
+    duplicate_count     INT UNSIGNED NOT NULL DEFAULT 0,
+    status              ENUM('IMPORTED') NOT NULL DEFAULT 'IMPORTED',
+    CONSTRAINT fk_sorb_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
+    CONSTRAINT fk_sorb_user FOREIGN KEY (uploaded_by) REFERENCES users(id),
+    UNIQUE KEY uq_sorb_session_hash (session_id, file_hash),
+    INDEX idx_sorb_session (session_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE stock_opname_reference_rows (
+    id                   BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    session_id           INT UNSIGNED NOT NULL,
+    import_batch_id      BIGINT UNSIGNED NOT NULL,
+    item_id              INT UNSIGNED NULL,
+    source_row_reference INT UNSIGNED NOT NULL,
+    source_code          VARCHAR(100) NOT NULL,
+    source_name          VARCHAR(255) NOT NULL,
+    source_unit          VARCHAR(60) NOT NULL,
+    source_qty           DECIMAL(20,6) NOT NULL,
+    base_unit_code       VARCHAR(32) NULL,
+    conversion_factor    DECIMAL(20,6) NULL,
+    converted_base_qty   DECIMAL(20,6) NULL,
+    mapping_status       ENUM('MATCHED','UNMATCHED_SCM','UNIT_MISMATCH','NEGATIVE_REFERENCE','DUPLICATE','NEEDS_REVIEW') NOT NULL,
+    mapped_by            INT UNSIGNED NULL,
+    mapped_at            DATETIME NULL,
+    created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_sorr_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
+    CONSTRAINT fk_sorr_batch FOREIGN KEY (import_batch_id) REFERENCES stock_opname_reference_batches(id),
+    CONSTRAINT fk_sorr_item FOREIGN KEY (item_id) REFERENCES items(id),
+    CONSTRAINT fk_sorr_mapper FOREIGN KEY (mapped_by) REFERENCES users(id),
+    INDEX idx_sorr_batch (import_batch_id),
+    INDEX idx_sorr_session_item (session_id, item_id),
+    INDEX idx_sorr_session_status (session_id, mapping_status)
+) ENGINE=InnoDB;
+
+CREATE TABLE stock_opname_reference_item_mappings (
+    id           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    source_code  VARCHAR(100) NOT NULL,
+    item_id      INT UNSIGNED NOT NULL,
+    approved_by  INT UNSIGNED NOT NULL,
+    approved_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    notes        VARCHAR(255) NULL,
+    is_active    TINYINT(1) NOT NULL DEFAULT 1,
+    CONSTRAINT fk_sorim_item FOREIGN KEY (item_id) REFERENCES items(id),
+    CONSTRAINT fk_sorim_approver FOREIGN KEY (approved_by) REFERENCES users(id),
+    INDEX idx_sorim_code_active (source_code, is_active)
+) ENGINE=InnoDB;
+
+CREATE TABLE stock_opname_reference_movements (
+    id                 BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    session_id         INT UNSIGNED NOT NULL,
+    item_id            INT UNSIGNED NOT NULL,
+    movement_type      ENUM('IN','OUT','SCALING','ADJUSTMENT') NOT NULL,
+    qty_base           DECIMAL(20,6) NOT NULL,
+    effective_at       DATETIME NOT NULL,
+    document_reference VARCHAR(100) NULL,
+    reason             VARCHAR(255) NOT NULL,
+    late_pre_cutoff    TINYINT(1) NOT NULL DEFAULT 0,
+    created_by         INT UNSIGNED NOT NULL,
+    created_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_sorm_session FOREIGN KEY (session_id) REFERENCES stock_opname_sessions(id),
+    CONSTRAINT fk_sorm_item FOREIGN KEY (item_id) REFERENCES items(id),
+    CONSTRAINT fk_sorm_user FOREIGN KEY (created_by) REFERENCES users(id),
+    INDEX idx_sorm_session_item (session_id, item_id)
+) ENGINE=InnoDB;
+
 CREATE TABLE stock_adjustments (
     id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     item_id             INT UNSIGNED NOT NULL,

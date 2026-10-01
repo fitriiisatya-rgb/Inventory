@@ -264,6 +264,16 @@ const StockOpname = (() => {
                 document.getElementById('opname-trace-btn').addEventListener('click', () => TraceDrawer.openOpname(session.id));
             }
 
+            // PHASE V2.16 — REFERENCE SCM import + Final SO export.
+            // Supervisor-only (same STOCK_OPNAME_SUPERVISE gate the server
+            // enforces on every one of these routes), rendered at EVERY
+            // session status — a draft export is useful at any point, and
+            // the official export's own eligibility (POSTED) is checked
+            // server-side regardless of when the button is clicked.
+            if (canSupervise()) {
+                body.appendChild(await buildReferenceScmCard(session));
+            }
+
             if (session.status === 'OPEN') {
                 // HOTFIX (post-274dc78): workflow_mode is an explicit,
                 // server-derived field (session_number !== null => a real
@@ -339,6 +349,85 @@ const StockOpname = (() => {
         printBtn.addEventListener('click', () => window.open(InvApi.opnamePrintUrl(session.id), '_blank'));
         wrap.appendChild(printBtn);
         return wrap;
+    }
+
+    // ============================================================
+    // PHASE V2.16 — REFERENCE SCM Excel import + Final SO export.
+    // REFERENCE/RECONCILIATION ONLY: this card never affects current
+    // stock, never edits an existing finding, never unblocks Checkpoint B
+    // — see StockOpnameReferenceImportService/StockOpnameFinalExportService
+    // docblocks. [Download Excel Final SO] is always rendered but the
+    // server refuses it (FINDINGS_V1_CHECKPOINT_B_REQUIRED / 409) unless
+    // the session is actually POSTED — the button never pretends it will
+    // succeed by hiding itself only on some client-guessed condition.
+    // ============================================================
+    async function buildReferenceScmCard(session) {
+        const card = UI.el('div', { class: 'card' }, [
+            UI.el('div', { class: 'card-title' }, '📎 Reference SCM'),
+        ]);
+
+        const fileInput = UI.el('input', { type: 'file', accept: '.xlsx,.csv' });
+        const importBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Import Excel');
+        const alertBox = UI.el('div');
+        const batchListHost = UI.el('div', { style: 'margin-top:10px;' });
+
+        async function refreshBatches() {
+            try {
+                const batches = await InvApi.opnameReferenceBatches(session.id);
+                batchListHost.innerHTML = '';
+                if (!batches.length) {
+                    batchListHost.appendChild(UI.el('div', { style: 'color:var(--text3); font-size:0.85rem;' }, 'Belum ada file reference yang diimpor.'));
+                    return;
+                }
+                const table = UI.el('table', { class: 'compact-table' }, [
+                    UI.el('thead', {}, [UI.el('tr', {}, ['File', 'Diupload', 'Baris', 'Matched', 'Unmatched', 'Unit Mismatch', 'Negative', 'Needs Review', 'Duplicate'].map((h) => UI.el('th', {}, h)))]),
+                    UI.el('tbody', {}, batches.map((b) => UI.el('tr', {}, [
+                        UI.el('td', {}, b.original_filename), UI.el('td', {}, b.uploaded_at), UI.el('td', {}, String(b.row_count)),
+                        UI.el('td', {}, String(b.matched_count)), UI.el('td', {}, String(b.unmatched_count)), UI.el('td', {}, String(b.unit_mismatch_count)),
+                        UI.el('td', {}, String(b.negative_count)), UI.el('td', {}, String(b.needs_review_count)), UI.el('td', {}, String(b.duplicate_count)),
+                    ]))),
+                ]);
+                batchListHost.appendChild(table);
+            } catch (err) {
+                UI.handleApiError(err);
+            }
+        }
+
+        importBtn.addEventListener('click', async () => {
+            const file = fileInput.files && fileInput.files[0];
+            alertBox.innerHTML = '';
+            if (!file) {
+                alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Pilih file .xlsx atau .csv terlebih dahulu.'));
+                return;
+            }
+            importBtn.disabled = true;
+            try {
+                const result = await InvApi.opnameReferenceImport(session.id, file);
+                UI.toast(`Reference diimpor: ${result.matched_count} matched, ${result.unmatched_count} unmatched, ${result.unit_mismatch_count} unit mismatch.`, 'success');
+                fileInput.value = '';
+                await refreshBatches();
+            } catch (err) {
+                UI.handleApiError(err);
+                alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal mengimpor reference.'));
+            } finally {
+                importBtn.disabled = false;
+            }
+        });
+
+        const draftBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, '⬇️ Download Draft');
+        draftBtn.addEventListener('click', () => window.open(InvApi.opnameExportDraftUrl(session.id), '_blank'));
+        const finalBtn = UI.el('button', { class: 'btn btn-primary btn-sm' }, '⬇️ Download Excel Final SO');
+        finalBtn.addEventListener('click', () => window.open(InvApi.opnameExportFinalUrl(session.id), '_blank'));
+
+        card.appendChild(UI.el('div', { style: 'display:flex; gap:8px; align-items:center; flex-wrap:wrap;' }, [fileInput, importBtn]));
+        card.appendChild(alertBox);
+        card.appendChild(batchListHost);
+        card.appendChild(UI.el('div', { style: 'margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;' }, [draftBtn, finalBtn]));
+        card.appendChild(UI.el('div', { style: 'margin-top:4px; color:var(--text3); font-size:0.78rem;' },
+            'Download Draft tersedia kapan saja (watermark "DRAFT — BELUM FINAL"). Download Excel Final SO hanya berhasil setelah sesi POSTED.'));
+
+        await refreshBatches();
+        return card;
     }
 
     // ============================================================

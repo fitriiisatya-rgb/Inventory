@@ -392,6 +392,17 @@ const InvApi = (() => {
         opnamePrintUrl: (id) => `/api/stock-opname/${id}/print`,
         opnameReportDetail: (id) => request('GET', `/reports/opname/${id}`),
         opnameReportDetailExportUrl: (id) => `/api/reports/opname/${id}?format=csv`,
+        // PHASE V2.16 — Excel REFERENCE import + Final SO export.
+        // REFERENCE/RECONCILIATION ONLY (see StockOpnameReferenceImportService
+        // docblock) — never touches inventory_batches/findings/current stock.
+        opnameReferenceImport: (id, file) => upload(`/stock-opname/${id}/reference-import`, file, {}, 'file'),
+        opnameReferenceBatches: (id) => request('GET', `/stock-opname/${id}/reference-batches`),
+        opnameReferenceRows: (id, mappingStatus) => request('GET', `/stock-opname/${id}/reference-rows${qs({ mapping_status: mappingStatus })}`),
+        opnameReferenceMapRow: (id, rowId, itemId) => request('POST', `/stock-opname/${id}/reference-rows/${rowId}/map`, { item_id: itemId }),
+        opnameReferenceApproveMapping: (id, sourceCode, itemId, notes) => request('POST', `/stock-opname/${id}/reference-item-mappings`, { source_code: sourceCode, item_id: itemId, notes: notes || null }),
+        opnameReferenceRecordMovement: (id, payload) => request('POST', `/stock-opname/${id}/reference-movements`, payload),
+        opnameExportDraftUrl: (id) => `/api/stock-opname/${id}/export/draft`,
+        opnameExportFinalUrl: (id) => `/api/stock-opname/${id}/export/final`,
 
         // ---- stock adjustments ----
         postAdjustment: (payload) => request('POST', '/stock-adjustments', payload),

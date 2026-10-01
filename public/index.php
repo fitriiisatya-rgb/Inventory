@@ -42,6 +42,8 @@ require_once __DIR__ . '/../services/StockAdjustmentService.php';
 require_once __DIR__ . '/../services/StockOpnameService.php';
 require_once __DIR__ . '/../services/StockOpnamePhotoService.php';
 require_once __DIR__ . '/../services/StockOpnameCounterAccountService.php';
+require_once __DIR__ . '/../services/StockOpnameReferenceImportService.php';
+require_once __DIR__ . '/../services/StockOpnameFinalExportService.php';
 require_once __DIR__ . '/../services/TransferService.php';
 require_once __DIR__ . '/../services/ProductionService.php';
 require_once __DIR__ . '/../services/BookClosingService.php';
@@ -128,6 +130,8 @@ use App\Services\TransferService;
 use App\Services\StockOpnameService;
 use App\Services\StockOpnamePhotoService;
 use App\Services\StockOpnameCounterAccountService;
+use App\Services\StockOpnameReferenceImportService;
+use App\Services\StockOpnameFinalExportService;
 use App\Services\StockAdjustmentService;
 use App\Services\ProductionService;
 use App\Services\BookClosingService;
@@ -3776,6 +3780,195 @@ $routes = [
         }
         inv_require_so_warehouse_scope($user, (int) $warehouseId);
         inv_html(StockOpnamePrintService::renderResult($pdo, $sessionId));
+    },
+
+    // ============================================================
+    // PHASE V2.16 — Stock Opname Excel REFERENCE import + Final SO
+    // export. REFERENCE/RECONCILIATION ONLY (see
+    // StockOpnameReferenceImportService/StockOpnameFinalExportService
+    // docblocks): never touches inventory_batches, never edits an
+    // existing P1/P2/recount/finding, never unblocks
+    // FINDINGS_V1_CHECKPOINT_B_REQUIRED. Same permission/warehouse-scope
+    // gate as finalize/post/cancel above — a counter (no
+    // STOCK_OPNAME_SUPERVISE) gets 403, never this session's reference/
+    // financial data.
+    // ============================================================
+    'POST /stock-opname/{id}/reference-import' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+
+        if (empty($_FILES['file']) || ($_FILES['file']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            inv_error(422, 'VALIDATION_ERROR', 'No file uploaded (expected multipart/form-data field "file")');
+        }
+        $originalName = basename((string) $_FILES['file']['name']);
+        $ext = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+        if (!in_array($ext, ['csv', 'xlsx'], true)) {
+            inv_error(422, 'VALIDATION_ERROR', 'Only .xlsx or .csv files are accepted');
+        }
+
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameReferenceImportService::import($tx, $sessionId, $_FILES['file']['tmp_name'], $originalName, (int) $user['id'])
+        );
+        inv_ok($result, 'Reference imported');
+    },
+
+    'GET /stock-opname/{id}/reference-batches' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        $stmt = $pdo->prepare('SELECT * FROM stock_opname_reference_batches WHERE session_id = :sid ORDER BY uploaded_at DESC');
+        $stmt->execute(['sid' => $sessionId]);
+        inv_ok($stmt->fetchAll(), 'OK');
+    },
+
+    'GET /stock-opname/{id}/reference-rows' => function (array $params) use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        $status = isset($query['mapping_status']) && $query['mapping_status'] !== '' ? (string) $query['mapping_status'] : null;
+        $sql = 'SELECT * FROM stock_opname_reference_rows WHERE session_id = :sid';
+        $args = ['sid' => $sessionId];
+        if ($status !== null) {
+            $sql .= ' AND mapping_status = :status';
+            $args['status'] = $status;
+        }
+        $sql .= ' ORDER BY import_batch_id DESC, source_row_reference ASC';
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($args);
+        inv_ok($stmt->fetchAll(), 'OK');
+    },
+
+    'POST /stock-opname/{id}/reference-rows/{rowId}/map' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        $itemId = (int) ($input['item_id'] ?? 0);
+        if ($itemId <= 0) {
+            inv_error(422, 'VALIDATION_ERROR', 'item_id is required');
+        }
+        $result = Database::transaction(
+            fn (PDO $tx) => StockOpnameReferenceImportService::manualMapRow($tx, $sessionId, (int) $params['rowId'], $itemId, (int) $user['id'])
+        );
+        inv_ok($result, 'Row mapped');
+    },
+
+    'POST /stock-opname/{id}/reference-item-mappings' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        $code = (string) ($input['source_code'] ?? '');
+        $itemId = (int) ($input['item_id'] ?? 0);
+        $notes = isset($input['notes']) && $input['notes'] !== '' ? (string) $input['notes'] : null;
+        $id = Database::transaction(
+            fn (PDO $tx) => StockOpnameReferenceImportService::approveItemMapping($tx, $code, $itemId, (int) $user['id'], $notes)
+        );
+        inv_ok(['mapping_id' => $id], 'Mapping approved');
+    },
+
+    'POST /stock-opname/{id}/reference-movements' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        $itemId = (int) ($input['item_id'] ?? 0);
+        $type = (string) ($input['movement_type'] ?? '');
+        $qty = (float) ($input['qty_base'] ?? 0);
+        $effectiveAt = (string) ($input['effective_at'] ?? '');
+        $docRef = isset($input['document_reference']) && $input['document_reference'] !== '' ? (string) $input['document_reference'] : null;
+        $reason = (string) ($input['reason'] ?? '');
+        if ($effectiveAt === '' || strtotime($effectiveAt) === false) {
+            inv_error(422, 'VALIDATION_ERROR', 'effective_at is required and must be a valid date/time');
+        }
+        $id = Database::transaction(
+            fn (PDO $tx) => StockOpnameReferenceImportService::recordMovement($tx, $sessionId, $itemId, $type, $qty, $effectiveAt, $docRef, $reason, (int) $user['id'])
+        );
+        inv_ok(['movement_id' => $id], 'Movement recorded');
+    },
+
+    'GET /stock-opname/{id}/export/draft' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        $path = StockOpnameFinalExportService::draft($pdo, $sessionId, (int) $user['id']);
+        try {
+            header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            header('Content-Disposition: attachment; filename="draft-final-so-' . $sessionId . '-' . date('Ymd_His') . '.xlsx"');
+            header('Content-Length: ' . filesize($path));
+            readfile($path);
+        } finally {
+            @unlink($path);
+        }
+    },
+
+    'GET /stock-opname/{id}/export/final' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'STOCK_OPNAME_SUPERVISE');
+        $sessionId = (int) $params['id'];
+        $scope = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $scope->execute(['id' => $sessionId]);
+        $warehouseId = $scope->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        $path = StockOpnameFinalExportService::official($pdo, $sessionId, (int) $user['id']);
+        try {
+            header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            header('Content-Disposition: attachment; filename="final-so-' . $sessionId . '-' . date('Ymd_His') . '.xlsx"');
+            header('Content-Length: ' . filesize($path));
+            readfile($path);
+        } finally {
+            @unlink($path);
+        }
     },
 
     // ---- Stock Adjustments (PHASE C2 Section 3) ----

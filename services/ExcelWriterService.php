@@ -14,14 +14,42 @@ use RuntimeException;
  * standard no-dependency technique, not a CSV-renamed-to-.xlsx shortcut.
  *
  * Deliberately minimal: every cell is either a plain number or an inline
- * string (`t="inlineStr"`) — no shared-strings table, no styles beyond a
- * bold header row, no formulas. That's everything a data-export report
- * needs; anything fancier would be scope this task never asked for.
+ * string (`t="inlineStr"`) — no shared-strings table, no formulas.
+ *
+ * PHASE V2.16: every numeric data cell (not the header row) now carries a
+ * fixed "#,##0.######" display format (style id 2) instead of Excel's
+ * bare "General" — purely a VISUAL numFmt on top of the exact same raw
+ * <v> value every existing caller already wrote, so nothing that reads
+ * a cell's value back (XlsxReaderService, every existing export test)
+ * is affected. Each sheet may also optionally set 'freeze_header' (bool),
+ * 'autofilter' (bool), and 'col_widths' (list<float>, Excel character-
+ * width units) — all three default to off/empty, so every one of this
+ * file's pre-V2.16 callers renders byte-identical XML to before.
  */
 final class ExcelWriterService
 {
     /**
-     * @param array<string, array{headers: list<string>, rows: list<list<int|float|string|null>>}> $sheets
+     * Section M (formula-injection protection): a string cell whose first
+     * character is one Excel/LibreOffice would interpret as a formula
+     * trigger (=, +, -, @, tab, CR) is prefixed with a single quote so it
+     * is always rendered as literal text, never evaluated. This is NOT
+     * applied automatically inside write()/rowXml() for every caller (a
+     * legitimate value like a "-5%" note would otherwise silently gain a
+     * leading quote for callers that never asked for this) — callers that
+     * render user-supplied/uploaded source text (e.g.
+     * StockOpnameFinalExportService) call this explicitly on every such
+     * value before handing rows to write().
+     */
+    public static function sanitizeCellText(string $value): string
+    {
+        if ($value !== '' && in_array($value[0], ['=', '+', '-', '@', "\t", "\r"], true)) {
+            return "'" . $value;
+        }
+        return $value;
+    }
+
+    /**
+     * @param array<string, array{headers: list<string>, rows: list<list<int|float|string|null>>, freeze_header?: bool, autofilter?: bool, col_widths?: list<float>}> $sheets
      *        Keyed by sheet name (max 31 chars, Excel's own limit).
      */
     public static function write(string $path, array $sheets): void
@@ -48,7 +76,10 @@ final class ExcelWriterService
 
         $i = 1;
         foreach ($sheets as $sheet) {
-            $zip->addFromString("xl/worksheets/sheet{$i}.xml", self::sheetXml($sheet['headers'], $sheet['rows']));
+            $zip->addFromString("xl/worksheets/sheet{$i}.xml", self::sheetXml(
+                $sheet['headers'], $sheet['rows'],
+                $sheet['freeze_header'] ?? false, $sheet['autofilter'] ?? false, $sheet['col_widths'] ?? []
+            ));
             $i++;
         }
 
@@ -111,14 +142,25 @@ final class ExcelWriterService
 
     private static function stylesXml(): string
     {
-        // Two cell formats: 0 = default, 1 = bold (header row).
+        // Three cell formats: 0 = default, 1 = bold (header row), 2 =
+        // numeric data ("#,##0.######"). PHASE V2.16: <numFmts> must be
+        // the FIRST child of <styleSheet> per the OOXML schema (ECMA-376
+        // CT_Stylesheet) — fonts/fills/borders/cellStyleXfs/cellXfs/
+        // cellStyles all come after it, never before.
         return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            . '<numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.######"/></numFmts>'
             . '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
             . '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
             . '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
             . '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0"/></cellStyleXfs>'
-            . '<cellXfs count="2"><xf numFmtId="0" fontId="0" xfId="0"/><xf numFmtId="0" fontId="1" xfId="0" applyFont="1"/></cellXfs>'
+            . '<cellXfs count="3">'
+            . '<xf numFmtId="0" fontId="0" xfId="0"/>'
+            . '<xf numFmtId="0" fontId="1" xfId="0" applyFont="1"/>'
+            // style 2 — numeric data cells: "#,##0.######" (thousands
+            // separator, up to 6 decimals, no forced trailing zeros).
+            . '<xf numFmtId="164" fontId="0" xfId="0" applyNumberFormat="1"/>'
+            . '</cellXfs>'
             . '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
             . '</styleSheet>';
     }
@@ -126,13 +168,26 @@ final class ExcelWriterService
     /**
      * @param list<string> $headers
      * @param list<list<int|float|string|null>> $rows
+     * @param list<float> $colWidths
      */
-    private static function sheetXml(array $headers, array $rows): string
+    private static function sheetXml(array $headers, array $rows, bool $freezeHeader = false, bool $autofilter = false, array $colWidths = []): string
     {
         $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-            . '<sheetData>';
+            . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
 
+        if ($freezeHeader) {
+            $xml .= '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>';
+        }
+        if (!empty($colWidths)) {
+            $xml .= '<cols>';
+            foreach ($colWidths as $i => $w) {
+                $colNum = $i + 1;
+                $xml .= "<col min=\"{$colNum}\" max=\"{$colNum}\" width=\"" . self::numberString((float) $w) . '" customWidth="1"/>';
+            }
+            $xml .= '</cols>';
+        }
+
+        $xml .= '<sheetData>';
         $rowNum = 1;
         $xml .= self::rowXml($rowNum, $headers, true);
         $rowNum++;
@@ -140,8 +195,15 @@ final class ExcelWriterService
             $xml .= self::rowXml($rowNum, $row, false);
             $rowNum++;
         }
+        $xml .= '</sheetData>';
 
-        $xml .= '</sheetData></worksheet>';
+        if ($autofilter && !empty($headers)) {
+            $lastCol = self::colLetter(count($headers) - 1);
+            $lastRow = max($rowNum - 1, 1);
+            $xml .= "<autoFilter ref=\"A1:{$lastCol}{$lastRow}\"/>";
+        }
+
+        $xml .= '</worksheet>';
         return $xml;
     }
 
@@ -150,16 +212,18 @@ final class ExcelWriterService
     {
         $cells = '';
         $col = 0;
-        $styleAttr = $bold ? ' s="1"' : '';
+        $styleAttr = $bold ? ' s="1"' : ' s="2"';
         foreach ($values as $value) {
             $ref = self::colLetter($col) . $rowNum;
             if ($value === null) {
                 $cells .= "<c r=\"{$ref}\"{$styleAttr}/>";
             } elseif (is_int($value) || is_float($value)) {
-                $cells .= "<c r=\"{$ref}\"{$styleAttr}><v>" . self::numberString($value) . '</v></c>';
+                $numStyle = $bold ? ' s="1"' : ' s="2"';
+                $cells .= "<c r=\"{$ref}\"{$numStyle}><v>" . self::numberString($value) . '</v></c>';
             } else {
+                $strStyle = $bold ? ' s="1"' : ' s="0"';
                 $safe = htmlspecialchars((string) $value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
-                $cells .= "<c r=\"{$ref}\" t=\"inlineStr\"{$styleAttr}><is><t xml:space=\"preserve\">{$safe}</t></is></c>";
+                $cells .= "<c r=\"{$ref}\" t=\"inlineStr\"{$strStyle}><is><t xml:space=\"preserve\">{$safe}</t></is></c>";
             }
             $col++;
         }

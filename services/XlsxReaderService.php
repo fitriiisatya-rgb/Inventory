@@ -118,7 +118,14 @@ final class XlsxReaderService
         $rowNumbers = array_keys($grid);
         $headerRowNum = array_shift($rowNumbers);
         $headerRow = $grid[$headerRowNum];
-        ksort($headerRow);
+        // PHASE V2.16: a plain ksort() here sorts column-letter KEYS as
+        // strings, which is wrong past column Z ("AA" < "B" alphabetically,
+        // so a >26-column sheet silently scrambled every header past that
+        // point) — every caller before this phase happened to stay under
+        // 26 columns, so this never surfaced until a 38-column export did.
+        // Sorting by the actual numeric column index fixes it for every
+        // sheet width, past and future.
+        uksort($headerRow, static fn (string $a, string $b): int => self::colIndexOf($a) <=> self::colIndexOf($b));
         $headers = array_values($headerRow);
 
         $rows = [];
@@ -146,5 +153,15 @@ final class XlsxReaderService
             $index = intdiv($index, 26);
         }
         return $letter;
+    }
+
+    /** Inverse of colLetterAt(): 'A' -> 0, 'Z' -> 25, 'AA' -> 26, ... */
+    private static function colIndexOf(string $letters): int
+    {
+        $index = 0;
+        foreach (str_split($letters) as $ch) {
+            $index = $index * 26 + (ord($ch) - 64);
+        }
+        return $index - 1;
     }
 }
