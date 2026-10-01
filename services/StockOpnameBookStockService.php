@@ -104,9 +104,11 @@ final class StockOpnameBookStockService
         }
 
         $ext = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
-        [$dataRows, $sourceRowOffset] = $ext === 'csv'
-            ? [self::readCsvRows($filePath), 1]
+        $parsed = $ext === 'csv'
+            ? ['rows' => self::readCsvRows($filePath), 'detected_sheet' => null, 'parent_header_row' => null, 'subheader_row' => null, 'data_start_row' => 2, 'data_end_row' => null, 'excluded_footer_row_count' => 0]
             : self::readScmWorkbook($filePath);
+        $dataRows = $parsed['rows'];
+        $sourceRowOffset = $parsed['data_start_row'] - 1;
 
         if (empty($dataRows)) {
             throw new ValidationException(['baseline file has no data rows']);
@@ -200,36 +202,69 @@ final class StockOpnameBookStockService
         return ['import_batch_id' => $batchId, 'row_count' => count($prepared)] + array_change_key_case([
             'matched_count' => $counts['MATCHED'], 'unmatched_count' => $counts['UNMATCHED_SCM'], 'unit_mismatch_count' => $counts['UNIT_MISMATCH'],
             'negative_count' => $counts['NEGATIVE_REFERENCE'], 'needs_review_count' => $counts['NEEDS_REVIEW'], 'duplicate_count' => $counts['DUPLICATE'],
-        ]);
+        ]) + [
+            // PHASE V2.16.2 — parser diagnostics surfaced to the admin/
+            // tests, so a real workbook's header/data-block detection is
+            // always visible, never a silent black box.
+            'detected_sheet' => $parsed['detected_sheet'], 'parent_header_row' => $parsed['parent_header_row'],
+            'subheader_row' => $parsed['subheader_row'], 'data_start_row' => $parsed['data_start_row'],
+            'data_end_row' => $parsed['data_end_row'], 'parsed_item_count' => count($dataRows),
+            'excluded_footer_row_count' => $parsed['excluded_footer_row_count'],
+        ];
     }
 
     /**
-     * Detects the "SCM" sheet and its (possibly two-row, possibly not on
-     * row 1) header, then returns [dataRows, headerRowNumber]. dataRows
-     * are keyed by the canonical names code/name/unit/qty — the ORIGINAL
-     * cell text is preserved verbatim (never numeric-cast), so a
-     * text-stored leading-zero code survives intact.
+     * Detects the "SCM" sheet and its header, then returns a diagnostic
+     * array (never a silent black box — see the keys below) including
+     * dataRows keyed by the canonical names code/name/unit/qty — the
+     * ORIGINAL cell text is preserved verbatim (never numeric-cast), so
+     * a text-stored leading-zero code survives intact.
      *
-     * Heuristic (no real sample file was available to validate this
-     * against at build time — this is implemented from the verbal
-     * structural description only; a production file that doesn't match
-     * these label conventions will raise a clear "could not detect"
-     * error naming what it found, never a silent wrong guess):
-     *   1. Scan the first 25 rows for one containing both "kode barang"
-     *      and "nama barang" (case-insensitive substring) — that is the
-     *      LEAF header row.
-     *   2. For every column, build a combined label = the row directly
-     *      ABOVE the leaf row (forward-filled rightward across blank
-     *      cells, i.e. a merged group header) + " " + the leaf row's own
-     *      cell — e.g. "Stok Akhir" (row above) + "QTY" (leaf) ->
-     *      "Stok Akhir QTY".
-     *   3. Among columns whose combined label contains "stok akhir", the
-     *      QTY column is the one that also contains "qty"/"quantity"/
-     *      "jumlah" AND does NOT contain "total"/"nilai"/"rupiah"/"rp".
-     *      Ambiguous or zero matches -> ValidationException, never a
-     *      guess.
+     * PHASE V2.16.2 — rewritten against the REAL "Inventory September
+     * 2026 SCM (gudang besar).xlsx" structure (V2.16.1's version was
+     * built from a verbal description only and got the header shape
+     * backwards). The real file's actual layout:
+     *   Row 7  (PARENT header): No | Nama Barang | Kode Barang | Satuan |
+     *           Isi | Harga | Stock Awal | Nominal Stok Awal | Stok Akhir
+     *           — this row itself contains "Kode Barang"/"Nama Barang"
+     *           literally; it is NOT a leaf row sitting below a group.
+     *   Row 8  (SUBHEADER, only under "Stok Akhir"): QTY | Total stok —
+     *           a TRUE Excel merge, so "Stok Akhir" text lives only in
+     *           its own left-most cell; every other column's row-8 cell
+     *           is blank.
+     *   Row 9  blank.
+     *   Row 10+ real item rows, until the item table ends and footer/
+     *           formula rows (garbage "No" values, "#N/A" qty, etc.)
+     *           follow — these must NEVER be imported as fake SKUs.
      *
-     * @return array{0: list<array<string,string>>, 1: int}
+     * Detection, in order:
+     *   1. Scan the first 30 rows for one containing both "kode barang"
+     *      and "nama barang" (case-insensitive substring) — that is
+     *      parent_header_row.
+     *   2. If the row directly below it contains a qty-hint word (qty/
+     *      quantity/jumlah/total) in any cell, that is subheader_row —
+     *      per-column label = parent_header_row's own cell if non-blank,
+     *      else (nearest non-blank parent_header_row cell TO THE LEFT) +
+     *      " " + subheader_row's own cell at that same column (this is
+     *      the correct merge-aware rule: a row-8 cell is only ever
+     *      non-blank for an ACTUAL sub-column of a two-row group, so
+     *      forward-filling the parent label is only even attempted
+     *      where row 8 itself has something to attach it to). If no
+     *      qty-hint word appears in the row below, there is no
+     *      subheader — every column's label is just its own
+     *      parent_header_row cell.
+     *   3. data_start_row = the first non-blank row after the header
+     *      block (skipping any blank separator rows, e.g. row 9).
+     *   4. data_end_row = the last row, scanning forward from
+     *      data_start_row, of the CONTIGUOUS run of rows that each have
+     *      Kode Barang + Nama Barang + Satuan all non-blank AND a
+     *      numeric Stok Akhir QTY. The first row that fails this ends
+     *      the item table — everything after it (footer/summary/
+     *      formula rows) is counted but NEVER returned as a data row.
+     * Ambiguous or zero matches at any step -> ValidationException
+     * naming what was found, never a silent guess.
+     *
+     * @return array{rows: list<array<string,string>>, detected_sheet: string, parent_header_row: int, subheader_row: ?int, data_start_row: int, data_end_row: int, excluded_footer_row_count: int}
      */
     public static function readScmWorkbook(string $filePath): array
     {
@@ -239,9 +274,9 @@ final class StockOpnameBookStockService
         }
         ksort($grid);
         $rowNumbers = array_keys($grid);
-        $maxScan = min(25, end($rowNumbers));
+        $maxScan = min(30, end($rowNumbers));
 
-        $leafRowNum = null;
+        $parentHeaderRow = null;
         foreach ($rowNumbers as $rowNum) {
             if ($rowNum > $maxScan) {
                 break;
@@ -249,41 +284,38 @@ final class StockOpnameBookStockService
             $values = array_map(static fn ($v) => strtolower(trim((string) $v)), $grid[$rowNum]);
             $joined = implode(' | ', $values);
             if (str_contains($joined, 'kode barang') && str_contains($joined, 'nama barang')) {
-                $leafRowNum = $rowNum;
+                $parentHeaderRow = $rowNum;
                 break;
             }
         }
-        if ($leafRowNum === null) {
-            throw new ValidationException(['could not detect the header row (expected a row containing both "Kode Barang" and "Nama Barang") in the first 25 rows of the SCM sheet']);
+        if ($parentHeaderRow === null) {
+            throw new ValidationException(['could not detect the header row (expected a row containing both "Kode Barang" and "Nama Barang") in the first 30 rows of the SCM sheet']);
         }
 
-        $leafRow = $grid[$leafRowNum] ?? [];
-        $aboveRow = $grid[$leafRowNum - 1] ?? [];
-        // Forward-fill the row above (a TRUE Excel merge only stores its
-        // text in the left-most cell of the merged range — every other
-        // cell under that merge is blank in the XML, not a repeated
-        // copy of the label). Earlier revision of this method reset
-        // lastAbove as soon as the leaf row had its own text, which
-        // silently dropped the group label for every sub-column except
-        // the very first one under a merge (e.g. "Stok Akhir" -> QTY
-        // would keep it, but "Stok Akhir" -> Total Stok, being the
-        // SECOND cell under the same merge, would wrongly lose it) —
-        // fixed by only resetting when we hit a genuinely blank column
-        // (neither an above-label nor a leaf value), which is the only
-        // case that safely marks "we have left any prior group".
-        $allCols = array_unique(array_merge(array_keys($leafRow), array_keys($aboveRow)));
+        $parentRow = $grid[$parentHeaderRow] ?? [];
+        $qtyHints = ['qty', 'quantity', 'jumlah', 'total'];
+        $nextRow = $grid[$parentHeaderRow + 1] ?? [];
+        $nextRowJoined = strtolower(implode(' | ', array_map(static fn ($v) => trim((string) $v), $nextRow)));
+        $hasSubheader = $nextRowJoined !== '' && array_any($qtyHints, static fn ($hint) => str_contains($nextRowJoined, $hint));
+        $subHeaderRow = $hasSubheader ? $parentHeaderRow + 1 : null;
+        $subRow = $hasSubheader ? $nextRow : [];
+
+        $allCols = array_unique(array_merge(array_keys($parentRow), array_keys($subRow)));
         usort($allCols, static fn ($a, $b) => XlsxReaderService::colIndexOf($a) <=> XlsxReaderService::colIndexOf($b));
-        $lastAbove = '';
+        $lastParentLabel = '';
         $combined = [];
         foreach ($allCols as $col) {
-            $aboveVal = trim((string) ($aboveRow[$col] ?? ''));
-            $leafVal = trim((string) ($leafRow[$col] ?? ''));
-            if ($aboveVal !== '') {
-                $lastAbove = $aboveVal;
-            } elseif ($leafVal === '') {
-                $lastAbove = '';
+            $parentVal = trim((string) ($parentRow[$col] ?? ''));
+            if ($parentVal !== '') {
+                $lastParentLabel = $parentVal;
             }
-            $combined[$col] = strtolower(trim($lastAbove . ' ' . $leafVal));
+            $subVal = trim((string) ($subRow[$col] ?? ''));
+            // A row-8 cell is only ever populated for an actual sub-
+            // column of a two-row group (a true Excel merge leaves every
+            // non-left-most merged cell blank) — so the parent label is
+            // only ever borrowed here, never forward-filled onto a
+            // column that has no sub-label of its own.
+            $combined[$col] = $subVal !== '' ? strtolower(trim($lastParentLabel . ' ' . $subVal)) : strtolower($parentVal);
         }
 
         $kodeCol = null;
@@ -310,7 +342,7 @@ final class StockOpnameBookStockService
 
         $qtyCol = null;
         $valueExclusions = ['total', 'nilai', 'rupiah', ' rp', 'rp.'];
-        $qtyHints = ['qty', 'quantity', 'jumlah'];
+        $qtyOnlyHints = ['qty', 'quantity', 'jumlah'];
         foreach ($qtyCandidates as $col => $label) {
             $isValueColumn = false;
             foreach ($valueExclusions as $ex) {
@@ -322,7 +354,7 @@ final class StockOpnameBookStockService
             if ($isValueColumn) {
                 continue;
             }
-            foreach ($qtyHints as $hint) {
+            foreach ($qtyOnlyHints as $hint) {
                 if (str_contains($label, $hint)) {
                     $qtyCol = $col;
                     break 2;
@@ -350,23 +382,67 @@ final class StockOpnameBookStockService
                 'candidates found: ' . implode('; ', $qtyCandidates)]);
         }
 
-        $dataRows = [];
+        $headerBottomRow = $subHeaderRow ?? $parentHeaderRow;
+
+        // data_start_row: the first non-blank row after the header block
+        // (skips any blank separator row(s), e.g. row 9 in the real file,
+        // without hardcoding a row number).
+        $dataStartRow = null;
         foreach ($rowNumbers as $rowNum) {
-            if ($rowNum <= $leafRowNum) {
+            if ($rowNum <= $headerBottomRow) {
+                continue;
+            }
+            if (implode('', $grid[$rowNum]) !== '') {
+                $dataStartRow = $rowNum;
+                break;
+            }
+        }
+        if ($dataStartRow === null) {
+            throw new ValidationException(['the SCM sheet has a header but no data rows after it']);
+        }
+
+        // data_end_row: the contiguous run of rows, starting at
+        // data_start_row, each satisfying ALL of: Kode Barang/Nama
+        // Barang/Satuan non-blank AND Stok Akhir QTY numeric. The first
+        // row that fails this ends the item table — never silently
+        // extended past genuine footer/summary/formula rows.
+        $dataRows = [];
+        $dataEndRow = null;
+        foreach ($rowNumbers as $rowNum) {
+            if ($rowNum < $dataStartRow) {
                 continue;
             }
             $cells = $grid[$rowNum];
-            if (implode('', $cells) === '') {
-                continue;
+            $code = trim((string) ($cells[$kodeCol] ?? ''));
+            $name = trim((string) ($cells[$namaCol] ?? ''));
+            $unit = trim((string) ($cells[$satuanCol] ?? ''));
+            $qty = trim((string) ($cells[$qtyCol] ?? ''));
+            if ($code === '' || $name === '' || $unit === '' || $qty === '' || !is_numeric($qty)) {
+                break;
             }
-            $dataRows[] = [
-                'code' => (string) ($cells[$kodeCol] ?? ''),
-                'name' => (string) ($cells[$namaCol] ?? ''),
-                'unit' => (string) ($cells[$satuanCol] ?? ''),
-                'qty' => (string) ($cells[$qtyCol] ?? ''),
-            ];
+            $dataRows[] = ['code' => $code, 'name' => $name, 'unit' => $unit, 'qty' => $qty];
+            $dataEndRow = $rowNum;
         }
-        return [$dataRows, $leafRowNum];
+        if ($dataEndRow === null) {
+            throw new ValidationException(["row {$dataStartRow}: expected the first item row to have Kode Barang/Nama Barang/Satuan all non-blank and a numeric Stok Akhir QTY — found none; refusing to guess where the item table starts"]);
+        }
+
+        $excludedFooterRowCount = 0;
+        foreach ($rowNumbers as $rowNum) {
+            if ($rowNum > $dataEndRow && implode('', $grid[$rowNum]) !== '') {
+                $excludedFooterRowCount++;
+            }
+        }
+
+        return [
+            'rows' => $dataRows,
+            'detected_sheet' => 'SCM',
+            'parent_header_row' => $parentHeaderRow,
+            'subheader_row' => $subHeaderRow,
+            'data_start_row' => $dataStartRow,
+            'data_end_row' => $dataEndRow,
+            'excluded_footer_row_count' => $excludedFooterRowCount,
+        ];
     }
 
     // ================================================================

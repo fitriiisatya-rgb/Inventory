@@ -270,8 +270,18 @@ const StockOpname = (() => {
             // session status — a draft export is useful at any point, and
             // the official export's own eligibility (POSTED) is checked
             // server-side regardless of when the button is clicked.
+            //
+            // PHASE V2.16.2 Blocker 3 — the old generic "Reference SCM"
+            // card is now OBSOLETE for FINDINGS_V1 (the only workflow the
+            // EOD reconciliation module targets): showing both importers
+            // side by side let an admin use the wrong one by mistake. The
+            // old backend routes stay in place for compatibility, but the
+            // card itself is only ever shown for a non-FINDINGS_V1
+            // session now — FINDINGS_V1 sees ONLY "Stok Buku SO".
             if (canSupervise()) {
-                body.appendChild(await buildReferenceScmCard(session));
+                if ((session.counting_model || 'LEGACY_DUAL_COUNT') !== 'FINDINGS_V1') {
+                    body.appendChild(await buildReferenceScmCard(session));
+                }
                 body.appendChild(await buildStokBukuSoCard(session));
             }
 

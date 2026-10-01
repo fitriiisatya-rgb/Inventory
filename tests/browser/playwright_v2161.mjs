@@ -40,8 +40,13 @@ console.log('Seeded:', JSON.stringify({ session_id: seed.session_id, sku: seed.s
 // ---- fixture files the browser will upload ----
 const fixtureDir = '/tmp/v2161_fixtures';
 fs.mkdirSync(fixtureDir, { recursive: true });
-const baselineCsv = path.join(fixtureDir, 'baseline.csv');
-fs.writeFileSync(baselineCsv, `Kode Barang,Nama Barang,Satuan,Stok Akhir\n${seed.sku},Item Playwright V2.16.1,KG,100\n`);
+// PHASE V2.16.2 — the baseline fixture now reproduces the ACTUAL real
+// workbook's shape (parent header row 7 / Stok Akhir sub-header row 8 /
+// blank row 9 / data from row 10, plus a footer garbage row), not a
+// flat single-row-header CSV — proving the real upload path, not just
+// a simplified stand-in.
+const baselineXlsx = path.join(fixtureDir, 'baseline_real_shaped.xlsx');
+sh(`php tests/browser/gen_scm_fixture.php ${baselineXlsx} ${seed.sku} 100`);
 const movementCsv = path.join(fixtureDir, 'movements.csv');
 fs.writeFileSync(movementCsv, [
     'effective_at,document_reference,sku,nama_barang,movement_type,qty,unit',
@@ -130,6 +135,12 @@ try {
         await cardTitle.waitFor({ state: 'visible', timeout: 8000 });
         check('2. "Stok Buku SO — Rekonsiliasi EOD" card renders', await cardTitle.count() > 0);
 
+        // PHASE V2.16.2 Blocker 3 — the old generic "Reference SCM" card
+        // must no longer render for this FINDINGS_V1 session, so an admin
+        // can never accidentally use the obsolete importer for this
+        // workflow (only "Stok Buku SO" should be visible).
+        check('2b. the OLD "Reference SCM" card is REMOVED for FINDINGS_V1 sessions', await page.locator('.card-title:has-text("Reference SCM")').count() === 0);
+
         check('3. Section A (Baseline Stok SCM) renders', await page.locator('text=A. Baseline Stok SCM').count() > 0);
         check('4. Section B (Movement Backdate) renders', await page.locator('text=B. Movement Backdate').count() > 0);
         check('5. Section C (Rekonsiliasi EOD per SKU) renders', await page.locator('text=C. Rekonsiliasi EOD per SKU').count() > 0);
@@ -144,18 +155,20 @@ try {
         await scalingInput.fill('2026-09-29T23:59');
         await adjustmentInput.fill('2026-09-29T23:59');
 
-        // File input [0] belongs to the OLDER V2.16 "Reference SCM" card
-        // (still rendered above this one for backward compatibility) —
-        // [1]/[2] are this new card's own Section A/B file inputs.
+        // With the old "Reference SCM" card removed, file input [0] is now
+        // this card's own Section A baseline input, [1] is Section B's
+        // movement input.
         const baselineFileInputs = page.locator('input[type="file"]');
-        await baselineFileInputs.nth(1).setInputFiles(baselineCsv);
+        await baselineFileInputs.nth(0).setInputFiles(baselineXlsx);
         await page.click('button:has-text("Import Baseline")');
         await page.waitForTimeout(800);
-        check('6. baseline import succeeds (summary table shows the file)', await page.locator('text=baseline.csv').count() > 0);
+        check('6. real-workbook-shaped baseline import succeeds (summary table shows the file)', await page.locator('text=baseline_real_shaped.xlsx').count() > 0);
         check('6b. baseline import shows the confirmed coverage, never blank', await page.locator('text=2026-09-29 23:59').count() > 0);
+        const matchedRow = page.locator('tr', { hasText: 'Matched' }).first();
+        check('6c. baseline import matches the seeded item (1 matched), never fooled by the footer garbage row', (await matchedRow.innerText()).includes('1'), await matchedRow.innerText());
 
         // ---- Section B: movement import ----
-        await baselineFileInputs.nth(2).setInputFiles(movementCsv);
+        await baselineFileInputs.nth(1).setInputFiles(movementCsv);
         await page.click('button:has-text("Import Movement")');
         await page.waitForTimeout(800);
         const includedRow = page.locator('tr', { hasText: 'Termasuk (Book Stock EOD)' });

@@ -131,61 +131,151 @@ $whId2 = (int) $pdo->lastInsertId();
 // run, so the CRITICAL TEST scenario needs its own third warehouse.
 $pdo->prepare("INSERT INTO warehouses (code, name, is_active) VALUES ('V2161WH3', 'V2.16.1 Test WH 3', 1)")->execute();
 $whId3 = (int) $pdo->lastInsertId();
+// PHASE V2.16.2 — the real-workbook-shaped fixture's own session stays
+// OPEN too, so it gets a dedicated fourth warehouse.
+$pdo->prepare("INSERT INTO warehouses (code, name, is_active) VALUES ('V2161WH4', 'V2.16.1 Test WH 4', 1)")->execute();
+$whId4 = (int) $pdo->lastInsertId();
 
 $admin = makeUser($pdo, 'v2161admin', $superRoleId);
 $p1 = makeUser($pdo, 'v2161p1', $superRoleId);
 
 // ============================================================
-// 1 — readScmWorkbook(): multi-row header detection, including the
-// previously-buggy case where the real QTY column is the SECOND
-// sub-column under a true Excel merge (group label text physically
-// present only in the left-most cell of the merge — "Total Stok"
-// first, "QTY" second — the exact ordering that the earlier forward-
-// fill implementation silently lost).
+// 1 — readScmWorkbook(): rebuilt (V2.16.2) against the ACTUAL real
+// workbook structure ("Inventory September 2026 SCM (gudang besar).xlsx"),
+// reproduced here as a synthetic fixture since the real file itself is
+// not available in this environment (disclosed in the final report):
+//   Row 7  PARENT header: No | Nama Barang | Kode Barang | Satuan | Isi |
+//          Harga | Stock Awal | Nominal Stok Awal | Stok Akhir
+//   Row 8  SUBHEADER (true merge, only under Stok Akhir): QTY | Total stok
+//   Row 9  blank
+//   Row 10..1023  1014 real item rows
+//   Row 1024+     footer/formula garbage (must NEVER become a fake SKU row)
 // ============================================================
-$scmFile = tempnam(sys_get_temp_dir(), 'v2161_scm_') . '.xlsx';
-$scmSkuA = uid('SCM-A');
-$scmSkuB = uid('SCM-B');
-ExcelWriterService::write($scmFile, [
-    'SCM' => [
-        // Row 1 — group header row: "Stok Akhir" sits only above column E
-        // (a true merge's label lives in its left-most cell only).
-        'headers' => [null, null, null, null, 'Stok Akhir', null],
-        'rows' => [
-            // Row 2 — the LEAF header row (contains "Kode Barang" + "Nama
-            // Barang", so this is what the detector must find). Columns
-            // E/F are the merge's two sub-columns, "Total Stok (Rp)"
-            // FIRST and "QTY" SECOND — the order that exposed the bug.
-            ['No', 'Kode Barang', 'Nama Barang', 'Satuan', 'Total Stok (Rp)', 'QTY'],
-            // Row 3+ — real data.
-            [1, $scmSkuA, 'Barang A (SCM)', 'KG', 125000, 100],
-            [2, $scmSkuB, 'Barang B (SCM)', 'KG', 50000, 40],
-        ],
-    ],
-]);
-[$scmRows, $scmLeafRow] = StockOpnameBookStockService::readScmWorkbook($scmFile);
-check('1. readScmWorkbook finds the leaf header row (row 2, not row 1)', $scmLeafRow === 2, (string) $scmLeafRow);
-check('1b. readScmWorkbook returns 2 data rows', count($scmRows) === 2, (string) count($scmRows));
-check('1c. readScmWorkbook picks the QTY sub-column, never the Total Stok (Rp) value column, even as the SECOND cell of a true merge',
-    $scmRows[0]['qty'] === '100' || $scmRows[0]['qty'] === 100, json_encode($scmRows[0]));
-check('1d. readScmWorkbook preserves the source code verbatim', $scmRows[0]['code'] === $scmSkuA, (string) $scmRows[0]['code']);
-@unlink($scmFile);
+function buildRealShapedScmFixture(): array
+{
+    $skuGradeA = '100313';
+    $skuGradeB = '100314';
+    $skuKresek = '777211';
+    $skuPolibag = '444901';
 
-// A workbook whose "Stok Akhir" group has no qty/total hint at all must be
-// refused, never guessed.
-$ambiguousFile = tempnam(sys_get_temp_dir(), 'v2161_amb_') . '.xlsx';
+    $blankRow = array_fill(0, 10, null);
+    $rows = [$blankRow, $blankRow, $blankRow, $blankRow, $blankRow]; // rows 2-6
+    $rows[] = ['No', 'Nama Barang', 'Kode Barang', 'Satuan', 'Isi', 'Harga', 'Stock Awal', 'Nominal Stok Awal', 'Stok Akhir', null]; // row 7
+    $rows[] = [null, null, null, null, null, null, null, null, 'QTY', 'Total stok']; // row 8
+    $rows[] = $blankRow; // row 9
+
+    $itemCount = 1014;
+    for ($i = 1; $i <= $itemCount; $i++) {
+        if ($i === 1) {
+            // COKLAT BUBUK DANISH GRADE A — must be preserved exactly for
+            // later mapping (Section "KNOWN REAL ITEMS").
+            $rows[] = [$i, 'COKLAT BUBUK DANISH GRADE A', $skuGradeA, 'Kg', 25, 50000, 10, 500000, 5.2, 130000];
+        } elseif ($i === 2) {
+            // GRADE B — qty 0 is a legitimate baseline value, never
+            // confused with blank/missing.
+            $rows[] = [$i, 'COKLAT BUBUK DANISH GRADE B', $skuGradeB, 'Kg', 25, 45000, 0, 0, 0, 0];
+        } elseif ($i === 3) {
+            // "Kresek Jumbo" — source unit recorded as "kg" even though
+            // the real business unit is PACK/PCS. Must stay UNIT_MISMATCH,
+            // never silently converted.
+            $rows[] = [$i, 'Kresek Jumbo Uk 50 @50Pcs', $skuKresek, 'kg', 1, 15000, 100, 1500000, 42, 630000];
+        } elseif ($i === 4) {
+            // Generic "Polibag" — must resolve ONLY to its own exact code,
+            // never fuzzy-matched to a similarly-named Polibag variant.
+            $rows[] = [$i, 'Polibag', $skuPolibag, 'Pack', 1, 8000, 20, 160000, 15, 120000];
+        } elseif ($i === $itemCount) {
+            $rows[] = [$i, 'SUMPIT', uid('SUMPIT'), 'PCS', 1, 500, 200, 100000, 180, 90000];
+        } else {
+            $rows[] = [$i, uid('BRG') . " Barang {$i}", uid('CODE'), 'PCS', 1, 1000, 5, 5000, (float) ($i % 50), 1000];
+        }
+    }
+
+    // Footer/formula garbage — a stray "No" value, blank Kode/Nama/Satuan,
+    // and a literal "#N/A" qty (never numeric) — must never be imported.
+    $rows[] = [1053, null, null, null, null, null, null, null, '#N/A', '#N/A'];
+    $rows[] = ['TOTAL', null, null, null, null, null, null, null, null, null];
+
+    return ['rows' => $rows, 'codes' => ['grade_a' => $skuGradeA, 'grade_b' => $skuGradeB, 'kresek' => $skuKresek, 'polibag' => $skuPolibag]];
+}
+
+$realFixture = buildRealShapedScmFixture();
+$realScmFile = tempnam(sys_get_temp_dir(), 'v2162_realscm_') . '.xlsx';
+ExcelWriterService::write($realScmFile, ['SCM' => ['headers' => array_fill(0, 10, null), 'rows' => $realFixture['rows']]]);
+
+$realParsed = StockOpnameBookStockService::readScmWorkbook($realScmFile);
+check('1. readScmWorkbook detects the SCM sheet', $realParsed['detected_sheet'] === 'SCM', (string) $realParsed['detected_sheet']);
+check('1b. readScmWorkbook finds the PARENT header row (7), not treating it as a leaf below a group', $realParsed['parent_header_row'] === 7, (string) $realParsed['parent_header_row']);
+check('1c. readScmWorkbook finds the SUBHEADER row (8) under Stok Akhir', $realParsed['subheader_row'] === 8, (string) $realParsed['subheader_row']);
+check('1d. readScmWorkbook sets data_start_row = 10 (skipping blank row 9)', $realParsed['data_start_row'] === 10, (string) $realParsed['data_start_row']);
+check('1e. readScmWorkbook sets data_end_row = 1023 (last real item, No 1014 SUMPIT)', $realParsed['data_end_row'] === 1023, (string) $realParsed['data_end_row']);
+check('1f. readScmWorkbook parses EXACTLY 1014 item rows, not 1015+', count($realParsed['rows']) === 1014, (string) count($realParsed['rows']));
+check('1g. readScmWorkbook excludes the footer/formula garbage rows (never a fake SKU)', $realParsed['excluded_footer_row_count'] === 2, (string) $realParsed['excluded_footer_row_count']);
+$footerCodes = array_column($realParsed['rows'], 'code');
+check('1h. the footer row\'s stray "No" value (1053) never appears as an imported code', !in_array('1053', $footerCodes, true) && !in_array(1053, $footerCodes, true));
+check('1i. GRADE A code/unit/qty preserved exactly (never stripped/altered)', $realParsed['rows'][0]['code'] === $realFixture['codes']['grade_a'] && $realParsed['rows'][0]['unit'] === 'Kg' && abs((float) $realParsed['rows'][0]['qty'] - 5.2) < 0.000001, json_encode($realParsed['rows'][0]));
+check('1j. GRADE B qty=0 preserved as a real zero, not dropped as blank', $realParsed['rows'][1]['code'] === $realFixture['codes']['grade_b'] && (float) $realParsed['rows'][1]['qty'] === 0.0, json_encode($realParsed['rows'][1]));
+
+// A workbook whose "Stok Akhir" has TWO unmerged, unlabeled columns (no
+// qty/total hint anywhere in the row below) must be refused, never guessed.
+$ambiguousFile = tempnam(sys_get_temp_dir(), 'v2162_amb_') . '.xlsx';
 ExcelWriterService::write($ambiguousFile, [
     'SCM' => [
-        'headers' => [null, null, null, null, 'Stok Akhir', 'Stok Akhir'],
+        'headers' => [null, null, null, null, null, null],
         'rows' => [
-            ['No', 'Kode Barang', 'Nama Barang', 'Satuan', 'Kolom A', 'Kolom B'],
-            [1, uid('SCM-X'), 'Barang X', 'KG', 1, 2],
+            ['No', 'Kode Barang', 'Nama Barang', 'Satuan', 'Stok Akhir', 'Stok Akhir'],
+            [1, uid('SCM-X'), 'Barang X', 'KG', 10, 20],
         ],
     ],
 ]);
 $ambiguousErr = expectException(ValidationException::class, fn () => StockOpnameBookStockService::readScmWorkbook($ambiguousFile));
-check('1e. an unrecognizable "Stok Akhir" sub-column layout is refused, never guessed', $ambiguousErr instanceof ValidationException, $ambiguousErr ? get_class($ambiguousErr) : 'no exception');
+check('1k. an unrecognizable "Stok Akhir" sub-column layout is refused, never guessed', $ambiguousErr instanceof ValidationException, $ambiguousErr ? get_class($ambiguousErr) : 'no exception');
 @unlink($ambiguousFile);
+
+// ============================================================
+// Mapping proof against the REAL-shaped workbook: known real items
+// resolve correctly (exact SKU only), the KG-on-a-PACK/PCS-business item
+// stays UNIT_MISMATCH (never silently converted), and the generic
+// "Polibag" resolves ONLY to its own exact code — never fuzzy-matched
+// to a similarly-named Polibag variant.
+// ============================================================
+$pdo->prepare("INSERT INTO warehouses (code, name, is_active) VALUES ('V2162WH', 'V2.16.2 Real Workbook WH', 1)")->execute();
+$whId5 = (int) $pdo->lastInsertId();
+$itemGradeA = makeItem($pdo, 'GRADEA', 'COKLAT BUBUK DANISH GRADE A', $kgUnitId);
+$pdo->prepare('UPDATE items SET sku = :sku WHERE id = :id')->execute(['sku' => $realFixture['codes']['grade_a'], 'id' => $itemGradeA]);
+$itemGradeB = makeItem($pdo, 'GRADEB', 'COKLAT BUBUK DANISH GRADE B', $kgUnitId);
+$pdo->prepare('UPDATE items SET sku = :sku WHERE id = :id')->execute(['sku' => $realFixture['codes']['grade_b'], 'id' => $itemGradeB]);
+// Kresek: base unit is PCS (the real business requirement), NOT kg — the
+// source file's "kg" must never be silently accepted/converted.
+$pcsUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='PCS'")->fetchColumn();
+$packUnitId = (int) $pdo->query("SELECT id FROM units WHERE code='PACK'")->fetchColumn();
+$itemKresek = makeItem($pdo, 'KRESEK', 'Kresek Jumbo Uk 50 @50Pcs', $pcsUnitId);
+$pdo->prepare('UPDATE items SET sku = :sku WHERE id = :id')->execute(['sku' => $realFixture['codes']['kresek'], 'id' => $itemKresek]);
+// The generic Polibag (the one the file's code 444901 actually refers
+// to) PLUS two decoys with similar names but different codes, never to
+// be matched by name similarity.
+$itemPolibagGeneric = makeItem($pdo, 'POLIBAG-GEN', 'Polibag', $packUnitId);
+$pdo->prepare('UPDATE items SET sku = :sku WHERE id = :id')->execute(['sku' => $realFixture['codes']['polibag'], 'id' => $itemPolibagGeneric]);
+$itemPolibag60x100 = makeItem($pdo, 'POLIBAG-60100', 'Polibag 60x100', $packUnitId);
+$itemPolibag90x120 = makeItem($pdo, 'POLIBAG-90120', 'Polibag 90x120', $packUnitId);
+
+$sessionReal = Database::transaction(fn (PDO $tx) => StockOpnameService::start($tx, $whId5, $admin['id'], [$itemGradeA, $itemGradeB, $itemKresek, $itemPolibagGeneric, $itemPolibag60x100, $itemPolibag90x120]));
+$realCoverage = ['inout_through' => '2026-09-29 23:59:59', 'scaling_through' => '2026-09-29 23:59:59', 'adjustment_through' => '2026-09-29 23:59:59'];
+$realImportResult = Database::transaction(fn (PDO $tx) => StockOpnameBookStockService::importBaseline($tx, $sessionReal, $realScmFile, 'Inventory September 2026 SCM (gudang besar).xlsx', $admin['id'], $realCoverage));
+check('2. real-workbook import reports detected_sheet/parent_header_row/subheader_row/data_start_row/data_end_row/parsed_item_count', $realImportResult['detected_sheet'] === 'SCM' && $realImportResult['parent_header_row'] === 7 && $realImportResult['subheader_row'] === 8 && $realImportResult['data_start_row'] === 10 && $realImportResult['data_end_row'] === 1023 && $realImportResult['parsed_item_count'] === 1014, json_encode($realImportResult));
+check('2b. real-workbook import row_count = 1014 (matches parsed_item_count, never 1015+)', $realImportResult['row_count'] === 1014, (string) $realImportResult['row_count']);
+
+$rowsStmtReal = $pdo->prepare('SELECT * FROM stock_opname_reference_rows WHERE import_batch_id = :id');
+$rowsStmtReal->execute(['id' => $realImportResult['import_batch_id']]);
+$realRowsByCode = [];
+foreach ($rowsStmtReal->fetchAll() as $r) {
+    $realRowsByCode[$r['source_code']] = $r;
+}
+check('3. GRADE A resolves MATCHED to the exact item (never fuzzy)', $realRowsByCode[$realFixture['codes']['grade_a']]['item_id'] == $itemGradeA && $realRowsByCode[$realFixture['codes']['grade_a']]['mapping_status'] === 'MATCHED');
+check('4. GRADE B (qty=0) resolves MATCHED, zero is not treated as blank/negative', $realRowsByCode[$realFixture['codes']['grade_b']]['mapping_status'] === 'MATCHED' && abs((float) $realRowsByCode[$realFixture['codes']['grade_b']]['converted_base_qty']) < 0.000001);
+check('5. Kresek (source unit "kg", business unit PCS) is UNIT_MISMATCH, never silently converted', $realRowsByCode[$realFixture['codes']['kresek']]['mapping_status'] === 'UNIT_MISMATCH');
+check('6. Polibag generic resolves MATCHED to its OWN exact code', $realRowsByCode[$realFixture['codes']['polibag']]['item_id'] == $itemPolibagGeneric && $realRowsByCode[$realFixture['codes']['polibag']]['mapping_status'] === 'MATCHED');
+check('7. Polibag generic is NEVER matched to the similarly-named "Polibag 60x100"/"90x120" decoys', (int) $realRowsByCode[$realFixture['codes']['polibag']]['item_id'] !== $itemPolibag60x100 && (int) $realRowsByCode[$realFixture['codes']['polibag']]['item_id'] !== $itemPolibag90x120);
+@unlink($realScmFile);
 
 // ============================================================
 // 2-6 — importBaseline(): required coverage confirmation, classification,
