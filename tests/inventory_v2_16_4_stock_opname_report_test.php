@@ -39,6 +39,7 @@ require_once __DIR__ . '/../services/WarehouseGuardService.php';
 require_once __DIR__ . '/../services/StockAdjustmentService.php';
 require_once __DIR__ . '/../services/NumberingService.php';
 require_once __DIR__ . '/../services/StockOpnameService.php';
+require_once __DIR__ . '/../services/StockOpnameBookStockService.php';
 require_once __DIR__ . '/../services/StockOpnameMonthlyReportService.php';
 require_once __DIR__ . '/../services/AuthService.php';
 
@@ -251,7 +252,12 @@ check('9. NO HPP/unit_cost/cost key is ever present in a detail item row', $leak
 
 $fs = $detail['finance_summary'];
 check('10a. finance_summary.total_item_scope = 4', $fs['total_item_scope'] === 4);
-check('10b. finance_summary.sesuai = 3 (item1/2/3 MATCH, item4 RECOUNTED)', $fs['sesuai'] === 3, (string) $fs['sesuai']);
+// PHASE V2.16.5 corrective — "Sesuai" means variance_qty_base = 0, NOT
+// match_status='MATCH' (P1/P2 agreeing with each other is not the same
+// claim as the agreed count matching the system snapshot). item1 (-5)
+// and item2 (+5) are both MATCH but NOT Sesuai; only item3 (variance 0,
+// also MATCH) is genuinely Sesuai. item4 is RECOUNTED, variance -1.
+check('10b. finance_summary.sesuai = 1 (only item3: variance=0 — NOT match_status-based)', $fs['sesuai'] === 1, (string) $fs['sesuai']);
 check('10c. finance_summary.selisih_plus = 1, selisih_minus = 2', $fs['selisih_plus'] === 1 && $fs['selisih_minus'] === 2);
 check('10d. finance_summary rusak/expired/deadstock counts = 1/1/1', $fs['rusak'] === 1 && $fs['expired'] === 1 && $fs['deadstock'] === 1);
 check('10e. finance_summary nilai_stok_sistem = 245000, nilai_stok_fisik_final = 248500', abs($fs['nilai_stok_sistem'] - 245000.0) < 0.01 && abs($fs['nilai_stok_fisik_final'] - 248500.0) < 0.01, json_encode($fs));

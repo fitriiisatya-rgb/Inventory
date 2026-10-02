@@ -158,7 +158,13 @@
                     <a class="sidebar-link" data-tab="laporan-inout" data-require-permission="INVENTORY_VIEW"><span class="icon">🔁</span> Laporan IN / OUT</a>
                     <a class="sidebar-link" data-tab="laporan-transfer" data-require-permission="WAREHOUSE_TRANSFER_MANAGE"><span class="icon">🚚</span> Laporan Transfer</a>
                     <a class="sidebar-link" data-tab="laporan-hpp" data-require-permission="INVENTORY_VIEW"><span class="icon">📊</span> Nilai Stok &amp; HPP</a>
-                    <a class="sidebar-link" data-tab="laporan-opname" data-require-permission="INVENTORY_VIEW"><span class="icon">📋</span> Laporan Stock Opname</a>
+                    <!-- PHASE V2.16.5 — renamed from the generic "Laporan
+                         Stock Opname" (now ambiguous with the new
+                         opname-laporan sidebar entry under Stock Opname)
+                         to describe what this report actually is: the
+                         older P1/P2 dual-count session/detail report
+                         (StockOpnameReportService), unchanged otherwise. -->
+                    <a class="sidebar-link" data-tab="laporan-opname" data-require-permission="INVENTORY_VIEW"><span class="icon">📋</span> Laporan P1/P2 Stock Opname</a>
                     <a class="sidebar-link" data-tab="laporan-adjustment" data-require-permission="INVENTORY_VIEW"><span class="icon">⚖️</span> Adjustment / Selisih</a>
                     <a class="sidebar-link" data-tab="laporan-expiry" data-require-permission="INVENTORY_VIEW"><span class="icon">⏰</span> Expired / Near Expired</a>
                     <a class="sidebar-link" data-tab="laporan-supplier" data-require-permission="INVENTORY_VIEW"><span class="icon">🏭</span> Pembelian per Supplier</a>
@@ -230,9 +236,11 @@
                          inventory control, finance/accounting, audit. Never
                          gated behind STOCK_OPNAME_MANAGE alone — a finance/
                          audit user with only INVENTORY_VIEW must also be
-                         able to reach it (same permission the pre-existing
-                         "Laporan Stock Opname" report under Laporan already
-                         uses), so it is OR'd with that role's own tab here. -->
+                         able to reach it, so it is OR'd with that role's own
+                         tab here. PHASE V2.16.5 — the older, unrelated P1/P2
+                         dual-count report under the Laporan mega-menu was
+                         renamed to "Laporan P1/P2 Stock Opname" so the two
+                         no longer share an identical, ambiguous label. -->
                     <a class="sidebar-link" data-tab="opname-laporan" data-require-permission="STOCK_OPNAME_MANAGE,INVENTORY_VIEW"><span class="icon">🧾</span> Laporan Stock Opname</a>
                     <!-- PHASE V2.14.10: "Stock Opname Saya" is deliberately
                          NEVER permission-gated — counter authority comes

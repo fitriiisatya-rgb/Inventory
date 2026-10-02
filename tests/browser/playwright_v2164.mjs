@@ -148,6 +148,21 @@ try {
         const excelBtn = page.locator('button:has-text("Excel Final")').first();
         check('12. Excel Final export button is visible for SUPERADMIN', await excelBtn.count() > 0);
 
+        // PHASE V2.16.5 — the older, unrelated P1/P2 dual-count report
+        // under the Laporan mega-menu must now show a DISTINCT label from
+        // the new monthly report (never both bare "Laporan Stock Opname").
+        // Done at the END of this flow, after this file's own report
+        // assertions, since navigating away resets the report back to its
+        // session list.
+        await page.click('.sidebar-group[data-group="laporan"] .sidebar-group-header');
+        await page.waitForTimeout(200);
+        const oldReportLink = page.locator('.sidebar-link[data-tab="laporan-opname"]');
+        check('V2.16.5: the old P1/P2 report link no longer says bare "Laporan Stock Opname"', (await oldReportLink.textContent()).includes('Laporan P1/P2 Stock Opname'));
+        await oldReportLink.click();
+        await page.waitForTimeout(500);
+        const oldReportTitleVisible = await page.locator('.hpp-title:has-text("Laporan P1/P2 Stock Opname")').count() > 0;
+        check('V2.16.5b: the old P1/P2 report still opens and renders under its new title', oldReportTitleVisible);
+
         check('no uncaught JS errors on this entire flow (SUPERADMIN)', pageErrors.length === 0, JSON.stringify(pageErrors));
         await context.close();
     }

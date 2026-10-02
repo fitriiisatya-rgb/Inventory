@@ -1,11 +1,17 @@
 /**
- * PHASE V2.6B — Report 8 "Laporan Stock Opname". Read-only over
- * StockOpnameReportService.
+ * PHASE V2.6B — Report 8, the older P1/P2 dual-count session/detail
+ * report. Read-only over StockOpnameReportService.
  *
  * PHASE V2.12C: now also shows the dual-count columns (session number,
  * P1/P2/supervisor, match/mismatch) added in V2.12A/B — a legacy
  * single-count session simply shows "-" for P1/P2/supervisor and 0 for
  * match/mismatch, so nothing about an old session's row changes.
+ *
+ * PHASE V2.16.5 — title renamed from the generic "Laporan Stock Opname"
+ * to "Laporan P1/P2 Stock Opname" so it's never confused with the newer
+ * monthly finance/accounting "Laporan Stock Opname"
+ * (StockOpnameMonthlyReportService / stock-opname-report.js) under the
+ * Stock Opname sidebar group. Nothing else about this report changed.
  */
 const ReportOpname = (() => {
     function render(container) {
@@ -16,7 +22,7 @@ const ReportOpname = (() => {
         ];
 
         ReportCommon.render(container, {
-            title: 'Laporan Stock Opname',
+            title: 'Laporan P1/P2 Stock Opname',
             subtitle: 'Riwayat sesi stock opname — termasuk dual-count P1/P2 (PHASE V2.12).',
             storageKey: 'dt-report-opname',
             exportUrl: (state) => InvApi.opnameReportExportUrl(state),

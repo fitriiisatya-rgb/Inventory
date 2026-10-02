@@ -96,7 +96,7 @@
         'laporan-ringkasan': 'Ringkasan Inventory',
         'laporan-pergerakan': 'Pergerakan Stok Harian', 'laporan-rekonsiliasi': 'Rekonsiliasi Arus Stok',
         'laporan-stok': 'Laporan Stok', 'laporan-pembelian': 'Laporan Pembelian', 'laporan-inout': 'Laporan IN / OUT',
-        'laporan-transfer': 'Laporan Transfer', 'laporan-opname': 'Laporan Stock Opname',
+        'laporan-transfer': 'Laporan Transfer', 'laporan-opname': 'Laporan P1/P2 Stock Opname',
         'laporan-adjustment': 'Adjustment / Selisih', 'laporan-expiry': 'Expired / Near Expired',
         'laporan-supplier': 'Pembelian per Supplier', 'laporan-bakery': 'Distribusi per Bakery',
         'laporan-slow-movement': 'Slow / No Movement', 'laporan-audit': 'Audit Transaksi',

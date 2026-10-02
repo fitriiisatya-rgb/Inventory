@@ -6,22 +6,46 @@ namespace App\Services;
 use PDO;
 
 /**
- * PHASE V2.16.4 — "Laporan Stock Opname": monthly/session reporting over
- * Stock Opname sessions for finance/accounting/audit, separate from the
- * "Proses Stock Opname" admin workflow (StockOpnameService) and from the
- * pre-existing P1/P2 dual-count report (StockOpnameReportService, still
- * used unchanged by GET /reports/opname).
+ * PHASE V2.16.4/V2.16.5 — "Laporan Stock Opname": monthly/session
+ * reporting over Stock Opname sessions for finance/accounting/audit,
+ * separate from the "Proses Stock Opname" admin workflow
+ * (StockOpnameService) and from the pre-existing P1/P2 dual-count report
+ * (StockOpnameReportService, still used unchanged by GET /reports/opname).
  *
  * READ-ONLY. Never writes stock_opname_lines/stock_opname_sessions,
- * stock_adjustments, inventory_transactions, or inventory_batches — every
- * method here is a SELECT over data StockOpnameService::finalize()/post()
- * already wrote. No new value formula is invented: system/physical/
- * variance qty and value are read directly from stock_opname_lines'
- * existing authoritative columns (system_qty_base, counted_qty_base,
- * variance_qty_base, unit_cost_base, final_rusak_qty/final_expired_qty/
- * final_deadstock_qty, final_notes) — the same columns
- * StockOpnameFinalExportService::buildFinalSoRow() already treats as the
- * "final" result.
+ * stock_adjustments, inventory_transactions, or inventory_batches.
+ *
+ * PHASE V2.16.5 CORRECTIVE — the authoritative "Stok Sistem"/"Stok Fisik
+ * Final"/"Selisih" source is counting_model-DEPENDENT, and this class must
+ * never read the wrong one:
+ *
+ *   - LEGACY_DUAL_COUNT: system_qty_base/counted_qty_base/variance_qty_base
+ *     remain the authoritative source, exactly as V2.16.4 originally used —
+ *     finalize() computes variance_qty_base = counted_qty_base -
+ *     system_qty_base for this model, and that is this model's real,
+ *     approved book-vs-physical comparison. UNCHANGED by this corrective.
+ *
+ *   - FINDINGS_V1: system_qty_base is only a session-START snapshot, NOT
+ *     the authoritative EOD book stock — and finalize()/post() UNCONDITION-
+ *     ALLY refuse to run for a FINDINGS_V1 session in this codebase
+ *     (StockOpnameService::assertNotFindingsV1(), "Checkpoint B's entire
+ *     scope" is explicitly not yet implemented here), so variance_qty_base
+ *     is NEVER populated for this model — reading it would silently show
+ *     0/NULL variance for every FINDINGS_V1 line regardless of the real
+ *     result. The existing, approved authoritative source for this model
+ *     is StockOpnameBookStockService::reconciliation() — the exact same
+ *     book_stock_eod/final_physical_eod/variance computation already
+ *     consumed by GET /stock-opname/{id}/eod-reconciliation and by
+ *     StockOpnameFinalExportService's "Rekonsiliasi Final" export. This
+ *     class calls that SAME method rather than re-deriving a second,
+ *     independent formula.
+ *
+ * Internal cost note: StockOpnameBookStockService::reconciliation() is
+ * O(lines) in query count (it already is, for the existing Rekonsiliasi
+ * Final export) — calling it once per detail() request for a FINDINGS_V1
+ * session carries that same, already-accepted cost; this class does not
+ * try to out-optimize it (that would itself risk becoming a second,
+ * subtly different formula).
  *
  * HPP / Unit Cost is NEVER exposed by this service: unit_cost_base is read
  * only to multiply into a Rupiah VALUE (nilai), never returned as its own
@@ -97,6 +121,8 @@ final class StockOpnameMonthlyReportService
     public static function detail(PDO $pdo, int $sessionId, array $filters): array
     {
         $session = self::loadSession($pdo, $sessionId);
+        $countingModel = $session['counting_model'] ?? 'LEGACY_DUAL_COUNT';
+        $isFindingsV1 = $countingModel === 'FINDINGS_V1';
 
         $page = max(1, (int) ($filters['page'] ?? 1));
         $perPage = (int) ($filters['per_page'] ?? 25);
@@ -111,6 +137,14 @@ final class StockOpnameMonthlyReportService
         );
         $countStmt->execute($params);
         $totalItems = (int) $countStmt->fetchColumn();
+
+        // PHASE V2.16.5 — computed ONCE per request (session-wide, not
+        // filtered — StockOpnameBookStockService::reconciliation() has no
+        // filter parameter, same as the existing Rekonsiliasi Final export
+        // that already calls it this way), then reused for the paginated
+        // item rows below AND for the finance/category summaries, so a
+        // FINDINGS_V1 session never pays for this twice in one request.
+        $reconBySku = $isFindingsV1 ? self::reconciliationBySku($pdo, $sessionId) : null;
 
         $stmt = $pdo->prepare(
             "SELECT sol.*, i.sku, i.name, u.code AS base_unit_code, c.name AS category_name
@@ -128,10 +162,14 @@ final class StockOpnameMonthlyReportService
         $stmt->bindValue(':limit', $perPage, PDO::PARAM_INT);
         $stmt->bindValue(':offset', ($page - 1) * $perPage, PDO::PARAM_INT);
         $stmt->execute();
-        $lines = array_map([self::class, 'formatLine'], $stmt->fetchAll());
+        $lines = array_map(static fn (array $l) => self::formatLine($l, $isFindingsV1, $reconBySku), $stmt->fetchAll());
 
-        $financeSummary = self::financeSummary($pdo, $sessionId, $filters);
-        $categorySummary = self::categorySummary($pdo, $sessionId, $filters);
+        if ($isFindingsV1) {
+            [$financeSummary, $categorySummary] = self::findingsV1Summaries($pdo, $sessionId, $filters, $reconBySku);
+        } else {
+            $financeSummary = self::financeSummary($pdo, $sessionId, $filters);
+            $categorySummary = self::categorySummary($pdo, $sessionId, $filters);
+        }
 
         $warehouseStmt = $pdo->prepare('SELECT name, code FROM warehouses WHERE id = :id');
         $warehouseStmt->execute(['id' => (int) $session['warehouse_id']]);
@@ -150,6 +188,7 @@ final class StockOpnameMonthlyReportService
                 'warehouse_code' => $warehouse['code'] ?? null,
                 'status' => $session['status'],
                 'counting_model' => $session['counting_model'],
+                'stock_source_label' => $isFindingsV1 ? 'Rekonsiliasi EOD (Stok Buku)' : 'Snapshot Sistem (P1/P2)',
                 'finalized_at' => $session['finalized_at'],
                 'finalized_by' => $finalizedBy,
                 'posted_at' => $session['posted_at'],
@@ -165,14 +204,31 @@ final class StockOpnameMonthlyReportService
         ];
     }
 
-    private static function formatLine(array $l): array
+    /**
+     * @param array<string,array<string,mixed>>|null $reconBySku only set
+     *     (and only consulted) for a FINDINGS_V1 session — see this
+     *     class's own docblock for why LEGACY_DUAL_COUNT never touches it.
+     */
+    private static function formatLine(array $l, bool $isFindingsV1, ?array $reconBySku): array
     {
-        $systemQty = (float) $l['system_qty_base'];
-        $physicalQty = $l['counted_qty_base'] !== null ? (float) $l['counted_qty_base'] : null;
-        $varianceQty = $l['variance_qty_base'] !== null ? (float) $l['variance_qty_base'] : null;
         $unitCost = (float) $l['unit_cost_base'];
 
-        $systemValue = round($systemQty * $unitCost, 2);
+        if ($isFindingsV1) {
+            $recon = ($reconBySku ?? [])[$l['sku']] ?? null;
+            // book_stock_eod/variance are null only when this SKU's EOD
+            // baseline/movement reconciliation is incomplete — never
+            // fabricated as 0 (same null-propagation the existing
+            // Rekonsiliasi Final export already uses).
+            $systemQty = $recon['book_stock_eod'] ?? null;
+            $physicalQty = $recon['final_physical_eod'] ?? null;
+            $varianceQty = $recon['variance'] ?? null;
+        } else {
+            $systemQty = (float) $l['system_qty_base'];
+            $physicalQty = $l['counted_qty_base'] !== null ? (float) $l['counted_qty_base'] : null;
+            $varianceQty = $l['variance_qty_base'] !== null ? (float) $l['variance_qty_base'] : null;
+        }
+
+        $systemValue = $systemQty !== null ? round($systemQty * $unitCost, 2) : null;
         $physicalValue = $physicalQty !== null ? round($physicalQty * $unitCost, 2) : null;
         $varianceValue = $varianceQty !== null ? round($varianceQty * $unitCost, 2) : null;
 
@@ -195,12 +251,12 @@ final class StockOpnameMonthlyReportService
             'rusak_qty' => $rusak,
             'expired_qty' => $expired,
             'deadstock_qty' => $deadstock,
-            'kondisi' => self::kondisi($l, $varianceQty, $rusak, $expired, $deadstock),
+            'kondisi' => self::kondisi($l, $varianceQty, $rusak, $expired, $deadstock, $isFindingsV1),
             'keterangan' => $l['final_notes'] ?? $l['notes'],
         ];
     }
 
-    private static function kondisi(array $l, ?float $varianceQty, float $rusak, float $expired, float $deadstock): string
+    private static function kondisi(array $l, ?float $varianceQty, float $rusak, float $expired, float $deadstock, bool $isFindingsV1): string
     {
         if ((int) $l['is_excluded'] === 1) {
             return 'Dikecualikan';
@@ -215,24 +271,37 @@ final class StockOpnameMonthlyReportService
             return 'Rusak';
         }
         if ($varianceQty === null) {
-            return 'Belum Dihitung';
+            // FINDINGS_V1: the EOD book-stock reconciliation for this SKU
+            // is not complete yet (no baseline match) — distinct from
+            // "nobody counted it", which can't happen on a POSTED session.
+            return $isFindingsV1 ? 'Belum Direkonsiliasi' : 'Belum Dihitung';
+        }
+        if (abs($varianceQty) < 0.0000001) {
+            return 'Sesuai';
         }
         if ($varianceQty > 0) {
             return 'Lebih (+)';
         }
-        if ($varianceQty < 0) {
-            return 'Kurang (-)';
-        }
-        return 'Sesuai';
+        return 'Kurang (-)';
     }
 
+    /**
+     * LEGACY_DUAL_COUNT only — see this class's docblock for why
+     * FINDINGS_V1 uses findingsV1Summaries() instead. "Sesuai" is the
+     * authoritative variance being exactly zero (variance_qty_base = 0),
+     * never match_status='MATCH' alone — P1/P2 agreeing with EACH OTHER
+     * is not the same claim as the agreed physical count matching the
+     * system snapshot (e.g. both P1 and P2 independently count 95 against
+     * a system snapshot of 100: match_status is MATCH, but there is a
+     * real -5 variance against the book figure).
+     */
     private static function financeSummary(PDO $pdo, int $sessionId, array $filters): array
     {
         [$where, $params] = self::buildLineWhere($sessionId, $filters);
         $stmt = $pdo->prepare(
             "SELECT
                 COUNT(*) AS total_item_scope,
-                SUM(CASE WHEN sol.match_status = 'MATCH' THEN 1 ELSE 0 END) AS sesuai,
+                SUM(CASE WHEN sol.variance_qty_base = 0 THEN 1 ELSE 0 END) AS sesuai,
                 SUM(CASE WHEN sol.variance_qty_base > 0 THEN 1 ELSE 0 END) AS selisih_plus,
                 SUM(CASE WHEN sol.variance_qty_base < 0 THEN 1 ELSE 0 END) AS selisih_minus,
                 SUM(CASE WHEN sol.final_rusak_qty > 0 THEN 1 ELSE 0 END) AS rusak_count,
@@ -271,6 +340,7 @@ final class StockOpnameMonthlyReportService
         ];
     }
 
+    /** LEGACY_DUAL_COUNT only — see findingsV1Summaries() for FINDINGS_V1. */
     private static function categorySummary(PDO $pdo, int $sessionId, array $filters): array
     {
         [$where, $params] = self::buildLineWhere($sessionId, $filters);
@@ -335,6 +405,171 @@ final class StockOpnameMonthlyReportService
         ];
 
         return $categories;
+    }
+
+    /**
+     * FINDINGS_V1 only. Builds BOTH the finance summary and the category
+     * summary in a single pass over the session's FILTERED lines (not
+     * paginated — same full-filtered-set scope the legacy SQL aggregates
+     * above already use), joining each line's authoritative book_stock_eod
+     * /final_physical_eod/variance from $reconBySku (computed once by the
+     * caller via reconciliationBySku()). "Sesuai"/"Selisih (+)"/"Selisih
+     * (-)" are bucketed by that authoritative variance, exactly like
+     * financeSummary() above does for LEGACY_DUAL_COUNT — never by
+     * match_status (FINDINGS_V1 doesn't even have one: match_status stays
+     * at its PENDING default for a FINDINGS_V1 line, since only legacy's
+     * submitCount() path writes it). A line whose reconciliation is
+     * incomplete (variance null) falls into none of those three buckets —
+     * same null-propagation StockOpnameBookStockService's own Ringkasan
+     * sheet already uses ("Belum Dapat Direkonsiliasi"), not an invented
+     * exclusion rule.
+     *
+     * @param array<string,array<string,mixed>> $reconBySku
+     * @return array{0:array<string,mixed>,1:list<array<string,mixed>>}
+     */
+    private static function findingsV1Summaries(PDO $pdo, int $sessionId, array $filters, array $reconBySku): array
+    {
+        [$where, $params] = self::buildLineWhere($sessionId, $filters);
+        $stmt = $pdo->prepare(
+            "SELECT sol.item_id, sol.unit_cost_base, sol.is_excluded,
+                    sol.final_rusak_qty, sol.final_expired_qty, sol.final_deadstock_qty,
+                    i.sku, COALESCE(c.name, '(Tanpa Kategori)') AS category
+               FROM stock_opname_lines sol
+               JOIN items i ON i.id = sol.item_id
+               LEFT JOIN categories c ON c.id = i.category_id
+              WHERE {$where}
+              ORDER BY category"
+        );
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll();
+
+        $totalItemScope = 0;
+        $sesuai = 0;
+        $selisihPlus = 0;
+        $selisihMinus = 0;
+        $rusakCount = 0;
+        $expiredCount = 0;
+        $deadstockCount = 0;
+        $nilaiSistemTotal = 0.0;
+        $nilaiFisikTotal = 0.0;
+        $qtySistemTotal = 0.0;
+        $qtyFisikTotal = 0.0;
+
+        $byCategory = [];
+
+        foreach ($rows as $r) {
+            $recon = $reconBySku[$r['sku']] ?? null;
+            $systemQty = $recon['book_stock_eod'] ?? null;
+            $physicalQty = $recon['final_physical_eod'] ?? null;
+            $variance = $recon['variance'] ?? null;
+            $unitCost = (float) $r['unit_cost_base'];
+
+            $nilaiSistem = $systemQty !== null ? $systemQty * $unitCost : null;
+            $nilaiFisik = $physicalQty !== null ? $physicalQty * $unitCost : null;
+
+            $totalItemScope++;
+            if ($variance !== null) {
+                if (abs($variance) < 0.0000001) {
+                    $sesuai++;
+                } elseif ($variance > 0) {
+                    $selisihPlus++;
+                } else {
+                    $selisihMinus++;
+                }
+            }
+            if ((float) $r['final_rusak_qty'] > 0) {
+                $rusakCount++;
+            }
+            if ((float) $r['final_expired_qty'] > 0) {
+                $expiredCount++;
+            }
+            if ((float) $r['final_deadstock_qty'] > 0) {
+                $deadstockCount++;
+            }
+            if ($systemQty !== null) {
+                $qtySistemTotal += $systemQty;
+                $nilaiSistemTotal += $nilaiSistem;
+            }
+            if ($physicalQty !== null) {
+                $qtyFisikTotal += $physicalQty;
+                $nilaiFisikTotal += $nilaiFisik;
+            }
+
+            $cat = $r['category'];
+            if (!isset($byCategory[$cat])) {
+                $byCategory[$cat] = ['category' => $cat, 'total_item' => 0, 'qty_sistem' => 0.0, 'nilai_sistem' => 0.0, 'qty_fisik' => 0.0, 'nilai_fisik' => 0.0];
+            }
+            $byCategory[$cat]['total_item']++;
+            if ($systemQty !== null) {
+                $byCategory[$cat]['qty_sistem'] += $systemQty;
+                $byCategory[$cat]['nilai_sistem'] += $nilaiSistem;
+            }
+            if ($physicalQty !== null) {
+                $byCategory[$cat]['qty_fisik'] += $physicalQty;
+                $byCategory[$cat]['nilai_fisik'] += $nilaiFisik;
+            }
+        }
+
+        $financeSummary = [
+            'total_item_scope' => $totalItemScope,
+            'sesuai' => $sesuai,
+            'selisih_plus' => $selisihPlus,
+            'selisih_minus' => $selisihMinus,
+            'rusak' => $rusakCount,
+            'expired' => $expiredCount,
+            'deadstock' => $deadstockCount,
+            'nilai_stok_sistem' => round($nilaiSistemTotal, 2),
+            'nilai_stok_fisik_final' => round($nilaiFisikTotal, 2),
+            'selisih_nilai' => round($nilaiFisikTotal - $nilaiSistemTotal, 2),
+            'qty_sistem' => round($qtySistemTotal, 6),
+            'qty_fisik_final' => round($qtyFisikTotal, 6),
+            'selisih_qty' => round($qtyFisikTotal - $qtySistemTotal, 6),
+        ];
+
+        $categorySummary = [];
+        foreach ($byCategory as $c) {
+            $categorySummary[] = [
+                'category' => $c['category'],
+                'total_item' => $c['total_item'],
+                'qty_sistem' => round($c['qty_sistem'], 6),
+                'nilai_sistem' => round($c['nilai_sistem'], 2),
+                'qty_fisik' => round($c['qty_fisik'], 6),
+                'nilai_fisik' => round($c['nilai_fisik'], 2),
+                'selisih_qty' => round($c['qty_fisik'] - $c['qty_sistem'], 6),
+                'selisih_nilai' => round($c['nilai_fisik'] - $c['nilai_sistem'], 2),
+            ];
+        }
+        $categorySummary[] = [
+            'category' => 'TOTAL',
+            'total_item' => $totalItemScope,
+            'qty_sistem' => round($qtySistemTotal, 6),
+            'nilai_sistem' => round($nilaiSistemTotal, 2),
+            'qty_fisik' => round($qtyFisikTotal, 6),
+            'nilai_fisik' => round($nilaiFisikTotal, 2),
+            'selisih_qty' => round($qtyFisikTotal - $qtySistemTotal, 6),
+            'selisih_nilai' => round($nilaiFisikTotal - $nilaiSistemTotal, 2),
+            'is_total_row' => true,
+        ];
+
+        return [$financeSummary, $categorySummary];
+    }
+
+    /**
+     * Keys StockOpnameBookStockService::reconciliation()'s own rows by
+     * SKU (unique per session — stock_opname_lines has a UNIQUE KEY on
+     * (session_id, item_id), and item.sku is unique) so callers can join
+     * back to a stock_opname_lines row without touching that service's
+     * internals or re-deriving its formula.
+     *
+     * @return array<string,array<string,mixed>>
+     */
+    private static function reconciliationBySku(PDO $pdo, int $sessionId): array
+    {
+        $bySku = [];
+        foreach (StockOpnameBookStockService::reconciliation($pdo, $sessionId) as $row) {
+            $bySku[$row['sku']] = $row;
+        }
+        return $bySku;
     }
 
     /** @return array{0:string,1:array<string,mixed>} */
