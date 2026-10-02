@@ -417,6 +417,14 @@ const InvApi = (() => {
         opnameExportEodDraftUrl: (id) => `/api/stock-opname/${id}/export/eod-draft`,
         opnameExportEodFinalUrl: (id) => `/api/stock-opname/${id}/export/eod-final`,
 
+        // PHASE V2.16.4 — "Laporan Stock Opname": monthly/session reporting
+        // for finance/accounting/audit, separate from opnameReport/
+        // opnameReportDetail above (the older P1/P2 dual-count report).
+        // Print/Excel actions reuse opnamePrintUrl/opnameExportFinalUrl/
+        // opnameExportEodFinalUrl above — no duplicate export endpoint.
+        stockOpnameReports: (params) => request('GET', `/stock-opname-reports${qs(params)}`),
+        stockOpnameReportDetail: (id, params) => request('GET', `/stock-opname-reports/${id}${qs(params)}`),
+
         // ---- stock adjustments ----
         postAdjustment: (payload) => request('POST', '/stock-adjustments', payload),
 

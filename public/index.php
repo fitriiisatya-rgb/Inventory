@@ -45,6 +45,7 @@ require_once __DIR__ . '/../services/StockOpnameCounterAccountService.php';
 require_once __DIR__ . '/../services/StockOpnameReferenceImportService.php';
 require_once __DIR__ . '/../services/StockOpnameFinalExportService.php';
 require_once __DIR__ . '/../services/StockOpnameBookStockService.php';
+require_once __DIR__ . '/../services/StockOpnameMonthlyReportService.php';
 require_once __DIR__ . '/../services/TransferService.php';
 require_once __DIR__ . '/../services/ProductionService.php';
 require_once __DIR__ . '/../services/BookClosingService.php';
@@ -134,6 +135,7 @@ use App\Services\StockOpnameCounterAccountService;
 use App\Services\StockOpnameReferenceImportService;
 use App\Services\StockOpnameFinalExportService;
 use App\Services\StockOpnameBookStockService;
+use App\Services\StockOpnameMonthlyReportService;
 use App\Services\StockAdjustmentService;
 use App\Services\ProductionService;
 use App\Services\BookClosingService;
@@ -1955,6 +1957,56 @@ $routes = [
                 ]
             );
         }
+
+        inv_ok($detail, 'OK');
+    },
+
+    // PHASE V2.16.4 — "Laporan Stock Opname": monthly/session reporting for
+    // finance/accounting/audit, separate from the P1/P2 dual-count report
+    // above. Same permission (INVENTORY_VIEW) and the same SO-specific
+    // warehouse-scope override pattern, applied fresh here rather than
+    // modifying the routes above.
+    'GET /stock-opname-reports' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        $warehouseId = inv_so_resolve_warehouse_scope($user, $warehouseId);
+
+        $result = StockOpnameMonthlyReportService::listSessions($pdo, [
+            'warehouse_id' => $warehouseId,
+            'month' => isset($query['month']) && $query['month'] !== '' ? (int) $query['month'] : null,
+            'year' => isset($query['year']) && $query['year'] !== '' ? (int) $query['year'] : null,
+            'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
+            'session_search' => $query['session'] ?? null,
+            'status' => $query['status'] ?? 'POSTED',
+            'search' => $query['search'] ?? null,
+            'page' => (int) ($query['page'] ?? 1),
+            'per_page' => (int) ($query['per_page'] ?? 25),
+        ]);
+
+        inv_ok($result, 'OK');
+    },
+
+    'GET /stock-opname-reports/{id}' => function (array $params) use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $sessionId = (int) $params['id'];
+        $wh = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $wh->execute(['id' => $sessionId]);
+        $warehouseId = $wh->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+
+        $detail = StockOpnameMonthlyReportService::detail($pdo, $sessionId, [
+            'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
+            'search' => $query['search'] ?? null,
+            'page' => (int) ($query['page'] ?? 1),
+            'per_page' => (int) ($query['per_page'] ?? 25),
+        ]);
 
         inv_ok($detail, 'OK');
     },

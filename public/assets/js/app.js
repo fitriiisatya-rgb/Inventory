@@ -91,7 +91,7 @@
         'master-vendor': 'Vendor / Supplier', 'master-bakery': 'Bakery Tujuan', 'master-category': 'Kategori',
         'trace-center': 'Trace Center',
         laporan: 'Mutasi Stok / Ledger', 'history-transaksi': 'History Transaksi', transaksi: 'Stock IN / OUT',
-        transfer: 'Transfer', 'distribusi-do': 'Delivery Order', 'distribusi-invoice': 'Invoice', 'distribusi-pricing': 'Pricing Distribusi', 'distribusi-laporan': 'Laporan Distribusi', produksi: 'Produksi', opname: 'Stock Opname', import: 'Import',
+        transfer: 'Transfer', 'distribusi-do': 'Delivery Order', 'distribusi-invoice': 'Invoice', 'distribusi-pricing': 'Pricing Distribusi', 'distribusi-laporan': 'Laporan Distribusi', produksi: 'Produksi', opname: 'Proses Stock Opname', 'opname-laporan': 'Laporan Stock Opname', import: 'Import',
         audit: 'Audit Log', closing: 'Tutup Buku', 'laporan-hpp': 'Laporan Nilai Stok & HPP',
         'laporan-ringkasan': 'Ringkasan Inventory',
         'laporan-pergerakan': 'Pergerakan Stok Harian', 'laporan-rekonsiliasi': 'Rekonsiliasi Arus Stok',
@@ -165,6 +165,8 @@
                 return;
             }
             StockOpname.render(document.getElementById('tab-opname'));
+        } else if (name === 'opname-laporan') {
+            StockOpnameReport.render(document.getElementById('tab-opname-laporan'));
         } else if (name === 'opname-saya') {
             StockOpname.renderMySessions(document.getElementById('tab-opname-saya'));
         } else if (name === 'import') {

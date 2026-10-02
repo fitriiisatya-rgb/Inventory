@@ -859,3 +859,25 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
     border-radius: 4px; padding: 1px 6px; margin-left: 4px; text-transform: uppercase;
 }
 .hpp-pre-go-live-value { color: var(--text3); }
+
+/* PHASE V2.16.4 — "Laporan Stock Opname" (stock-opname-report.js). Reuses
+   .card/.hpp-page-header/.hpp-filter-*/.hpp-kpi-* above for the shared
+   chrome; the rules below cover only this report's own table/action/pager
+   layout. Single shared app.css, same as every other feature in this repo
+   — no separate per-feature stylesheet exists here. */
+.so-report-table-wrap { overflow-x: auto; }
+.so-report-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; white-space: nowrap; }
+.so-report-table th, .so-report-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; }
+.so-report-table th { color: var(--text2); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.so-report-table tbody tr:hover { background: var(--bg3); }
+.so-report-table .text-right { text-align: right; }
+.so-report-total-row { font-weight: 700; background: var(--bg2); }
+.so-report-actions { white-space: nowrap; }
+.so-report-action-group { display: flex; gap: 6px; flex-wrap: wrap; }
+.so-report-pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 2px; flex-wrap: wrap; color: var(--text2); font-size: 0.8rem; }
+.so-report-info-card { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 20px; margin-bottom: 16px; }
+@media (max-width: 900px) { .so-report-info-card { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 480px) { .so-report-info-card { grid-template-columns: 1fr; } }
+.so-report-info-row { display: flex; flex-direction: column; gap: 2px; font-size: 0.85rem; }
+.so-report-info-label { color: var(--text3); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.so-report-section-title { margin: 0 0 12px; font-size: 0.95rem; color: var(--text); }
