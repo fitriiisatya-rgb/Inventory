@@ -50,3 +50,8 @@ migration/workspace/staging_export/*
 vendor/
 __pycache__/
 *.pyc
+# Generated deployment bundles (tar.gz + SHA256SUMS + staged patch/docs
+# folders built by a feature's own packaging step) are delivered directly
+# to the requester, never committed to history -- they're fully
+# reproducible from the commit(s) they package.
+/dist/
