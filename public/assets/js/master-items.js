@@ -333,6 +333,38 @@ const MasterItems = (() => {
             UI.handleApiError(err);
             return;
         }
+        // STABILIZATION — item_unit_conversions legitimately has nothing
+        // beyond the base-unit identity row for most items; if even THAT
+        // is missing (a data gap, or a transient GET /items/{id}/units
+        // hiccup), "Satuan untuk Harga" must never fall back to zero
+        // options — the item's own base unit (already known from the list
+        // row the user clicked, via the SAME server-provided value
+        // row.unit already used elsewhere in this file) is always a valid
+        // pricing target. Never fabricates a conversion factor beyond the
+        // trivial base-unit identity (1), never invents a unit.
+        if (units.length === 0 && row.unit) {
+            units = [{ id: row.unit.id, code: row.unit.code, name: row.unit.name, conversion_to_base: 1, is_purchase_default: false, reference_price: null, price_source: null }];
+        }
+
+        // STABILIZATION — Master.units() is the shared, cached canonical
+        // units list Master.loadAll() populates at app start; Base Unit
+        // and Unit Conversion both read ONLY from it (never a per-item
+        // source, never hardcoded). If its own GET /units call failed
+        // independently of the CORE lists that got this screen open at
+        // all (Master.loadAll()'s CORE/OPTIONAL split lets that happen
+        // silently by design), blindly trusting an empty cache here would
+        // render three dropdowns with zero options and no visible error —
+        // exactly the production "No Options" symptom. One retry, then a
+        // visible, specific failure — never a silent empty <select>.
+        if (Master.units().length === 0) {
+            try {
+                await Master.loadAll();
+            } catch (err) { /* loadAll() itself never throws (see master.js) — defensive only */ }
+        }
+        if (Master.units().length === 0) {
+            UI.toast('Gagal memuat daftar satuan (GET /units) — Edit Barang tidak bisa dibuka. Coba muat ulang halaman atau hubungi IT.', 'error');
+            return;
+        }
 
         const categoryOptions = Master.categories().map((c) => ({ value: c.id, label: c.name }));
         const supplierOptions = Master.suppliers().map((s) => ({ value: s.id, label: s.name }));

@@ -122,6 +122,22 @@ function insert_before_line_containing(string $source, string $exactSubstring, s
     return substr($source, 0, $lineStart) . $insertText . "\n" . substr($source, $lineStart);
 }
 
+/**
+ * Like insert_before_line_containing(), but the exact-substring search is
+ * scoped to ONE named function's body (located via find_function_bounds())
+ * instead of the whole file — so an anchor that legitimately repeats
+ * elsewhere in the file (a call made from more than one function) can
+ * still be targeted safely, as long as it appears exactly once WITHIN
+ * that function.
+ */
+function insert_before_line_containing_within_function(string $source, string $signaturePattern, string $exactSubstring, string $insertText): string
+{
+    [$start, $end] = find_function_bounds($source, $signaturePattern);
+    $body = substr($source, $start, $end - $start);
+    $patchedBody = insert_before_line_containing($body, $exactSubstring, $insertText);
+    return substr($source, 0, $start) . $patchedBody . substr($source, $end);
+}
+
 /** Verifies the file's current content hashes to $expectedSha256; throws otherwise. Call this FIRST, before any mutation. */
 function assert_preimage_hash(string $source, string $expectedSha256): void
 {
