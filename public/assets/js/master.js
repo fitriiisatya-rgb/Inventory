@@ -21,9 +21,10 @@ const Master = (() => {
     let categories = [];
     let bakeryDestinations = [];
     let itemBarcodes = [];
+    let units = [];
 
     async function loadAll() {
-        [items, warehouses, suppliers, divisions, categories, bakeryDestinations, itemBarcodes] = await Promise.all([
+        [items, warehouses, suppliers, divisions, categories, bakeryDestinations, itemBarcodes, units] = await Promise.all([
             InvApi.listItems(),
             InvApi.listWarehouses(),
             InvApi.listSuppliers(),
@@ -31,8 +32,9 @@ const Master = (() => {
             InvApi.listCategories(),
             InvApi.listBakeryDestinations(),
             InvApi.listItemBarcodes(),
+            InvApi.listUnits(),
         ]);
-        return { items, warehouses, suppliers, divisions, categories, bakeryDestinations, itemBarcodes };
+        return { items, warehouses, suppliers, divisions, categories, bakeryDestinations, itemBarcodes, units };
     }
 
     const findById = (list, id) => list.find((row) => Number(row.id) === Number(id));
@@ -46,12 +48,14 @@ const Master = (() => {
         categories: () => categories,
         bakeryDestinations: () => bakeryDestinations,
         itemBarcodes: () => itemBarcodes,
+        units: () => units,
         itemById: (id) => findById(items, id),
         warehouseById: (id) => findById(warehouses, id),
         supplierById: (id) => findById(suppliers, id),
         divisionById: (id) => findById(divisions, id),
         categoryById: (id) => findById(categories, id),
         bakeryDestinationById: (id) => findById(bakeryDestinations, id),
+        unitById: (id) => findById(units, id),
         // Re-fetch just the barcode list (after a create/edit in Master
         // Barang's barcode manager) without re-loading every other cache.
         async reloadItemBarcodes() {

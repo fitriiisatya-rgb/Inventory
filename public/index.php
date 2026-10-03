@@ -127,6 +127,7 @@ use App\Services\ValidationException;
 use App\Services\CountingModeConflictException;
 use App\Services\ClaimConflictException;
 use App\Services\FindingsCheckpointBRequiredException;
+use App\Services\ItemLockedException;
 use App\Services\FifoService;
 use App\Services\InventoryService;
 use App\Services\TransferService;
@@ -374,6 +375,12 @@ set_exception_handler(function (Throwable $e) use ($path) {
         CountingModeConflictException::class      => ['code' => 409, 'label' => 'COUNTING_MODE_CONFLICT'],
         ClaimConflictException::class              => ['code' => 409, 'label' => 'CLAIM_LOST'],
         FindingsCheckpointBRequiredException::class => ['code' => 409, 'label' => 'FINDINGS_V1_CHECKPOINT_B_REQUIRED'],
+        // PHASE: Edit Barang — base_unit_id change is refused once an item
+        // has posted transactions (UnitConversionService::changeBaseUnit()
+        // already enforces this; this class existed before but had no
+        // route exercising it, so it was never mapped to a friendly HTTP
+        // code until Edit Barang became its first real caller).
+        ItemLockedException::class                => ['code' => 422, 'label' => 'ITEM_LOCKED'],
     ];
     // PHASE V2.5: the two dependency exceptions carry a structured
     // `dependencies` list the frontend renders verbatim (spec: "Then list
@@ -929,6 +936,14 @@ $routes = [
         $stmt = $pdo->prepare($sql);
         $stmt->execute($bind);
         inv_ok($stmt->fetchAll(), 'OK');
+    },
+    // PHASE: Edit Barang — the canonical unit list (GR/KG/PCS/KARTON/...)
+    // has never had its own list endpoint; Base Unit/Unit Conversion
+    // dropdowns need one. Read-only, same bare-auth treatment as
+    // GET /categories just above (reference data, not security-sensitive).
+    'GET /units' => function () use ($pdo) {
+        inv_require_auth();
+        inv_ok($pdo->query('SELECT id, code, name FROM units ORDER BY code')->fetchAll(), 'OK');
     },
     'POST /categories' => function () use ($pdo, $input) {
         $user = inv_require_auth();
@@ -4777,6 +4792,10 @@ $routes = [
     // notes/status. base_unit_id and minimum_stock (FIFO-sensitive /
     // stock-policy-owned) are deliberately never accepted here; minimum/
     // buffer stay on the existing PUT /stock-policy workflow.
+    // PHASE: Edit Barang — extends this SAME route (not a parallel
+    // endpoint) with base_unit_id/unit_conversion/price, all optional and
+    // additive to the existing name/category/supplier/barcode/notes/
+    // status fields above. Still MASTER_ITEM_MANAGE-gated, unchanged.
     'PUT /items/{id}' => function (array $params) use ($pdo, $input) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'MASTER_ITEM_MANAGE');
@@ -4794,12 +4813,79 @@ $routes = [
             throw new ValidationException(['name cannot be blank']);
         }
         $categoryId = array_key_exists('category_id', $input) ? ($input['category_id'] !== null ? (int) $input['category_id'] : null) : $before['category_id'];
+        if ($categoryId !== null) {
+            $catExists = $pdo->prepare('SELECT COUNT(*) FROM categories WHERE id = :id');
+            $catExists->execute(['id' => $categoryId]);
+            if ((int) $catExists->fetchColumn() === 0) {
+                throw new ValidationException(["category_id {$categoryId} does not exist"]);
+            }
+        }
         $supplierId = array_key_exists('default_supplier_id', $input) ? ($input['default_supplier_id'] !== null ? (int) $input['default_supplier_id'] : null) : $before['default_supplier_id'];
+        // Supplier must be selected from the existing supplier master —
+        // never free text, never auto-created from Edit Barang. Blank
+        // (null) remains explicitly allowed.
+        if ($supplierId !== null) {
+            $supExists = $pdo->prepare('SELECT COUNT(*) FROM suppliers WHERE id = :id');
+            $supExists->execute(['id' => $supplierId]);
+            if ((int) $supExists->fetchColumn() === 0) {
+                throw new ValidationException(["default_supplier_id {$supplierId} does not exist in the supplier master"]);
+            }
+        }
         $barcode = array_key_exists('barcode', $input) ? (($input['barcode'] === null || trim((string) $input['barcode']) === '') ? null : trim((string) $input['barcode'])) : $before['barcode'];
         $notes = array_key_exists('notes', $input) ? (($input['notes'] === null) ? null : trim((string) $input['notes'])) : $before['notes'];
         $status = array_key_exists('status', $input) ? strtoupper((string) $input['status']) : $before['status'];
         if (!in_array($status, ['ACTIVE', 'INACTIVE'], true)) {
             throw new ValidationException(["status must be ACTIVE or INACTIVE, got '{$status}'"]);
+        }
+
+        // Base unit — only when explicitly requested AND different from
+        // the current value. UnitConversionService::changeBaseUnit()
+        // itself refuses once the item has posted transactions
+        // (locked_at) — never forced/bypassed here.
+        $baseUnitId = (int) $before['base_unit_id'];
+        if (array_key_exists('base_unit_id', $input) && $input['base_unit_id'] !== null) {
+            $newBaseUnitId = (int) $input['base_unit_id'];
+            if ($newBaseUnitId !== $baseUnitId) {
+                $unitExists = $pdo->prepare('SELECT COUNT(*) FROM units WHERE id = :id');
+                $unitExists->execute(['id' => $newBaseUnitId]);
+                if ((int) $unitExists->fetchColumn() === 0) {
+                    throw new ValidationException(["base_unit_id {$newBaseUnitId} is not a recognized unit"]);
+                }
+                UnitConversionService::changeBaseUnit($pdo, $itemId, $newBaseUnitId);
+                $baseUnitId = $newBaseUnitId;
+            }
+        }
+
+        // Unit conversion — reuses an EXISTING canonical unit (never a
+        // free-typed new one; the frontend's dropdown is populated from
+        // GET /units) and the existing versioned-conversion mechanism
+        // (openNewVersion() closes whatever was open and opens the new
+        // factor — never a raw UPDATE on a closed/historical version).
+        if (array_key_exists('unit_conversion', $input) && is_array($input['unit_conversion'])) {
+            $uc = $input['unit_conversion'];
+            $ucUnitId = (int) ($uc['unit_id'] ?? 0);
+            $ucFactor = (float) ($uc['conversion_to_base'] ?? 0);
+            if ($ucUnitId <= 0) {
+                throw new ValidationException(['unit_conversion.unit_id is required']);
+            }
+            $unitExists = $pdo->prepare('SELECT COUNT(*) FROM units WHERE id = :id');
+            $unitExists->execute(['id' => $ucUnitId]);
+            if ((int) $unitExists->fetchColumn() === 0) {
+                throw new ValidationException(["unit_conversion.unit_id {$ucUnitId} is not a recognized unit"]);
+            }
+            if ($ucFactor <= 0) {
+                throw new ValidationException(['unit_conversion.conversion_to_base must be > 0']);
+            }
+            if ($ucUnitId === $baseUnitId && abs($ucFactor - 1.0) > 0.0000001) {
+                throw new ValidationException(['the base unit\'s own conversion factor is always 1 and cannot be set to anything else']);
+            }
+            $openConv = UnitConversionService::getActiveConversion($pdo, $itemId, $ucUnitId, date('Y-m-d H:i:s'));
+            if ($openConv === null || abs((float) $openConv['conversion_to_base'] - $ucFactor) > 0.0000001) {
+                UnitConversionService::openNewVersion(
+                    $pdo, $itemId, $ucUnitId, $ucFactor, date('Y-m-d H:i:s'), $user['id'],
+                    'Edit Barang', (bool) ($uc['is_purchase_default'] ?? false)
+                );
+            }
         }
 
         $pdo->prepare('UPDATE items SET name = :n, category_id = :c, default_supplier_id = :s, barcode = :b, notes = :notes, status = :status WHERE id = :id')
@@ -4809,10 +4895,62 @@ $routes = [
             $pdo, $user['id'], $user['username'],
             $before['status'] !== $status ? ($status === 'INACTIVE' ? 'ITEM_DEACTIVATE' : 'ITEM_ACTIVATE') : 'ITEM_UPDATE',
             'items', $itemId,
-            ['name' => $before['name'], 'category_id' => $before['category_id'], 'default_supplier_id' => $before['default_supplier_id'], 'barcode' => $before['barcode'], 'status' => $before['status']],
-            ['name' => $name, 'category_id' => $categoryId, 'default_supplier_id' => $supplierId, 'barcode' => $barcode, 'status' => $status],
+            ['name' => $before['name'], 'category_id' => $before['category_id'], 'default_supplier_id' => $before['default_supplier_id'], 'barcode' => $before['barcode'], 'status' => $before['status'], 'base_unit_id' => (int) $before['base_unit_id']],
+            ['name' => $name, 'category_id' => $categoryId, 'default_supplier_id' => $supplierId, 'barcode' => $barcode, 'status' => $status, 'base_unit_id' => $baseUnitId],
             null
         );
+
+        // Price / HPP — append-only to item_price_history, NEVER a
+        // destructive overwrite of an earlier row. Only accepted for a
+        // unit this item has a KNOWN conversion for (base unit, or an
+        // already-open purchase/middle conversion — including the one
+        // just set above in this same request) — never guessed/invented.
+        // Zero is explicitly allowed (an intentionally free/zero-cost
+        // item); negative is always rejected.
+        if (array_key_exists('price', $input) && is_array($input['price'])) {
+            $priceUnitId = (int) ($input['price']['unit_id'] ?? 0);
+            $pricePerUnit = $input['price']['price_per_unit'] ?? null;
+            if ($priceUnitId <= 0) {
+                throw new ValidationException(['price.unit_id is required']);
+            }
+            if ($pricePerUnit === null || !is_numeric($pricePerUnit)) {
+                throw new ValidationException(['price.price_per_unit is required and must be numeric']);
+            }
+            $pricePerUnit = (float) $pricePerUnit;
+            if ($pricePerUnit < 0) {
+                throw new ValidationException(['price.price_per_unit cannot be negative']);
+            }
+
+            if ($priceUnitId === $baseUnitId) {
+                $conversionToBase = 1.0;
+            } else {
+                $conv = UnitConversionService::getActiveConversion($pdo, $itemId, $priceUnitId, date('Y-m-d H:i:s'));
+                if ($conv === null) {
+                    throw new ValidationException(["price.unit_id {$priceUnitId} has no existing valid unit conversion for this item — add the conversion first; price is never auto-converted without one"]);
+                }
+                $conversionToBase = (float) $conv['conversion_to_base'];
+            }
+            $unitCostBase = round($pricePerUnit / $conversionToBase, 4);
+
+            $oldLatest = $pdo->prepare('SELECT unit_cost_base FROM item_price_history WHERE item_id = :id ORDER BY effective_date DESC, id DESC LIMIT 1');
+            $oldLatest->execute(['id' => $itemId]);
+            $oldUnitCostBase = $oldLatest->fetchColumn();
+
+            $pdo->prepare(
+                'INSERT INTO item_price_history (item_id, supplier_id, unit_id, price_per_unit, unit_cost_base, effective_date, created_at)
+                 VALUES (:item_id, :supplier_id, :unit_id, :price_per_unit, :unit_cost_base, NOW(), NOW())'
+            )->execute([
+                'item_id' => $itemId, 'supplier_id' => $supplierId, 'unit_id' => $priceUnitId,
+                'price_per_unit' => $pricePerUnit, 'unit_cost_base' => $unitCostBase,
+            ]);
+
+            AuditService::log(
+                $pdo, $user['id'], $user['username'], 'ITEM_PRICE_UPDATE', 'items', $itemId,
+                ['unit_cost_base' => $oldUnitCostBase !== false ? (float) $oldUnitCostBase : null],
+                ['unit_cost_base' => $unitCostBase, 'price_per_unit' => $pricePerUnit, 'unit_id' => $priceUnitId],
+                'Edit Barang'
+            );
+        }
 
         inv_ok(['success' => true, 'item_id' => $itemId], 'Item updated');
     },

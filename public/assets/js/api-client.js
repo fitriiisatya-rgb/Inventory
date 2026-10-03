@@ -137,6 +137,7 @@ const InvApi = (() => {
 
         // ---- PHASE V2: category master ----
         listCategories: (params = {}) => request('GET', `/categories${qs(params)}`),
+        listUnits: () => request('GET', '/units'),
         createCategory: (payload) => request('POST', '/categories', payload),
         updateCategory: (id, payload) => request('PUT', `/categories/${id}`, payload),
         deleteCategory: (id) => request('DELETE', `/categories/${id}`),

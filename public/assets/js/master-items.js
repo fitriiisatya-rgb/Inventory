@@ -133,6 +133,11 @@ const MasterItems = (() => {
         Drawer.open({
             title: `${row.sku} — ${row.name}`,
             render: (body) => {
+                if (canManage) {
+                    const editBtn = UI.el('button', { class: 'btn btn-primary btn-sm', style: 'margin-bottom:12px;' }, '✏️ Edit Barang');
+                    editBtn.addEventListener('click', () => openEdit(row, true));
+                    body.appendChild(editBtn);
+                }
                 body.appendChild(Drawer.section('Ringkasan', Drawer.kv([
                     ['SKU', row.sku],
                     ['Nama Barang', row.name],
@@ -184,6 +189,12 @@ const MasterItems = (() => {
                 UI.el('td', { class: 'text-right' }, u.reference_price !== null ? UI.formatMoney(u.reference_price) : '—'),
                 UI.el('td', {}, u.price_source === 'EXACT_UNIT' ? 'Pembelian terakhir' : (u.price_source === 'DERIVED' ? 'Diturunkan dari base' : '—')),
             ]));
+            // PRICE RULE 2 — zero/blank price is explicitly allowed to
+            // remain (never blocks anything); a clear, consistent badge
+            // surfaces that state rather than a silent blank cell.
+            if (units.every((u) => u.reference_price === null)) {
+                host.appendChild(UI.el('span', { class: 'badge badge-cancelled', style: 'margin-bottom:8px; display:inline-block;' }, 'Harga Belum Diisi'));
+            }
             host.appendChild(UI.el('table', {}, [
                 UI.el('thead', {}, [UI.el('tr', {}, ['Satuan', 'Konversi ke Base', 'Default Beli', 'Internal Unit Cost (HPP)', 'Sumber Harga'].map((h) => UI.el('th', {}, h)))]),
                 UI.el('tbody', {}, rows),
@@ -301,41 +312,178 @@ const MasterItems = (() => {
         }
     }
 
-    async function openEdit(row) {
+    // ============================================================
+    // CENTRALIZED MASTER DATA — Edit Barang. Extends the plain-field edit
+    // above with Base Unit / Unit Conversion / Internal Unit Cost (HPP),
+    // all served by the SAME PUT /items/{id} route (extended server-side
+    // — see public/index.php) rather than a parallel endpoint. Price is
+    // OPTIONAL and explicitly allowed to stay blank/zero (Rule 1) — a
+    // "Harga Belum Diisi" badge is shown whenever the item currently has
+    // no price history at all, never a blocking error. Supplier/Category/
+    // Unit dropdowns are always populated from the existing master lists
+    // (Master.suppliers()/Master.categories()/Master.units()) — never
+    // free text, never auto-created from this form.
+    // ============================================================
+    async function openEdit(row, refreshDetail = false) {
+        const fullItem = Master.itemById(row.item_id); // GET /items includes barcode; the report row doesn't
+        let units = [];
+        try {
+            units = await InvApi.itemUnits(row.item_id);
+        } catch (err) {
+            UI.handleApiError(err);
+            return;
+        }
+
         const categoryOptions = Master.categories().map((c) => ({ value: c.id, label: c.name }));
         const supplierOptions = Master.suppliers().map((s) => ({ value: s.id, label: s.name }));
-        const fullItem = Master.itemById(row.item_id); // GET /items includes barcode; the report row doesn't
+        const unitOptions = Master.units().map((u) => ({ value: u.id, label: `${u.code} (${u.name})` }));
 
-        const values = await MasterCommon.formModal({
-            title: `✏️ Edit Barang: ${row.name}`,
-            submitLabel: 'Simpan',
-            initial: {
-                name: row.name,
-                category_id: row.category ? row.category.id : '',
-                default_supplier_id: row.supplier ? row.supplier.id : '',
-                barcode: fullItem ? (fullItem.barcode || '') : '',
-                status: row.item_status,
-            },
-            fields: [
-                { key: 'name', label: 'Nama Barang', type: 'text', required: true },
-                { key: 'category_id', label: 'Kategori', type: 'select', options: categoryOptions, emptyLabel: 'Tanpa Kategori' },
-                { key: 'default_supplier_id', label: 'Vendor', type: 'select', options: supplierOptions, emptyLabel: 'Tanpa Vendor' },
-                { key: 'barcode', label: 'Barcode', type: 'text' },
-                { key: 'status', label: 'Status Item', type: 'select', allowEmpty: false, options: [{ value: 'ACTIVE', label: 'Aktif' }, { value: 'INACTIVE', label: 'Tidak Aktif' }] },
-            ],
+        const baseUnitId = row.unit.id;
+        // The item's own existing purchase-default conversion (if any) —
+        // pre-fills the Unit Conversion section; never a different unit's
+        // conversion, never invented.
+        const purchaseConv = units.find((u) => u.is_purchase_default && Number(u.id) !== Number(baseUnitId));
+        // Any existing reference price at all (base or purchase unit) —
+        // its absence is what triggers "Harga Belum Diisi", never a crash.
+        const anyPrice = units.find((u) => u.reference_price !== null);
+        // Units a price can be safely attached to right now: the base
+        // unit (always valid, factor=1) plus any unit this item already
+        // has an open conversion for — never a unit picked out of thin air.
+        const priceUnitOptions = units.map((u) => ({ value: u.id, label: `${u.code}${Number(u.id) === Number(baseUnitId) ? ' (Base)' : ''}` }));
+
+        const values = await new Promise((resolve) => {
+            const nameInput = UI.el('input', { type: 'text', value: row.name });
+            const categorySelect = UI.el('select', {}, [UI.el('option', { value: '' }, 'Tanpa Kategori')].concat(
+                categoryOptions.map((o) => UI.el('option', { value: String(o.value), ...(row.category && row.category.id === o.value ? { selected: 'selected' } : {}) }, o.label))
+            ));
+            const supplierSelect = UI.el('select', {}, [UI.el('option', { value: '' }, 'Tanpa Vendor')].concat(
+                supplierOptions.map((o) => UI.el('option', { value: String(o.value), ...(row.supplier && row.supplier.id === o.value ? { selected: 'selected' } : {}) }, o.label))
+            ));
+            const barcodeInput = UI.el('input', { type: 'text', value: fullItem ? (fullItem.barcode || '') : '' });
+            const statusSelect = UI.el('select', {}, [
+                UI.el('option', { value: 'ACTIVE', ...(row.item_status === 'ACTIVE' ? { selected: 'selected' } : {}) }, 'Aktif'),
+                UI.el('option', { value: 'INACTIVE', ...(row.item_status === 'INACTIVE' ? { selected: 'selected' } : {}) }, 'Tidak Aktif'),
+            ]);
+            const baseUnitSelect = UI.el('select', {}, unitOptions.map((o) => UI.el('option', { value: String(o.value), ...(Number(o.value) === Number(baseUnitId) ? { selected: 'selected' } : {}) }, o.label)));
+
+            const convUnitSelect = UI.el('select', {}, [UI.el('option', { value: '' }, 'Tidak diubah')].concat(
+                unitOptions.map((o) => UI.el('option', { value: String(o.value), ...(purchaseConv && Number(o.value) === Number(purchaseConv.id) ? { selected: 'selected' } : {}) }, o.label))
+            ));
+            const convFactorInput = UI.el('input', { type: 'text', placeholder: 'contoh: 10', value: purchaseConv ? String(purchaseConv.conversion_to_base) : '' });
+            const convDefaultCheckbox = UI.el('input', { type: 'checkbox', ...(purchaseConv ? { checked: 'checked' } : {}) });
+
+            const priceUnitSelect = UI.el('select', {}, priceUnitOptions.map((o) => UI.el('option', { value: String(o.value) }, o.label)));
+            const priceAmountInput = UI.el('input', { type: 'text', placeholder: 'kosongkan = tidak diubah' });
+            const priceBadge = !anyPrice
+                ? UI.el('span', { class: 'badge badge-cancelled', style: 'margin-left:8px;' }, 'Harga Belum Diisi')
+                : null;
+
+            const errorNode = UI.el('div', { class: 'alert alert-error', style: 'display:none; margin-top:8px;' });
+            const overlay = UI.el('div', { class: 'modal open' });
+            const cancelBtn = UI.el('button', { class: 'btn btn-secondary' }, 'Batal');
+            const submitBtn = UI.el('button', { class: 'btn btn-primary' }, 'Simpan');
+
+            const group = (label, node) => UI.el('div', { class: 'form-group' }, [UI.el('label', {}, label), node]);
+            const content = UI.el('div', { class: 'modal-content' }, [
+                UI.el('h3', {}, `✏️ Edit Barang: ${row.name}`),
+                UI.el('div', {}, [
+                    group('Nama Barang', nameInput),
+                    group('Kategori', categorySelect),
+                    group('Vendor', supplierSelect),
+                    group('Barcode', barcodeInput),
+                    group('Status Item', statusSelect),
+                    group('Satuan Dasar (Base Unit)', baseUnitSelect),
+                    UI.el('div', { class: 'drawer-section-title', style: 'margin-top:14px;' }, 'Konversi Satuan (Unit Conversion)'),
+                    group('Satuan Pembelian', convUnitSelect),
+                    group('Faktor Konversi ke Satuan Dasar', convFactorInput),
+                    UI.el('div', { class: 'form-group', style: 'display:flex; align-items:center; gap:8px;' }, [convDefaultCheckbox, UI.el('label', { style: 'margin:0;' }, 'Jadikan satuan beli default')]),
+                    UI.el('div', { class: 'drawer-section-title', style: 'margin-top:14px;' }, [UI.el('span', {}, 'Internal Unit Cost / HPP'), priceBadge].filter(Boolean)),
+                    group('Satuan untuk Harga', priceUnitSelect),
+                    group('Harga per Satuan (boleh 0, tidak boleh negatif)', priceAmountInput),
+                    errorNode,
+                ]),
+                UI.el('div', { style: 'display:flex; gap:10px; justify-content:flex-end; margin-top:18px;' }, [cancelBtn, submitBtn]),
+            ]);
+            overlay.appendChild(content);
+            document.body.appendChild(overlay);
+
+            const close = () => overlay.remove();
+            cancelBtn.addEventListener('click', () => { close(); resolve(null); });
+            submitBtn.addEventListener('click', () => {
+                const name = nameInput.value.trim();
+                if (!name) {
+                    errorNode.textContent = 'Nama barang wajib diisi.';
+                    errorNode.style.display = 'block';
+                    return;
+                }
+                const convFactorRaw = convFactorInput.value.trim();
+                if (convUnitSelect.value !== '' && (convFactorRaw === '' || !(Number(convFactorRaw) > 0))) {
+                    errorNode.textContent = 'Faktor konversi harus diisi dan lebih besar dari 0.';
+                    errorNode.style.display = 'block';
+                    return;
+                }
+                const priceRaw = priceAmountInput.value.trim();
+                if (priceRaw !== '' && (!Number.isFinite(Number(priceRaw)) || Number(priceRaw) < 0)) {
+                    errorNode.textContent = 'Harga tidak boleh negatif.';
+                    errorNode.style.display = 'block';
+                    return;
+                }
+                close();
+                resolve({
+                    name,
+                    category_id: categorySelect.value !== '' ? Number(categorySelect.value) : null,
+                    default_supplier_id: supplierSelect.value !== '' ? Number(supplierSelect.value) : null,
+                    barcode: barcodeInput.value.trim() || null,
+                    status: statusSelect.value,
+                    base_unit_id: Number(baseUnitSelect.value),
+                    unit_conversion: convUnitSelect.value !== '' ? {
+                        unit_id: Number(convUnitSelect.value),
+                        conversion_to_base: Number(convFactorRaw),
+                        is_purchase_default: !!convDefaultCheckbox.checked,
+                    } : null,
+                    price: priceRaw !== '' ? { unit_id: Number(priceUnitSelect.value), price_per_unit: Number(priceRaw) } : null,
+                });
+            });
         });
         if (!values) return;
 
         try {
-            await InvApi.updateItem(row.item_id, {
+            const payload = {
                 name: values.name,
-                category_id: values.category_id !== null ? Number(values.category_id) : null,
-                default_supplier_id: values.default_supplier_id !== null ? Number(values.default_supplier_id) : null,
-                barcode: values.barcode || null,
+                category_id: values.category_id,
+                default_supplier_id: values.default_supplier_id,
+                barcode: values.barcode,
                 status: values.status,
-            });
+            };
+            if (values.base_unit_id !== Number(baseUnitId)) {
+                payload.base_unit_id = values.base_unit_id;
+            }
+            if (values.unit_conversion) {
+                payload.unit_conversion = values.unit_conversion;
+            }
+            if (values.price) {
+                payload.price = values.price;
+            }
+            await InvApi.updateItem(row.item_id, payload);
             UI.toast('Barang berhasil diperbarui.', 'success');
             if (dtHandle) dtHandle.reload();
+            if (refreshDetail) {
+                // No single-item "report row" endpoint exists to re-fetch
+                // the exact shape openDetail()/the list need — patch the
+                // known-changed fields from the just-saved values instead
+                // of a stale re-display, then reopen so the Drawer (and
+                // its own fresh InvApi.itemUnits() fetch for the Satuan &
+                // Konversi section) shows the new state immediately.
+                const patchedRow = {
+                    ...row,
+                    name: values.name,
+                    category: values.category_id !== null ? Master.categoryById(values.category_id) : null,
+                    supplier: values.default_supplier_id !== null ? Master.supplierById(values.default_supplier_id) : null,
+                    item_status: values.status,
+                    unit: Master.unitById(values.base_unit_id) || row.unit,
+                };
+                openDetail(patchedRow);
+            }
         } catch (err) {
             UI.handleApiError(err);
         }
