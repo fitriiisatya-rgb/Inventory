@@ -146,11 +146,39 @@ try {
     $patched = insert_after_line_containing(
         $patched,
         'InvApi.postOpname(currentSessionId, overrides)',
-        "            btn.textContent = __stabOriginalLabel; // STABILIZATION — restore label on success path too"
+        "            btn.textContent = __stabOriginalLabel; // STABILIZATION — restore label on success path too\n            await renderSession(currentSessionId); // STABILIZATION — refresh the view (status -> POSTED) after a successful post"
     );
-    $applied[] = 'postOpname() label restore after the call (success path)';
+    $applied[] = 'postOpname() label restore + renderSession(currentSessionId) refresh after a successful post';
 } catch (JsPatchFailure $e) {
-    $skipped[] = "postOpname() label restore: {$e->getMessage()}";
+    $skipped[] = "postOpname() label restore / post-success refresh: {$e->getMessage()}";
+}
+
+// Step 6 (best-effort — no human-confirmed anchor for postOpname()'s
+// catch block exists, so this is independently skippable): a friendlier
+// message for the EXISTING, unmodified FINDINGS_V1_CHECKPOINT_B_REQUIRED
+// server gate, anchored on this codebase's own app-wide error-handling
+// convention (UI.handleApiError(err)) wherever it appears inside
+// postOpname(). Skipped cleanly (reported, not guessed) if that
+// convention isn't present verbatim in this file.
+try {
+    [$postStart, $postEnd] = find_function_bounds($patched, '/\bfunction\s+postOpname\s*\(\s*\)\s*\{/');
+    $postBody = substr($patched, $postStart, $postEnd - $postStart);
+    if (substr_count($postBody, 'UI.handleApiError(err)') !== 1) {
+        throw new JsPatchFailure('UI.handleApiError(err) not found exactly once inside postOpname()');
+    }
+    $patchedPostBody = str_replace(
+        'UI.handleApiError(err)',
+        "if (err && err.code === 'FINDINGS_V1_CHECKPOINT_B_REQUIRED') {\n" .
+        "                UI.toast('Sesi Team/Findings ini belum bisa diposting lewat tombol ini — gunakan proses rekonsiliasi EOD dan hubungi supervisor/IT untuk posting terkontrol.', 'error');\n" .
+        "            } else {\n" .
+        "                UI.handleApiError(err);\n" .
+        '            }',
+        $postBody
+    );
+    $patched = substr($patched, 0, $postStart) . $patchedPostBody . substr($patched, $postEnd);
+    $applied[] = 'friendly FINDINGS_V1_CHECKPOINT_B_REQUIRED message in postOpname() catch block';
+} catch (JsPatchFailure $e) {
+    $skipped[] = "friendly FINDINGS_V1_CHECKPOINT_B_REQUIRED message: {$e->getMessage()}";
 }
 
 if (!$apply) {
