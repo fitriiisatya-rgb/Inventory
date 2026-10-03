@@ -152,8 +152,48 @@ const MasterItems = (() => {
                     ['Terakhir Update', UI.formatDate(row.updated_at)],
                 ])));
                 body.appendChild(Drawer.section('📷 Barcode / Satuan', buildBarcodeSection(row, canManage)));
+                body.appendChild(Drawer.section('⚖️ Satuan & Konversi (Internal Unit Cost)', buildUnitConversionSection(row)));
             },
         });
+    }
+
+    // ============================================================
+    // CENTRALIZED MASTER DATA — expose "Unit Conversion" + "Internal Unit
+    // Cost / HPP" (minimum fields spec) in the existing Master Barang
+    // Detail drawer. Reuses GET /items/{id}/units as-is — that route
+    // already returns, per open conversion, conversion_to_base AND
+    // ItemPriceService::resolveReferencePrice()'s reference_price (the
+    // same latest-purchase-price-per-base-unit figure the Stock IN
+    // auto-fill already relies on) — no new backend route, no new
+    // permission. View-only here: editing a conversion/price stays on
+    // its own existing workflows (Stock IN auto-fill / barcode's
+    // "Satuan" picker), this section never writes anything.
+    // ============================================================
+    function buildUnitConversionSection(row) {
+        const host = UI.el('div', {}, [UI.el('div', { style: 'color:var(--text3); font-size:0.82rem;' }, 'Memuat satuan & HPP...')]);
+        InvApi.itemUnits(row.item_id).then((units) => {
+            host.innerHTML = '';
+            if (!units || units.length === 0) {
+                host.appendChild(UI.el('div', { style: 'color:var(--text3); font-size:0.82rem;' }, 'Belum ada konversi satuan untuk barang ini.'));
+                return;
+            }
+            const rows = units.map((u) => UI.el('tr', {}, [
+                UI.el('td', {}, u.code + (u.id === row.unit.id ? ' (Base)' : '')),
+                UI.el('td', { class: 'text-right' }, UI.formatNumber(u.conversion_to_base)),
+                UI.el('td', {}, u.is_purchase_default ? 'Ya' : '—'),
+                UI.el('td', { class: 'text-right' }, u.reference_price !== null ? UI.formatMoney(u.reference_price) : '—'),
+                UI.el('td', {}, u.price_source === 'EXACT_UNIT' ? 'Pembelian terakhir' : (u.price_source === 'DERIVED' ? 'Diturunkan dari base' : '—')),
+            ]));
+            host.appendChild(UI.el('table', {}, [
+                UI.el('thead', {}, [UI.el('tr', {}, ['Satuan', 'Konversi ke Base', 'Default Beli', 'Internal Unit Cost (HPP)', 'Sumber Harga'].map((h) => UI.el('th', {}, h)))]),
+                UI.el('tbody', {}, rows),
+            ]));
+        }).catch((err) => {
+            host.innerHTML = '';
+            host.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Gagal memuat satuan/HPP.'));
+            UI.handleApiError(err);
+        });
+        return host;
     }
 
     // ============================================================
