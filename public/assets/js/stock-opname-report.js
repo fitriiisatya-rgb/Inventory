@@ -6,11 +6,12 @@
  * reachable from the Laporan mega-menu).
  *
  * READ-ONLY: every action here is a GET against
- * StockOpnameMonthlyReportService, or a window.open() to an EXISTING
- * print/export endpoint (opnamePrintUrl/opnameExportFinalUrl/
- * opnameExportEodFinalUrl) — this module never creates a Stock
- * Adjustment, never writes a finding/condition, and can never
- * finalize/post/reopen a session.
+ * StockOpnameMonthlyReportService, a window.open() to this report's OWN
+ * print endpoint (stockOpnameReportPrintUrl → StockOpnameMonthlyReport-
+ * PrintService, [V2.16.6]), or a window.open() to an EXISTING export
+ * endpoint reused as-is (opnameExportFinalUrl/opnameExportEodFinalUrl) —
+ * this module never creates a Stock Adjustment, never writes a
+ * finding/condition, and can never finalize/post/reopen a session.
  *
  * PENTING: HPP / Unit Cost is NEVER rendered anywhere in this file — only
  * Rupiah VALUE fields (nilai sistem/fisik/selisih) the backend already
@@ -25,14 +26,15 @@ const StockOpnameReport = (() => {
     ];
 
     function canUseExports() {
-        // PHASE V2.16.4 — the reused export/print endpoints
-        // (opnamePrintUrl/opnameExportFinalUrl/opnameExportEodFinalUrl)
-        // are STOCK_OPNAME_SUPERVISE/STOCK_OPNAME_MANAGE-gated on the
-        // backend, unchanged (never weakened to INVENTORY_VIEW — see
+        // PHASE V2.16.4/V2.16.6 — the reused Excel export endpoints
+        // (opnameExportFinalUrl/opnameExportEodFinalUrl) stay
+        // STOCK_OPNAME_SUPERVISE/STOCK_OPNAME_MANAGE-gated on the backend,
+        // unchanged (never weakened to INVENTORY_VIEW — see
         // PRODUCTION_MAPPING.md / final report ISSUES for why). A
-        // finance/audit user with only INVENTORY_VIEW can still open
-        // this whole report (list + detail + summaries), just without
-        // these three buttons, which would 403 anyway.
+        // finance/audit user with only INVENTORY_VIEW can still open this
+        // whole report (list + detail + summaries + this report's own
+        // Print/PDF — see stockOpnameReportPrintUrl, INVENTORY_VIEW-gated),
+        // just without these two Excel buttons, which would 403 anyway.
         return Auth.hasPermission('STOCK_OPNAME_MANAGE') || Auth.hasPermission('STOCK_OPNAME_SUPERVISE');
     }
 
@@ -206,15 +208,23 @@ const StockOpnameReport = (() => {
         const detailBtn = UI.el('button', { class: 'btn btn-primary btn-sm' }, 'Lihat Detail');
         detailBtn.addEventListener('click', () => renderDetail(container, session.id));
 
-        const buttons = [detailBtn];
+        // [V2.16.6] Print/PDF uses this report's OWN A4-landscape finance
+        // print (stockOpnameReportPrintUrl → GET /stock-opname-reports/
+        // {id}/print, INVENTORY_VIEW-gated) — never opnamePrintUrl (the
+        // old discrepancy-only A4-portrait print). Always shown: any user
+        // who can see this report can print it, unlike Excel Final/
+        // Rekonsiliasi Final below, which stay gated to the stricter
+        // STOCK_OPNAME_MANAGE/SUPERVISE permission their reused endpoints
+        // already require.
+        const printBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Print / PDF');
+        printBtn.addEventListener('click', () => window.open(InvApi.stockOpnameReportPrintUrl(session.id), '_blank'));
+        const buttons = [detailBtn, printBtn];
         if (canUseExports()) {
             const excelBtn = UI.el('button', { class: 'btn btn-success btn-sm' }, 'Excel Final');
             excelBtn.addEventListener('click', () => window.open(InvApi.opnameExportFinalUrl(session.id), '_blank'));
             const reconBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Rekonsiliasi Final');
             reconBtn.addEventListener('click', () => window.open(InvApi.opnameExportEodFinalUrl(session.id), '_blank'));
-            const printBtn = UI.el('button', { class: 'btn btn-secondary btn-sm' }, 'Print / PDF');
-            printBtn.addEventListener('click', () => window.open(InvApi.opnamePrintUrl(session.id), '_blank'));
-            buttons.push(excelBtn, reconBtn, printBtn);
+            buttons.push(excelBtn, reconBtn);
         }
         return UI.el('div', { class: 'so-report-action-group' }, buttons);
     }
@@ -268,15 +278,19 @@ const StockOpnameReport = (() => {
             const backBtn = UI.el('button', { class: 'btn btn-secondary' }, '‹ Kembali ke Daftar Sesi');
             backBtn.addEventListener('click', () => renderList(container));
 
-            const headerActions = [backBtn];
+            // [V2.16.6] same rule as buildActionButtons() above: Print/PDF
+            // is this report's own A4-landscape print, always available to
+            // anyone who can see the report (INVENTORY_VIEW); Excel Final/
+            // Rekonsiliasi Final stay gated behind canUseExports().
+            const printBtn = UI.el('button', { class: 'btn btn-secondary' }, 'Print / PDF');
+            printBtn.addEventListener('click', () => window.open(InvApi.stockOpnameReportPrintUrl(sessionId), '_blank'));
+            const headerActions = [backBtn, printBtn];
             if (canUseExports()) {
                 const excelBtn = UI.el('button', { class: 'btn btn-success' }, 'Excel Final');
                 excelBtn.addEventListener('click', () => window.open(InvApi.opnameExportFinalUrl(sessionId), '_blank'));
                 const reconBtn = UI.el('button', { class: 'btn btn-secondary' }, 'Rekonsiliasi Final');
                 reconBtn.addEventListener('click', () => window.open(InvApi.opnameExportEodFinalUrl(sessionId), '_blank'));
-                const printBtn = UI.el('button', { class: 'btn btn-secondary' }, 'Print / PDF');
-                printBtn.addEventListener('click', () => window.open(InvApi.opnamePrintUrl(sessionId), '_blank'));
-                headerActions.push(excelBtn, reconBtn, printBtn);
+                headerActions.push(excelBtn, reconBtn);
             }
 
             container.appendChild(UI.el('div', { class: 'hpp-page-header' }, [

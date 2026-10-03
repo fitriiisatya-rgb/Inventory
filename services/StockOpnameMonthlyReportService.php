@@ -47,6 +47,41 @@ use PDO;
  * try to out-optimize it (that would itself risk becoming a second,
  * subtly different formula).
  *
+ * PHASE V2.16.6 CORRECTIVE — reconciliation()['final_physical_eod'] is
+ * TOTAL physical EOD (GOOD + DAMAGED + EXPIRED + DEADSTOCK, all projected
+ * forward together by StockOpnameBookStockService::physicalEodForLine() —
+ * see its $finalRawTotal, which explicitly sums all four before
+ * projection). "Stok Fisik Final" for THIS finance/accounting report must
+ * mean final GOOD/usable stock alone, with Rusak/Expired/Deadstock shown
+ * as their own separate columns — never folded into it. Rather than
+ * re-deriving a SECOND, independent EOD movement/projection engine (the
+ * one thing explicitly forbidden here), goodPhysicalEod() below derives
+ * GOOD EOD by subtracting the SAME reconciliation row's own
+ * final_damaged/final_expired/final_deadstock from its own
+ * final_physical_eod:
+ *
+ *     good_eod = final_physical_eod - (final_damaged + final_expired + final_deadstock)
+ *
+ * This is safe specifically BECAUSE of how physicalEodForLine() is
+ * written: $finalRawTotal = GOOD + DAMAGED + EXPIRED + DEADSTOCK (summed
+ * BEFORE projection), and the SAME post-count movement adjustment
+ * (eligible IN/OUT/SCALING/ADJUSTMENT between counted_at and the SO EOD
+ * cutoff) is then added to that one combined total to produce
+ * final_physical_eod — there is no per-condition split inside that
+ * projection to preserve, so subtracting the (unprojected, but also
+ * never-moving-post-count) condition quantities back out afterward
+ * recovers exactly "GOOD, projected forward by the same post-count
+ * movement" — see the worked example in this class's own test file
+ * (book=100, GOOD=90, conditions=10, no movement -> GOOD EOD=90,
+ * Selisih=-10; and GOOD=90, conditions=10, +5 post-count movement ->
+ * total EOD=105, GOOD EOD=95). A null final_damaged/expired/deadstock
+ * (this SKU's condition classification not yet resolved between P1/P2 —
+ * see StockOpnameService::resolveConditionAgreement()) is treated as 0
+ * for this subtraction, the SAME default the Rusak/Expired/Deadstock
+ * DISPLAY columns already use elsewhere in this class — so "GOOD" +
+ * "Rusak" + "Expired" + "Deadstock" as DISPLAYED always sums back to the
+ * reconciliation's own total, never silently losing quantity.
+ *
  * HPP / Unit Cost is NEVER exposed by this service: unit_cost_base is read
  * only to multiply into a Rupiah VALUE (nilai), never returned as its own
  * field. Every array this service returns is safe to serialize directly
@@ -120,6 +155,34 @@ final class StockOpnameMonthlyReportService
      */
     public static function detail(PDO $pdo, int $sessionId, array $filters): array
     {
+        return self::buildDetail($pdo, $sessionId, $filters, true);
+    }
+
+    /**
+     * Same session info, item formatting, and finance/category summaries
+     * as detail() — built by the SAME private buildDetail() — but with
+     * every matching line in one unpaginated batch (page/per_page filters,
+     * if present, are ignored), for the report-specific print view
+     * (StockOpnameMonthlyReportPrintService::renderResult()). This exists
+     * so the print output and the on-screen report can never disagree:
+     * there is exactly one place (buildDetail()) that computes
+     * reconciliation()/formatLine()/the summaries, and it is computed
+     * exactly once per call either way — this is not a second formula,
+     * only a second caller of the first one.
+     *
+     * @param array{category_id?:?int, search?:?string} $filters
+     */
+    public static function detailForPrint(PDO $pdo, int $sessionId, array $filters = []): array
+    {
+        unset($filters['page'], $filters['per_page']);
+        return self::buildDetail($pdo, $sessionId, $filters, false);
+    }
+
+    /**
+     * @param array{category_id?:?int, search?:?string, page?:int, per_page?:int} $filters
+     */
+    private static function buildDetail(PDO $pdo, int $sessionId, array $filters, bool $paginate): array
+    {
         $session = self::loadSession($pdo, $sessionId);
         $countingModel = $session['counting_model'] ?? 'LEGACY_DUAL_COUNT';
         $isFindingsV1 = $countingModel === 'FINDINGS_V1';
@@ -141,26 +204,31 @@ final class StockOpnameMonthlyReportService
         // PHASE V2.16.5 — computed ONCE per request (session-wide, not
         // filtered — StockOpnameBookStockService::reconciliation() has no
         // filter parameter, same as the existing Rekonsiliasi Final export
-        // that already calls it this way), then reused for the paginated
-        // item rows below AND for the finance/category summaries, so a
-        // FINDINGS_V1 session never pays for this twice in one request.
+        // that already calls it this way), then reused for the item rows
+        // below AND for the finance/category summaries, so a FINDINGS_V1
+        // session never pays for this twice in one request — whether that
+        // request is a paginated page (detail()) or the full unpaginated
+        // set (detailForPrint()).
         $reconBySku = $isFindingsV1 ? self::reconciliationBySku($pdo, $sessionId) : null;
 
-        $stmt = $pdo->prepare(
-            "SELECT sol.*, i.sku, i.name, u.code AS base_unit_code, c.name AS category_name
-               FROM stock_opname_lines sol
-               JOIN items i ON i.id = sol.item_id
-               JOIN units u ON u.id = i.base_unit_id
-               LEFT JOIN categories c ON c.id = i.category_id
-              WHERE {$where}
-              ORDER BY i.sku
-              LIMIT :limit OFFSET :offset"
-        );
+        $sql = "SELECT sol.*, i.sku, i.name, u.code AS base_unit_code, c.name AS category_name
+                  FROM stock_opname_lines sol
+                  JOIN items i ON i.id = sol.item_id
+                  JOIN units u ON u.id = i.base_unit_id
+                  LEFT JOIN categories c ON c.id = i.category_id
+                 WHERE {$where}
+                 ORDER BY i.sku";
+        if ($paginate) {
+            $sql .= ' LIMIT :limit OFFSET :offset';
+        }
+        $stmt = $pdo->prepare($sql);
         foreach ($params as $key => $value) {
             $stmt->bindValue($key, $value);
         }
-        $stmt->bindValue(':limit', $perPage, PDO::PARAM_INT);
-        $stmt->bindValue(':offset', ($page - 1) * $perPage, PDO::PARAM_INT);
+        if ($paginate) {
+            $stmt->bindValue(':limit', $perPage, PDO::PARAM_INT);
+            $stmt->bindValue(':offset', ($page - 1) * $perPage, PDO::PARAM_INT);
+        }
         $stmt->execute();
         $lines = array_map(static fn (array $l) => self::formatLine($l, $isFindingsV1, $reconBySku), $stmt->fetchAll());
 
@@ -195,10 +263,10 @@ final class StockOpnameMonthlyReportService
                 'posted_by' => $postedBy,
             ],
             'items' => $lines,
-            'page' => $page,
-            'per_page' => $perPage,
+            'page' => $paginate ? $page : 1,
+            'per_page' => $paginate ? $perPage : $totalItems,
             'total' => $totalItems,
-            'total_pages' => $perPage > 0 ? (int) ceil($totalItems / $perPage) : 0,
+            'total_pages' => $paginate ? ($perPage > 0 ? (int) ceil($totalItems / $perPage) : 0) : 1,
             'finance_summary' => $financeSummary,
             'category_summary' => $categorySummary,
         ];
@@ -215,13 +283,17 @@ final class StockOpnameMonthlyReportService
 
         if ($isFindingsV1) {
             $recon = ($reconBySku ?? [])[$l['sku']] ?? null;
-            // book_stock_eod/variance are null only when this SKU's EOD
-            // baseline/movement reconciliation is incomplete — never
-            // fabricated as 0 (same null-propagation the existing
-            // Rekonsiliasi Final export already uses).
+            // book_stock_eod is null only when this SKU's EOD baseline/
+            // movement reconciliation is incomplete — never fabricated as
+            // 0 (same null-propagation the existing Rekonsiliasi Final
+            // export already uses). physicalQty is GOOD-only — see
+            // goodPhysicalEod() and this class's own docblock for why
+            // final_physical_eod (TOTAL physical) is never used directly
+            // here. varianceQty is recomputed from the GOOD figure, never
+            // reconciliation()'s own 'variance' (which is total-based).
             $systemQty = $recon['book_stock_eod'] ?? null;
-            $physicalQty = $recon['final_physical_eod'] ?? null;
-            $varianceQty = $recon['variance'] ?? null;
+            $physicalQty = $recon !== null ? self::goodPhysicalEod($recon) : null;
+            $varianceQty = ($systemQty !== null && $physicalQty !== null) ? round($physicalQty - $systemQty, 6) : null;
         } else {
             $systemQty = (float) $l['system_qty_base'];
             $physicalQty = $l['counted_qty_base'] !== null ? (float) $l['counted_qty_base'] : null;
@@ -412,17 +484,19 @@ final class StockOpnameMonthlyReportService
      * summary in a single pass over the session's FILTERED lines (not
      * paginated — same full-filtered-set scope the legacy SQL aggregates
      * above already use), joining each line's authoritative book_stock_eod
-     * /final_physical_eod/variance from $reconBySku (computed once by the
-     * caller via reconciliationBySku()). "Sesuai"/"Selisih (+)"/"Selisih
-     * (-)" are bucketed by that authoritative variance, exactly like
-     * financeSummary() above does for LEGACY_DUAL_COUNT — never by
-     * match_status (FINDINGS_V1 doesn't even have one: match_status stays
-     * at its PENDING default for a FINDINGS_V1 line, since only legacy's
-     * submitCount() path writes it). A line whose reconciliation is
-     * incomplete (variance null) falls into none of those three buckets —
-     * same null-propagation StockOpnameBookStockService's own Ringkasan
-     * sheet already uses ("Belum Dapat Direkonsiliasi"), not an invented
-     * exclusion rule.
+     * from $reconBySku (computed once by the caller via
+     * reconciliationBySku()) against its GOOD-only physical EOD
+     * (goodPhysicalEod() — never reconciliation()'s own 'final_physical_eod'
+     * /'variance', which are TOTAL-physical-based; see this class's own
+     * docblock). "Sesuai"/"Selisih (+)"/"Selisih (-)" are bucketed by that
+     * GOOD-based variance, exactly like financeSummary() above does for
+     * LEGACY_DUAL_COUNT — never by match_status (FINDINGS_V1 doesn't even
+     * have one: match_status stays at its PENDING default for a
+     * FINDINGS_V1 line, since only legacy's submitCount() path writes it).
+     * A line whose reconciliation is incomplete (variance null) falls into
+     * none of those three buckets — same null-propagation
+     * StockOpnameBookStockService's own Ringkasan sheet already uses
+     * ("Belum Dapat Direkonsiliasi"), not an invented exclusion rule.
      *
      * @param array<string,array<string,mixed>> $reconBySku
      * @return array{0:array<string,mixed>,1:list<array<string,mixed>>}
@@ -460,8 +534,10 @@ final class StockOpnameMonthlyReportService
         foreach ($rows as $r) {
             $recon = $reconBySku[$r['sku']] ?? null;
             $systemQty = $recon['book_stock_eod'] ?? null;
-            $physicalQty = $recon['final_physical_eod'] ?? null;
-            $variance = $recon['variance'] ?? null;
+            // GOOD-only, never the total — see goodPhysicalEod()/this
+            // class's own docblock.
+            $physicalQty = $recon !== null ? self::goodPhysicalEod($recon) : null;
+            $variance = ($systemQty !== null && $physicalQty !== null) ? round($physicalQty - $systemQty, 6) : null;
             $unitCost = (float) $r['unit_cost_base'];
 
             $nilaiSistem = $systemQty !== null ? $systemQty * $unitCost : null;
@@ -570,6 +646,26 @@ final class StockOpnameMonthlyReportService
             $bySku[$row['sku']] = $row;
         }
         return $bySku;
+    }
+
+    /**
+     * Derives final GOOD/usable physical EOD from one
+     * StockOpnameBookStockService::reconciliation() row — see this
+     * class's own docblock for the full derivation rationale. Returns
+     * null when the reconciliation itself has no final physical total
+     * yet (nobody's counted this line, or both sides counted but
+     * disagree and await supervisor resolution — the same cases
+     * reconciliation()['final_physical_eod'] is already null for).
+     */
+    private static function goodPhysicalEod(array $reconRow): ?float
+    {
+        if ($reconRow['final_physical_eod'] === null) {
+            return null;
+        }
+        $rusak = $reconRow['final_damaged'] ?? 0.0;
+        $expired = $reconRow['final_expired'] ?? 0.0;
+        $deadstock = $reconRow['final_deadstock'] ?? 0.0;
+        return round((float) $reconRow['final_physical_eod'] - (float) $rusak - (float) $expired - (float) $deadstock, 6);
     }
 
     /** @return array{0:string,1:array<string,mixed>} */

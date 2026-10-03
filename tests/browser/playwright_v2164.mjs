@@ -10,7 +10,15 @@
 //   7. pagination bekerja (pager controls render)
 //  11/12. Print/PDF + Excel Final buttons open without a JS error (SUPERADMIN)
 //  13. kolom HPP TIDAK ADA anywhere in the rendered report (session list OR detail)
-//  14. permission existing tidak diregresikan (VIEWER sees NO export/print buttons)
+//  14. permission existing tidak diregresikan (VIEWER sees NO Excel/Rekonsiliasi buttons)
+//
+// [V2.16.6 additions] report-specific Print/PDF (never the old reused
+// /stock-opname/{id}/print route) + CSS horizontal-overflow check:
+//   6/7/8/9/10. print document is A4 landscape, shows system/final/variance
+//     Qty+Rupiah values, Rusak/Expired/Deadstock, NO HPP, and all item rows
+//   13c. .so-report-table-wrap actually applies overflow-x: auto
+//   14e/14f. VIEWER (INVENTORY_VIEW only) now CAN use Print/PDF — the new
+//     route is INVENTORY_VIEW-gated, unlike Excel Final/Rekonsiliasi Final
 //
 // Usage:
 //   NODE_PATH=/opt/node22/lib/node_modules node tests/browser/playwright_v2164.mjs
@@ -136,13 +144,31 @@ try {
         const hppLeak = /\bHPP\b|Unit Cost|Harga Pokok/i.test(detailPageText);
         check('13. NO "HPP" / "Unit Cost" / "Harga Pokok" text anywhere in the rendered report', !hppLeak, hppLeak ? 'LEAK DETECTED' : 'clean');
 
+        // [V2.16.6] .so-report-table-wrap must actually apply horizontal
+        // overflow (the malformed CSS comment that used to swallow this
+        // rule is fixed in app.css — this proves the browser parses it).
+        const tableWrapOverflowX = await page.locator('.so-report-table-wrap').first().evaluate((el) => getComputedStyle(el).overflowX);
+        check('13c. [V2.16.6] .so-report-table-wrap has overflow-x: auto applied (CSS comment fix verified)', tableWrapOverflowX === 'auto', tableWrapOverflowX);
+
         // 11/12. Print/PDF + Excel Final buttons are visible for a privileged
-        // user and open a new tab without crashing the page (no JS error).
+        // user. [V2.16.6] Print/PDF now opens THIS report's OWN A4-landscape
+        // finance print (GET /stock-opname-reports/{id}/print) — never the
+        // old reused /stock-opname/{id}/print route.
         const printBtn = page.locator('button:has-text("Print / PDF")').first();
         check('11. Print/PDF button is visible for SUPERADMIN', await printBtn.count() > 0);
         const [printPopup] = await Promise.all([context.waitForEvent('page'), printBtn.click()]);
         await printPopup.waitForLoadState('load').catch(() => {});
-        check('11b. Print/PDF opens a new tab (window.open to the reused print route)', printPopup !== undefined);
+        const printUrl = printPopup.url();
+        check('11b. [V2.16.6] Print/PDF opens the NEW report-specific route, not the old /stock-opname/{id}/print', printUrl.includes('/stock-opname-reports/') && printUrl.endsWith('/print'), printUrl);
+        const printHtml = await printPopup.content();
+        check('6. [V2.16.6] print document declares A4 LANDSCAPE', /size:\s*A4\s*landscape/i.test(printHtml));
+        check('[V2.16.6] print header shows AMORCAKES AND BAKERY / PT. Inovasi Sukses Persada', printHtml.includes('AMORCAKES AND BAKERY') && printHtml.includes('PT. Inovasi Sukses Persada'));
+        check('7. [V2.16.6] print shows system/final/variance Qty AND Rupiah values', /Stok Sistem Qty/.test(printHtml) && /Stok Fisik Final Nilai/.test(printHtml) && /Selisih Nilai/.test(printHtml) && /Rp&nbsp;|Rp\s/.test(printHtml));
+        check('8. [V2.16.6] print shows Rusak/Expired/Deadstock columns', printHtml.includes('>Rusak<') && printHtml.includes('>Expired<') && printHtml.includes('>Deadstock<'));
+        const printHppLeak = /\bHPP\b|Unit Cost|Harga Pokok/i.test(printHtml);
+        check('9. [V2.16.6] print has NO HPP/Unit Cost/Harga Pokok text', !printHppLeak, printHppLeak ? 'LEAK DETECTED' : 'clean');
+        const printRowCount = (printHtml.match(/<tbody>[\s\S]*<\/tbody>/)?.[0].match(/<tr>/g) || []).length;
+        check('10. [V2.16.6] print includes every item row, not only the current UI page', printRowCount >= itemRows, `print=${printRowCount} ui_page=${itemRows}`);
         await printPopup.close();
 
         const excelBtn = page.locator('button:has-text("Excel Final")').first();
@@ -189,8 +215,21 @@ try {
         const viewerDetailVisible = await page.locator(`.hpp-title:has-text("${seed.session_number}")`).count() > 0;
         check('14c. VIEWER can open the detail report (INVENTORY_VIEW is sufficient)', viewerDetailVisible);
 
-        const viewerExportButtons = await page.locator('button:has-text("Excel Final"), button:has-text("Rekonsiliasi Final"), button:has-text("Print / PDF")').count();
-        check('14d. VIEWER does NOT see the Excel Final/Rekonsiliasi Final/Print buttons (no STOCK_OPNAME_MANAGE/SUPERVISE)', viewerExportButtons === 0, String(viewerExportButtons));
+        const viewerExcelReconButtons = await page.locator('button:has-text("Excel Final"), button:has-text("Rekonsiliasi Final")').count();
+        check('14d. VIEWER does NOT see Excel Final/Rekonsiliasi Final (no STOCK_OPNAME_MANAGE/SUPERVISE)', viewerExcelReconButtons === 0, String(viewerExcelReconButtons));
+
+        // [V2.16.6] Print/PDF is a NEW, separate, INVENTORY_VIEW-gated route
+        // — a VIEWER-only user who can already see this report can now also
+        // print it (a side-benefit fix, not a weakening of any EXISTING
+        // route's security: the old STOCK_OPNAME_MANAGE-gated print route
+        // is untouched and still refuses this user).
+        const viewerPrintBtn = page.locator('button:has-text("Print / PDF")').first();
+        check('14e. [V2.16.6] VIEWER (INVENTORY_VIEW only) DOES see Print/PDF (new route only needs INVENTORY_VIEW)', await viewerPrintBtn.count() > 0);
+        const [viewerPrintPopup] = await Promise.all([context.waitForEvent('page'), viewerPrintBtn.click()]);
+        await viewerPrintPopup.waitForLoadState('load').catch(() => {});
+        const viewerPrintTitle = await viewerPrintPopup.title();
+        check('14f. [V2.16.6] VIEWER can successfully open the print route (no 403, real document loads)', viewerPrintTitle.includes(seed.session_number), viewerPrintTitle);
+        await viewerPrintPopup.close();
 
         const viewerPageText = await page.locator('#tab-opname-laporan').innerText();
         const viewerHppLeak = /\bHPP\b|Unit Cost|Harga Pokok/i.test(viewerPageText);

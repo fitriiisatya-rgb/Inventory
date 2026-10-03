@@ -46,6 +46,7 @@ require_once __DIR__ . '/../services/StockOpnameReferenceImportService.php';
 require_once __DIR__ . '/../services/StockOpnameFinalExportService.php';
 require_once __DIR__ . '/../services/StockOpnameBookStockService.php';
 require_once __DIR__ . '/../services/StockOpnameMonthlyReportService.php';
+require_once __DIR__ . '/../services/StockOpnameMonthlyReportPrintService.php';
 require_once __DIR__ . '/../services/TransferService.php';
 require_once __DIR__ . '/../services/ProductionService.php';
 require_once __DIR__ . '/../services/BookClosingService.php';
@@ -136,6 +137,7 @@ use App\Services\StockOpnameReferenceImportService;
 use App\Services\StockOpnameFinalExportService;
 use App\Services\StockOpnameBookStockService;
 use App\Services\StockOpnameMonthlyReportService;
+use App\Services\StockOpnameMonthlyReportPrintService;
 use App\Services\StockAdjustmentService;
 use App\Services\ProductionService;
 use App\Services\BookClosingService;
@@ -2009,6 +2011,32 @@ $routes = [
         ]);
 
         inv_ok($detail, 'OK');
+    },
+
+    // PHASE V2.16.6 — report-specific Print/PDF for the monthly report
+    // above (A4 landscape, finance-oriented). Deliberately a NEW route
+    // rather than reusing GET /stock-opname/{id}/print
+    // (StockOpnamePrintService), which is untouched and keeps serving the
+    // existing operational discrepancy-only A4-portrait print. Same
+    // permission/warehouse-scope pattern as GET /stock-opname-reports/{id}
+    // above (INVENTORY_VIEW, not the stricter STOCK_OPNAME_MANAGE the old
+    // print route requires) — a new, separate endpoint, so this does not
+    // loosen any existing route's security; it also means a VIEWER-only
+    // user who can already see this report can now print it too.
+    'GET /stock-opname-reports/{id}/print' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $sessionId = (int) $params['id'];
+        $wh = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $wh->execute(['id' => $sessionId]);
+        $warehouseId = $wh->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+
+        inv_html(StockOpnameMonthlyReportPrintService::renderResult($pdo, $sessionId, $user['username'] ?? null));
     },
 
     // Report 9 — Adjustment / Selisih.

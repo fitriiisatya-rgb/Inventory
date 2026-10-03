@@ -860,11 +860,12 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 }
 .hpp-pre-go-live-value { color: var(--text3); }
 
-/* PHASE V2.16.4 — "Laporan Stock Opname" (stock-opname-report.js). Reuses
-   .card/.hpp-page-header/.hpp-filter-*/.hpp-kpi-* above for the shared
-   chrome; the rules below cover only this report's own table/action/pager
-   layout. Single shared app.css, same as every other feature in this repo
-   — no separate per-feature stylesheet exists here. */
+/* PHASE V2.16.4 — "Laporan Stock Opname" (stock-opname-report.js).
+   Reuses existing card, hpp-page-header, hpp-filter and hpp-kpi styles
+   above for the shared chrome; the rules below cover only this report's
+   own table/action/pager layout. Single shared app.css, same as every
+   other feature in this repo — no separate per-feature stylesheet
+   exists here. */
 .so-report-table-wrap { overflow-x: auto; }
 .so-report-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; white-space: nowrap; }
 .so-report-table th, .so-report-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; }

@@ -420,10 +420,14 @@ const InvApi = (() => {
         // PHASE V2.16.4 — "Laporan Stock Opname": monthly/session reporting
         // for finance/accounting/audit, separate from opnameReport/
         // opnameReportDetail above (the older P1/P2 dual-count report).
-        // Print/Excel actions reuse opnamePrintUrl/opnameExportFinalUrl/
+        // Excel Final/Rekonsiliasi Final actions reuse opnameExportFinalUrl/
         // opnameExportEodFinalUrl above — no duplicate export endpoint.
+        // [V2.16.6] Print/PDF does NOT reuse opnamePrintUrl — that is the
+        // old discrepancy-only A4-portrait print; this report has its own
+        // A4-landscape finance print via stockOpnameReportPrintUrl below.
         stockOpnameReports: (params) => request('GET', `/stock-opname-reports${qs(params)}`),
         stockOpnameReportDetail: (id, params) => request('GET', `/stock-opname-reports/${id}${qs(params)}`),
+        stockOpnameReportPrintUrl: (id) => `/api/stock-opname-reports/${id}/print`,
 
         // ---- stock adjustments ----
         postAdjustment: (payload) => request('POST', '/stock-adjustments', payload),
