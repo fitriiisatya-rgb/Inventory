@@ -18,6 +18,26 @@
 const StockOpname = (() => {
     let currentWarehouseId = null;
     let currentSessionId = null;
+    // STABILIZATION (production incident) — two overlapping loadForWarehouse()
+    // / renderSession() calls (e.g. the warehouse selector's own auto-load
+    // on mount racing an immediate manual selection change, or two quick
+    // warehouse switches) both read/write the SAME #opname-body element.
+    // Each call only clears the body ONCE, near its own start, then makes
+    // several further AWAITED calls (Reference SCM card, Stok Buku SO
+    // card, the FINALIZED/Post-button view) that append MORE content
+    // without clearing again — so once two calls are both past their own
+    // single clear, their later appends pile up TOGETHER instead of one
+    // replacing the other. Observed effect: two "Post Hasil Opname"
+    // buttons rendered at once (for two different sessions), and because
+    // the module-level currentSessionId had since been overwritten by
+    // whichever call ran last, clicking the stale button posted against
+    // the WRONG session id — easily perceived as "the button did nothing"
+    // if that response's own view then got immediately overwritten again.
+    // Fixed with a simple generation token: renderSession() stamps itself
+    // the current generation; any call that resumes after a NEWER
+    // renderSession()/loadForWarehouse() has started silently aborts
+    // before touching the DOM, so only the latest request can ever win.
+    let renderGeneration = 0;
 
     function canSupervise() { return Auth.hasPermission('STOCK_OPNAME_SUPERVISE'); }
 
@@ -202,11 +222,13 @@ const StockOpname = (() => {
     }
 
     async function loadForWarehouse() {
+        const myGeneration = ++renderGeneration;
         currentWarehouseId = Number(document.getElementById('opname-wh').value);
         const body = document.getElementById('opname-body');
         body.innerHTML = '<div class="alert alert-info">Memeriksa status opname gudang ini...</div>';
         try {
             const sessions = await InvApi.listOpnameSessions({ warehouse_id: currentWarehouseId });
+            if (myGeneration !== renderGeneration) return; // a newer load/render started while this was in flight — never act on a stale response (STABILIZATION)
             const active = sessions.find((s) => s.status !== 'POSTED' && s.status !== 'CANCELLED');
             if (active) {
                 await renderSession(active.id);
@@ -214,6 +236,7 @@ const StockOpname = (() => {
                 renderStartButton();
             }
         } catch (err) {
+            if (myGeneration !== renderGeneration) return;
             UI.handleApiError(err);
             body.innerHTML = `<div class="alert alert-error">Gagal memuat status opname: ${(err && err.message) || ''}</div>`;
         }
@@ -243,11 +266,31 @@ const StockOpname = (() => {
     }
 
     async function renderSession(sessionId) {
+        const myGeneration = ++renderGeneration;
         currentSessionId = sessionId;
         const body = document.getElementById('opname-body');
         body.innerHTML = '<div class="alert alert-info">Memuat sesi opname...</div>';
         try {
             const session = await InvApi.getOpname(sessionId);
+            // STABILIZATION — a newer renderSession()/loadForWarehouse() call
+            // started while this fetch was in flight (e.g. a quick warehouse
+            // switch, or the selector's auto-load racing a manual change).
+            // Every DOM mutation this function makes happens after this
+            // point, so aborting here — before the FIRST one — is enough to
+            // stop this stale call from ever appending a second "Post Hasil
+            // Opname" card (or anything else) alongside the newer one's.
+            if (myGeneration !== renderGeneration) return;
+            // STABILIZATION — this function makes SEVERAL further awaited
+            // calls below (Reference SCM card, Stok Buku SO card, team
+            // assignment/review cards), each of which can take long enough
+            // for a NEWER renderSession()/loadForWarehouse() call to start
+            // and bump renderGeneration again. `stale()` is re-checked
+            // after every one of them, immediately before its result is
+            // appended, so a superseded call can never pile its cards on
+            // top of a newer call's — the exact mechanism that used to let
+            // a quick warehouse switch leave two "Post Hasil Opname"
+            // buttons (for two different sessions) both live in the DOM.
+            const stale = () => myGeneration !== renderGeneration;
             body.innerHTML = '';
 
             if (session.role) {
@@ -280,9 +323,13 @@ const StockOpname = (() => {
             // session now — FINDINGS_V1 sees ONLY "Stok Buku SO".
             if (canSupervise()) {
                 if ((session.counting_model || 'LEGACY_DUAL_COUNT') !== 'FINDINGS_V1') {
-                    body.appendChild(await buildReferenceScmCard(session));
+                    const referenceCard = await buildReferenceScmCard(session);
+                    if (stale()) return;
+                    body.appendChild(referenceCard);
                 }
-                body.appendChild(await buildStokBukuSoCard(session));
+                const stokBukuCard = await buildStokBukuSoCard(session);
+                if (stale()) return;
+                body.appendChild(stokBukuCard);
             }
 
             if (session.status === 'OPEN') {
@@ -317,9 +364,13 @@ const StockOpname = (() => {
                         upgradeCard.appendChild(upgradeBtn);
                         body.appendChild(upgradeCard);
                     }
-                    body.appendChild(await buildAssignCountersCard(session));
+                    const assignCard = await buildAssignCountersCard(session);
+                    if (stale()) return;
+                    body.appendChild(assignCard);
                     if (canSupervise()) {
-                        body.appendChild(await buildSupervisorReviewCard(session));
+                        const reviewCard = await buildSupervisorReviewCard(session);
+                        if (stale()) return;
+                        body.appendChild(reviewCard);
                     } else {
                         body.appendChild(UI.el('div', { class: 'card' }, [
                             UI.el('div', { class: 'alert alert-info' }, 'P1 dan P2 sedang menghitung fisik. Hubungi supervisor untuk melihat perbandingan hasil hitung.'),
@@ -2287,28 +2338,50 @@ const StockOpname = (() => {
         }
     }
 
+    // STABILIZATION (production incident) — "Post Hasil Opname" looked
+    // clickable but silently did nothing. Root cause was NOT the frontend:
+    // a FINDINGS_V1 session can never reach FINALIZED (see render()'s own
+    // FINDINGS_V1 branch above, which never renders this button's card at
+    // all) and, independently, StockOpnameService::post() unconditionally
+    // refuses to post a FINDINGS_V1 session server-side
+    // (FINDINGS_V1_CHECKPOINT_B_REQUIRED/409) until its own dedicated EOD
+    // reconciliation workflow ships — that guard is intentional and is
+    // NEVER weakened or bypassed from here. What WAS worth hardening at
+    // this layer: (1) a human-readable explanation for that one error
+    // code, so a supervisor who somehow reaches this call never again sees
+    // a bare technical message, (2) an explicit "posting…" loading label
+    // (previously only a disabled attribute with no visible text change),
+    // and (3) a defensive re-entrancy guard — belt-and-suspenders on top of
+    // the native disabled-button click suppression already in place.
     async function postOpname() {
         const btn = document.getElementById('opname-post-btn');
+        if (!btn || btn.disabled) return; // already posting, or this view no longer has the button — never double-submit
         const alertBox = document.getElementById('opname-post-alert');
         alertBox.innerHTML = '';
         const overrides = {};
         document.querySelectorAll('.opname-cost-override').forEach((input) => {
             if (input.value !== '') overrides[input.dataset.itemId] = Number(input.value);
         });
+        const originalLabel = btn.textContent;
         btn.disabled = true;
+        btn.textContent = 'Memposting…';
         try {
             await InvApi.postOpname(currentSessionId, overrides);
             UI.toast('Opname berhasil diposting — stok gudang sudah disesuaikan.', 'success');
             await renderSession(currentSessionId);
+            return; // renderSession() replaced this button's card entirely — nothing left to restore below
         } catch (err) {
             if (err && err.code === 'COST_REQUIRED') {
                 alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, `${err.message} — isi kolom harga untuk barang tersebut sebelum posting.`));
+            } else if (err && err.code === 'FINDINGS_V1_CHECKPOINT_B_REQUIRED') {
+                alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Sesi Team/Findings ini belum bisa diposting lewat tombol ini — gunakan proses rekonsiliasi EOD (Stok Buku SO) dan hubungi supervisor/IT untuk posting terkontrol.'));
             } else {
                 UI.handleApiError(err);
                 alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal posting opname.'));
             }
         } finally {
             btn.disabled = false;
+            btn.textContent = originalLabel;
         }
     }
 
