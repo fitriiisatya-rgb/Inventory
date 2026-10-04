@@ -399,8 +399,8 @@ final class DashboardInventoryService
         $all = StockReportService::list($pdo, $params);
         $critical = StockReportService::list($pdo, ['status' => 'CRITICAL'] + $params);
 
-        $dead = self::deadStock($pdo, $wh);
-        $rusak = self::rusakFromLatestOpname($pdo, $wh);
+        $dead = self::conditionFromLatestOpname($pdo, $wh, 'final_deadstock_qty');
+        $rusak = self::conditionFromLatestOpname($pdo, $wh, 'final_rusak_qty');
         $expired = self::nearExpired($pdo, $wh);
 
         $rows = [
@@ -408,8 +408,8 @@ final class DashboardInventoryService
                 'action' => ['type' => 'stock_report', 'filters' => ['status' => 'OUT_OF_STOCK']]],
             ['key' => 'below_minimum', 'label' => 'Di Bawah Minimum', 'hint' => 'SKU di bawah minimum', 'sku_count' => $critical['summary']['total_items'], 'value' => $critical['summary']['total_value'],
                 'action' => ['type' => 'stock_report', 'filters' => ['status' => 'CRITICAL']]],
-            ['key' => 'dead_stock', 'label' => 'Dead Stock', 'hint' => 'Tidak bergerak ≥ 90 hari', 'sku_count' => $dead['sku_count'], 'value' => $dead['value'],
-                'action' => ['type' => 'tab', 'tab' => 'laporan-slow-movement']],
+            ['key' => 'dead_stock', 'label' => 'Dead Stock', 'hint' => $dead['hint'], 'sku_count' => $dead['sku_count'], 'value' => $dead['value'],
+                'action' => ['type' => 'detail', 'detail' => 'deadstock']],
             ['key' => 'rusak', 'label' => 'Rusak', 'hint' => $rusak['hint'], 'sku_count' => $rusak['sku_count'], 'value' => $rusak['value'],
                 'action' => ['type' => 'detail', 'detail' => 'rusak']],
         ];
@@ -420,33 +420,18 @@ final class DashboardInventoryService
         return $rows;
     }
 
-    /** @return array{sku_count:int,value:float} items with stock that have not moved for >= 90 days (or never) */
-    private static function deadStock(PDO $pdo, ?int $wh): array
-    {
-        $r = SlowMovementReportService::list($pdo, ['warehouse_id' => $wh, 'threshold_days' => 90, 'include_zero_stock' => false, 'page' => 1, 'per_page' => 5000]);
-        $items = [];
-        $value = 0.0;
-        foreach ($r['rows'] as $row) {
-            if ($row['qty_on_hand'] <= 0) {
-                continue;
-            }
-            $items[$row['item']['id']] = true;
-            $value += (float) $row['inventory_value'];
-        }
-        return ['sku_count' => count($items), 'value' => round($value, 4)];
-    }
-
     /**
-     * "Rusak": the damaged quantity recorded by the LATEST POSTED Stock Opname
-     * of each warehouse in scope (stock_opname_lines.final_rusak_qty x the
-     * line's unit_cost_base) — the only place a damaged condition is recorded.
-     * It is a recorded finding, not a live balance, and is labelled so.
+     * "Rusak" / "Dead Stock": the quantity of that condition recorded by the LATEST POSTED Stock
+     * Opname of each warehouse in scope (stock_opname_lines.final_rusak_qty / final_deadstock_qty x
+     * the line's unit_cost_base) — the same figures the Stock Opname result shows. A recorded
+     * finding, not a live balance, and labelled so. (Dead Stock used to be a "no movement for
+     * >= 90 days" report; it now follows the SO result as the owner asked.)
      *
      * @return array{sku_count:int,value:float,hint:string}
      */
-    private static function rusakFromLatestOpname(PDO $pdo, ?int $wh): array
+    private static function conditionFromLatestOpname(PDO $pdo, ?int $wh, string $col): array
     {
-        [$sql, $bind] = self::rusakSql($wh, null);
+        [$sql, $bind] = self::conditionSql($col, $wh, null);
         $stmt = $pdo->prepare("SELECT COUNT(DISTINCT x.item_id) AS skus, COALESCE(SUM(x.value),0) AS v FROM ({$sql}) x");
         $stmt->execute($bind);
         $r = $stmt->fetch();
@@ -454,10 +439,13 @@ final class DashboardInventoryService
     }
 
     /** @return array{0:string,1:array<string,mixed>} */
-    private static function rusakSql(?int $wh, ?string $q): array
+    private static function conditionSql(string $col, ?int $wh, ?string $q): array
     {
+        if (!in_array($col, ['final_rusak_qty', 'final_deadstock_qty'], true)) {
+            throw new \InvalidArgumentException('unsupported condition column');
+        }
         $bind = [];
-        $where = ["s.status = 'POSTED'", 'sol.final_rusak_qty > 0'];
+        $where = ["s.status = 'POSTED'", "sol.{$col} > 0"];
         // latest POSTED session per warehouse (date desc, id desc)
         $where[] = "s.id = (SELECT s2.id FROM stock_opname_sessions s2 WHERE s2.warehouse_id = s.warehouse_id AND s2.status = 'POSTED' ORDER BY s2.session_date DESC, s2.id DESC LIMIT 1)";
         if ($wh !== null) {
@@ -469,8 +457,8 @@ final class DashboardInventoryService
             $bind['r_q1'] = $bind['r_q2'] = '%' . trim($q) . '%';
         }
         $sql = "SELECT sol.item_id, i.sku, i.name, u.code AS unit, w.name AS warehouse_name, w.code AS warehouse_code,
-                       s.session_number, s.id AS session_id, sol.final_rusak_qty AS qty, sol.unit_cost_base AS hpp,
-                       ROUND(sol.final_rusak_qty * sol.unit_cost_base, 2) AS value, COALESCE(sol.final_notes, sol.notes) AS note
+                       s.session_number, s.id AS session_id, sol.{$col} AS qty, sol.unit_cost_base AS hpp,
+                       ROUND(sol.{$col} * sol.unit_cost_base, 2) AS value, COALESCE(sol.final_notes, sol.notes) AS note
                   FROM stock_opname_lines sol
                   JOIN stock_opname_sessions s ON s.id = sol.session_id
                   JOIN items i ON i.id = sol.item_id
@@ -586,7 +574,7 @@ final class DashboardInventoryService
 
     public const DETAIL_TYPES = [
         'opening_stock', 'closing_stock', 'purchase_in', 'stock_out', 'current_stock',
-        'pending_transfers', 'active_opname', 'rusak',
+        'pending_transfers', 'active_opname', 'rusak', 'deadstock',
         'move_transfer_in', 'move_transfer_out', 'move_transfer_net', 'move_adjustment_positive', 'move_adjustment_negative', 'move_opening_in', 'move_other',
     ];
 
@@ -647,7 +635,9 @@ final class DashboardInventoryService
             case 'active_opname':
                 return $base + self::activeOpnameDetail($pdo, $wh, $page, $perPage);
             case 'rusak':
-                return $base + self::rusakDetail($pdo, $wh, $filters, $page, $perPage);
+                return $base + self::conditionDetail($pdo, 'rusak', 'final_rusak_qty', $wh, $filters, $page, $perPage);
+            case 'deadstock':
+                return $base + self::conditionDetail($pdo, 'deadstock', 'final_deadstock_qty', $wh, $filters, $page, $perPage);
         }
         throw new ValidationException(["type tidak dikenal: {$type}"]);
     }
@@ -888,10 +878,10 @@ final class DashboardInventoryService
             'grand_total' => ['value' => null, 'row_count' => $total, 'sku_count' => 0], 'card_total' => ['value' => null, 'row_count' => $total]];
     }
 
-    private static function rusakDetail(PDO $pdo, ?int $wh, array $filters, int $page, int $perPage): array
+    private static function conditionDetail(PDO $pdo, string $kind, string $col, ?int $wh, array $filters, int $page, int $perPage): array
     {
-        [$sql, $bind] = self::rusakSql($wh, $filters['q'] ?? null);
-        [$cardSql, $cardBind] = self::rusakSql($wh, null);
+        [$sql, $bind] = self::conditionSql($col, $wh, $filters['q'] ?? null);
+        [$cardSql, $cardBind] = self::conditionSql($col, $wh, null);
         $tot = $pdo->prepare("SELECT COUNT(*) AS n, COALESCE(SUM(x.value),0) AS v, COUNT(DISTINCT x.item_id) AS skus FROM ({$sql}) x");
         $tot->execute($bind);
         $t = $tot->fetch();
@@ -901,7 +891,7 @@ final class DashboardInventoryService
         $stmt = $pdo->prepare("SELECT x.* FROM ({$sql}) x ORDER BY x.value DESC, x.sku ASC LIMIT " . (int) $perPage . ' OFFSET ' . (int) (($page - 1) * $perPage));
         $stmt->execute($bind);
         return [
-            'kind' => 'rusak',
+            'kind' => $kind,
             'rows' => array_map(static fn (array $r): array => [
                 'sku' => $r['sku'], 'name' => $r['name'], 'warehouse' => $r['warehouse_name'], 'session' => $r['session_number'] ?? ('OPN-' . $r['session_id']), 'session_id' => (int) $r['session_id'],
                 'unit' => $r['unit'], 'qty' => round((float) $r['qty'], 6), 'hpp' => round((float) $r['hpp'], 4), 'value' => round((float) $r['value'], 2), 'note' => $r['note'],

@@ -168,10 +168,10 @@ function dashboard_build_fixture(PDO $pdo): array
     };
     $oldS = $mkSession($A, '2026-05-01', 'SO-DF-OLD');
     $newS = $mkSession($A, '2026-06-01', 'SO-DF-NEW');
-    $line = $pdo->prepare('INSERT INTO stock_opname_lines (session_id, item_id, system_qty_base, counted_qty_base, is_counted, unit_cost_base, final_rusak_qty) VALUES (:s,:i,10,10,1,:h,:r)');
-    $line->execute(['s' => $oldS, 'i' => $it['tepung']['id'], 'h' => 1000, 'r' => 99]);   // must NOT count (older session)
-    $line->execute(['s' => $newS, 'i' => $it['tepung']['id'], 'h' => 1000, 'r' => 3]);    // 3 x 1000 = 3.000
-    $line->execute(['s' => $newS, 'i' => $it['gula']['id'], 'h' => 2000, 'r' => 2]);      // 2 x 2000 = 4.000
+    $line = $pdo->prepare('INSERT INTO stock_opname_lines (session_id, item_id, system_qty_base, counted_qty_base, is_counted, unit_cost_base, final_rusak_qty, final_deadstock_qty) VALUES (:s,:i,10,10,1,:h,:r,:d)');
+    $line->execute(['s' => $oldS, 'i' => $it['tepung']['id'], 'h' => 1000, 'r' => 99, 'd' => 50]);  // must NOT count (older session)
+    $line->execute(['s' => $newS, 'i' => $it['tepung']['id'], 'h' => 1000, 'r' => 3, 'd' => 4]);    // rusak 3 x 1000 = 3.000 · dead stock 4 x 1000 = 4.000
+    $line->execute(['s' => $newS, 'i' => $it['gula']['id'], 'h' => 2000, 'r' => 2, 'd' => 1]);      // rusak 2 x 2000 = 4.000 · dead stock 1 x 2000 = 2.000
     // an OPEN session on B so Stock Opname Aktif = 1
     $uuid = sprintf('%08x-%04x-%04x-%04x-%012x', random_int(0, 0xffffffff), random_int(0, 0xffff), random_int(0, 0xffff), random_int(0, 0xffff), random_int(0, 0xffffffffffff));
     $pdo->prepare("INSERT INTO stock_opname_sessions (warehouse_id, session_date, session_uuid, session_number, scope, status, counting_model, created_by) VALUES (:w,:d,:u,'SO-DF-OPEN','SELECTED_ITEMS','OPEN','LEGACY_DUAL_COUNT',:c)")

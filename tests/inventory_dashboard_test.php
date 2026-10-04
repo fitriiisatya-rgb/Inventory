@@ -204,14 +204,11 @@ check('Rusak = ONLY the latest POSTED opname of the warehouse: 3x1.000 + 2x2.000
 $rd = D::detail($pdo, 'rusak', null, 'today', null, null, ['page' => 1, 'per_page' => 25]);
 check('Rusak drill-down: 2 rows, Σ == card, shows the session number', $rd['pagination']['total'] === 2 && near($rd['grand_total']['value'], 7000.0) && $rd['rows'][0]['session'] === 'SO-DF-NEW');
 check('Rusak for warehouse B (no posted opname) is 0', (function () use ($pdo, $W) { foreach (D::overview($pdo, $W['B'], 'today')['attention'] as $a) { if ($a['key'] === 'rusak') return $a['sku_count'] === 0 && $a['value'] == 0.0; } return false; })());
-$deadExpected = $pdo->query(
-    "SELECT COUNT(DISTINCT s.item_id) c, COALESCE(SUM(s.v),0) v FROM (
-        SELECT b.item_id, b.warehouse_id, SUM(b.qty_base) q, SUM(b.qty_base*b.unit_cost_base) v FROM inventory_batches b GROUP BY b.item_id, b.warehouse_id HAVING SUM(b.qty_base) > 0) s
-     LEFT JOIN (SELECT l.item_id, l.warehouse_id, MAX(t.transaction_date) mv FROM inventory_transaction_lines l JOIN inventory_transactions t ON t.id=l.transaction_id WHERE t.status='POSTED' AND t.inventory_effect=1 GROUP BY l.item_id, l.warehouse_id) m
-       ON m.item_id = s.item_id AND m.warehouse_id = s.warehouse_id
-     WHERE m.mv IS NULL OR m.mv < DATE_SUB(CURDATE(), INTERVAL 90 DAY)"
-)->fetch();
-check('Dead Stock (company) == independent SQL (stock>0, no movement ≥ 90 days)', $att['dead_stock']['sku_count'] === (int) $deadExpected['c'] && near($att['dead_stock']['value'], (float) $deadExpected['v']), "{$att['dead_stock']['sku_count']}/{$att['dead_stock']['value']} vs {$deadExpected['c']}/{$deadExpected['v']}");
+check('Dead Stock = ONLY the latest POSTED opname of the warehouse (same source as the SO result): 4x1.000 + 1x2.000 = 6.000 over 2 SKU (the older session\'s 50 is ignored)', $att['dead_stock']['sku_count'] === 2 && near($att['dead_stock']['value'], 6000.0) && $att['dead_stock']['hint'] === 'Hasil Stock Opname terakhir', json_encode($att['dead_stock']));
+$dd = D::detail($pdo, 'deadstock', null, 'today', null, null, ['page' => 1, 'per_page' => 25]);
+check('Dead Stock drill-down: 2 rows, Σ == card, shows the SO session number, kind=deadstock', $dd['kind'] === 'deadstock' && $dd['pagination']['total'] === 2 && near($dd['grand_total']['value'], 6000.0) && $dd['rows'][0]['session'] === 'SO-DF-NEW' && near($dd['card_total']['value'], $att['dead_stock']['value']));
+check('Dead Stock drill-down search narrows rows but the card total stays', (function () use ($pdo) { $r = D::detail($pdo, 'deadstock', null, 'today', null, null, ['page' => 1, 'per_page' => 25, 'q' => 'zzzz-nothing']); return $r['pagination']['total'] === 0 && near($r['card_total']['value'], 6000.0); })());
+check('Dead Stock for warehouse B (no posted opname) is 0; action opens the detail drawer', (function () use ($pdo, $W, $att) { foreach (D::overview($pdo, $W['B'], 'today')['attention'] as $a) { if ($a['key'] === 'dead_stock') return $a['sku_count'] === 0 && $a['value'] == 0.0 && $att['dead_stock']['action'] === ['type' => 'detail', 'detail' => 'deadstock']; } return false; })());
 check('Expired is omitted when no batch has an expiry date (no fabricated 0)', !isset($att['expired']));
 foreach ($ov['attention'] as $a) {
     check("attention '{$a['key']}' has an action the UI can follow", isset($a['action']['type']));

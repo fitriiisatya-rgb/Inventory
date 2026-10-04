@@ -191,28 +191,71 @@ const Dashboard = (() => {
         return card;
     }
 
-    // Rupiah figures are never wrapped or clipped: shrink the font stepwise until
-    // the figure fits its card (min 0.62rem); the full value stays in the title.
+    // Rupiah figures are never wrapped or clipped. A figure keeps its full text while it fits
+    // (shrinking at most to MIN_SHRINK of its CSS size); if it still does not fit it switches to
+    // the compact secondary format ("Rp 2,23 M", "Rp 12,5 jt") at the full CSS size and only as a
+    // last resort shrinks that. The exact value stays in `title` / `data-full` and in the
+    // drill-down; the underlying number is never changed.
+    const MIN_SHRINK = 0.86;
+    function compactRupiah(full) {
+        const m = /^(-?)\s*Rp\s*(-?)([\d.]+)(?:,(\d+))?\s*$/.exec(String(full).trim());
+        if (!m) return null;
+        const n = parseFloat(`${m[3].replace(/\./g, '')}.${m[4] || '0'}`);
+        const abs = Math.abs(n);
+        const sign = (m[1] || m[2]) ? '-' : '';
+        const unit = abs >= 1e12 ? [1e12, 'T'] : abs >= 1e9 ? [1e9, 'M'] : abs >= 1e6 ? [1e6, 'jt'] : null;
+        if (!unit) return null;
+        const body = (abs / unit[0]).toLocaleString('id-ID', { maximumFractionDigits: 2 });
+        return `${sign}Rp ${body} ${unit[1]}`;
+    }
     function fitValues(root) {
         const scope = root || document;
-        const fit = (v) => {
-            v.style.fontSize = '';
-            v.title = v.textContent;
+        const overflows = (v) => v.scrollWidth > v.clientWidth + 0.5;
+        const shrink = (v, floor) => {
             let px = parseFloat(getComputedStyle(v).fontSize);
             let guard = 80;
-            while (v.scrollWidth > v.clientWidth + 0.5 && px > 10 && guard-- > 0) {
+            while (overflows(v) && px > floor && guard-- > 0) {
                 px -= 0.5;
                 v.style.fontSize = `${px}px`;
             }
             return px;
         };
-        // KPI figures are sized individually; the four movement figures are all
-        // Rupiah of the same kind, so they share the SMALLEST fitted size and the
-        // row reads as one consistent set.
-        scope.querySelectorAll('.dash-kpis .dash-value').forEach(fit);
+        const reset = (v) => {
+            if (!v.dataset.full) v.dataset.full = v.textContent;
+            v.textContent = v.dataset.full;
+            v.style.fontSize = '';
+            v.title = v.dataset.full;
+            v.removeAttribute('data-compact');
+        };
+        const makeCompact = (v) => {
+            const c = compactRupiah(v.dataset.full);
+            if (!c) return false;
+            v.textContent = c;
+            v.dataset.compact = '1';
+            v.style.fontSize = '';
+            return true;
+        };
+        // Full text if it fits the floor size, else compact (when the figure can be compacted).
+        const needsCompact = (v) => {
+            reset(v);
+            const base = parseFloat(getComputedStyle(v).fontSize);
+            shrink(v, base * MIN_SHRINK);
+            const fits = !overflows(v);
+            v.style.fontSize = '';
+            return !fits && compactRupiah(v.dataset.full) !== null;
+        };
+        // KPI figures are sized individually (only money figures can go compact).
+        scope.querySelectorAll('.dash-kpis .dash-value').forEach((v) => {
+            if (needsCompact(v)) makeCompact(v); else reset(v);
+            shrink(v, 10);
+        });
+        // The four movement figures are all Rupiah of the same kind: they share one format
+        // (compact for all if any needs it) and the smallest fitted size, so the row reads as a set.
         scope.querySelectorAll('.dash-mv-cards').forEach((group) => {
             const vals = Array.from(group.querySelectorAll('.dash-value'));
-            const sizes = vals.map(fit);
+            const compact = vals.map(needsCompact).some(Boolean);
+            vals.forEach((v) => { reset(v); if (compact) makeCompact(v); });
+            const sizes = vals.map((v) => shrink(v, 10));
             const smallest = Math.min(...sizes);
             vals.forEach((v, i) => { if (sizes[i] > smallest) v.style.fontSize = `${smallest}px`; });
         });
@@ -523,6 +566,7 @@ const Dashboard = (() => {
         pending_transfers: [['No', 'reference_no'], ['Tanggal Kirim', 'date', 'date'], ['Dari', 'from'], ['Ke', 'to'], ['Jumlah Item', 'item_count', 'int'], ['Nilai', 'value', 'money']],
         active_opname: [['No. Sesi', 'reference_no'], ['Tanggal', 'date'], ['Gudang', 'warehouse'], ['Status', 'status'], ['Model', 'counting_model'], ['Jumlah Item', 'item_count', 'int']],
         rusak: [['SKU', 'sku'], ['Nama Barang', 'name'], ['Gudang', 'warehouse'], ['Sesi SO', 'session'], ['Satuan', 'unit'], ['Qty Rusak', 'qty', 'qty'], ['HPP', 'hpp', 'money'], ['Nilai', 'value', 'money'], ['Catatan', 'note']],
+        deadstock: [['SKU', 'sku'], ['Nama Barang', 'name'], ['Gudang', 'warehouse'], ['Sesi SO', 'session'], ['Satuan', 'unit'], ['Qty Dead Stock', 'qty', 'qty'], ['HPP', 'hpp', 'money'], ['Nilai', 'value', 'money'], ['Catatan', 'note']],
     };
 
     function columnsFor(type, kind) {
@@ -583,8 +627,8 @@ const Dashboard = (() => {
         search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { ds.q = search.value.trim(); ds.page = 1; fetchPage(); }, 300); });
         toolbar.appendChild(search);
 
-        const needsFilters = ['opening_stock', 'closing_stock', 'current_stock', 'purchase_in', 'stock_out', 'rusak'].includes(spec.type) || spec.type.startsWith('move_');
-        if (needsFilters && spec.type !== 'rusak') {
+        const needsFilters = ['opening_stock', 'closing_stock', 'current_stock', 'purchase_in', 'stock_out', 'rusak', 'deadstock'].includes(spec.type) || spec.type.startsWith('move_');
+        if (needsFilters && spec.type !== 'rusak' && spec.type !== 'deadstock') {
             const cats = (typeof Master !== 'undefined' && Master.categories) ? Master.categories() : [];
             const catSel = UI.el('select', { 'data-testid': 'dash-drawer-category', style: 'flex:0 0 200px; width:200px;' }, [UI.el('option', { value: '' }, 'Semua Kategori')].concat(cats.map((c) => UI.el('option', { value: String(c.id) }, c.name))));
             catSel.addEventListener('change', () => { ds.category = catSel.value; ds.page = 1; fetchPage(); });
