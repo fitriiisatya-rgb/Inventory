@@ -281,6 +281,12 @@ footer { text-align: center; font-size: 0.73rem; color: var(--text3); padding: 2
 .drawer-kv .k { font-size: 0.72rem; color: var(--text3); }
 .drawer-kv .v { font-size: 0.9rem; font-weight: 600; }
 
+/* MOCKUP — wide drawer modifier (Jejak Stock Opname and similar dense
+   report-style detail panels). Added alongside .drawer, never replacing
+   it, so every other screen's 560px drawer is completely unaffected. */
+.drawer-xl { width: min(1200px, 94vw); }
+@media (max-width: 900px) { .drawer-xl { width: 100vw; } }
+
 /* PHASE V2.2 — trace timeline (TraceDrawer, Trace Center) */
 .trace-timeline-row { border-left: 2px solid var(--border); padding: 4px 0 14px 14px; margin-left: 4px; position: relative; }
 .trace-timeline-row::before { content: ''; position: absolute; left: -5px; top: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }

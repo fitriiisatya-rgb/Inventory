@@ -180,7 +180,7 @@ const StockOpnameReport = (() => {
             const tbody = UI.el('tbody');
 
             sessions.forEach((s, idx) => {
-                const tr = UI.el('tr', {}, [
+                const tr = UI.el('tr', { style: 'cursor:pointer;', title: 'Klik untuk lihat jejak' }, [
                     UI.el('td', {}, String((result.page - 1) * result.per_page + idx + 1)),
                     UI.el('td', {}, s.session_number),
                     UI.el('td', {}, s.session_date),
@@ -191,6 +191,16 @@ const StockOpnameReport = (() => {
                     UI.el('td', {}, s.posted_at || '-'),
                     UI.el('td', { class: 'so-report-actions' }, buildActionButtons(s, container)),
                 ]);
+                // MOCKUP — row click opens the "Jejak Stock Opname" detail
+                // drawer (stock-opname-report-jejak.js), separate from the
+                // existing "Lihat Detail"/Print/Excel buttons below, which
+                // keep calling the real backend exactly as before. Ignores
+                // clicks that originate from those action buttons so both
+                // interactions coexist on the same row without conflict.
+                tr.addEventListener('click', (e) => {
+                    if (e.target.closest('button')) return;
+                    if (typeof StockOpnameJejak !== 'undefined') StockOpnameJejak.open(s);
+                });
                 tbody.appendChild(tr);
             });
 
