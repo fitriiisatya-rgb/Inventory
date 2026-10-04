@@ -67,6 +67,7 @@ require_once __DIR__ . '/../services/ImportHistoricalTransactionService.php';
 require_once __DIR__ . '/../services/InventoryHppReportService.php';
 require_once __DIR__ . '/../services/DashboardInventoryService.php';
 require_once __DIR__ . '/../services/InventoryMovementReportService.php';
+require_once __DIR__ . '/../services/MovementDailyReportService.php';
 require_once __DIR__ . '/../services/InventoryReconciliationReportService.php';
 require_once __DIR__ . '/../services/InventorySummaryReportService.php';
 require_once __DIR__ . '/../services/TransferReportService.php';
@@ -554,6 +555,26 @@ function inv_require_division_scope(array $user, ?int $divisionId): void
  * /reports/transactions — centralized here since the HPP report has 5
  * routes that all need it identically.
  */
+/**
+ * Pergerakan Stok Harian (redesign): common query parsing. Returns [start, end, warehouse(scope-resolved), category, q, item].
+ * The warehouse is resolved through inv_hpp_resolve_warehouse_scope(), so a warehouse-limited user can never widen the scope
+ * by editing the query string.
+ */
+function inv_movement_params(array $user, array $query): array
+{
+    $start = (string) ($query['start_date'] ?? '');
+    $end = (string) ($query['end_date'] ?? '');
+    if ($start === '' || $end === '' || strtotime($start) === false || strtotime($end) === false || strtotime($start) > strtotime($end)) {
+        inv_error(422, 'VALIDATION_ERROR', 'start_date and end_date are required and start_date must not be after end_date');
+    }
+    $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+    $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+    $cat = isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null;
+    $q = isset($query['q']) && trim((string) $query['q']) !== '' ? trim((string) $query['q']) : null;
+    $item = isset($query['item_id']) && $query['item_id'] !== '' ? (int) $query['item_id'] : null;
+    return [$start, $end, $warehouseId, $cat, $q, $item];
+}
+
 function inv_hpp_resolve_warehouse_scope(array $user, ?int $requestedWarehouseId): ?int
 {
     if ($user['role_code'] === 'STOCK') {
@@ -1638,6 +1659,127 @@ $routes = [
         $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
 
         inv_ok(InventoryMovementReportService::historicalTransactions($pdo, $date, $warehouseId), 'OK');
+    },
+
+    // PERGERAKAN STOK HARIAN (redesign) — item-level qty + value straight from the ledger (MovementDailyReportService).
+    // Strictly read-only (GET), INVENTORY_VIEW, warehouse scope enforced server-side like every other report here
+    // (a STOCK user is forced to their own warehouse whatever the query says).
+    'GET /reports/movement/overview' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        [$start, $end, $wh, $cat, $q, $item] = inv_movement_params($user, $query);
+        inv_ok(\App\Services\MovementDailyReportService::overview($pdo, $start, $end, $wh, $cat, $q, $item), 'OK');
+    },
+
+    'GET /reports/movement/day-items' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $date = (string) ($query['date'] ?? '');
+        if ($date === '' || strtotime($date) === false) {
+            inv_error(422, 'VALIDATION_ERROR', 'date is required (YYYY-MM-DD)');
+        }
+        [, , $wh, $cat, $q, $item] = inv_movement_params($user, $query + ['start_date' => $date, 'end_date' => $date]);
+        $movement = isset($query['movement']) && $query['movement'] !== '' ? (string) $query['movement'] : null;
+        inv_ok(\App\Services\MovementDailyReportService::dayItems(
+            $pdo, $date, $wh, $cat, $q, $item, $movement, (string) ($query['sort'] ?? 'sku'), (string) ($query['dir'] ?? 'asc'),
+            max(1, (int) ($query['page'] ?? 1)), min(200, max(1, (int) ($query['per_page'] ?? 25))), ($query['moved_only'] ?? '') === '1'
+        ), 'OK');
+    },
+
+    'GET /reports/movement/item-trail' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $date = (string) ($query['date'] ?? '');
+        $itemId = (int) ($query['item_id'] ?? 0);
+        if ($date === '' || strtotime($date) === false || $itemId <= 0) {
+            inv_error(422, 'VALIDATION_ERROR', 'date and item_id are required');
+        }
+        $warehouseId = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $warehouseId);
+        inv_ok(\App\Services\MovementDailyReportService::itemTrail($pdo, $date, $itemId, $warehouseId), 'OK');
+    },
+
+    'GET /reports/movement/period-transactions' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        [$start, $end, $wh, $cat, $q, $item] = inv_movement_params($user, $query);
+        inv_ok(\App\Services\MovementDailyReportService::periodTransactions(
+            $pdo, $start, $end, $wh, $cat, $q, $item, (string) ($query['bucket'] ?? ''),
+            max(1, (int) ($query['page'] ?? 1)), min(200, max(1, (int) ($query['per_page'] ?? 25)))
+        ), 'OK');
+    },
+
+    // Export mirrors what the screen shows: kind=summary (one row per date), detail (one row per item/date with movement),
+    // transactions (one row per underlying ledger line). Every file starts with the filters used + generated timestamp.
+    'GET /reports/movement/export' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        [$start, $end, $wh, $cat, $q, $item] = inv_movement_params($user, $query);
+        $kind = (string) ($query['kind'] ?? 'summary');
+        if (!in_array($kind, ['summary', 'detail', 'transactions'], true)) {
+            inv_error(422, 'VALIDATION_ERROR', 'kind must be summary, detail or transactions');
+        }
+        $mode = ($query['mode'] ?? 'nominal') === 'qty' ? 'qty' : 'nominal';
+        $whLabel = $wh !== null ? (string) ($pdo->query("SELECT name FROM warehouses WHERE id = " . (int) $wh)->fetchColumn() ?: $wh) : 'Semua Gudang';
+        $catLabel = $cat !== null ? (string) ($pdo->query("SELECT name FROM categories WHERE id = " . (int) $cat)->fetchColumn() ?: $cat) : 'Semua Kategori';
+        $filename = implode('_', array_filter([
+            'pergerakan-stok-' . $kind, preg_replace('/[^A-Za-z0-9_-]+/', '-', $wh !== null ? $whLabel : 'ALL'), $start, $end, $mode,
+        ]));
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="' . $filename . '.csv"');
+        $out = fopen('php://output', 'w');
+        fwrite($out, "\xEF\xBB\xBF");
+        $meta = [
+            ['Laporan', 'Pergerakan Stok Harian — ' . $kind], ['Periode', $start . ' s/d ' . $end], ['Gudang', $whLabel], ['Kategori', $catLabel],
+            ['Pencarian barang', (string) ($q ?? '')], ['Mode tampilan', $mode === 'qty' ? 'Kuantitas (Qty)' : 'Nominal (Rp)'],
+            ['Dibuat', date('Y-m-d H:i:s')], ['Dibuat oleh', (string) $user['username']],
+        ];
+        foreach ($meta as $m) { inv_csv_write_row($out, $m); }
+        inv_csv_write_row($out, []);
+        if ($kind === 'summary') {
+            $res = \App\Services\MovementDailyReportService::overview($pdo, $start, $end, $wh, $cat, $q, $item);
+            inv_csv_write_row($out, ['Tanggal', 'Saldo Awal (Rp)', 'Barang Masuk (Rp)', 'Barang Keluar (Rp)', 'Adjustment / Pergerakan Lain (Rp)', 'Saldo Akhir (Rp)', 'SKU Memiliki Stok', 'SKU Bergerak', 'Transaksi Masuk', 'Transaksi Keluar', 'Transaksi Lain', 'Rekonsiliasi', 'Selisih Ledger (Rp)']
+                + ($res['single_item'] ? [13 => 'Satuan', 14 => 'Qty Awal', 15 => 'Qty Masuk', 16 => 'Qty Keluar', 17 => 'Qty Lain', 18 => 'Qty Akhir'] : []));
+            foreach ($res['rows'] as $r) {
+                $row = [$r['date'], $r['nominal']['opening'], $r['nominal']['masuk'], $r['nominal']['keluar'], $r['nominal']['lain'], $r['nominal']['closing'], $r['counts']['sku_closing'], $r['counts']['sku_moved'], $r['counts']['tx_in'], $r['counts']['tx_out'], $r['counts']['tx_other'], $r['is_pre_go_live'] ? 'PRE-GO-LIVE' : ($r['reconciliation']['ok'] ? 'OK' : 'SELISIH'), $r['reconciliation']['diff']];
+                if ($res['single_item']) {
+                    $qd = $r['qty'];
+                    array_push($row, $res['single_item']['unit'], $qd['opening'] ?? '', $qd['masuk'] ?? '', $qd['keluar'] ?? '', $qd['lain'] ?? '', $qd['closing'] ?? '');
+                }
+                inv_csv_write_row($out, $row);
+            }
+            $t = $res['totals'];
+            inv_csv_write_row($out, ['TOTAL PERIODE', $t['opening'], $t['masuk'], $t['keluar'], $t['lain'], $t['closing'], $t['sku_closing'], '', $t['tx_in'], $t['tx_out'], $t['tx_other'], $res['reconciliation']['ok'] ? 'OK' : 'SELISIH', '']);
+            inv_csv_write_row($out, []);
+            inv_csv_write_row($out, ['Kuantitas per satuan (tidak dijumlahkan lintas satuan)']);
+            inv_csv_write_row($out, ['Komponen', 'Satuan', 'Qty']);
+            foreach (['opening' => 'Saldo Awal', 'masuk' => 'Barang Masuk', 'keluar' => 'Barang Keluar', 'lain' => 'Adjustment / Lain', 'closing' => 'Saldo Akhir'] as $k => $label) {
+                foreach ($t['qty_by_unit'][$k] as $u) { inv_csv_write_row($out, [$label, $u['unit'], $u['qty']]); }
+            }
+            if (!$res['reconciliation']['ok']) {
+                inv_csv_write_row($out, []);
+                inv_csv_write_row($out, ['PERINGATAN REKONSILIASI']);
+                foreach ($res['reconciliation']['issues'] as $i) { inv_csv_write_row($out, [$i['date'] ?? '', $i['type'], $i['difference'], $i['message']]); }
+            }
+        } elseif ($kind === 'detail') {
+            inv_csv_write_row($out, ['Tanggal', 'Kode', 'Nama Barang', 'Kategori', 'Satuan', 'Saldo Awal Qty', 'Saldo Awal Nilai', 'Masuk Qty', 'Masuk Nilai', 'Keluar Qty', 'HPP Keluar Nilai', 'Adjustment Qty', 'Adjustment Nilai', 'Saldo Akhir Qty', 'Saldo Akhir Nilai', 'Jumlah Transaksi']);
+            foreach (\App\Services\MovementDailyReportService::detailRows($pdo, $start, $end, $wh, $cat, $q, $item) as $r) {
+                inv_csv_write_row($out, [$r['date'], $r['sku'], $r['name'], $r['category'], $r['unit'], $r['opening_qty'], $r['opening_value'], $r['masuk_qty'], $r['masuk_value'], $r['keluar_qty'], $r['hpp_keluar_value'], $r['adjustment_qty'], $r['adjustment_value'], $r['closing_qty'], $r['closing_value'], $r['tx_count']]);
+            }
+        } else {
+            inv_csv_write_row($out, ['Bucket', 'Timestamp', 'Jenis', 'No. Referensi', 'Gudang', 'Kode', 'Nama Barang', 'Qty', 'Nilai (bertanda)', 'Nilai']);
+            foreach (['masuk', 'keluar', 'other'] as $bucket) {
+                for ($page = 1; $page <= 100; $page++) {
+                    $res = \App\Services\MovementDailyReportService::periodTransactions($pdo, $start, $end, $wh, $cat, $q, $item, $bucket, $page, 200);
+                    foreach ($res['rows'] as $r) {
+                        inv_csv_write_row($out, [$bucket === 'other' ? 'adjustment_lain' : $bucket, $r['timestamp'], $r['type_label'], $r['reference_no'], $r['warehouse_code'], $r['sku'], $r['item_name'], $r['qty'], $r['signed_value'], $r['value']]);
+                    }
+                    if ($page >= $res['pagination']['total_pages']) { break; }
+                }
+            }
+        }
+        fclose($out);
+        exit;
     },
 
     'GET /reports/reconciliation/movement' => function () use ($pdo, $query) {
