@@ -114,7 +114,6 @@ use App\Services\TransactionHistoryService;
 use App\Services\SupplierService;
 use App\Services\BakeryDestinationService;
 use App\Services\MasterDataSafetyService;
-use App\Services\MasterRecordService;
 use App\Services\WarehouseReportService;
 use App\Services\WarehouseCutoverService;
 use App\Services\WarehouseCutoverImportService;
@@ -5203,21 +5202,21 @@ $routes = [
         inv_require_permission($pdo, $user, 'MASTER_ITEM_MANAGE');
         $input['created_by'] = $user['id'];
         $input['username'] = $user['username'];
-        inv_ok(Database::transaction(fn (PDO $tx) => MasterRecordService::createItem($tx, $input)), 'Item created');
+        inv_ok(Database::transaction(fn (PDO $tx) => \App\Services\MasterRecordService::createItem($tx, $input)), 'Item created');
     },
     'POST /warehouses' => function () use ($pdo, $input) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'MASTER_WAREHOUSE_MANAGE');
         $input['created_by'] = $user['id'];
         $input['username'] = $user['username'];
-        inv_ok(Database::transaction(fn (PDO $tx) => MasterRecordService::createWarehouse($tx, $input)), 'Warehouse created');
+        inv_ok(Database::transaction(fn (PDO $tx) => \App\Services\MasterRecordService::createWarehouse($tx, $input)), 'Warehouse created');
     },
     'POST /divisions' => function () use ($pdo, $input) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'MASTER_DIVISION_MANAGE');
         $input['created_by'] = $user['id'];
         $input['username'] = $user['username'];
-        inv_ok(Database::transaction(fn (PDO $tx) => MasterRecordService::createDivision($tx, $input)), 'Division created');
+        inv_ok(Database::transaction(fn (PDO $tx) => \App\Services\MasterRecordService::createDivision($tx, $input)), 'Division created');
     },
 
     'PUT /warehouses/{id}' => function (array $params) use ($pdo, $input) {
