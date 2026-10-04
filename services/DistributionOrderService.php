@@ -79,11 +79,11 @@ final class DistributionOrderService
             if (!($qty > 0)) {
                 throw new ValidationException(["line {$lineNo}: input_qty must be > 0"]);
             }
-            $conversion = UnitConversionService::getActiveConversion($pdo, $item['id'], (int) $line['input_unit_id'], $p['do_date']);
-            if ($conversion === null) {
+            $factor = UnitConversionService::resolveConversionFactor($pdo, $item['id'], (int) $line['input_unit_id'], $p['do_date']);
+            if ($factor === null) {
                 throw new UnitConversionNotApprovedException($item['id'], (int) $line['input_unit_id']);
             }
-            $qtyBase = round($qty * (float) $conversion['conversion_to_base'], 6);
+            $qtyBase = round($qty * $factor, 6);
 
             $lineStmt->execute([
                 'do_id' => $doId, 'line_no' => $lineNo, 'item_id' => $item['id'],

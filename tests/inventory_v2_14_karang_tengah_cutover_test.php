@@ -364,13 +364,20 @@ $cutover2Id = WarehouseCutoverService::create($pdo, [
     'warehouse_id' => $karangTengahId, 'source_name' => 'rollback-test', 'opening_as_of' => '2026-09-19', 'created_by' => $adminUserId,
 ]);
 $goodItem = makeItem($pdo, $kgUnitId, uid('V214-GOOD'), 'Rollback Test Good Item');
-// A real item row (satisfies warehouse_cutover_lines' item_id FK) but
-// deliberately created WITHOUT calling UnitConversionService::openNewVersion()
-// — it has no approved unit conversion at all, so FifoService::postIn()'s
-// own UnitConversionNotApprovedException fires mid-load. This is a real,
-// naturally-occurring FifoService failure (not a contrived FK violation
-// the schema itself would refuse to store), giving Section F a genuine
-// same-transaction second-line failure to roll back.
+// STABILIZATION — this line's item used to be created WITHOUT calling
+// UnitConversionService::openNewVersion() specifically so FifoService::
+// postIn()'s own UnitConversionNotApprovedException would fire mid-load —
+// but loadOpening() ALWAYS posts via the item's OWN base_unit_id (line
+// ~663 above: 'input_unit_id' => $baseUnitId), and
+// UnitConversionService::resolveConversionFactor() now correctly treats
+// an item's base unit as intrinsically factor 1 whether or not a stored
+// item_unit_conversions row exists (661 real production items are in
+// exactly that state) — so that no longer fails, by design, and is no
+// longer a valid way to construct this test's failure line. A negative
+// approved_unit_cost is used instead: a real, naturally-occurring
+// validation failure (loadOpening()'s own pre-flight check, line ~642)
+// that still proves the same thing — one bad line in a multi-line
+// cutover rolls back the WHOLE atomic load, nothing partially posts.
 $badSku = uid('V214-BAD');
 $pdo->prepare('INSERT INTO items (sku, name, base_unit_id, minimum_stock, status) VALUES (:sku,:name,:unit,0,:status)')
     ->execute(['sku' => $badSku, 'name' => 'Rollback Test Bad Item', 'unit' => $kgUnitId, 'status' => 'ACTIVE']);
@@ -381,7 +388,7 @@ $pdo->prepare(
 )->execute(['cid' => $cutover2Id, 'item1' => $goodItem, 'sku1' => 'GOOD-1', 'name1' => 'Good', 'unit1' => 'KG', 'status1' => 'PASS', 'ms1' => 'MATCHED', 'decision1' => 'ACCEPT_SOURCE']);
 $pdo->prepare(
     'INSERT INTO warehouse_cutover_lines (cutover_id, item_id, source_sku, source_name, source_unit, theoretical_closing_qty, source_price, reconciliation_status, mapping_status, decision, approved_qty, approved_unit_cost, source_row_reference)
-     VALUES (:cid, :item2, :sku2, :name2, :unit2, 5, 3000, :status2, :ms2, :decision2, 5, 3000, 3)'
+     VALUES (:cid, :item2, :sku2, :name2, :unit2, 5, -3000, :status2, :ms2, :decision2, 5, -3000, 3)'
 )->execute(['cid' => $cutover2Id, 'item2' => $badItem, 'sku2' => $badSku, 'name2' => 'Bad', 'unit2' => 'KG', 'status2' => 'PASS', 'ms2' => 'MATCHED', 'decision2' => 'ACCEPT_SOURCE']);
 $pdo->prepare("UPDATE warehouse_cutovers SET status='APPROVED', approved_by=:by, approved_at=NOW() WHERE id=:id")->execute(['by' => $adminUserId, 'id' => $cutover2Id]);
 
@@ -392,7 +399,7 @@ try {
 } catch (\Throwable $e) {
     $errRollback = $e;
 }
-check('F. loadOpening() throws when one line has a non-existent item_id', $errRollback !== null, $errRollback ? get_class($errRollback) : 'NO EXCEPTION');
+check('F. loadOpening() throws when one line fails validation (negative approved_unit_cost)', $errRollback !== null, $errRollback ? get_class($errRollback) : 'NO EXCEPTION');
 $companyAfterRollbackTest = companyInventory($pdo);
 check('F. company inventory COMPLETELY unchanged after the failed load (the GOOD line was also rolled back)', $companyBeforeRollbackTest == $companyAfterRollbackTest);
 check('F. cutover 2 status was NOT advanced to LOADED', $pdo->query("SELECT status FROM warehouse_cutovers WHERE id={$cutover2Id}")->fetchColumn() === 'APPROVED');

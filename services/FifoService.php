@@ -91,11 +91,10 @@ final class FifoService
             throw new ValidationException(['input_qty and unit_price_input must both be > 0']);
         }
 
-        $conversion = UnitConversionService::getActiveConversion($pdo, $p['item_id'], $p['input_unit_id'], $p['transaction_date']);
-        if ($conversion === null) {
+        $factor = UnitConversionService::resolveConversionFactor($pdo, $p['item_id'], $p['input_unit_id'], $p['transaction_date']);
+        if ($factor === null) {
             throw new UnitConversionNotApprovedException((int) $p['item_id'], (int) $p['input_unit_id']);
         }
-        $factor = (float) $conversion['conversion_to_base'];
 
         $baseQty = round($p['input_qty'] * $factor, self::QTY_SCALE);
         $unitCostBase = round($p['unit_price_input'] / $factor, self::MONEY_SCALE);
@@ -216,11 +215,10 @@ final class FifoService
             throw new ValidationException(['input_qty must be > 0']);
         }
 
-        $conversion = UnitConversionService::getActiveConversion($pdo, $p['item_id'], $p['input_unit_id'], $p['transaction_date']);
-        if ($conversion === null) {
+        $factor = UnitConversionService::resolveConversionFactor($pdo, $p['item_id'], $p['input_unit_id'], $p['transaction_date']);
+        if ($factor === null) {
             throw new UnitConversionNotApprovedException((int) $p['item_id'], (int) $p['input_unit_id']);
         }
-        $factor = (float) $conversion['conversion_to_base'];
         $baseQtyRequested = round($p['input_qty'] * $factor, self::QTY_SCALE);
 
         $batches = Database::lockFifoBatches($pdo, $p['item_id'], $p['warehouse_id']);

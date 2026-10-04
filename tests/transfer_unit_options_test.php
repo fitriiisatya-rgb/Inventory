@@ -17,20 +17,25 @@ declare(strict_types=1);
  *     existing default-selection (first element) is never disturbed by
  *     the backfill (it is always appended, never prepended).
  *
- *  2. (E-H) End-to-end TransferService::create()/receive() correctness
+ *  2. (E-I) End-to-end TransferService::create()/receive() correctness
  *     through FifoService, for lines submitted in the base unit, a
  *     middle/purchase unit, and with decimals — proving the selected
- *     *input* unit never changes the resulting *base* quantity, that
- *     insufficient stock is still rejected (unchanged backend behavior —
- *     this file touches neither TransferService nor FifoService), and
- *     surfacing (never silently working around) a PRE-EXISTING, SEPARATE
- *     backend fact unrelated to the dropdown fix: TransferService::receive()
- *     always posts the IN side using the item's base_unit_id (see its own
- *     baseUnitId() helper) — so any item that reaches Transfer without an
- *     OPEN base-unit identity conversion row was already going to fail at
- *     receive(), regardless of this round's frontend change, on ANY unit
- *     chosen for the OUT side. Section H documents this explicitly as an
- *     existing condition, not something this round introduces or fixes.
+ *     *input* unit never changes the resulting *base* quantity, and that
+ *     insufficient stock is still rejected (unchanged backend behavior).
+ *
+ *     Section I previously documented a then-PRE-EXISTING, separate
+ *     backend defect (discovered while testing this exact fix, not
+ *     introduced by it): TransferService::receive() always posts the IN
+ *     side using the item's base_unit_id, so an item reaching Transfer
+ *     without an OPEN base-unit identity conversion row failed at
+ *     receive() even on a unit (e.g. KARTON) that worked fine for the OUT
+ *     side — and production evidence then confirmed 661 real items are in
+ *     exactly that state (no base-unit identity row), proving it was
+ *     normal data, not a handful of bad rows. That defect is now FIXED at
+ *     its root — UnitConversionService::resolveConversionFactor() (see
+ *     tests/unit_conversion_base_unit_factor_test.php for the full backend
+ *     regression matrix) — so Section I below now asserts the corrected
+ *     behavior: receive() succeeds for such an item, never throws.
  *
  * Usage: php tests/transfer_unit_options_test.php
  */
@@ -57,7 +62,6 @@ use App\Services\FifoService;
 use App\Services\TransferService;
 use App\Services\UnitConversionService;
 use App\Services\InsufficientStockException;
-use App\Services\UnitConversionNotApprovedException;
 
 $results = [];
 function check(string $name, bool $pass, string $detail = ''): void
@@ -308,16 +312,17 @@ function doTransfer(PDO $pdo, int $itemId, float $qty, int $unitId, int $by): ar
 }
 
 // ============================================================
-// I. (Separate finding, NOT a dropdown-fix regression) An item that
-// reaches Transfer WITHOUT an open base-unit identity conversion row
-// (the exact production gap proven in A-D above) fails at RECEIVE time
-// regardless of which unit was chosen for the OUT side, because
-// TransferService::receive() always posts the IN side using
-// base_unit_id (see TransferService::baseUnitId()) — this is a
-// PRE-EXISTING fact about TransferService/FifoService, completely
-// independent of item-selector.js, and this test file does not modify
-// either service. Documented here, not silently patched (out of scope
-// per this round's explicit "jangan sentuh TransferService, FifoService").
+// I. FIXED this round (was a separate, pre-existing finding first
+// surfaced by this exact test — see tests/unit_conversion_base_unit_factor_test.php
+// for the full backend regression matrix): an item reaching Transfer
+// WITHOUT an open base-unit identity conversion row (the exact
+// production gap proven in A-D above — confirmed, 661 real items) used
+// to fail at RECEIVE time, because TransferService::receive() always
+// posts the IN side using base_unit_id (see TransferService::baseUnitId())
+// and FifoService::postIn() required a REAL item_unit_conversions row
+// even for the base unit. UnitConversionService::resolveConversionFactor()
+// now treats the base unit as intrinsically factor 1 — this asserts the
+// CORRECTED behavior: the same transfer now succeeds end-to-end.
 // ============================================================
 {
     $itemId = makeItemRaw($pdo, $pcsUnitId, 'TFU-I-NOBASEIDENTITY');
@@ -325,9 +330,11 @@ function doTransfer(PDO $pdo, int $itemId, float $qty, int $unitId, int $by): ar
     // reproducing the exact RM-TF-26-032 shape.
     UnitConversionService::openNewVersion($pdo, $itemId, $kartonUnitId, 100.0, '2026-01-01 00:00:00', null, 'karton', true);
     postInBase($pdo, $itemId, $srcWhId, $kartonUnitId, 5, $adminId); // 5 KARTON = 500 PCS base
-    $errClass = expectException(fn () => doTransfer($pdo, $itemId, 1, $kartonUnitId, $adminId), UnitConversionNotApprovedException::class);
-    check('I1. (pre-existing, out of this round\'s scope) an item lacking a base-unit identity row fails at RECEIVE (not create) with UnitConversionNotApprovedException, EVEN when KARTON — a unit that already worked before this fix — is used for the OUT side',
-        $errClass === UnitConversionNotApprovedException::class, (string) $errClass);
+    $result = doTransfer($pdo, $itemId, 1, $kartonUnitId, $adminId); // 1 KARTON = 100 PCS, receive() posts IN via base_unit_id
+    check('I1. FIXED: an item lacking a base-unit identity row now succeeds at RECEIVE, even though receive() posts the IN side via base_unit_id with no stored conversion row for it',
+        $result['receive']['success'] === true);
+    check('I2. the received destination stock is exactly 100 (1 KARTON * factor 100), proving the intrinsic base-unit factor of 1 was applied correctly inside FifoService::postIn()',
+        stockBase($pdo, $itemId, $dstWhId) === 100.0, 'stock=' . stockBase($pdo, $itemId, $dstWhId));
 }
 
 $failed = count(array_filter($results, fn ($r) => !$r));

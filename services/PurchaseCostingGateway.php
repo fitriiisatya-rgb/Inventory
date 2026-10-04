@@ -35,11 +35,10 @@ final class PurchaseCostingGateway
         $grossPrice = (float) ($input['unit_price_input'] ?? 0);
         $txDate = (string) ($input['transaction_date'] ?? '');
 
-        $conversion = UnitConversionService::getActiveConversion($pdo, $itemId, $unitId, $txDate);
-        if ($conversion === null) {
+        $factor = UnitConversionService::resolveConversionFactor($pdo, $itemId, $unitId, $txDate);
+        if ($factor === null) {
             throw new UnitConversionNotApprovedException($itemId, $unitId);
         }
-        $factor = (float) $conversion['conversion_to_base'];
         $baseQty = round($qty * $factor, 6);
 
         $preview = PurchaseCostingService::buildCostPreview(
