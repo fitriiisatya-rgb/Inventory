@@ -1,783 +1,364 @@
 /**
- * D5/D6, rebuilt PHASE 4-A as the approved V2 stepper UI. The frontend
- * only collects qty/unit/price/warehouse/etc — the server remains the
- * sole authority on unit conversion, base_qty, cost, FIFO consumption,
- * and stock validation. This file never computes a final cost or
- * balance itself; every number shown before POST is explicitly a
- * PREVIEW (computed client-side from already-loaded master data, for
- * the operator's benefit only), and every number shown after POST comes
- * straight from what InvApi.postTransactionIn/Out actually returned.
+ * STOCK IN / OUT V2 — the table-first transaction workspace (shell + shared kit).
  *
- * PHASE 4-A note: this is a frontend workflow/orchestration change only.
- * It calls the exact same POST /transactions/in and POST /transactions/out
- * endpoints, with the exact same payload shape, as the pre-stepper form.
- * FIFO, transaction semantics, warehouse scoping, and idempotency are
- * unchanged — see the idempotency comment on requestUuid below, which
- * preserves the original "one uuid per action, reused across every retry
- * of that SAME action, only a fresh uuid after an actual post or an
- * explicit reset" rule byte-for-byte from the pre-stepper implementation.
+ * The page is ONE compact transaction sheet per kind (Stock IN / Stock OUT):
+ * header fields, a "Daftar Barang" table with live totals, a summary bar and a
+ * simplified Review. The two sheets live in stock-in-sheet.js and
+ * stock-out-sheet.js; this file owns the tab shell and TxKit, the helpers both
+ * share (number input/format, item picker without SKU column, unit cache,
+ * server calls, document preview drawer).
  *
- * Operator never chooses a FIFO layer — the "FIFO layer preview" in the
- * OUT stepper's review step is read-only, informational, computed by
- * walking the already-loaded batch list in the same (received_date ASC,
- * id ASC) order FifoService itself consumes in — never sent to the
- * server, never influences the actual server-side consumption.
+ * Authority: the browser only COLLECTS and PREVIEWS. Every number that is posted
+ * or printed is recomputed by the server (POST /stock-in/quote, /stock-out/quote
+ * — same code path as the posting) and the Review step shows the server's
+ * figures. Master / default prices are never written from here.
+ *
+ * Only the proven endpoints are used for reads that already existed
+ * (GET /items/{id}/units, GET /inventory/current); new endpoints are called
+ * through TxKit.api() with the session's CSRF token (api-client.js untouched).
  */
-const Transactions = (() => {
-    const IN_STEPS = ['Informasi', 'Barang', 'Review', 'Selesai'];
-    const OUT_STEPS = ['Tujuan', 'Barang', 'Review FIFO', 'Selesai'];
+const TxKit = (() => {
+    // ------------------------------------------------------------ numbers
+    const nz = (v) => (v === null || v === undefined || v === '' || Number.isNaN(Number(v)) ? 0 : Number(v));
+    const money = (v) => UI.formatMoney(Math.round((Number(v) || 0) * 100) / 100);
+    const fmtNum = (v, d = 4) => UI.formatNumber(Number(v) || 0, d);
 
-    // One state object per kind, so IN and OUT steppers on the same page
-    // never interfere with each other's idempotency key or step position.
-    function freshState() {
-        return {
-            step: 1,
-            warehouseId: null, itemId: null, unitId: null, qty: '', price: '',
-            supplierId: '', divisionId: '', bakeryDestinationId: '',
-            reference: '', date: new Date().toISOString().slice(0, 10),
-            allowNegative: false, negativeReason: '',
-            requestUuid: null,
-            lastResult: null,
-            // PHASE V2.7 — Purchase Costing (Stock IN only). All optional;
-            // '' -> NONE/0 gets sent, which is mathematically a no-op (the
-            // Cost Preview equals the raw gross price exactly). Default
-            // PPN rate mirrors the seeded system_settings.default_ppn_rate
-            // (11%) — there is no settings-read API today (that table is
-            // not otherwise wired to anything in the app), so this is a
-            // client-side default only; every transaction still snapshots
-            // whatever rate the operator actually submits.
-            lineDiscountType: 'NONE', lineDiscountValue: '',
-            invoiceDiscountType: 'NONE', invoiceDiscountValue: '',
-            ppnTreatment: 'NONE', ppnRate: '11', ppnCreditablePct: '',
-            freightTreatment: 'NONE', freightAmount: '',
-            costPreview: null,
-        };
+    /** "12.500" / "12.500,5" / "12500.5" / "5" → number (id-ID: '.' thousands, ',' decimal) */
+    function parseNum(text) {
+        let t = String(text ?? '').replace(/[^\d.,-]/g, '');
+        if (t === '' || t === '-') return NaN;
+        if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.');
+        else if (/^-?\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, '');
+        return Number(t);
     }
-    const state = { in: freshState(), out: freshState() };
+    const fmtInput = (v) => (v === '' || v === null || v === undefined || Number.isNaN(Number(v)) ? '' : Number(v).toLocaleString('id-ID', { maximumFractionDigits: 4 }));
+    const round4 = (v) => Math.round((v + Number.EPSILON) * 10000) / 10000;
+
+    /**
+     * Text input that shows grouped digits when idle and raw digits while typing.
+     * `onValue(number|NaN)` fires on every keystroke; the caller keeps its own state.
+     */
+    function numInput({ value = '', placeholder = '0', prefix = null, suffix = null, onValue, testid = null, cls = '', money: isMoney = false }) {
+        const input = UI.el('input', { type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder, class: 'tx2-num', ...(testid ? { 'data-testid': testid } : {}) });
+        input.value = fmtInput(value);
+        let focused = false;
+        input.addEventListener('focus', () => {
+            focused = true;
+            const n = parseNum(input.value);
+            input.value = Number.isNaN(n) ? '' : String(n).replace('.', ',');
+            input.select();
+        });
+        input.addEventListener('blur', () => {
+            focused = false;
+            const n = parseNum(input.value);
+            input.value = Number.isNaN(n) ? '' : fmtInput(n);
+        });
+        input.addEventListener('input', () => onValue(parseNum(input.value)));
+        const wrap = UI.el('div', { class: `tx2-numwrap ${cls}`.trim() }, [
+            prefix ? UI.el('span', { class: 'tx2-pre' }, prefix) : null, input, suffix ? UI.el('span', { class: 'tx2-suf' }, suffix) : null,
+        ]);
+        wrap.input = input;
+        wrap.setValue = (v) => { if (!focused) input.value = fmtInput(v); };
+        return wrap;
+    }
+
+    // ------------------------------------------------------------ server
+    function csrf() {
+        const u = Auth.user();
+        return (u && u.csrf_token) || '';
+    }
+    /** JSON (or raw HTML with {raw:true}) call; throws an Error with .code/.status/.errors like InvApi. */
+    async function api(method, path, body, { raw = false } = {}) {
+        let res;
+        try {
+            const headers = {};
+            if (body !== undefined) headers['Content-Type'] = 'application/json';
+            if (method !== 'GET') headers['X-CSRF-Token'] = csrf();
+            res = await fetch(`/api${path}`, { method, credentials: 'include', headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+        } catch (e) {
+            const err = new Error('Sistem sedang tidak dapat terhubung ke server.');
+            err.code = 'NETWORK_ERROR';
+            throw err;
+        }
+        if (raw && res.ok) return res.text();
+        let payload;
+        try { payload = await res.json(); } catch (e) { const err = new Error(`Respons server tidak valid (HTTP ${res.status}).`); err.code = 'INVALID_RESPONSE'; throw err; }
+        if (!payload.success) {
+            const err = new Error((payload.error && payload.error.message) || `Permintaan gagal (HTTP ${res.status}).`);
+            err.code = (payload.error && payload.error.code) || 'UNKNOWN_ERROR';
+            err.status = res.status;
+            err.errors = (payload.error && (payload.error.errors || payload.error.details)) || null;
+            throw err;
+        }
+        return payload.data;
+    }
+
+    // ------------------------------------------------------------ units (one request per item, cached)
+    const unitCache = new Map();
+    function unitsFor(itemId) {
+        const key = String(itemId);
+        if (!unitCache.has(key)) {
+            unitCache.set(key, (async () => {
+                let units = await InvApi.itemUnits(itemId);
+                const item = Master.itemById(itemId);
+                const baseId = item ? item.base_unit_id : null;
+                if (baseId !== null && baseId !== undefined && !units.some((u) => String(u.id) === String(baseId))) {
+                    const base = Master.unitById(baseId);
+                    if (base) units = units.concat([{ id: base.id, code: base.code, name: base.name, conversion_to_base: 1, is_purchase_default: false, reference_price: null, price_source: null }]);
+                }
+                return units;
+            })().catch((err) => { unitCache.delete(key); throw err; }));
+        }
+        return unitCache.get(key);
+    }
+    const clearUnitCache = () => unitCache.clear();
+
+    // ------------------------------------------------------------ item picker (name only — no SKU column)
+    /**
+     * Autocomplete over the already-loaded master items (ItemSelector.search: name,
+     * SKU or barcode match, ACTIVE only). Shows the NAME; the SKU/barcode is only
+     * a way to find the item. Keyboard: ↑/↓/Enter/Esc. Exact barcode/SKU + Enter
+     * resolves directly. An unknown text is never turned into an item.
+     */
+    function itemPicker({ item = null, onPick, onClear, onHint }) {
+        const input = UI.el('input', { type: 'text', class: 'tx2-pick', placeholder: 'Cari nama barang...', autocomplete: 'off', 'data-testid': 'tx-item-input' });
+        const hint = UI.el('div', { class: 'tx2-pick-hint' });
+        const wrap = UI.el('div', { class: 'tx2-pickwrap' }, [UI.el('span', { class: 'tx2-pick-ico' }, '⌕'), input]);
+        const dropdown = UI.el('div', { class: 'tx2-dd', 'data-testid': 'tx-item-dd' });
+        dropdown.style.display = 'none';
+        let results = [];
+        let hi = -1;
+        let current = item;
+        if (item) input.value = item.name;
+
+        const close = () => { dropdown.style.display = 'none'; if (dropdown.parentNode) dropdown.parentNode.removeChild(dropdown); hi = -1; };
+        function place() {
+            const r = input.getBoundingClientRect();
+            const w = Math.max(r.width, 300);
+            dropdown.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - w - 8))}px`;
+            dropdown.style.width = `${w}px`;
+            const below = window.innerHeight - r.bottom;
+            if (below < 260 && r.top > below) { dropdown.style.top = 'auto'; dropdown.style.bottom = `${window.innerHeight - r.top + 4}px`; } else { dropdown.style.bottom = 'auto'; dropdown.style.top = `${r.bottom + 4}px`; }
+        }
+        function render() {
+            dropdown.innerHTML = '';
+            if (!results.length) {
+                dropdown.appendChild(UI.el('div', { class: 'tx2-dd-empty' }, 'Barang belum tersedia di Master Barang. Tambahkan melalui Master Barang terlebih dahulu.'));
+            } else {
+                results.forEach((it, i) => {
+                    const cat = it.category_id ? Master.categoryById(it.category_id) : null;
+                    const row = UI.el('div', { class: `tx2-dd-opt${i === hi ? ' active' : ''}`, 'data-testid': 'tx-item-opt' }, [
+                        UI.el('span', { class: 'tx2-dd-name' }, it.name), UI.el('span', { class: 'tx2-dd-cat' }, cat ? cat.name : ''),
+                    ]);
+                    row.addEventListener('mousedown', (e) => { e.preventDefault(); pick(it); });
+                    dropdown.appendChild(row);
+                });
+            }
+            if (!dropdown.parentNode) document.body.appendChild(dropdown);
+            place();
+            dropdown.style.display = 'block';
+        }
+        function pick(it) {
+            current = it;
+            input.value = it.name;
+            hint.textContent = '';
+            close();
+            onPick(it);
+        }
+        input.addEventListener('input', () => {
+            if (current) { current = null; onClear(); }
+            results = ItemSelector.search(input.value);
+            hi = -1;
+            if (input.value.trim()) render(); else close();
+        });
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowDown') { e.preventDefault(); if (dropdown.style.display === 'none' && input.value.trim()) { results = ItemSelector.search(input.value); render(); } if (results.length) { hi = Math.min(hi + 1, results.length - 1); render(); } }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); if (results.length) { hi = Math.max(hi - 1, 0); render(); } }
+            else if (e.key === 'Escape') close();
+            else if (e.key === 'Enter') {
+                e.preventDefault();
+                if (hi >= 0 && results[hi]) { pick(results[hi]); return; }
+                const raw = input.value.trim();
+                if (!raw) return;
+                const bc = ItemSelector.resolveBarcode(raw);
+                if (bc.status === 'OK') { pick(bc.item); return; }
+                const sku = Master.items().find((i) => i.status === 'ACTIVE' && String(i.sku).toLowerCase() === raw.toLowerCase());
+                if (sku) { pick(sku); return; }
+                if (results.length === 1) pick(results[0]);
+                else if (!results.length && onHint) onHint('Barang belum tersedia di Master Barang. Tambahkan melalui Master Barang terlebih dahulu.');
+            }
+        });
+        input.addEventListener('blur', () => setTimeout(close, 120));
+        const reposition = () => { if (dropdown.style.display !== 'none') place(); };
+        window.addEventListener('resize', reposition);
+        const node = UI.el('div', { class: 'tx2-pickcell' }, [wrap, hint]);
+        node.focus = () => input.focus();
+        node.setHint = (t) => { hint.textContent = t || ''; };
+        node.destroy = () => { close(); window.removeEventListener('resize', reposition); };
+        return node;
+    }
+
+    // ------------------------------------------------------------ small UI helpers
+    const icon = (txt, cls = '') => UI.el('span', { class: `tx2-ico ${cls}`.trim(), 'aria-hidden': 'true' }, txt);
+    function field(label, control, { required = false, cls = '' } = {}) {
+        return UI.el('div', { class: `tx2-field ${cls}`.trim() }, [UI.el('label', {}, required ? [label, UI.el('span', { class: 'tx2-req' }, ' *')] : [label]), control]);
+    }
+    function select(options, value, onChange, { disabled = false, testid = null, cls = '' } = {}) {
+        const s = UI.el('select', { class: `tx2-sel ${cls}`.trim(), ...(testid ? { 'data-testid': testid } : {}) });
+        options.forEach(([v, label]) => s.appendChild(UI.el('option', { value: String(v) }, label)));
+        s.value = value === null || value === undefined ? '' : String(value);
+        if (disabled) s.setAttribute('disabled', 'disabled');
+        s.addEventListener('change', () => onChange(s.value));
+        return s;
+    }
+    /** two-way segmented toggle, e.g. [%, Nominal] */
+    function segmented(options, value, onChange, testid = null) {
+        const box = UI.el('div', { class: 'tx2-seg', ...(testid ? { 'data-testid': testid } : {}) });
+        const btns = options.map(([v, label]) => {
+            const b = UI.el('button', { type: 'button', class: `tx2-segbtn${String(v) === String(value) ? ' on' : ''}`, 'data-value': String(v) }, label);
+            b.addEventListener('click', () => { btns.forEach((x) => x.classList.toggle('on', x === b)); onChange(v); });
+            box.appendChild(b);
+            return b;
+        });
+        return box;
+    }
+    function stepper(step) {
+        const labels = ['Informasi', 'Barang', 'Review', 'Selesai'];
+        return UI.el('div', { class: 'tx2-steps', 'data-testid': 'tx-steps' }, labels.map((l, i) => UI.el('div', { class: `tx2-step${i + 1 === step ? ' on' : (i + 1 < step ? ' done' : '')}` }, [UI.el('span', { class: 'tx2-stepno' }, i + 1 < step ? '✓' : String(i + 1)), UI.el('span', {}, l)])));
+    }
+    const uuid = () => InvApi.newRequestUuid();
+
+    // ------------------------------------------------------------ bottom action bar that stays reachable
+    // body{overflow-x:hidden} makes <body> a (non-scrolling) scroll container, which silently disables
+    // position:sticky for every descendant — so the bar is pinned with position:fixed instead, only while
+    // its natural spot is below the visible area, and aligned to the sheet's own left/width.
+    const bars = [];
+    function updateBars() {
+        for (let i = bars.length - 1; i >= 0; i--) {
+            const { slot, bar } = bars[i];
+            if (!slot.isConnected) { bars.splice(i, 1); continue; }
+            bar.classList.remove('pinned');
+            bar.style.left = ''; bar.style.width = '';
+            slot.style.minHeight = '';
+            const h = bar.getBoundingClientRect().height;
+            const r = slot.getBoundingClientRect();
+            if (r.top + h > window.innerHeight) {
+                slot.style.minHeight = `${h}px`;
+                bar.style.left = `${r.left}px`;
+                bar.style.width = `${r.width}px`;
+                bar.classList.add('pinned');
+            }
+        }
+    }
+    window.addEventListener('scroll', updateBars, { passive: true });
+    window.addEventListener('resize', updateBars);
+    function stickyBar(bar) {
+        const slot = UI.el('div', { class: 'tx2-barslot' }, [bar]);
+        bars.push({ slot, bar });
+        setTimeout(updateBars, 0);
+        slot.update = updateBars;
+        return slot;
+    }
+
+    // ------------------------------------------------------------ document preview / print drawer (Stock OUT)
+    function lockPage(on) {
+        document.documentElement.classList.toggle('tx2-scroll-lock', on);
+        document.body.classList.toggle('tx2-scroll-lock', on);
+    }
+    /** Wide drawer (shared Drawer singleton) with page scroll-lock + cleanup on close. */
+    function wideDrawer(title, render) {
+        Drawer.open({ title: UI.el('div', { 'data-tx-doc-title': '1' }, title), render });
+        const panel = document.querySelector('.drawer');
+        if (panel) {
+            panel.classList.add('drawer-tx');
+            lockPage(true);
+            const obs = new MutationObserver(() => {
+                if (!panel.classList.contains('open') || !panel.querySelector('[data-tx-doc-title]')) { panel.classList.remove('drawer-tx'); lockPage(false); obs.disconnect(); }
+            });
+            obs.observe(panel, { attributes: true, attributeFilter: ['class'], childList: true });
+        }
+    }
+    /**
+     * Wide drawer with an iframe showing server-rendered A4 HTML (the exact
+     * document that is printed). docs = [{label, load: () => Promise<html>}].
+     */
+    function openDocDrawer(title, docs, startIndex = 0) {
+        const frame = UI.el('iframe', { class: 'tx2-docframe', title: 'Pratinjau dokumen', 'data-testid': 'tx-doc-frame' });
+        const status = UI.el('div', { class: 'tx2-docstatus' });
+        const tabs = UI.el('div', { class: 'tx2-doctabs' });
+        let active = startIndex;
+        const printBtn = UI.el('button', { class: 'btn btn-secondary tx2-printbtn', type: 'button', 'data-testid': 'tx-doc-print' }, '🖨 Cetak');
+        printBtn.addEventListener('click', () => { try { frame.contentWindow.focus(); frame.contentWindow.print(); } catch (e) { UI.toast('Cetak tidak tersedia di browser ini.', 'error'); } });
+        const seq = { n: 0 };
+        async function show(i) {
+            active = i;
+            const mine = ++seq.n;
+            Array.from(tabs.children).forEach((b, bi) => b.classList.toggle('on', bi === i));
+            status.textContent = 'Memuat dokumen...';
+            status.className = 'tx2-docstatus';
+            try {
+                const html = await docs[i].load();
+                if (mine !== seq.n) return;
+                frame.srcdoc = html;
+                status.textContent = '';
+            } catch (err) {
+                if (mine !== seq.n) return;
+                frame.srcdoc = '';
+                status.textContent = `Gagal memuat dokumen: ${err.message}`;
+                status.className = 'tx2-docstatus err';
+            }
+        }
+        docs.forEach((d, i) => {
+            const b = UI.el('button', { type: 'button', class: 'tx2-doctab', 'data-testid': `tx-doc-tab-${i}` }, d.label);
+            b.addEventListener('click', () => show(i));
+            tabs.appendChild(b);
+        });
+        const head = UI.el('div', { class: 'tx2-dochead' }, [tabs, printBtn]);
+        wideDrawer(title, (b) => { b.appendChild(head); b.appendChild(status); b.appendChild(frame); });
+        show(active);
+    }
+
+    return { nz, money, fmtNum, parseNum, fmtInput, round4, numInput, api, unitsFor, clearUnitCache, itemPicker, icon, field, select, segmented, stepper, uuid, openDocDrawer, wideDrawer, stickyBar, updateBars };
+})();
+
+const Transactions = (() => {
+    const state = { kind: null };
+
+    function can(code) { return Auth.hasPermission(code); }
 
     function render(container) {
         container.innerHTML = '';
-        container.appendChild(buildStepper('in'));
-        container.appendChild(buildStepper('out'));
-    }
-
-    function isStockUser() {
-        return Auth.user().role_code === 'STOCK';
-    }
-    function ownWarehouseId() {
-        return Auth.user().warehouse_id || null;
-    }
-
-    // ============================================================
-    // Shared stepper chrome
-    // ============================================================
-    function buildStepper(kind) {
-        const s = state[kind];
-        if (isStockUser() && !s.warehouseId) s.warehouseId = ownWarehouseId();
-
-        const card = UI.el('div', { class: 'card', id: `tx-${kind}-card` }, [
-            UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, kind === 'in' ? '📥 Transaksi Masuk (Stock IN)' : '📤 Transaksi Keluar (Stock OUT)')]),
-            renderStepperNav(kind === 'in' ? IN_STEPS : OUT_STEPS, s.step),
-            UI.el('div', { id: `tx-${kind}-step-body` }),
-        ]);
-        setTimeout(() => renderStep(kind), 0);
-        return card;
-    }
-
-    function renderStepperNav(steps, currentStep) {
-        const nodes = [];
-        steps.forEach((label, idx) => {
-            const num = idx + 1;
-            const cls = num === currentStep ? 'stepper-step active' : (num < currentStep ? 'stepper-step done' : 'stepper-step');
-            nodes.push(UI.el('div', { class: cls }, `${num < currentStep ? '✓' : num}. ${label}`));
-            if (idx < steps.length - 1) nodes.push(UI.el('div', { class: 'stepper-sep' }, '→'));
-        });
-        return UI.el('div', { class: 'stepper' }, nodes);
-    }
-
-    function stepBody(kind) {
-        return document.getElementById(`tx-${kind}-step-body`);
-    }
-
-    function goToStep(kind, step) {
-        state[kind].step = step;
-        rerenderCard(kind);
-    }
-
-    function rerenderCard(kind) {
-        const card = document.getElementById(`tx-${kind}-card`);
-        if (!card) return;
-        const container = card.parentElement;
-        const fresh = buildStepper(kind);
-        card.replaceWith(fresh);
-    }
-
-    function navButtons(kind, { backStep = null, nextLabel = 'Lanjut', onNext, nextDisabled = false } = {}) {
-        const buttons = [];
-        if (backStep !== null) {
-            const backBtn = UI.el('button', { class: 'btn btn-secondary' }, '‹ Kembali');
-            backBtn.addEventListener('click', () => goToStep(kind, backStep));
-            buttons.push(backBtn);
+        const canIn = can('TRANSACTION_IN_CREATE');
+        const canOut = can('TRANSACTION_OUT_CREATE');
+        if (!canIn && !canOut) {
+            container.appendChild(UI.el('div', { class: 'alert alert-warning' }, 'Anda tidak memiliki izin untuk membuat transaksi Stock IN / OUT.'));
+            return;
         }
-        if (onNext) {
-            const nextBtn = UI.el('button', { class: 'btn btn-primary', ...(nextDisabled ? { disabled: 'disabled' } : {}) }, nextLabel);
-            nextBtn.addEventListener('click', onNext);
-            buttons.push(nextBtn);
-        }
-        return UI.el('div', { style: 'display:flex; gap:10px; margin-top:16px;' }, buttons);
-    }
+        if (!state.kind || (state.kind === 'in' && !canIn) || (state.kind === 'out' && !canOut)) state.kind = canIn ? 'in' : 'out';
 
-    // ============================================================
-    // Step dispatch
-    // ============================================================
-    function renderStep(kind) {
-        const s = state[kind];
-        const body = stepBody(kind);
-        if (!body) return;
-        body.innerHTML = '';
-        if (kind === 'in') {
-            if (s.step === 1) body.appendChild(inStep1Informasi());
-            else if (s.step === 2) body.appendChild(inStep2Barang());
-            else if (s.step === 3) body.appendChild(inStep3Review());
-            else body.appendChild(step4Selesai('in'));
-        } else {
-            if (s.step === 1) body.appendChild(outStep1Tujuan());
-            else if (s.step === 2) body.appendChild(outStep2Barang());
-            else if (s.step === 3) body.appendChild(outStep3ReviewFifo());
-            else body.appendChild(step4Selesai('out'));
-        }
-    }
-
-    // ============================================================
-    // STOCK IN
-    // ============================================================
-    function inStep1Informasi() {
-        const s = state.in;
-        const whOptions = Master.warehouses().map((w) => `<option value="${w.id}" ${String(w.id) === String(s.warehouseId) ? 'selected' : ''}>${w.name}</option>`).join('');
-        const supplierOptions = Master.suppliers().filter((v) => v.is_active).map((v) => `<option value="${v.id}" ${String(v.id) === String(s.supplierId) ? 'selected' : ''}>${v.name}</option>`).join('');
-
-        const wrap = UI.el('div', {}, [
-            UI.el('div', { class: 'grid-2', html: `
-                <div class="form-group"><label>Gudang</label>
-                    <select id="in-wh" ${isStockUser() ? 'disabled' : ''}>${whOptions}</select>
-                </div>
-                <div class="form-group"><label>Vendor / Supplier (opsional)</label>
-                    <select id="in-supplier"><option value="">-</option>${supplierOptions}</select>
-                </div>
-                <div class="form-group"><label>Referensi (opsional)</label><input type="text" id="in-ref" value="${s.reference}"></div>
-                <div class="form-group"><label>Tanggal Transaksi</label><input type="date" id="in-date" value="${s.date}"></div>
-            ` }),
-        ]);
-        setTimeout(() => {
-            document.getElementById('in-wh')?.addEventListener('change', (e) => { s.warehouseId = e.target.value; });
-            document.getElementById('in-supplier').addEventListener('change', (e) => { s.supplierId = e.target.value; });
-            document.getElementById('in-ref').addEventListener('input', (e) => { s.reference = e.target.value; });
-            document.getElementById('in-date').addEventListener('change', (e) => { s.date = e.target.value; });
-        }, 0);
-        wrap.appendChild(navButtons('in', {
-            onNext: () => {
-                if (!s.warehouseId) { UI.toast('Gudang wajib dipilih.', 'error'); return; }
-                goToStep('in', 2);
-            },
-        }));
-        return wrap;
-    }
-
-    // PHASE V2.10 — reference-vs-transaction price hint under the price
-    // field (Part B5). Never shown as an error: a price difference is
-    // informational only, and if there's no configured reference price at
-    // all we show the exact required string rather than a misleading Rp 0.
-    function priceReferenceHintNode(referencePrice, priceSource, currentPrice) {
-        if (priceSource === 'NONE' || referencePrice === null || referencePrice === undefined) {
-            return UI.el('div', { class: 'price-reference-hint' }, 'Harga default belum tersedia.');
-        }
-        const ref = Number(referencePrice);
-        const current = Number(currentPrice || 0);
-        const diff = current - ref;
-        if (Math.abs(diff) < 0.005) {
-            return UI.el('div', { class: 'price-reference-hint' }, `Harga referensi database: ${UI.formatMoney(ref)}`);
-        }
-        const pct = ref !== 0 ? (diff / ref) * 100 : 0;
-        const sign = diff > 0 ? '+' : '';
-        return UI.el('div', { class: 'price-reference-hint price-diff' },
-            `Harga referensi database: ${UI.formatMoney(ref)} / Perubahan harga: ${sign}${UI.formatMoney(diff)} (${sign}${pct.toFixed(2)}%)`);
-    }
-
-    function inStep2Barang() {
-        const s = state.in;
-        const itemSelectorHost = UI.el('div');
-        const qtyInput = UI.el('input', { type: 'number', id: 'in-qty', min: '0', step: 'any', value: s.qty });
-        const priceInput = UI.el('input', { type: 'number', id: 'in-price', min: '0', step: 'any', value: s.price });
-        const priceHintHost = UI.el('div', { id: 'in-price-hint' });
-
-        const grid = UI.el('div', { class: 'grid-3' }, [
-            itemSelectorHost,
-            UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Jumlah'), qtyInput]),
-            UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Harga Satuan / Gross (Rp)'), priceInput, priceHintHost]),
-        ]);
-        const wrap = UI.el('div', {}, [grid, purchaseCostingFields(s)]);
-
-        function refreshPriceHint(units, unitId) {
-            const unit = (units || []).find((u) => String(u.id) === String(unitId));
-            priceHintHost.innerHTML = '';
-            if (!unit) return;
-            priceHintHost.appendChild(priceReferenceHintNode(unit.reference_price, unit.price_source, s.price));
-        }
-
-        // PHASE V2.10 — Part A/B/C: ItemSelector owns search/barcode/unit
-        // selection. Every item OR unit change is a full replacement of
-        // item_id/unit_id/price (Part G — no stale value from a previous
-        // item ever survives) and, for Stock IN, re-derives the price from
-        // that unit's own reference price (Part B9 — a price is only ever
-        // shown/used for the unit it was actually resolved for).
-        const selector = ItemSelector.mount(itemSelectorHost, {
-            initialItemId: s.itemId,
-            initialUnitId: s.unitId,
-            onChange: ({ itemId, unitId, units }) => {
-                s.itemId = itemId;
-                s.unitId = unitId;
-                if (!itemId || !unitId) {
-                    s.price = '';
-                    priceInput.value = '';
-                    priceHintHost.innerHTML = '';
-                    return;
-                }
-                const unit = units.find((u) => String(u.id) === String(unitId));
-                const referencePrice = unit && unit.reference_price !== null && unit.reference_price !== undefined
-                    ? String(unit.reference_price) : '';
-                s.price = referencePrice;
-                priceInput.value = referencePrice;
-                refreshPriceHint(units, unitId);
-            },
-        });
-
-        qtyInput.addEventListener('input', (e) => { s.qty = e.target.value; });
-        priceInput.addEventListener('input', (e) => {
-            s.price = e.target.value;
-            const { units, unitId } = selector.getState();
-            refreshPriceHint(units, unitId);
-        });
-        setTimeout(() => bindPurchaseCostingFields(s), 0);
-
-        wrap.appendChild(navButtons('in', {
-            backStep: 1,
-            onNext: () => {
-                const sel = selector.getState();
-                if (!sel.valid || !sel.itemId) {
-                    UI.toast(ItemSelector.MESSAGES.PICK_FROM_RESULTS, 'error');
-                    return;
-                }
-                if (!s.unitId) { UI.toast('Satuan wajib dipilih.', 'error'); return; }
-                if (!(Number(s.qty) > 0)) { UI.toast('Jumlah harus lebih dari 0.', 'error'); return; }
-                if (!(Number(s.price) >= 0)) { UI.toast('Harga wajib diisi dengan benar.', 'error'); return; }
-                goToStep('in', 3);
-            },
-        }));
-        return wrap;
-    }
-
-    // ============================================================
-    // PHASE V2.7 — Purchase Costing input fields (Stock IN only).
-    // Collapsed by default ("opsional") since most Stock IN entries never
-    // need them — every field left at NONE/0 makes the Cost Preview
-    // mathematically identical to the raw gross price (see
-    // PurchaseCostingService::buildCostPreview()).
-    // ============================================================
-    function purchaseCostingFields(s) {
-        return UI.el('details', { class: 'card', style: 'margin-top:10px; padding:12px;' }, [
-            UI.el('summary', { style: 'cursor:pointer; font-weight:600;' }, '💰 Purchase Costing (opsional): Diskon, PPN, Freight'),
-            UI.el('div', { class: 'grid-3', style: 'margin-top:12px;', html: `
-                <div class="form-group"><label>Diskon Baris — Tipe</label>
-                    <select id="in-linedisc-type">
-                        <option value="NONE" ${s.lineDiscountType === 'NONE' ? 'selected' : ''}>Tidak Ada</option>
-                        <option value="PERCENT" ${s.lineDiscountType === 'PERCENT' ? 'selected' : ''}>Persen (%)</option>
-                        <option value="AMOUNT" ${s.lineDiscountType === 'AMOUNT' ? 'selected' : ''}>Nominal (Rp)</option>
-                    </select>
-                </div>
-                <div class="form-group"><label>Diskon Baris — Nilai</label><input type="number" id="in-linedisc-value" min="0" step="any" value="${s.lineDiscountValue}"></div>
-                <div class="form-group"></div>
-                <div class="form-group"><label>Diskon Invoice — Tipe</label>
-                    <select id="in-invdisc-type">
-                        <option value="NONE" ${s.invoiceDiscountType === 'NONE' ? 'selected' : ''}>Tidak Ada</option>
-                        <option value="PERCENT" ${s.invoiceDiscountType === 'PERCENT' ? 'selected' : ''}>Persen (%)</option>
-                        <option value="AMOUNT" ${s.invoiceDiscountType === 'AMOUNT' ? 'selected' : ''}>Nominal (Rp)</option>
-                    </select>
-                </div>
-                <div class="form-group"><label>Diskon Invoice — Nilai</label><input type="number" id="in-invdisc-value" min="0" step="any" value="${s.invoiceDiscountValue}"></div>
-                <div class="form-group"></div>
-                <div class="form-group"><label>PPN — Perlakuan</label>
-                    <select id="in-ppn-treatment">
-                        <option value="NONE" ${s.ppnTreatment === 'NONE' ? 'selected' : ''}>Tidak Ada PPN</option>
-                        <option value="CREDITABLE" ${s.ppnTreatment === 'CREDITABLE' ? 'selected' : ''}>Creditable / Recoverable</option>
-                        <option value="NON_CREDITABLE" ${s.ppnTreatment === 'NON_CREDITABLE' ? 'selected' : ''}>Non-Creditable</option>
-                        <option value="PARTIALLY_CREDITABLE" ${s.ppnTreatment === 'PARTIALLY_CREDITABLE' ? 'selected' : ''}>Partially Creditable</option>
-                    </select>
-                </div>
-                <div class="form-group"><label>PPN — Rate (%)</label><input type="number" id="in-ppn-rate" min="0" step="any" value="${s.ppnRate}"></div>
-                <div class="form-group" id="in-ppn-pct-group" style="display:${s.ppnTreatment === 'PARTIALLY_CREDITABLE' ? '' : 'none'};"><label>PPN — % Creditable</label><input type="number" id="in-ppn-pct" min="0" max="100" step="any" value="${s.ppnCreditablePct}"></div>
-                <div class="form-group"><label>Freight — Perlakuan</label>
-                    <select id="in-freight-treatment">
-                        <option value="NONE" ${s.freightTreatment === 'NONE' ? 'selected' : ''}>Tidak Ada</option>
-                        <option value="CAPITALIZE" ${s.freightTreatment === 'CAPITALIZE' ? 'selected' : ''}>Capitalize (masuk HPP)</option>
-                        <option value="EXPENSE" ${s.freightTreatment === 'EXPENSE' ? 'selected' : ''}>Expense (tidak masuk HPP)</option>
-                    </select>
-                </div>
-                <div class="form-group"><label>Freight — Nominal (Rp)</label><input type="number" id="in-freight-amount" min="0" step="any" value="${s.freightAmount}"></div>
-            ` }),
-        ]);
-    }
-
-    function bindPurchaseCostingFields(s) {
-        const bind = (id, key, isNumber) => {
-            const el = document.getElementById(id);
-            if (!el) return;
-            el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', (e) => { s[key] = e.target.value; });
+        const root = UI.el('div', { class: 'tx2', 'data-testid': 'tx-root' });
+        const host = UI.el('div', { class: 'tx2-host', id: 'tx2-host' });
+        const tabs = UI.el('div', { class: 'tx2-tabs', 'data-testid': 'tx-tabs' });
+        const mk = (kind, label, glyph) => {
+            const b = UI.el('button', { type: 'button', class: `tx2-tab${state.kind === kind ? ' on' : ''}`, 'data-testid': `tx-tab-${kind}` }, [UI.el('span', { class: 'tx2-tab-ico' }, glyph), label]);
+            b.addEventListener('click', () => { if (state.kind === kind) return; state.kind = kind; render(container); });
+            return b;
         };
-        bind('in-linedisc-type', 'lineDiscountType');
-        bind('in-linedisc-value', 'lineDiscountValue');
-        bind('in-invdisc-type', 'invoiceDiscountType');
-        bind('in-invdisc-value', 'invoiceDiscountValue');
-        bind('in-ppn-rate', 'ppnRate');
-        bind('in-ppn-pct', 'ppnCreditablePct');
-        bind('in-freight-treatment', 'freightTreatment');
-        bind('in-freight-amount', 'freightAmount');
-        const ppnTreatmentSel = document.getElementById('in-ppn-treatment');
-        if (ppnTreatmentSel) {
-            ppnTreatmentSel.addEventListener('change', (e) => {
-                s.ppnTreatment = e.target.value;
-                const pctGroup = document.getElementById('in-ppn-pct-group');
-                if (pctGroup) pctGroup.style.display = e.target.value === 'PARTIALLY_CREDITABLE' ? '' : 'none';
-            });
-        }
-    }
+        if (canIn) tabs.appendChild(mk('in', 'Stock IN', '⭳'));
+        if (canOut) tabs.appendChild(mk('out', 'Stock OUT', '⭱'));
 
-    function costingParams(s) {
-        return {
-            item_id: s.itemId, input_unit_id: s.unitId, input_qty: s.qty, unit_price_input: s.price,
-            transaction_date: s.date,
-            line_discount_type: s.lineDiscountType, line_discount_value: s.lineDiscountValue || 0,
-            invoice_discount_type: s.invoiceDiscountType, invoice_discount_value: s.invoiceDiscountValue || 0,
-            ppn_treatment: s.ppnTreatment, ppn_rate: s.ppnRate || 0, ppn_creditable_pct: s.ppnCreditablePct || 0,
-            freight_treatment: s.freightTreatment, freight_amount: s.freightAmount || 0,
-        };
-    }
+        const title = state.kind === 'in' ? 'Transaksi Stock IN / OUT' : 'Transaksi Keluar (Stock OUT)';
+        const sub = state.kind === 'in' ? 'Kelola transaksi pemasukan dan pengeluaran stok barang' : 'Distribusi barang ke cabang bakery (packaging, aksesoris, dan bahan-bahan).';
+        root.appendChild(UI.el('div', { class: 'tx2-top' }, [
+            UI.el('div', { class: 'tx2-titlebox' }, [UI.el('div', { class: 'tx2-titleico' }, state.kind === 'in' ? '⭳' : '⭱'), UI.el('div', {}, [UI.el('h2', { class: 'tx2-title' }, title), UI.el('div', { class: 'tx2-subtitle' }, sub)])]),
+            tabs,
+            UI.el('div', { class: 'tx2-stepslot', id: 'tx2-stepslot' }),
+        ]));
+        root.appendChild(host);
+        container.appendChild(root);
 
-    function costPreviewPanel(preview) {
-        if (!preview) return UI.el('div', {});
-        const h = preview.header;
-        const row = (label, value, bold) => UI.el('div', { style: `display:flex; justify-content:space-between; padding:3px 0;${bold ? ' font-weight:700; border-top:1px solid var(--border); margin-top:4px; padding-top:6px;' : ''}` }, [
-            UI.el('span', {}, label), UI.el('span', {}, UI.formatMoney(value)),
-        ]);
-        return UI.el('div', { class: 'card', style: 'margin-top:12px; padding:12px; background:var(--bg2);' }, [
-            UI.el('div', { style: 'font-weight:700; margin-bottom:8px;' }, '💰 Cost Preview'),
-            row('Gross Purchase', h.gross_purchase),
-            row('Diskon Baris', -h.line_discount_total),
-            row('Diskon Invoice', -h.invoice_discount_amount),
-            row('Net Purchase Before Tax', h.net_purchase_before_tax, true),
-            row('PPN', h.ppn_amount),
-            row('Freight', h.freight_amount),
-            row('Supplier Invoice / Payable', h.invoice_total, true),
-            UI.el('div', { style: 'height:10px;' }),
-            row('Net Purchase', h.net_purchase_before_tax),
-            row('PPN Non-Creditable', h.ppn_non_creditable_amount),
-            row('Freight Capitalized', h.freight_treatment === 'CAPITALIZE' ? h.freight_amount : 0),
-            row('Inventory / FIFO Cost', h.inventory_cost_total, true),
-            UI.el('div', { style: 'font-size:0.75rem; color:var(--text3); margin-top:8px;' }, `PPN Recoverable: ${UI.formatMoney(h.ppn_creditable_amount)} · PPN Non-Creditable: ${UI.formatMoney(h.ppn_non_creditable_amount)}`),
-        ]);
-    }
-
-    // Synchronous return (a loading placeholder) + async population — never
-    // returns a Promise to the caller, which just does body.appendChild(...).
-    function inStep3Review() {
-        const s = state.in;
-        const wrap = UI.el('div', {}, [UI.el('div', { id: 'in-review-alert' }), UI.el('div', { class: 'alert alert-info' }, 'Memuat review...')]);
-
-        (async () => {
-            const item = Master.itemById(s.itemId);
-            const wh = Master.warehouseById(s.warehouseId);
-            const supplier = s.supplierId ? Master.supplierById(s.supplierId) : null;
-
-            // PHASE V2.7 — real Cost Preview from the server (the EXACT
-            // same PurchaseCostingService::buildCostPreview() call the
-            // POST will use), never a second client-side cost formula.
-            // Unit-conversion factor/base qty are still a client preview
-            // only (POST remains the sole authority), same convention as
-            // every other stepper review step in this file.
-            let costPreview = null;
-            let previewError = null;
-            try {
-                costPreview = await InvApi.purchaseCostPreview(costingParams(s));
-                s.costPreview = costPreview;
-            } catch (err) {
-                previewError = (err && err.message) || 'Gagal memuat cost preview';
-            }
-
-            let factor = 1;
-            let unit = null;
-            try {
-                const units = await InvApi.itemUnits(s.itemId);
-                unit = units.find((u) => String(u.id) === String(s.unitId));
-                if (unit) factor = Number(unit.conversion_to_base);
-            } catch (err) { /* preview-only; POST will still validate authoritatively */ }
-            const baseQtyPreview = Number(s.qty) * factor;
-
-            // PHASE V2.10 — Part B6: review screen shows both the database
-            // reference price and the actual transaction price side by
-            // side, in this exact order, so a price override is never
-            // silently hidden before POST.
-            const referenceRow = (unit && unit.price_source !== 'NONE' && unit.reference_price !== null && unit.reference_price !== undefined)
-                ? UI.formatMoney(unit.reference_price)
-                : 'Harga default belum tersedia.';
-
-            wrap.innerHTML = '';
-            wrap.appendChild(UI.el('div', { id: 'in-review-alert' }));
-            wrap.appendChild(Drawer.kv([
-                ['Gudang', wh ? wh.name : '-'],
-                ['Vendor', supplier ? supplier.name : '-'],
-                ['Referensi', s.reference || '-'],
-                ['Tanggal Transaksi', s.date],
-                ['Barang', item ? `${item.sku} — ${item.name}` : '-'],
-                ['Satuan', unit ? `${unit.code} (${unit.name})` : '-'],
-                ['Jumlah', UI.formatNumber(Number(s.qty))],
-                ['Harga Referensi Database', referenceRow],
-                ['Harga Transaksi / Gross', UI.formatMoney(Number(s.price))],
-                ['Konversi ke Base (preview)', UI.formatNumber(factor, 6)],
-                ['Qty Base (preview)', UI.formatNumber(baseQtyPreview)],
-            ]));
-            if (unit && unit.price_source !== 'NONE' && unit.reference_price !== null && unit.reference_price !== undefined) {
-                wrap.appendChild(priceReferenceHintNode(unit.reference_price, unit.price_source, s.price));
-            }
-
-            if (previewError) {
-                wrap.appendChild(UI.el('div', { class: 'alert alert-error', style: 'margin-top:10px;' }, `Gagal memuat Cost Preview: ${previewError}`));
-            } else {
-                wrap.appendChild(costPreviewPanel(costPreview));
-            }
-            wrap.appendChild(UI.el('p', { style: 'color:var(--text3); font-size:0.75rem; margin-top:10px;' }, 'Cost Preview dihitung oleh server — nilai final yang sama persis akan digunakan saat POST (bukan perhitungan kedua di browser).'));
-
-            const postBtn = UI.el('button', { class: 'btn btn-primary', id: 'in-post-btn', ...(previewError ? { disabled: 'disabled' } : {}) }, 'Simpan Transaksi Masuk');
-            postBtn.addEventListener('click', () => submitIn());
-            wrap.appendChild(UI.el('div', { style: 'display:flex; gap:10px; margin-top:16px;' }, [
-                (() => { const b = UI.el('button', { class: 'btn btn-secondary' }, '‹ Kembali'); b.addEventListener('click', () => goToStep('in', 2)); return b; })(),
-                postBtn,
-            ]));
-        })();
-        return wrap;
-    }
-
-    // Idempotency: requestUuid is generated once on the FIRST submit
-    // attempt and reused across every retry of that SAME action (network
-    // failure, PRICE_ANOMALY override) — only cleared on an actual
-    // successful post or an explicit "Transaksi Baru" reset. Identical
-    // rule to the pre-stepper implementation.
-    async function submitIn(extra = {}) {
-        const s = state.in;
-        if (!s.requestUuid) s.requestUuid = InvApi.newRequestUuid();
-        const postBtn = document.getElementById('in-post-btn');
-        if (postBtn) postBtn.disabled = true;
-        const alertBox = document.getElementById('in-review-alert');
-        if (alertBox) alertBox.innerHTML = '';
-        try {
-            const payload = {
-                transaction_uuid: s.requestUuid,
-                item_id: Number(s.itemId), warehouse_id: Number(s.warehouseId),
-                input_unit_id: Number(s.unitId), input_qty: Number(s.qty),
-                unit_price_input: Number(s.price), transaction_date: s.date,
-                reference_no: s.reference || null, supplier_id: s.supplierId || null,
-                // PHASE V2.7 — optional; all default to NONE/0 server-side
-                // if omitted, so a plain Stock IN (every field left blank)
-                // behaves byte-identically to before this phase.
-                line_discount_type: s.lineDiscountType, line_discount_value: Number(s.lineDiscountValue || 0),
-                invoice_discount_type: s.invoiceDiscountType, invoice_discount_value: Number(s.invoiceDiscountValue || 0),
-                ppn_treatment: s.ppnTreatment, ppn_rate: Number(s.ppnRate || 0), ppn_creditable_pct: Number(s.ppnCreditablePct || 0),
-                freight_treatment: s.freightTreatment, freight_amount: Number(s.freightAmount || 0),
-                ...extra,
-            };
-            const result = await InvApi.postTransactionIn(payload);
-            s.lastResult = { ...result, transaction_uuid: s.requestUuid };
-            s.requestUuid = null;
-            goToStep('in', 4);
-        } catch (err) {
-            await handleTxError('in', err, extra, submitIn);
-            if (postBtn) postBtn.disabled = false;
-        }
-    }
-
-    // ============================================================
-    // STOCK OUT
-    // ============================================================
-    function outStep1Tujuan() {
-        const s = state.out;
-        const whOptions = Master.warehouses().map((w) => `<option value="${w.id}" ${String(w.id) === String(s.warehouseId) ? 'selected' : ''}>${w.name}</option>`).join('');
-        const bakeryOptions = Master.bakeryDestinations().filter((b) => b.is_active).map((b) => `<option value="${b.id}" ${String(b.id) === String(s.bakeryDestinationId) ? 'selected' : ''}>${b.name}</option>`).join('');
-        const divisionOptions = Master.divisions().map((d) => `<option value="${d.id}" ${String(d.id) === String(s.divisionId) ? 'selected' : ''}>${d.name}</option>`).join('');
-
-        const wrap = UI.el('div', {}, [
-            UI.el('div', { class: 'grid-2', html: `
-                <div class="form-group"><label>Gudang (Asal)</label>
-                    <select id="out-wh" ${isStockUser() ? 'disabled' : ''}>${whOptions}</select>
-                </div>
-                <div class="form-group"><label>Bakery Tujuan (opsional)</label>
-                    <select id="out-bakery"><option value="">-</option>${bakeryOptions}</select>
-                </div>
-                <div class="form-group"><label>Divisi Tujuan (opsional)</label>
-                    <select id="out-division"><option value="">-</option>${divisionOptions}</select>
-                </div>
-                <div class="form-group"><label>Referensi (opsional)</label><input type="text" id="out-ref" value="${s.reference}"></div>
-                <div class="form-group"><label>Tanggal Transaksi</label><input type="date" id="out-date" value="${s.date}"></div>
-            ` }),
-        ]);
-        setTimeout(() => {
-            document.getElementById('out-wh')?.addEventListener('change', (e) => { s.warehouseId = e.target.value; });
-            document.getElementById('out-bakery').addEventListener('change', (e) => { s.bakeryDestinationId = e.target.value; });
-            document.getElementById('out-division').addEventListener('change', (e) => { s.divisionId = e.target.value; });
-            document.getElementById('out-ref').addEventListener('input', (e) => { s.reference = e.target.value; });
-            document.getElementById('out-date').addEventListener('change', (e) => { s.date = e.target.value; });
-        }, 0);
-        wrap.appendChild(navButtons('out', {
-            onNext: () => {
-                if (!s.warehouseId) { UI.toast('Gudang wajib dipilih.', 'error'); return; }
-                goToStep('out', 2);
-            },
-        }));
-        return wrap;
-    }
-
-    function outStep2Barang() {
-        const s = state.out;
-        const itemSelectorHost = UI.el('div');
-        const qtyInput = UI.el('input', { type: 'number', id: 'out-qty', min: '0', step: 'any', value: s.qty });
-
-        const wrap = UI.el('div', {}, [
-            UI.el('div', { class: 'grid-3' }, [
-                itemSelectorHost,
-                UI.el('div', { class: 'form-group' }, [UI.el('label', {}, 'Jumlah Diminta'), qtyInput]),
-            ]),
-            UI.el('div', { class: 'form-group', html: `
-                <label style="display:flex; align-items:center; gap:8px; text-transform:none;"><input type="checkbox" id="out-allow-negative" ${s.allowNegative ? 'checked' : ''} style="width:auto;"> Izinkan stok negatif</label>
-                <input type="text" id="out-negative-reason" placeholder="Alasan stok negatif (wajib jika dicentang)" value="${s.negativeReason}" style="margin-top:6px;">
-            ` }),
-        ]);
-
-        // PHASE V2.10 — same reusable ItemSelector as Stock IN (Part D),
-        // without any purchase-price wiring: Stock OUT never gains
-        // Stock-IN-only fields, and stays governed entirely by the
-        // existing FIFO/stock validation on POST.
-        const selector = ItemSelector.mount(itemSelectorHost, {
-            initialItemId: s.itemId,
-            initialUnitId: s.unitId,
-            onChange: ({ itemId, unitId }) => {
-                s.itemId = itemId;
-                s.unitId = unitId;
-            },
-        });
-
-        qtyInput.addEventListener('input', (e) => { s.qty = e.target.value; });
-        setTimeout(() => {
-            document.getElementById('out-allow-negative').addEventListener('change', (e) => { s.allowNegative = e.target.checked; });
-            document.getElementById('out-negative-reason').addEventListener('input', (e) => { s.negativeReason = e.target.value; });
-        }, 0);
-        wrap.appendChild(navButtons('out', {
-            backStep: 1,
-            onNext: () => {
-                const sel = selector.getState();
-                if (!sel.valid || !sel.itemId) {
-                    UI.toast(ItemSelector.MESSAGES.PICK_FROM_RESULTS, 'error');
-                    return;
-                }
-                if (!s.unitId) { UI.toast('Satuan wajib dipilih.', 'error'); return; }
-                if (!(Number(s.qty) > 0)) { UI.toast('Jumlah harus lebih dari 0.', 'error'); return; }
-                goToStep('out', 3);
-            },
-        }));
-        return wrap;
-    }
-
-    // Synchronous return (a loading placeholder) + async population — never
-    // returns a Promise to the caller, which just does body.appendChild(...).
-    function outStep3ReviewFifo() {
-        const s = state.out;
-        const wrap = UI.el('div', {}, [UI.el('div', { id: 'out-review-alert' }), UI.el('div', { class: 'alert alert-info' }, 'Memuat review...')]);
-
-        (async () => {
-            const item = Master.itemById(s.itemId);
-            const wh = Master.warehouseById(s.warehouseId);
-            const bakery = s.bakeryDestinationId ? Master.bakeryDestinationById(s.bakeryDestinationId) : null;
-
-            let factor = 1;
-            let currentStock = null;
-            let batches = [];
-            try {
-                const units = await InvApi.itemUnits(s.itemId);
-                const unit = units.find((u) => String(u.id) === String(s.unitId));
-                if (unit) factor = Number(unit.conversion_to_base);
-            } catch (err) { /* preview-only */ }
-            try {
-                currentStock = await InvApi.currentStock(s.itemId, s.warehouseId);
-            } catch (err) { /* shown as unavailable below */ }
-            try {
-                batches = await InvApi.batches(s.itemId, s.warehouseId);
-            } catch (err) { /* FIFO preview simply won't show */ }
-
-            const baseQtyPreview = Number(s.qty) * factor;
-            const currentQty = currentStock ? Number(currentStock.qty_base) : null;
-            const estimatedRemaining = currentQty !== null ? currentQty - baseQtyPreview : null;
-
-            wrap.innerHTML = '';
-            wrap.appendChild(UI.el('div', { id: 'out-review-alert' }));
-            wrap.appendChild(Drawer.kv([
-                ['Gudang', wh ? wh.name : '-'],
-                ['Bakery Tujuan', bakery ? bakery.name : '-'],
-                ['Referensi', s.reference || '-'],
-                ['Tanggal Transaksi', s.date],
-                ['Barang', item ? `${item.sku} — ${item.name}` : '-'],
-                ['Jumlah Diminta', UI.formatNumber(Number(s.qty))],
-                ['Qty Base (preview)', UI.formatNumber(baseQtyPreview)],
-                ['Stok Saat Ini', currentQty !== null ? UI.formatNumber(currentQty) : 'Gagal memuat'],
-                ['Estimasi Sisa Stok (preview)', estimatedRemaining !== null ? UI.formatNumber(estimatedRemaining) : '-'],
-            ]));
-
-            if (currentStock && currentStock.migration_negative_review) {
-                wrap.appendChild(UI.el('div', { class: 'alert alert-warning', style: 'margin-top:10px;' }, 'Item ini berstatus MIGRATION_NEGATIVE_REVIEW — transaksi OUT akan DITOLAK oleh server sampai saldo diperbaiki melalui Stock Opname / Stock Adjustment.'));
-            }
-            if (estimatedRemaining !== null && estimatedRemaining < 0 && !s.allowNegative) {
-                wrap.appendChild(UI.el('div', { class: 'alert alert-warning', style: 'margin-top:10px;' }, 'Estimasi sisa stok negatif. Server akan menolak transaksi ini kecuali "Izinkan stok negatif" dicentang (kembali ke langkah Barang).'));
-            }
-
-            wrap.appendChild(UI.el('div', { class: 'drawer-section-title', style: 'margin-top:16px;' }, 'FIFO Layer Preview (read-only — operator tidak memilih layer secara manual)'));
-            wrap.appendChild(buildFifoPreviewTable(batches, baseQtyPreview));
-            wrap.appendChild(UI.el('p', { style: 'color:var(--text3); font-size:0.75rem; margin-top:6px;' }, 'Preview ini dihitung di browser dari data FIFO layer yang sudah dimuat, mengikuti urutan konsumsi yang sama (tanggal terima terlama dahulu) dengan server — bukan instruksi ke server. Alokasi aktual tetap dihitung ulang secara otomatis oleh server saat transaksi disimpan.'));
-
-            const postBtn = UI.el('button', { class: 'btn btn-primary', id: 'out-post-btn' }, 'Simpan Transaksi Keluar');
-            postBtn.addEventListener('click', () => submitOut());
-            wrap.appendChild(UI.el('div', { style: 'display:flex; gap:10px; margin-top:16px;' }, [
-                (() => { const b = UI.el('button', { class: 'btn btn-secondary' }, '‹ Kembali'); b.addEventListener('click', () => goToStep('out', 2)); return b; })(),
-                postBtn,
-            ]));
-        })();
-        return wrap;
-    }
-
-    /** Read-only simulation of FIFO consumption order — never sent to the server. */
-    function buildFifoPreviewTable(batches, requestedBaseQty) {
-        let remaining = requestedBaseQty;
-        const rows = batches.map((b) => {
-            const available = Number(b.qty_base);
-            const consumed = remaining > 0 ? Math.min(available, remaining) : 0;
-            remaining = Math.max(0, remaining - consumed);
-            return UI.el('tr', {}, [
-                UI.el('td', {}, UI.formatDate(b.received_date)),
-                UI.el('td', {}, UI.formatNumber(available)),
-                UI.el('td', {}, UI.formatMoney(b.unit_cost_base)),
-                UI.el('td', {}, consumed > 0 ? UI.formatNumber(consumed) : '-'),
-            ]);
-        });
-        return UI.el('div', { class: 'table-wrapper' }, [
-            UI.el('table', {}, [
-                UI.el('thead', {}, [UI.el('tr', {}, ['Diterima', 'Qty Tersedia', 'Unit Cost', 'Estimasi Terpakai'].map((h) => UI.el('th', {}, h)))]),
-                UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '4' }, 'Tidak ada layer FIFO aktif untuk barang ini di gudang ini')])]),
-            ]),
-        ]);
-    }
-
-    async function submitOut(extra = {}) {
-        const s = state.out;
-        if (!s.requestUuid) s.requestUuid = InvApi.newRequestUuid();
-        const postBtn = document.getElementById('out-post-btn');
-        if (postBtn) postBtn.disabled = true;
-        const alertBox = document.getElementById('out-review-alert');
-        if (alertBox) alertBox.innerHTML = '';
-        try {
-            const payload = {
-                transaction_uuid: s.requestUuid,
-                item_id: Number(s.itemId), warehouse_id: Number(s.warehouseId),
-                input_unit_id: Number(s.unitId), input_qty: Number(s.qty),
-                transaction_date: s.date, reference_no: s.reference || null,
-                division_id: s.divisionId || null, bakery_destination_id: s.bakeryDestinationId || null,
-                ...(s.allowNegative ? { allow_negative_stock: true, negative_stock_reason: s.negativeReason } : {}),
-                ...extra,
-            };
-            const result = await InvApi.postTransactionOut(payload);
-            state.out.lastResult = { ...result, transaction_uuid: s.requestUuid };
-            state.out.requestUuid = null;
-            goToStep('out', 4);
-        } catch (err) {
-            await handleTxError('out', err, extra, submitOut);
-            if (postBtn) postBtn.disabled = false;
-        }
-    }
-
-    // ============================================================
-    // Step 4 — Selesai (shared shape, per-kind data)
-    // ============================================================
-    function step4Selesai(kind) {
-        const s = state[kind];
-        const r = s.lastResult || {};
-        const wrap = UI.el('div', {}, [
-            UI.el('div', { class: 'alert alert-success' }, kind === 'in' ? 'Transaksi Masuk berhasil disimpan.' : 'Transaksi Keluar berhasil disimpan.'),
-            Drawer.kv([
-                ['Transaction ID', r.transaction_id !== undefined ? String(r.transaction_id) : '-'],
-                ['Referensi (UUID)', r.transaction_uuid || '-'],
-                ['Qty Base', r.base_qty !== undefined ? UI.formatNumber(r.base_qty) : '-'],
-                ['Harga Pokok / Unit', r.unit_cost_base !== undefined ? UI.formatMoney(r.unit_cost_base) : '-'],
-            ]),
-        ]);
-        const newTxBtn = UI.el('button', { class: 'btn btn-primary', style: 'margin-top:16px;' }, kind === 'in' ? '➕ Transaksi Masuk Baru' : '➕ Transaksi Keluar Baru');
-        newTxBtn.addEventListener('click', () => {
-            const preservedWarehouse = isStockUser() ? ownWarehouseId() : null;
-            state[kind] = freshState();
-            if (preservedWarehouse) state[kind].warehouseId = preservedWarehouse;
-            rerenderCard(kind);
-        });
-        wrap.appendChild(newTxBtn);
-        return wrap;
-    }
-
-    // ============================================================
-    // Shared error handling — identical branches/messages to the
-    // pre-stepper implementation, only using Modal instead of native
-    // confirm(), and re-rendering the current (Review) step instead of
-    // a flat form on error.
-    // ============================================================
-    async function handleTxError(kind, err, extra, retryFn) {
-        const alertBox = document.getElementById(`${kind === 'in' ? 'in' : 'out'}-review-alert`);
-        const showAlert = (type, message) => {
-            if (!alertBox) return;
-            alertBox.innerHTML = '';
-            alertBox.appendChild(UI.el('div', { class: `alert alert-${type}` }, message));
-        };
-
-        if (err && err.code === 'NETWORK_ERROR') {
-            UI.handleApiError(err);
-            showAlert('error', 'Koneksi ke server terputus. Transaksi BELUM tentu tersimpan — silakan coba kirim ulang (aman, tidak akan tercatat dobel).');
-            return;
-        }
-        if (err && err.code === 'PRICE_ANOMALY') {
-            const proceed = await Modal.confirm({
-                title: 'Anomali Harga Terdeteksi',
-                message: `${err.message}\n\nLanjutkan menyimpan dengan harga ini?`,
-                confirmLabel: 'Lanjutkan', danger: true,
-            });
-            if (proceed) {
-                await retryFn({ ...extra, anomaly_approved_by: Auth.user().id });
-                return;
-            }
-            showAlert('warning', 'Transaksi dibatalkan karena anomali harga tidak disetujui.');
-            return;
-        }
-        if (err && err.code === 'INSUFFICIENT_STOCK') {
-            showAlert('error', `${err.message} — centang "Izinkan stok negatif" pada langkah Barang dan isi alasan jika ingin tetap melanjutkan.`);
-            return;
-        }
-        if (err && err.code === 'NEGATIVE_MIGRATION_STOCK_REQUIRES_ADJUSTMENT') {
-            showAlert('error', `${err.message} — selesaikan melalui Stock Opname / Stock Adjustment terlebih dahulu.`);
-            return;
-        }
-        if (err && (err.code === 'PERIOD_LOCKED' || err.code === 'OPNAME_ACTIVE')) {
-            showAlert('error', err.message);
-            return;
-        }
-        showAlert('error', (err && err.message) || 'Gagal menyimpan transaksi.');
+        const ctx = { host, stepSlot: root.querySelector('#tx2-stepslot') };
+        if (state.kind === 'in') StockInSheet.mount(ctx); else StockOutSheet.mount(ctx);
     }
 
     return { render };

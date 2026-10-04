@@ -110,7 +110,23 @@ const TransactionHistory = (() => {
                         voidBtn.addEventListener('click', () => voidTransaction(d, voidBtn));
                         actionsRow.appendChild(voidBtn);
                     }
-                    if (actionsRow.children.length) body.appendChild(actionsRow);
+                    // STOCK OUT V2 — an OUT that was issued through the Stock OUT sheet has a Delivery Order
+                    // and an Invoice: offer to re-print them (selling prices only — see StockOutDocumentService).
+                    const isOutDoc = d.transaction_type === 'OUT' && !!d.reference_no && typeof TxKit !== 'undefined';
+                    if (isOutDoc) {
+                        TxKit.api('GET', `/stock-out/by-transaction/${transactionId}`).then((doc) => {
+                            if (!doc) return;
+                            const doBtn = UI.el('button', { class: 'btn btn-secondary btn-sm', 'data-testid': 'hist-print-do' }, '🖨 Cetak DO');
+                            doBtn.addEventListener('click', () => StockOutSheet.openDocuments(doc.do_id, 1, doc));
+                            actionsRow.appendChild(doBtn);
+                            if (doc.invoice_id && (Auth.hasPermission('TRANSACTION_OUT_CREATE') || Auth.hasPermission('DISTRIBUTION_VIEW'))) {
+                                const invBtn = UI.el('button', { class: 'btn btn-secondary btn-sm', 'data-testid': 'hist-print-invoice' }, '🖨 Cetak Invoice');
+                                invBtn.addEventListener('click', () => StockOutSheet.openDocuments(doc.do_id, 0, doc));
+                                actionsRow.appendChild(invBtn);
+                            }
+                        }).catch(() => { /* reprint is a convenience; the transaction detail itself is unaffected */ });
+                    }
+                    if (actionsRow.children.length || isOutDoc) body.appendChild(actionsRow);
 
                     d.lines.forEach((line, idx) => {
                         const lineRows = [
