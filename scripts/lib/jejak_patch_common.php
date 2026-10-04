@@ -103,14 +103,24 @@ function jp_regex_replace_exactly_once(string $source, string $pattern, callable
     return $out;
 }
 
+// State-file suffixes are overridable (define() BEFORE require_once) so a later
+// package can keep its own backup/meta beside an earlier package's without
+// colliding: v2 used the defaults; v3 defines '.pre-v3-backup' / '.jejak-v3-patch.json'.
+if (!defined('JP_BACKUP_SUFFIX')) {
+    define('JP_BACKUP_SUFFIX', '.pre-patch-backup');
+}
+if (!defined('JP_META_SUFFIX')) {
+    define('JP_META_SUFFIX', '.jejak-patch.json');
+}
+
 function jp_meta_path(string $path): string
 {
-    return $path . '.jejak-patch.json';
+    return $path . JP_META_SUFFIX;
 }
 
 function jp_backup_path(string $path): string
 {
-    return $path . '.pre-patch-backup';
+    return $path . JP_BACKUP_SUFFIX;
 }
 
 /**

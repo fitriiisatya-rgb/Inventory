@@ -69,6 +69,7 @@ require_once __DIR__ . '/../services/InventoryReconciliationReportService.php';
 require_once __DIR__ . '/../services/InventorySummaryReportService.php';
 require_once __DIR__ . '/../services/TransferReportService.php';
 require_once __DIR__ . '/../services/StockOpnameReportService.php';
+require_once __DIR__ . '/../services/StockOpnameJejakService.php';
 require_once __DIR__ . '/../services/StockOpnamePrintService.php';
 require_once __DIR__ . '/../services/AdjustmentReportService.php';
 require_once __DIR__ . '/../services/ExpiryReportService.php';
@@ -1942,6 +1943,28 @@ $routes = [
         }
 
         inv_ok($result, 'OK');
+    },
+
+    // "Jejak Stock Opname" drawer (report-opname.js row click): READ-ONLY
+    // per-session trace — real lines, Count 01/02, final, variance, dead
+    // stock, rusak, HPP and posted adjustments, plus the six KPI figures
+    // computed from those same rows. Same permission + warehouse-scope
+    // guards as GET /reports/opname/{id}; HPP is exposed under
+    // INVENTORY_VIEW exactly like the existing HPP reports.
+    'GET /reports/opname/{id}/jejak' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+
+        $sessionId = (int) $params['id'];
+        $wh = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $wh->execute(['id' => $sessionId]);
+        $warehouseId = $wh->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+
+        inv_ok(\App\Services\StockOpnameJejakService::detail($pdo, $sessionId), 'OK');
     },
 
     // PHASE V2.12C: per-session detail (Section 21) — same permission and

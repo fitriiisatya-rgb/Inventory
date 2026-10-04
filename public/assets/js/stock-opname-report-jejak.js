@@ -1,104 +1,63 @@
 /**
- * MOCKUP — "Jejak Stock Opname" detail drawer, per the supplied reference
- * design. Fast-path visual mockup only (explicitly NOT a backend/data-
- * model task this round): opens a wide Drawer (reusing the existing
- * Drawer component — drawer.js — untouched) when a session row is clicked
- * in report-opname.js (the ACTIVE production Stock Opname report) or in
- * stock-opname-report.js (dev-branch-only monthly report).
+ * "Jejak Stock Opname" — per-session trace drawer, REAL DATA.
  *
- * SELF-CONTAINED STYLING: every class this file needs beyond the
- * long-standing .card/.badge/.btn/.modal, .hpp-kpi and .drawer rules is a
- * .jejak-* rule shipped in the same app.css patch as .drawer-xl. It must
- * NOT depend on .so-report-* (V2.16.4 — absent from production's app.css).
+ * Opened by a row click in report-opname.js (the active production Stock
+ * Opname report; stock-opname-report.js uses it too on the dev branch).
+ * Everything shown comes from ONE read-only call,
+ *   GET /api/reports/opname/{id}/jejak   (StockOpnameJejakService)
+ * — session identity, every line (system / Count 01 / Count 02 / final /
+ * variance / dead stock / rusak / HPP and their Rupiah values) and the
+ * posted adjustments. There is NO mock or fallback data: while loading a
+ * spinner text is shown, and on any failure the real error is shown with a
+ * retry button.
  *
- * ALL DATA IN THIS FILE IS MOCK, clearly isolated in buildMockDetail()
- * below. Nothing here calls InvApi, posts anything, or touches
- * StockOpnameService/TransferService/FifoService/the DB. Cetak Laporan /
- * Export Excel are safe no-op toasts only; Posting Adjustment is
- * hard-disabled (see open()/buildPerBarangTab()) and can never fire a
- * click handler, let alone a real posting call. The drawer header always
- * carries a "PREVIEW UI — DATA SIMULASI" badge + explanatory note so this
- * can never be mistaken for a live report even once linked from a real
- * menu.
+ * READ-ONLY: this module only ever issues that one GET. It cannot post,
+ * finalize or adjust anything; "Posting Adjustment" is a disabled button
+ * with no click handler, and "Export Excel" is disabled until an export is
+ * built on this data.
  *
- * Shaped loosely after stock-opname-report.js's own REAL detail response
- * (detail.session / detail.finance_summary / detail.items) so swapping
- * in a real endpoint later is a data-source change, not a UI rewrite.
+ * KPI cards are computed here from the SAME rows the drill-down tables list
+ * (computeKpis / drilldownRows below), so a card and its breakdown can
+ * never disagree; the server returns its own kpi block purely so tests can
+ * cross-check the two implementations.
+ *
+ * Self-contained styling: .jejak-* rules ship in the same app.css patch as
+ * .drawer-xl (no dependency on .so-report-*, absent from production).
  */
 const StockOpnameJejak = (() => {
-    function money(n) { return UI.formatMoney(n); }
-    function num(n) { return UI.formatNumber(n, 0); }
+    const PAGE_SIZE = 50;
 
-    // PRODUCTION PREVIEW — derives the drawer header's "#N" from the real
-    // session_number's trailing digit group (e.g. "SO-20260930-0012" -> 12)
-    // instead of the raw DB id, when that's safely parseable. Falls back to
-    // the raw id unchanged if session_number is missing/unparseable.
-    function deriveSessionDisplayNumber(session) {
-        const raw = session && session.session_number;
-        if (typeof raw === 'string') {
-            const match = raw.match(/(\d+)(?!.*\d)/);
-            if (match) {
-                const parsed = parseInt(match[1], 10);
-                if (!Number.isNaN(parsed)) return String(parsed);
-            }
+    // ------------------------------------------------------------ formatting
+    const isNil = (v) => v === null || v === undefined;
+    const money = (v) => (isNil(v) ? '—' : UI.formatMoney(v));
+    const num = (v) => (isNil(v) ? '—' : UI.formatNumber(v, 4));
+    const r2 = (v) => Math.round((v + Number.EPSILON) * 100) / 100;
+
+    // ------------------------------------------------------------ data access
+    async function fetchDetail(sessionId) {
+        let res;
+        try {
+            res = await fetch(`/api/reports/opname/${encodeURIComponent(sessionId)}/jejak`, {
+                method: 'GET', credentials: 'include', headers: { Accept: 'application/json' },
+            });
+        } catch (e) {
+            throw new Error('Sistem sedang tidak dapat terhubung ke server.');
         }
-        return String((session && session.id) ?? '');
+        let payload;
+        try {
+            payload = await res.json();
+        } catch (e) {
+            throw new Error(`Respons server tidak valid (HTTP ${res.status}).`);
+        }
+        if (!payload || !payload.success) {
+            throw new Error((payload && payload.error && payload.error.message) || `Gagal memuat Jejak (HTTP ${res.status}).`);
+        }
+        return payload.data;
     }
 
-    // ---- MOCK DATA — replace with a real API call in a future round. ----
-    function buildMockDetail(session) {
-        const items = [
-            { sku: 'BRD-001', name: 'Roti Tawar Kupas', category: 'Roti', unit: 'Pack', qty_sistem: 100, count1: 98, petugas1: 'Dewi', count2: 97, petugas2: 'Arman', final: 97, selisih_qty: -3, dead_qty: 0, rusak_qty: 0, hpp: 8500, nilai_selisih: -25500, nilai_dead: 0, nilai_rusak: 0 },
-            { sku: 'BRD-002', name: 'Roti Manis Coklat', category: 'Roti', unit: 'Pcs', qty_sistem: 250, count1: 252, petugas1: 'Dewi', count2: 251, petugas2: 'Arman', final: 251, selisih_qty: 1, dead_qty: 0, rusak_qty: 0, hpp: 3000, nilai_selisih: 3000, nilai_dead: 0, nilai_rusak: 0 },
-            { sku: 'CK-001', name: 'Cookies Choco Chips', category: 'Kue Kering', unit: 'Pack', qty_sistem: 75, count1: 75, petugas1: 'Dewi', count2: 75, petugas2: 'Arman', final: 75, selisih_qty: 0, dead_qty: 0, rusak_qty: 0, hpp: 12000, nilai_selisih: 0, nilai_dead: 0, nilai_rusak: 0 },
-            { sku: 'CK-002', name: 'Cookies Kastengel', category: 'Kue Kering', unit: 'Pack', qty_sistem: 40, count1: 38, petugas1: 'Dewi', count2: 38, petugas2: 'Arman', final: 38, selisih_qty: -2, dead_qty: 0, rusak_qty: 0, hpp: 15000, nilai_selisih: -30000, nilai_dead: 0, nilai_rusak: 0 },
-            { sku: 'TR-001', name: 'Brownies Coklat', category: 'Kue Basah', unit: 'Pcs', qty_sistem: 60, count1: 58, petugas1: 'Dewi', count2: 59, petugas2: 'Arman', final: 59, selisih_qty: -1, dead_qty: 0, rusak_qty: 2, hpp: 10000, nilai_selisih: -10000, nilai_dead: 0, nilai_rusak: 20000 },
-            { sku: 'TR-002', name: 'Lapis Legit', category: 'Kue Basah', unit: 'Pcs', qty_sistem: 30, count1: 30, petugas1: 'Dewi', count2: 28, petugas2: 'Arman', final: 28, selisih_qty: -2, dead_qty: 3, rusak_qty: 0, hpp: 25000, nilai_selisih: -50000, nilai_dead: 75000, nilai_rusak: 0 },
-            { sku: 'MD-001', name: 'Tepung Terigu', category: 'Bahan Baku', unit: 'Kg', qty_sistem: 500, count1: 505, petugas1: 'Dewi', count2: 505, petugas2: 'Arman', final: 505, selisih_qty: 5, dead_qty: 0, rusak_qty: 0, hpp: 12000, nilai_selisih: 60000, nilai_dead: 0, nilai_rusak: 0 },
-            { sku: 'MD-002', name: 'Gula Pasir', category: 'Bahan Baku', unit: 'Kg', qty_sistem: 300, count1: 300, petugas1: 'Dewi', count2: 300, petugas2: 'Arman', final: 300, selisih_qty: 0, dead_qty: 0, rusak_qty: 0, hpp: 13000, nilai_selisih: 0, nilai_dead: 0, nilai_rusak: 0 },
-            { sku: 'MD-003', name: 'Mentega', category: 'Bahan Baku', unit: 'Kg', qty_sistem: 120, count1: 118, petugas1: 'Dewi', count2: 118, petugas2: 'Arman', final: 118, selisih_qty: -2, dead_qty: 0, rusak_qty: 0, hpp: 28000, nilai_selisih: -56000, nilai_dead: 0, nilai_rusak: 0 },
-            { sku: 'PKG-001', name: 'Box Kue 26x26', category: 'Kemasan', unit: 'Pcs', qty_sistem: 200, count1: 195, petugas1: 'Dewi', count2: 195, petugas2: 'Arman', final: 195, selisih_qty: -5, dead_qty: 0, rusak_qty: 0, hpp: 4000, nilai_selisih: -20000, nilai_dead: 0, nilai_rusak: 0 },
-        ];
-        return {
-            session: {
-                number: session.session_number || (session.id != null ? `OPN-${session.id}` : 'SO-20260930-0012'),
-                date: session.session_date || '30 September 2026',
-                warehouse: session.warehouse_name || (session.warehouse && session.warehouse.name) || 'Gudang Cibadak',
-                warehouse_code: 'CIBADAK',
-                status: session.status || 'POSTED',
-                created_by: 'superadmin',
-                finalized_by: 'Rina', finalized_at: '01 Oktober 2026 10:15',
-                posted_by: 'Fajar', posted_at: '01 Oktober 2026 11:30',
-                petugas1: 'Dewi', petugas1_date: '30 September 2026',
-                petugas2: 'Arman', petugas2_date: '30 September 2026',
-                supervisor: 'Andi SPV', supervisor_date: '01 Oktober 2026 09:45',
-            },
-            kpi: {
-                nilai_stok_sistem: 125460000, nilai_final_count: 123985000, selisih_nominal: 1475000,
-                dead_stock: 640000, rusak: 225000, adjustment_bersih: 610000,
-            },
-            bottom: { sku_cocok: 96, perlu_review: 18, dead_stock_sku: 9, rusak_sku: 5 },
-            items,
-        };
-    }
-
-    // ---- KPI DRILL-DOWN ---------------------------------------------------
-    // Each KPI card opens a secondary modal (above the still-open drawer)
-    // listing the rows behind that number. Two clearly separated parts:
-    //   DRILLDOWNS            — static presentation spec (title, columns,
-    //                           filters). Does not change when real data
-    //                           arrives.
-    //   getDrilldownData()    — THE ONLY place that produces rows. Today it
-    //                           derives MOCK rows from detail.items; later
-    //                           replace its body with an API call returning
-    //                           the same shape:
-    //                             { rows: [{ ...column keys, sku_count?, rest? }],
-    //                               total_count: <SKU/row count behind the KPI> }
-    // Column formats: text | qty | sqty (signed qty) | money | smoney
-    // (signed money) | arah (Lebih/Kurang pill) | kontribusi (+/- pill).
-    // `total: true` columns are summed into the TOTAL row; a column whose
-    // rows include a null (the non-itemised "Lainnya" row) totals as "—"
-    // rather than a misleading partial sum.
+    // ------------------------------------------------------- KPI / drill-down
+    // DRILLDOWNS is the static presentation spec; drilldownRows() turns the
+    // real payload into rows; computeKpis() reduces the very same rows.
     const KPI_DEFS = [
         { key: 'nilai_stok_sistem', icon: '🗄️', label: 'Nilai Stok Sistem', color: 'var(--accent)' },
         { key: 'nilai_final_count', icon: '🛒', label: 'Nilai Final Count', color: 'var(--green)' },
@@ -114,136 +73,152 @@ const StockOpnameJejak = (() => {
 
     const DRILLDOWNS = {
         nilai_stok_sistem: {
-            title: 'Rincian Nilai Stok Sistem', countLabel: 'SKU', headline: 'nilai',
+            title: 'Rincian Nilai Stok Sistem', countLabel: 'SKU', value: 'system_value',
             columns: [COL_SKU, COL_NAME, { key: 'unit', label: 'Satuan', fmt: 'text' },
-                { key: 'qty_sistem', label: 'Qty Sistem', fmt: 'qty', total: true }, COL_HPP,
-                { key: 'nilai', label: 'Nilai Stok Sistem (Rp)', fmt: 'money', total: true }],
+                { key: 'system_qty', label: 'Qty Sistem', fmt: 'qty' }, COL_HPP,
+                { key: 'system_value', label: 'Nilai Stok Sistem (Rp)', fmt: 'money', total: true }],
         },
         nilai_final_count: {
-            title: 'Rincian Nilai Final Count', countLabel: 'SKU', headline: 'nilai',
+            title: 'Rincian Nilai Final Count', countLabel: 'SKU', value: 'final_value',
             columns: [COL_SKU, COL_NAME, { key: 'unit', label: 'Satuan', fmt: 'text' },
-                { key: 'final', label: 'Final Count', fmt: 'qty', total: true }, COL_HPP,
-                { key: 'nilai', label: 'Nilai Final Count (Rp)', fmt: 'money', total: true }],
+                { key: 'final_qty', label: 'Final Count', fmt: 'qty' }, COL_HPP,
+                { key: 'final_value', label: 'Nilai Final Count (Rp)', fmt: 'money', total: true }],
         },
         selisih_nominal: {
-            title: 'Rincian Selisih Nominal', countLabel: 'SKU', headline: 'nilai_selisih',
+            title: 'Rincian Selisih Nominal', countLabel: 'SKU', value: 'variance_value',
             filter: { key: 'arah', label: 'Semua (Lebih/Kurang)', options: ['Lebih', 'Kurang'] },
             columns: [COL_SKU, COL_NAME,
-                { key: 'qty_sistem', label: 'Qty Sistem', fmt: 'qty' }, { key: 'final', label: 'Final Count', fmt: 'qty' },
-                { key: 'selisih_qty', label: 'Selisih Qty', fmt: 'sqty' }, COL_HPP,
-                { key: 'nilai_selisih', label: 'Nilai Selisih (Rp)', fmt: 'smoney', total: true },
+                { key: 'system_qty', label: 'Qty Sistem', fmt: 'qty' }, { key: 'final_qty', label: 'Final Count', fmt: 'qty' },
+                { key: 'variance_qty', label: 'Selisih Qty', fmt: 'sqty' }, COL_HPP,
+                { key: 'variance_value', label: 'Nilai Selisih (Rp)', fmt: 'smoney', total: true },
                 { key: 'arah', label: 'Lebih/Kurang', fmt: 'arah' }],
         },
         dead_stock: {
-            title: 'Rincian Dead Stock', countLabel: 'SKU', headline: 'nilai_dead',
-            columns: [COL_SKU, COL_NAME, { key: 'dead_qty', label: 'Dead Stock Qty', fmt: 'qty', total: true }, COL_HPP,
-                { key: 'nilai_dead', label: 'Nilai Dead Stock (Rp)', fmt: 'money', total: true },
+            title: 'Rincian Dead Stock', countLabel: 'SKU', value: 'dead_value',
+            columns: [COL_SKU, COL_NAME, { key: 'dead_qty', label: 'Dead Stock Qty', fmt: 'qty' }, COL_HPP,
+                { key: 'dead_value', label: 'Nilai Dead Stock (Rp)', fmt: 'money', total: true },
                 { key: 'note', label: 'Catatan', fmt: 'text' }],
         },
         rusak: {
-            title: 'Rincian Rusak', countLabel: 'SKU', headline: 'nilai_rusak',
-            columns: [COL_SKU, COL_NAME, { key: 'rusak_qty', label: 'Rusak Qty', fmt: 'qty', total: true }, COL_HPP,
-                { key: 'nilai_rusak', label: 'Nilai Rusak (Rp)', fmt: 'money', total: true },
+            title: 'Rincian Rusak', countLabel: 'SKU', value: 'rusak_value',
+            columns: [COL_SKU, COL_NAME, { key: 'rusak_qty', label: 'Rusak Qty', fmt: 'qty' }, COL_HPP,
+                { key: 'rusak_value', label: 'Nilai Rusak (Rp)', fmt: 'money', total: true },
                 { key: 'note', label: 'Catatan', fmt: 'text' }],
         },
         adjustment_bersih: {
-            title: 'Rincian Adjustment Bersih', countLabel: 'baris adjustment', headline: 'nilai_adj',
+            title: 'Rincian Adjustment Bersih', countLabel: 'baris adjustment', value: 'value',
             filter: { key: 'kontribusi', label: 'Semua Kontribusi', options: ['Menambah', 'Mengurangi'] },
             columns: [COL_SKU, COL_NAME, { key: 'jenis', label: 'Jenis Adjustment', fmt: 'text' },
-                { key: 'qty_adj', label: 'Qty Adjustment', fmt: 'sqty' }, COL_HPP,
-                { key: 'nilai_adj', label: 'Nilai Adjustment (Rp)', fmt: 'smoney', total: true },
+                { key: 'qty', label: 'Qty Adjustment', fmt: 'sqty' }, COL_HPP,
+                { key: 'value', label: 'Nilai Adjustment (Rp)', fmt: 'smoney', total: true },
                 { key: 'kontribusi', label: 'Kontribusi', fmt: 'kontribusi' }],
         },
     };
 
-    // MOCK — swap point (see block comment above). The drawer shows a sample
-    // of SKUs while the KPI cards describe the whole session, so every
-    // drill-down ends with ONE non-itemised "Lainnya" row that carries the
-    // remainder; that keeps the modal's TOTAL equal to the KPI card.
-    function getDrilldownData(key, detail) {
-        const items = detail.items;
-        const kpiValue = detail.kpi[key];
-        let rows;
-        let totalCount;
-        if (key === 'nilai_stok_sistem') {
-            rows = items.map((it) => ({ sku: it.sku, name: it.name, unit: it.unit, qty_sistem: it.qty_sistem, hpp: it.hpp, nilai: it.qty_sistem * it.hpp }));
-            totalCount = detail.bottom.sku_cocok + detail.bottom.perlu_review;
-        } else if (key === 'nilai_final_count') {
-            rows = items.map((it) => ({ sku: it.sku, name: it.name, unit: it.unit, final: it.final, hpp: it.hpp, nilai: it.final * it.hpp }));
-            totalCount = detail.bottom.sku_cocok + detail.bottom.perlu_review;
-        } else if (key === 'selisih_nominal') {
-            rows = items.filter((it) => it.selisih_qty !== 0).map((it) => ({
-                sku: it.sku, name: it.name, qty_sistem: it.qty_sistem, final: it.final, selisih_qty: it.selisih_qty,
-                hpp: it.hpp, nilai_selisih: it.nilai_selisih, arah: it.selisih_qty > 0 ? 'Lebih' : 'Kurang',
-            }));
-            totalCount = detail.bottom.perlu_review;
-        } else if (key === 'dead_stock') {
-            rows = items.filter((it) => it.dead_qty > 0).map((it) => ({
-                sku: it.sku, name: it.name, dead_qty: it.dead_qty, hpp: it.hpp, nilai_dead: it.nilai_dead,
-                note: 'Tidak ada pergerakan > 90 hari (simulasi)',
-            }));
-            totalCount = detail.bottom.dead_stock_sku;
-        } else if (key === 'rusak') {
-            rows = items.filter((it) => it.rusak_qty > 0).map((it) => ({
-                sku: it.sku, name: it.name, rusak_qty: it.rusak_qty, hpp: it.hpp, nilai_rusak: it.nilai_rusak,
-                note: 'Rusak saat penyimpanan (simulasi)',
-            }));
-            totalCount = detail.bottom.rusak_sku;
-        } else {
-            rows = [];
-            items.forEach((it) => {
-                if (it.selisih_qty !== 0) {
-                    rows.push({ sku: it.sku, name: it.name, jenis: it.selisih_qty > 0 ? 'Selisih Lebih' : 'Selisih Kurang', qty_adj: it.selisih_qty, hpp: it.hpp, nilai_adj: it.nilai_selisih });
-                }
-                if (it.dead_qty > 0) {
-                    rows.push({ sku: it.sku, name: it.name, jenis: 'Write-off Dead Stock', qty_adj: -it.dead_qty, hpp: it.hpp, nilai_adj: -it.nilai_dead });
-                }
-                if (it.rusak_qty > 0) {
-                    rows.push({ sku: it.sku, name: it.name, jenis: 'Write-off Rusak', qty_adj: -it.rusak_qty, hpp: it.hpp, nilai_adj: -it.nilai_rusak });
-                }
-            });
-            rows.forEach((r) => { r.kontribusi = r.nilai_adj >= 0 ? 'Menambah' : 'Mengurangi'; });
-            totalCount = rows.length + (detail.bottom.perlu_review - items.filter((it) => it.selisih_qty !== 0).length);
-        }
+    const hasVariance = (it) => !isNil(it.variance_qty) && Math.abs(it.variance_qty) >= 0.0000001;
 
-        const spec = DRILLDOWNS[key];
-        const itemised = rows.reduce((sum, r) => sum + r[spec.headline], 0);
-        const restCount = totalCount - rows.length;
-        if (restCount > 0) {
-            const rest = { rest: true, sku_count: restCount, sku: '—', name: `Lainnya — ${restCount} ${spec.countLabel} lain (tidak dirinci, simulasi)` };
-            rest[spec.headline] = kpiValue - itemised;
-            if (key === 'adjustment_bersih') { rest.jenis = 'Penyesuaian lainnya'; rest.kontribusi = rest[spec.headline] >= 0 ? 'Menambah' : 'Mengurangi'; }
-            if (key === 'selisih_nominal') { rest.arah = rest[spec.headline] >= 0 ? 'Lebih' : 'Kurang'; }
-            rows.push(rest);
+    /** Real rows behind one KPI. `unvalued` = SKUs listed but not in the total (qty unknown). */
+    function drilldownRows(key, data) {
+        const items = data.items;
+        if (key === 'nilai_stok_sistem') {
+            return { rows: items, valued: items.filter((i) => !isNil(i.system_value)).length };
         }
-        return { rows, total_count: totalCount };
+        if (key === 'nilai_final_count') {
+            return { rows: items, valued: items.filter((i) => !isNil(i.final_value)).length };
+        }
+        if (key === 'selisih_nominal') {
+            const rows = items.filter(hasVariance).map((i) => Object.assign({}, i, { arah: i.variance_qty > 0 ? 'Lebih' : 'Kurang' }));
+            return { rows, valued: rows.length };
+        }
+        if (key === 'dead_stock') {
+            const rows = items.filter((i) => !isNil(i.dead_qty) && i.dead_qty > 0);
+            return { rows, valued: rows.length };
+        }
+        if (key === 'rusak') {
+            const rows = items.filter((i) => !isNil(i.rusak_qty) && i.rusak_qty > 0);
+            return { rows, valued: rows.length };
+        }
+        const rows = data.adjustments.map((a) => Object.assign({}, a, { kontribusi: a.value >= 0 ? 'Menambah' : 'Mengurangi' }));
+        return { rows, valued: rows.length };
     }
 
-    function rightAligned(col) { return ['qty', 'sqty', 'money', 'smoney'].includes(col.fmt); }
+    function sumOf(rows, field) {
+        return r2(rows.reduce((acc, r) => acc + (isNil(r[field]) ? 0 : r[field]), 0));
+    }
 
+    function computeKpis(data) {
+        const out = {};
+        KPI_DEFS.forEach((def) => {
+            const spec = DRILLDOWNS[def.key];
+            const { rows } = drilldownRows(def.key, data);
+            const counted = rows.filter((r) => !isNil(r[spec.value]));
+            out[def.key] = { value: sumOf(counted, spec.value), count: counted.length };
+        });
+        return out;
+    }
+
+    // ------------------------------------------------------------- UI pieces
     function pill(text, color) {
         return UI.el('span', { style: `color:${color}; font-weight:700;` }, text);
     }
 
-    function drillCell(col, row) {
-        const v = row[col.key];
-        let node;
-        if (v === undefined || v === null || v === '') node = document.createTextNode('—');
-        else if (col.fmt === 'qty') node = document.createTextNode(num(v));
-        else if (col.fmt === 'sqty') node = variancePill(v, false);
-        else if (col.fmt === 'money') node = document.createTextNode(money(v));
-        else if (col.fmt === 'smoney') node = variancePill(v, true);
-        else if (col.fmt === 'arah') node = pill(v, v === 'Lebih' ? 'var(--green)' : 'var(--red)');
-        else if (col.fmt === 'kontribusi') node = pill(v === 'Menambah' ? '▲ Menambah (+)' : '▼ Mengurangi (−)', v === 'Menambah' ? 'var(--green)' : 'var(--red)');
-        else node = document.createTextNode(String(v));
-        return UI.el('td', rightAligned(col) ? { class: 'text-right' } : {}, [node]);
+    function signed(value, isMoney) {
+        if (isNil(value)) return UI.el('span', { style: 'color:var(--text3);' }, '—');
+        if (!value) return UI.el('span', { style: 'color:var(--text3);' }, isMoney ? money(0) : '0');
+        const color = value > 0 ? 'var(--green)' : 'var(--red)';
+        return pill(isMoney ? money(value) : (value > 0 ? `+${num(value)}` : num(value)), color);
     }
 
-    function openDrilldown(key, detail, returnFocusTo) {
+    const RIGHT = ['qty', 'sqty', 'money', 'smoney'];
+    const isRight = (col) => RIGHT.includes(col.fmt);
+
+    function cellNode(col, row) {
+        const v = row[col.key];
+        if (isNil(v) || v === '') return document.createTextNode('—');
+        if (col.fmt === 'qty') {
+            return document.createTextNode(num(v) + (row.unit ? ` ${row.unit}` : ''));
+        }
+        if (col.fmt === 'sqty') return signed(v, false);
+        if (col.fmt === 'money') return document.createTextNode(money(v));
+        if (col.fmt === 'smoney') return signed(v, true);
+        if (col.fmt === 'arah') return pill(v, v === 'Lebih' ? 'var(--green)' : 'var(--red)');
+        if (col.fmt === 'kontribusi') return pill(v === 'Menambah' ? '▲ Menambah (+)' : '▼ Mengurangi (−)', v === 'Menambah' ? 'var(--green)' : 'var(--red)');
+        return document.createTextNode(String(v));
+    }
+
+    /** Prev/next pager shared by the Per Barang table and the drill-down tables. */
+    function pager(total, state, onChange, testid) {
+        const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+        state.page = Math.min(Math.max(1, state.page), pages);
+        const from = total === 0 ? 0 : (state.page - 1) * PAGE_SIZE + 1;
+        const to = Math.min(total, state.page * PAGE_SIZE);
+        const prev = UI.el('button', { class: 'btn btn-secondary btn-sm', type: 'button', 'data-testid': `${testid}-prev` }, '‹ Sebelumnya');
+        const next = UI.el('button', { class: 'btn btn-secondary btn-sm', type: 'button', 'data-testid': `${testid}-next` }, 'Berikutnya ›');
+        if (state.page <= 1) prev.setAttribute('disabled', 'disabled');
+        if (state.page >= pages) next.setAttribute('disabled', 'disabled');
+        prev.addEventListener('click', () => { state.page -= 1; onChange(); });
+        next.addEventListener('click', () => { state.page += 1; onChange(); });
+        return UI.el('div', { class: 'jejak-pager', 'data-testid': `${testid}-pager` }, [
+            UI.el('span', {}, total === 0 ? 'Tidak ada baris' : `Baris ${num(from)}–${num(to)} dari ${num(total)} · halaman ${state.page}/${pages}`),
+            UI.el('span', { style: 'display:flex; gap:8px;' }, [prev, next]),
+        ]);
+    }
+
+    function openDrilldown(key, data, returnFocusTo) {
         const spec = DRILLDOWNS[key];
-        const kpi = KPI_DEFS.find((k) => k.key === key);
-        const data = getDrilldownData(key, detail);
-        const headlineTotal = data.rows.reduce((sum, r) => sum + (r[spec.headline] || 0), 0);
+        const kpiDef = KPI_DEFS.find((k) => k.key === key);
+        const { rows: allRows, valued } = drilldownRows(key, data);
+        const headline = sumOf(allRows.filter((r) => !isNil(r[spec.value])), spec.value);
+        const unvalued = allRows.length - valued;
+        const dq = data.data_quality || {};
+
+        const summaryParts = [
+            UI.el('span', { 'data-testid': 'jejak-drill-count' }, `${num(valued)} ${spec.countLabel}`),
+            UI.el('span', {}, ' · Total '),
+            UI.el('strong', { style: `color:${kpiDef.color};`, 'data-testid': 'jejak-drill-total' }, money(headline)),
+        ];
+        if (unvalued > 0) summaryParts.push(UI.el('span', {}, ` · ${num(unvalued)} SKU belum ada qty (tidak dihitung)`));
+        if (key === 'selisih_nominal' && dq.variance_missing > 0) summaryParts.push(UI.el('span', {}, ` · ${num(dq.variance_missing)} SKU belum dapat dihitung selisihnya`));
 
         const searchInput = UI.el('input', { type: 'text', placeholder: 'Cari SKU atau nama barang...', style: 'flex:1 1 260px; width:auto;', 'data-testid': 'jejak-drill-search' });
         const filterSelect = spec.filter
@@ -251,19 +226,14 @@ const StockOpnameJejak = (() => {
                 [UI.el('option', { value: '' }, spec.filter.label)].concat(spec.filter.options.map((o) => UI.el('option', { value: o }, o))))
             : null;
         const tableHost = UI.el('div');
-        const closeBtn = UI.el('button', { class: 'drawer-close', 'aria-label': 'Tutup rincian', 'data-testid': 'jejak-drill-close' }, '✕');
-        const backBtn = UI.el('button', { class: 'btn btn-secondary', 'data-testid': 'jejak-drill-back' }, '← Kembali ke Jejak');
+        const closeBtn = UI.el('button', { class: 'drawer-close', type: 'button', 'aria-label': 'Tutup rincian', 'data-testid': 'jejak-drill-close' }, '✕');
+        const backBtn = UI.el('button', { class: 'btn btn-secondary', type: 'button', 'data-testid': 'jejak-drill-back' }, '← Kembali ke Jejak');
 
         const content = UI.el('div', { class: 'modal-content jejak-drill', role: 'dialog', 'aria-modal': 'true', 'aria-label': spec.title, 'data-testid': 'jejak-drill-modal' }, [
             UI.el('div', { class: 'jejak-drill-head' }, [
                 UI.el('div', {}, [
-                    UI.el('h3', { 'data-testid': 'jejak-drill-title', style: 'margin-bottom:4px;' }, `${kpi.icon} ${spec.title}`),
-                    UI.el('div', { class: 'hpp-subtitle', 'data-testid': 'jejak-drill-summary' }, [
-                        UI.el('span', {}, `${num(data.total_count)} ${spec.countLabel}`),
-                        UI.el('span', {}, ' · Total '),
-                        UI.el('strong', { style: `color:${kpi.color};` }, money(headlineTotal)),
-                        UI.el('span', {}, ' · data simulasi'),
-                    ]),
+                    UI.el('h3', { 'data-testid': 'jejak-drill-title', style: 'margin-bottom:4px;' }, `${kpiDef.icon} ${spec.title}`),
+                    UI.el('div', { class: 'hpp-subtitle', 'data-testid': 'jejak-drill-summary' }, summaryParts),
                 ]),
                 closeBtn,
             ]),
@@ -272,39 +242,45 @@ const StockOpnameJejak = (() => {
             UI.el('div', { style: 'display:flex; justify-content:flex-end; margin-top:14px;' }, [backBtn]),
         ]);
         const overlay = UI.el('div', { class: 'modal open jejak-drill-overlay' }, [content]);
+        const state = { page: 1 };
 
         function renderTable() {
             tableHost.innerHTML = '';
             const q = searchInput.value.trim().toLowerCase();
             const f = filterSelect ? filterSelect.value : '';
             const filtered = !!(q || f);
-            const rows = data.rows.filter((r) => {
-                if (filtered && r.rest) return false;
+            const rows = allRows.filter((r) => {
                 if (f && r[spec.filter.key] !== f) return false;
                 if (q && !(String(r.sku).toLowerCase().includes(q) || String(r.name).toLowerCase().includes(q))) return false;
                 return true;
             });
-            const thead = UI.el('thead', {}, UI.el('tr', {}, spec.columns.map((c) => UI.el('th', rightAligned(c) ? { class: 'text-right' } : {}, c.label))));
-            const tbody = UI.el('tbody', {}, rows.map((r) => UI.el('tr', r.rest ? { class: 'jejak-rest-row' } : {}, spec.columns.map((c) => drillCell(c, r)))));
+            const pageRows = rows.slice((state.page - 1) * PAGE_SIZE, state.page * PAGE_SIZE);
+
+            const thead = UI.el('thead', {}, UI.el('tr', {}, spec.columns.map((c) => UI.el('th', isRight(c) ? { class: 'text-right' } : {}, c.label))));
+            const tbody = UI.el('tbody', {}, pageRows.map((r) => UI.el('tr', {}, spec.columns.map((c) => UI.el('td', isRight(c) ? { class: 'text-right' } : {}, [cellNode(c, r)])))));
             if (!rows.length) {
-                tbody.appendChild(UI.el('tr', {}, [UI.el('td', { colspan: String(spec.columns.length), style: 'text-align:center; color:var(--text3);' }, 'Tidak ada baris yang cocok.')]));
+                const empty = key === 'adjustment_bersih' && !filtered
+                    ? ((dq.notes && dq.notes.length) ? dq.notes.join(' ') : 'Tidak ada adjustment ter-posting untuk sesi ini.')
+                    : 'Tidak ada baris yang cocok.';
+                tbody.appendChild(UI.el('tr', {}, [UI.el('td', { colspan: String(spec.columns.length), style: 'text-align:center; color:var(--text3); white-space:normal;' }, empty)]));
             }
+            // TOTAL covers ALL filtered rows (every page), nominal columns only
+            // — summing quantities across different units is meaningless.
             const totalRow = UI.el('tr', { class: 'jejak-total-row', 'data-testid': 'jejak-drill-total-row' }, spec.columns.map((c, i) => {
                 if (i === 0) return UI.el('td', {}, filtered ? 'TOTAL (terfilter)' : 'TOTAL');
                 if (!c.total) return UI.el('td', {}, '');
-                if (rows.some((r) => r[c.key] === undefined || r[c.key] === null)) return UI.el('td', { class: 'text-right' }, '—');
-                const sum = rows.reduce((acc, r) => acc + r[c.key], 0);
-                return UI.el('td', { class: 'text-right' }, [c.fmt === 'smoney' ? variancePill(sum, true) : document.createTextNode(c.fmt === 'money' ? money(sum) : num(sum))]);
+                const sum = sumOf(rows.filter((r) => !isNil(r[c.key])), c.key);
+                return UI.el('td', { class: 'text-right' }, [c.fmt === 'smoney' ? signed(sum, true) : document.createTextNode(money(sum))]);
             }));
             tbody.appendChild(totalRow);
             tableHost.appendChild(UI.el('div', { class: 'jejak-table-wrap', 'data-testid': 'jejak-drill-table-wrap' }, [
                 UI.el('table', { class: 'jejak-table', 'data-testid': 'jejak-drill-table' }, [thead, tbody]),
             ]));
+            if (rows.length > PAGE_SIZE) tableHost.appendChild(pager(rows.length, state, renderTable, 'jejak-drill'));
         }
 
-        // Escape closes ONLY this modal: a capture-phase listener on document
-        // runs before Drawer's own (bubble-phase) Escape handler and stops it,
-        // so the Jejak drawer underneath stays open.
+        // Escape closes ONLY this modal: a capture-phase document listener runs
+        // before Drawer's own (bubble-phase) Escape handler and stops it.
         function onKeydown(e) {
             if (e.key !== 'Escape') return;
             e.stopImmediatePropagation();
@@ -320,16 +296,16 @@ const StockOpnameJejak = (() => {
         closeBtn.addEventListener('click', closeDrilldown);
         backBtn.addEventListener('click', closeDrilldown);
         overlay.addEventListener('click', (e) => { if (e.target === overlay) closeDrilldown(); });
-        searchInput.addEventListener('input', renderTable);
-        if (filterSelect) filterSelect.addEventListener('change', renderTable);
+        searchInput.addEventListener('input', () => { state.page = 1; renderTable(); });
+        if (filterSelect) filterSelect.addEventListener('change', () => { state.page = 1; renderTable(); });
 
         renderTable();
         document.body.appendChild(overlay);
         backBtn.focus();
     }
 
-    // ---- small UI pieces (self-contained .jejak-* styles + existing .hpp-kpi-*) ----
-    function kpiTile(def, value, detail) {
+    function kpiTile(def, kpi, data) {
+        const sub = def.key === 'adjustment_bersih' ? `${num(kpi.count)} baris` : `${num(kpi.count)} SKU`;
         const card = UI.el('div', {
             class: 'card hpp-kpi-card jejak-kpi', role: 'button', tabindex: '0',
             title: 'Klik untuk lihat rincian', 'data-testid': `jejak-kpi-${def.key}`,
@@ -338,10 +314,11 @@ const StockOpnameJejak = (() => {
             UI.el('div', { class: 'hpp-kpi-icon' }, def.icon),
             UI.el('div', {}, [
                 UI.el('div', { class: 'hpp-kpi-label' }, def.label),
-                UI.el('div', { class: 'hpp-kpi-value', style: `color:${def.color};` }, money(value)),
+                UI.el('div', { class: 'hpp-kpi-value', style: `color:${def.color};`, 'data-testid': `jejak-kpi-value-${def.key}` }, money(kpi.value)),
+                UI.el('div', { style: 'font-size:0.66rem; color:var(--text3);' }, sub),
             ]),
         ]);
-        const activate = () => openDrilldown(def.key, detail, card);
+        const activate = () => openDrilldown(def.key, data, card);
         card.addEventListener('click', activate);
         card.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
@@ -349,8 +326,8 @@ const StockOpnameJejak = (() => {
         return card;
     }
 
-    function miniStat(icon, label, value, color) {
-        return UI.el('div', { class: 'card hpp-kpi-card', style: `border-left:3px solid ${color};` }, [
+    function miniStat(icon, label, value, color, testid) {
+        return UI.el('div', { class: 'card hpp-kpi-card', style: `border-left:3px solid ${color};`, 'data-testid': testid }, [
             UI.el('div', { class: 'hpp-kpi-icon' }, icon),
             UI.el('div', {}, [
                 UI.el('div', { class: 'hpp-kpi-value', style: `color:${color};` }, String(value)),
@@ -359,31 +336,23 @@ const StockOpnameJejak = (() => {
         ]);
     }
 
-    function variancePill(value, isMoney) {
-        if (!value) return UI.el('span', { style: 'color:var(--text3);' }, isMoney ? money(0) : '0');
-        const color = value > 0 ? 'var(--green)' : 'var(--red)';
-        const text = isMoney ? money(value) : (value > 0 ? `+${num(value)}` : num(value));
-        return UI.el('span', { style: `color:${color}; font-weight:700;` }, text);
-    }
+    const dash = (v) => (isNil(v) || v === '' ? '—' : v);
+    const who = (name, at) => (name ? (at ? `${name} · ${at}` : name) : '—');
 
-    function qtyCell(value, color) {
-        if (!value) return UI.el('span', { style: 'color:var(--text3);' }, '0');
-        return UI.el('span', { style: `color:${color}; font-weight:700;` }, num(value));
-    }
-
-    // Compact session info: label-over-value cells in an auto-fill grid
-    // (3-4 columns in the wide drawer) instead of the 2-column .drawer-kv.
     function buildInfoCard(s) {
+        const model = s.counting_model === 'FINDINGS_V1' ? 'Findings — tim P1/P2' : 'Dual count P1/P2 (legacy)';
         const rows = [
-            ['Gudang', `${s.warehouse_code} — ${s.warehouse}`],
+            ['Gudang', `${dash(s.warehouse_code)} — ${dash(s.warehouse_name)}`],
             ['Status', UI.el('span', { class: `badge ${UI.badgeClass(s.status)}` }, s.status)],
-            ['Tanggal Sesi', s.date],
-            ['Dibuat Oleh', s.created_by],
-            ['Difinalisasi Oleh', `${s.finalized_by} · ${s.finalized_at}`],
-            ['Diposting Oleh', `${s.posted_by} · ${s.posted_at}`],
-            ['Petugas Count 01', `${s.petugas1} · ${s.petugas1_date}`],
-            ['Petugas Count 02', `${s.petugas2} · ${s.petugas2_date}`],
-            ['Supervisor Verifikasi', `${s.supervisor} · ${s.supervisor_date}`],
+            ['Tanggal Sesi', dash(s.session_date)],
+            ['Model Hitung', model],
+            ['Sumber Stok Sistem', dash(s.stock_source_label)],
+            ['Dibuat Oleh', who(s.created_by, s.created_at)],
+            ['Difinalisasi Oleh', who(s.finalized_by, s.finalized_at)],
+            ['Diposting Oleh', who(s.posted_by, s.posted_at)],
+            ['Supervisor', dash(s.supervisor)],
+            ['Tim Count 01 (P1)', (s.team && s.team.P1 && s.team.P1.length) ? s.team.P1.join(', ') : dash(s.p1_user)],
+            ['Tim Count 02 (P2)', (s.team && s.team.P2 && s.team.P2.length) ? s.team.P2.join(', ') : dash(s.p2_user)],
         ];
         const grid = UI.el('div', { class: 'jejak-info-grid' }, rows.map(([k, v]) => UI.el('div', { class: 'jejak-info-cell' }, [
             UI.el('div', { class: 'k' }, k),
@@ -392,225 +361,306 @@ const StockOpnameJejak = (() => {
         return Drawer.section('Informasi Sesi Stock Opname', grid);
     }
 
-    function buildKpiRow(detail) {
-        return UI.el('div', { class: 'hpp-kpi-row jejak-kpi-row' },
-            KPI_DEFS.map((def) => kpiTile(def, detail.kpi[def.key], detail)));
+    function buildKpiRow(data) {
+        const kpis = computeKpis(data);
+        return UI.el('div', { class: 'hpp-kpi-row jejak-kpi-row' }, KPI_DEFS.map((def) => kpiTile(def, kpis[def.key], data)));
     }
 
-    function buildBottomSummary(bottom) {
-        return UI.el('div', { class: 'hpp-kpi-row jejak-kpi-row', style: 'margin-top:16px;' }, [
-            miniStat('✅', 'Total SKU cocok', bottom.sku_cocok, 'var(--green)'),
-            miniStat('⚠️', 'Perlu review', bottom.perlu_review, 'var(--red)'),
-            miniStat('📦', 'Dead stock SKU', `${bottom.dead_stock_sku} SKU`, 'var(--orange)'),
-            miniStat('🛠', 'Rusak SKU', `${bottom.rusak_sku} SKU`, '#f97316'),
+    function buildNotes(data) {
+        const notes = (data.data_quality && data.data_quality.notes) || [];
+        if (!notes.length) return null;
+        return UI.el('div', { class: 'alert alert-info', style: 'margin-bottom:12px;', 'data-testid': 'jejak-data-notes' },
+            notes.map((n) => UI.el('div', {}, n)));
+    }
+
+    function buildBottomSummary(sum) {
+        return UI.el('div', { class: 'hpp-kpi-row jejak-kpi-row', style: 'margin-top:16px;', 'data-testid': 'jejak-bottom-summary' }, [
+            miniStat('✅', 'Total SKU cocok', sum.sku_cocok, 'var(--green)', 'jejak-sum-cocok'),
+            miniStat('⚠️', 'Perlu review', sum.perlu_review, 'var(--red)', 'jejak-sum-review'),
+            miniStat('📦', 'Dead stock SKU', `${sum.dead_stock_sku} SKU`, 'var(--orange)', 'jejak-sum-dead'),
+            miniStat('🛠', 'Rusak SKU', `${sum.rusak_sku} SKU`, '#f97316', 'jejak-sum-rusak'),
         ]);
     }
 
-    function buildPerBarangTab(detail) {
+    // ---- printing: a plain HTML copy of the REAL data in a new window ----
+    function esc(v) {
+        return String(isNil(v) ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+    function printReport(data) {
+        const s = data.session;
+        const kpis = computeKpis(data);
+        const win = window.open('', '_blank');
+        if (!win) { UI.toast('Pop-up diblokir browser — izinkan pop-up untuk mencetak.', 'error'); return; }
+        const kpiHtml = KPI_DEFS.map((d) => `<tr><td>${esc(d.label)}</td><td style="text-align:right">${esc(money(kpis[d.key].value))}</td><td style="text-align:right">${esc(kpis[d.key].count)}</td></tr>`).join('');
+        const head = ['SKU', 'Nama Barang', 'Satuan', 'Qty Sistem', 'Count 01', 'Petugas 01', 'Count 02', 'Petugas 02', 'Final', 'Selisih', 'Dead', 'Rusak', 'HPP', 'Nilai Selisih', 'Nilai Dead', 'Nilai Rusak'];
+        const body = data.items.map((i) => `<tr>${[i.sku, i.name, i.unit, num(i.system_qty), num(i.count1_qty), (i.count1_users || []).join(', ') || '—', num(i.count2_qty), (i.count2_users || []).join(', ') || '—', num(i.final_qty), num(i.variance_qty), num(i.dead_qty), num(i.rusak_qty), money(i.hpp), money(i.variance_value), money(i.dead_value), money(i.rusak_value)].map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('');
+        win.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Jejak Stock Opname ${esc(s.session_number)}</title>
+<style>body{font:12px Arial,sans-serif;margin:16px}table{border-collapse:collapse;width:100%;margin-bottom:14px}td,th{border:1px solid #999;padding:3px 5px;text-align:left}th{background:#eee}h1{font-size:16px;margin:0 0 4px}</style></head><body>
+<h1>Jejak Stock Opname ${esc(s.session_number)}</h1>
+<div>${esc(s.warehouse_code)} — ${esc(s.warehouse_name)} · ${esc(s.session_date)} · ${esc(s.status)} · ${esc(s.stock_source_label)}</div><br>
+<table><tr><th>KPI</th><th>Nilai</th><th>Jumlah</th></tr>${kpiHtml}</table>
+<table><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr>${body}</table></body></html>`);
+        win.document.close();
+        win.focus();
+        win.print();
+    }
+
+    function buildPerBarangTab(data) {
         const wrap = UI.el('div');
-        wrap.appendChild(buildInfoCard(detail.session));
-        wrap.appendChild(buildKpiRow(detail));
+        wrap.appendChild(buildInfoCard(data.session));
+        wrap.appendChild(buildKpiRow(data));
+        const notes = buildNotes(data);
+        if (notes) wrap.appendChild(notes);
 
         const toolbar = UI.el('div', { style: 'display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px;' });
         const searchInput = UI.el('input', { type: 'text', placeholder: 'Cari SKU atau nama barang...', style: 'flex:1 1 260px; width:auto;', 'data-testid': 'jejak-items-search' });
-        const catOptions = Array.from(new Set(detail.items.map((it) => it.category)));
-        const catSelect = UI.el('select', { style: 'flex:0 0 220px; width:220px;', 'data-testid': 'jejak-items-category' }, [UI.el('option', { value: '' }, 'Semua Kategori')].concat(
-            catOptions.map((c) => UI.el('option', { value: c }, c))
-        ));
+        const cats = Array.from(new Set(data.items.map((it) => it.category))).sort();
+        const catSelect = UI.el('select', { style: 'flex:0 0 220px; width:220px;', 'data-testid': 'jejak-items-category' },
+            [UI.el('option', { value: '' }, 'Semua Kategori')].concat(cats.map((c) => UI.el('option', { value: c }, c))));
         toolbar.appendChild(searchInput);
         toolbar.appendChild(catSelect);
         wrap.appendChild(toolbar);
 
         const tableHost = UI.el('div', { class: 'card' });
         wrap.appendChild(tableHost);
-        wrap.appendChild(buildBottomSummary(detail.bottom));
+        wrap.appendChild(buildBottomSummary(data.summary));
 
-        // Sticky footer inside the scrolling drawer body, so the actions stay
-        // reachable however long the tab content gets.
+        // Sticky footer inside the scrolling drawer body: at the very end of
+        // the content it simply sits after it (never over rows).
         const actionsRow = UI.el('div', { class: 'jejak-actions', 'data-testid': 'jejak-actions' });
-        const printBtn = UI.el('button', { class: 'btn btn-secondary' }, '🖨 Cetak Laporan');
-        const excelBtn = UI.el('button', { class: 'btn btn-secondary' }, '📊 Export Excel');
-        // PRODUCTION PREVIEW — Posting Adjustment is hard-disabled (the
-        // `disabled` attribute itself blocks the browser from ever firing a
-        // click on it, so there is no code path here that can perform a
-        // real posting) and visually marked as preview-only. Never wire
-        // this to StockOpnameService or any posting endpoint until a real
-        // backend/data-model round explicitly authorizes it.
+        const printBtn = UI.el('button', { class: 'btn btn-secondary', type: 'button', 'data-testid': 'jejak-print' }, '🖨 Cetak Laporan');
+        const excelBtn = UI.el('button', {
+            class: 'btn btn-secondary', type: 'button', disabled: 'disabled', 'data-testid': 'jejak-export',
+            title: 'Export Excel belum tersedia untuk data Jejak.',
+        }, '📊 Export Excel (Belum tersedia)');
+        // Posting Adjustment: reporting-only — disabled, NO click handler, and
+        // nothing in this module can call a posting endpoint.
         const postBtn = UI.el('button', {
-            class: 'btn btn-primary',
-            disabled: 'disabled',
-            title: 'Preview — Posting Adjustment belum tersedia di tahap ini (data simulasi).',
-        }, '✅ Posting Adjustment (Preview)');
-        printBtn.addEventListener('click', () => UI.toast('Mockup — Cetak Laporan belum terhubung ke data nyata.', 'info'));
-        excelBtn.addEventListener('click', () => UI.toast('Mockup — Export Excel belum terhubung ke data nyata.', 'info'));
-        actionsRow.appendChild(printBtn);
-        actionsRow.appendChild(excelBtn);
-        actionsRow.appendChild(postBtn);
+            class: 'btn btn-primary', type: 'button', disabled: 'disabled', 'data-testid': 'jejak-post',
+            title: 'Posting Adjustment dinonaktifkan — Jejak hanya untuk pelaporan.',
+        }, '✅ Posting Adjustment (Disabled)');
+        printBtn.addEventListener('click', () => printReport(data));
+        [printBtn, excelBtn, postBtn].forEach((b) => actionsRow.appendChild(b));
         wrap.appendChild(actionsRow);
 
+        const state = { page: 1 };
         function renderTable() {
             tableHost.innerHTML = '';
             const q = searchInput.value.trim().toLowerCase();
             const cat = catSelect.value;
-            const rows = detail.items.filter((it) => {
+            const rows = data.items.filter((it) => {
                 if (cat && it.category !== cat) return false;
                 if (q && !(it.sku.toLowerCase().includes(q) || it.name.toLowerCase().includes(q))) return false;
                 return true;
             });
+            const pageRows = rows.slice((state.page - 1) * PAGE_SIZE, state.page * PAGE_SIZE);
 
-            const table = UI.el('table', { class: 'jejak-table', 'data-testid': 'jejak-items-table' });
-            const thead = UI.el('thead', {}, UI.el('tr', {}, [
-                'SKU', 'Nama Barang', 'Kategori', 'Satuan', 'Qty Sistem', 'Hasil Count 01', 'Petugas 01',
-                'Hasil Count 02', 'Petugas 02', 'Final Count', 'Selisih Qty', 'Dead Stock Qty', 'Rusak Qty',
-                'HPP (Rp)', 'Nilai Selisih (Rp)', 'Nilai Dead Stock (Rp)', 'Nilai Rusak (Rp)',
-            ].map((h) => UI.el('th', {}, h))));
-            const tbody = UI.el('tbody', {}, rows.map((it) => UI.el('tr', {}, [
+            const heads = ['SKU', 'Nama Barang', 'Kategori', 'Satuan', 'Qty Sistem', 'Hasil Count 01', 'Petugas 01',
+                'Hasil Count 02', 'Petugas 02', 'Final Count', 'Selisih Qty', 'Dead Stock Qty', 'Rusak Qty', 'Expired Qty',
+                'HPP (Rp)', 'Nilai Selisih (Rp)', 'Nilai Dead Stock (Rp)', 'Nilai Rusak (Rp)'];
+            const textCols = new Set(['SKU', 'Nama Barang', 'Kategori', 'Satuan', 'Petugas 01', 'Petugas 02']);
+            const thead = UI.el('thead', {}, UI.el('tr', {}, heads.map((h) => UI.el('th', textCols.has(h) ? {} : { class: 'text-right' }, h))));
+            const R = (node) => UI.el('td', { class: 'text-right' }, [node]);
+            const T = (v) => document.createTextNode(v);
+            const qtyColored = (v, color) => (isNil(v) ? T('—') : (v ? pill(num(v), color) : UI.el('span', { style: 'color:var(--text3);' }, '0')));
+            const moneyColored = (v, color) => (isNil(v) ? T('—') : (v ? pill(money(v), color) : UI.el('span', { style: 'color:var(--text3);' }, money(0))));
+            const people = (list) => (list && list.length ? list.join(', ') : '—');
+
+            const tbody = UI.el('tbody', {}, pageRows.map((it) => UI.el('tr', {}, [
                 UI.el('td', {}, it.sku),
-                UI.el('td', {}, it.name),
+                UI.el('td', {}, it.name + (it.is_excluded ? ' (dikecualikan)' : '') + (it.condition_unresolved ? ' ⚠' : '')),
                 UI.el('td', {}, it.category),
                 UI.el('td', {}, it.unit),
-                UI.el('td', { class: 'text-right' }, num(it.qty_sistem)),
-                UI.el('td', { class: 'text-right' }, num(it.count1)),
-                UI.el('td', {}, it.petugas1),
-                UI.el('td', { class: 'text-right' }, num(it.count2)),
-                UI.el('td', {}, it.petugas2),
-                UI.el('td', { class: 'text-right' }, num(it.final)),
-                UI.el('td', { class: 'text-right' }, variancePill(it.selisih_qty, false)),
-                UI.el('td', { class: 'text-right' }, qtyCell(it.dead_qty, 'var(--orange)')),
-                UI.el('td', { class: 'text-right' }, qtyCell(it.rusak_qty, '#f97316')),
-                UI.el('td', { class: 'text-right' }, money(it.hpp)),
-                UI.el('td', { class: 'text-right' }, variancePill(it.nilai_selisih, true)),
-                UI.el('td', { class: 'text-right' }, it.nilai_dead ? UI.el('span', { style: 'color:var(--orange); font-weight:700;' }, money(it.nilai_dead)) : money(0)),
-                UI.el('td', { class: 'text-right' }, it.nilai_rusak ? UI.el('span', { style: 'color:#f97316; font-weight:700;' }, money(it.nilai_rusak)) : money(0)),
+                R(T(num(it.system_qty))),
+                R(T(num(it.count1_qty))),
+                UI.el('td', {}, people(it.count1_users)),
+                R(T(num(it.count2_qty))),
+                UI.el('td', {}, people(it.count2_users)),
+                R(T(num(it.final_qty))),
+                R(signed(it.variance_qty, false)),
+                R(qtyColored(it.dead_qty, 'var(--orange)')),
+                R(qtyColored(it.rusak_qty, '#f97316')),
+                R(T(num(it.expired_qty))),
+                R(T(money(it.hpp))),
+                R(signed(it.variance_value, true)),
+                R(moneyColored(it.dead_value, 'var(--orange)')),
+                R(moneyColored(it.rusak_value, '#f97316')),
             ])));
+            if (!rows.length) {
+                tbody.appendChild(UI.el('tr', {}, [UI.el('td', { colspan: String(heads.length), style: 'text-align:center; color:var(--text3);' }, 'Tidak ada baris yang cocok.')]));
+            }
 
-            const totals = rows.reduce((acc, it) => {
-                acc.qty_sistem += it.qty_sistem; acc.count1 += it.count1; acc.count2 += it.count2; acc.final += it.final;
-                acc.selisih_qty += it.selisih_qty; acc.dead_qty += it.dead_qty; acc.rusak_qty += it.rusak_qty;
-                acc.nilai_selisih += it.nilai_selisih; acc.nilai_dead += it.nilai_dead; acc.nilai_rusak += it.nilai_rusak;
-                return acc;
-            }, { qty_sistem: 0, count1: 0, count2: 0, final: 0, selisih_qty: 0, dead_qty: 0, rusak_qty: 0, nilai_selisih: 0, nilai_dead: 0, nilai_rusak: 0 });
-            const totalRow = UI.el('tr', { class: 'jejak-total-row' }, [
-                UI.el('td', { colspan: '4' }, 'TOTAL'),
-                UI.el('td', { class: 'text-right' }, num(totals.qty_sistem)),
-                UI.el('td', { class: 'text-right' }, num(totals.count1)),
-                UI.el('td', {}, ''),
-                UI.el('td', { class: 'text-right' }, num(totals.count2)),
-                UI.el('td', {}, ''),
-                UI.el('td', { class: 'text-right' }, num(totals.final)),
-                UI.el('td', { class: 'text-right' }, variancePill(totals.selisih_qty, false)),
-                UI.el('td', { class: 'text-right' }, num(totals.dead_qty)),
-                UI.el('td', { class: 'text-right' }, num(totals.rusak_qty)),
-                UI.el('td', {}, '—'),
-                UI.el('td', { class: 'text-right' }, variancePill(totals.nilai_selisih, true)),
-                UI.el('td', { class: 'text-right' }, money(totals.nilai_dead)),
-                UI.el('td', { class: 'text-right' }, money(totals.nilai_rusak)),
-            ]);
+            // TOTAL over ALL filtered rows (every page); nominal columns only.
+            const tot = (field) => sumOf(rows.filter((r) => !isNil(r[field])), field);
+            const totalRow = UI.el('tr', { class: 'jejak-total-row', 'data-testid': 'jejak-items-total-row' },
+                heads.map((h, i) => {
+                    if (i === 0) return UI.el('td', {}, `TOTAL (${num(rows.length)} SKU)`);
+                    if (h === 'Nilai Selisih (Rp)') return R(signed(tot('variance_value'), true));
+                    if (h === 'Nilai Dead Stock (Rp)') return R(T(money(tot('dead_value'))));
+                    if (h === 'Nilai Rusak (Rp)') return R(T(money(tot('rusak_value'))));
+                    return UI.el('td', {}, '');
+                }));
             tbody.appendChild(totalRow);
 
-            table.appendChild(thead);
-            table.appendChild(tbody);
-            tableHost.appendChild(UI.el('div', { class: 'jejak-table-wrap', 'data-testid': 'jejak-items-table-wrap' }, [table]));
+            tableHost.appendChild(UI.el('div', { class: 'jejak-table-wrap', 'data-testid': 'jejak-items-table-wrap' }, [
+                UI.el('table', { class: 'jejak-table', 'data-testid': 'jejak-items-table' }, [thead, tbody]),
+            ]));
+            if (rows.length > PAGE_SIZE) tableHost.appendChild(pager(rows.length, state, renderTable, 'jejak-items'));
         }
-
-        searchInput.addEventListener('input', renderTable);
-        catSelect.addEventListener('change', renderTable);
+        searchInput.addEventListener('input', () => { state.page = 1; renderTable(); });
+        catSelect.addEventListener('change', () => { state.page = 1; renderTable(); });
         renderTable();
-
         return wrap;
     }
 
-    function buildOverviewTab(detail) {
+    function buildOverviewTab(data) {
         const wrap = UI.el('div');
-        wrap.appendChild(buildInfoCard(detail.session));
-        wrap.appendChild(buildKpiRow(detail));
-        wrap.appendChild(UI.el('div', { class: 'alert alert-info', style: 'margin-top:12px;' },
-            'Ringkasan Overview — mockup visual. Klik kartu KPI untuk rincian; data lengkap ada di tab Per Barang.'));
+        wrap.appendChild(buildInfoCard(data.session));
+        wrap.appendChild(buildKpiRow(data));
+        const notes = buildNotes(data);
+        if (notes) wrap.appendChild(notes);
+        wrap.appendChild(buildBottomSummary(data.summary));
         return wrap;
     }
 
-    function buildRekonsiliasiTab(detail) {
+    function buildRekonsiliasiTab(data) {
         const wrap = UI.el('div');
-        wrap.appendChild(UI.el('div', { class: 'alert alert-info' },
-            'Mockup — tab Rekonsiliasi akan menampilkan pencocokan Stok Buku SO vs hasil opname di tahap berikutnya.'));
-        wrap.appendChild(buildKpiRow(detail));
+        const src = data.sources || {};
+        wrap.appendChild(Drawer.section('Sumber Data', Drawer.kv([
+            ['HPP', dash(src.hpp)],
+            ['Qty Sistem', dash(src.system_qty)],
+            ['Final Count', dash(src.final_qty)],
+            ['Selisih', dash(src.variance)],
+            ['Dead Stock / Rusak', dash(src.dead_rusak)],
+            ['Adjustment', dash(src.adjustment)],
+        ])));
+        wrap.appendChild(buildKpiRow(data));
+        const notes = buildNotes(data);
+        if (notes) wrap.appendChild(notes);
         return wrap;
     }
 
-    function buildAuditTab(detail) {
-        const s = detail.session;
+    function buildAuditTab(data) {
+        const s = data.session;
         const rows = [
-            ['Dibuat', `${s.created_by}`],
-            ['Difinalisasi', `${s.finalized_by} · ${s.finalized_at}`],
-            ['Diposting', `${s.posted_by} · ${s.posted_at}`],
-            ['Supervisor Verifikasi', `${s.supervisor} · ${s.supervisor_date}`],
+            ['Dibuat', who(s.created_by, s.created_at)],
+            ['Difinalisasi', who(s.finalized_by, s.finalized_at)],
+            ['Diposting', who(s.posted_by, s.posted_at)],
+            ['Dibatalkan', who(s.cancelled_by, s.cancelled_at)],
+            ['Supervisor', dash(s.supervisor)],
         ];
         const wrap = UI.el('div');
-        wrap.appendChild(Drawer.section('Jejak Audit (mockup)', Drawer.kv(rows)));
-        wrap.appendChild(UI.el('div', { class: 'alert alert-info' },
-            'Mockup — timeline audit lengkap (per-field before/after, mengikuti pola TraceDrawer) menyusul di tahap berikutnya.'));
+        wrap.appendChild(Drawer.section('Jejak Sesi', Drawer.kv(rows)));
+        const adj = data.adjustments || [];
+        if (adj.length) {
+            wrap.appendChild(Drawer.section('Adjustment Ter-posting', Drawer.kv(adj.map((a) => [
+                `#${a.adjustment_id} · ${a.sku}`, `${a.jenis} · ${num(a.qty)} · ${money(a.value)} · ${dash(a.created_by)} · ${dash(a.created_at)}`,
+            ]))));
+        }
         return wrap;
+    }
+
+    // ----------------------------------------------------------- drawer shell
+    function titleNode(session, data, loadingLabel) {
+        const s = data ? data.session : null;
+        const idLabel = s ? s.id : session.id;
+        const number = s ? s.session_number : (session.session_number || `OPN-${session.id}`);
+        const status = s ? s.status : session.status;
+        const sub = s
+            ? `${s.session_number} · ${s.session_date} · ${dash(s.warehouse_code)} · ${dash(s.stock_source_label)}`
+            : `${number}${loadingLabel ? ` · ${loadingLabel}` : ''}`;
+        return UI.el('div', { 'data-jejak-title': '1', 'data-jejak-session': String(idLabel) }, [
+            UI.el('div', { style: 'font-size:1.1rem; font-weight:800; display:flex; align-items:center; gap:8px; flex-wrap:wrap;' }, [
+                `Jejak Stock Opname #${idLabel}`,
+                status ? UI.el('span', { class: `badge ${UI.badgeClass(status)}` }, status) : null,
+            ]),
+            UI.el('div', { style: 'font-size:0.78rem; color:var(--text3); font-weight:500; margin-top:2px;', 'data-testid': 'jejak-subtitle' }, sub),
+        ]);
+    }
+
+    // app.css gives <html> its own overflow (overflow-x:hidden), so
+    // `body{overflow:hidden}` alone is NOT propagated to the viewport and the
+    // page behind the drawer would still scroll — both elements are locked.
+    function lockPageScroll(on) {
+        document.documentElement.classList.toggle('jejak-scroll-lock', on);
+        document.body.classList.toggle('jejak-scroll-lock', on);
+    }
+
+    function isStillOpenFor(sessionId) {
+        const panel = document.querySelector('.drawer');
+        const marker = panel && panel.querySelector('[data-jejak-title]');
+        return !!(panel && panel.classList.contains('open') && marker && marker.getAttribute('data-jejak-session') === String(sessionId));
     }
 
     function open(session) {
-        const detail = buildMockDetail(session);
-        const s = detail.session;
-
-        const titleNode = UI.el('div', {}, [
-            UI.el('div', { style: 'font-size:1.1rem; font-weight:800; display:flex; align-items:center; gap:8px; flex-wrap:wrap;' }, [
-                `Jejak Stock Opname #${deriveSessionDisplayNumber(session)}`,
-                // PRODUCTION PREVIEW — reuses the existing .badge/.badge-warning
-                // pair (app.css:84/95) as-is; no new badge CSS introduced.
-                UI.el('span', { class: 'badge badge-warning', 'data-testid': 'jejak-preview-badge' }, 'PREVIEW UI — DATA SIMULASI'),
-            ]),
-            UI.el('div', { style: 'font-size:0.78rem; color:var(--text3); font-weight:500; margin-top:2px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;' }, [
-                UI.el('span', {}, `${s.number} · ${s.date} · ${s.warehouse_code}`),
-                UI.el('span', { class: `badge ${UI.badgeClass(s.status)}` }, s.status),
-            ]),
-            // PRODUCTION PREVIEW — reuses the existing .hpp-subtitle muted-text
-            // style (app.css:776) as-is; no new text-style CSS introduced.
-            UI.el('div', { class: 'hpp-subtitle', style: 'margin-top:4px;', 'data-testid': 'jejak-preview-note' },
-                'Tampilan ini masih menggunakan data simulasi dan belum terhubung ke data Stock Opname aktual.'),
-        ]);
+        const sessionId = session.id;
 
         Drawer.open({
-            title: titleNode,
-            tabs: [
-                { key: 'overview', label: 'Overview', render: (body) => body.appendChild(buildOverviewTab(detail)) },
-                { key: 'per-barang', label: 'Per Barang', render: (body) => body.appendChild(buildPerBarangTab(detail)) },
-                { key: 'rekonsiliasi', label: 'Rekonsiliasi', render: (body) => body.appendChild(buildRekonsiliasiTab(detail)) },
-                { key: 'audit', label: 'Audit', render: (body) => body.appendChild(buildAuditTab(detail)) },
-            ],
+            title: titleNode(session, null, 'memuat…'),
+            render: (body) => body.appendChild(UI.el('div', { class: 'alert alert-info', 'data-testid': 'jejak-loading' }, 'Memuat data Stock Opname…')),
         });
 
-        // Widen this specific drawer instance beyond the shared 560px
-        // default — a modifier class, never a change to .drawer itself
-        // (every other screen's drawer stays untouched).
+        // Widen this drawer instance (modifier class — never a change to
+        // .drawer itself) and keep the page behind from scrolling. The Drawer
+        // panel is a shared singleton, so both are dropped again as soon as it
+        // closes or another screen's drawer replaces our content.
         const panel = document.querySelector('.drawer');
         if (panel) {
             panel.classList.add('drawer-xl');
-            // The Drawer panel is a shared singleton, so the modifier must not
-            // outlive this view: drop it as soon as the drawer closes or its
-            // content is replaced by another screen's drawer (e.g. the real
-            // "Lihat Detail" trace), which then gets its normal 560px width.
+            lockPageScroll(true);
             const observer = new MutationObserver(() => {
-                if (!panel.classList.contains('open') || !panel.contains(titleNode)) {
+                if (!panel.classList.contains('open') || !panel.querySelector('[data-jejak-title]')) {
                     panel.classList.remove('drawer-xl');
+                    lockPageScroll(false);
                     observer.disconnect();
                 }
             });
             observer.observe(panel, { attributes: true, attributeFilter: ['class'], childList: true });
         }
 
-        // Tab order is Overview | Per Barang | ..., but Per Barang is the
-        // default. Drawer.open() always activates tabs[0] and shared
-        // drawer.js is deliberately not modified, so select it the same way
-        // a user would — by clicking its tab button.
-        if (panel) {
-            const perBarangTab = Array.from(panel.querySelectorAll('.drawer-tab')).find((b) => b.textContent === 'Per Barang');
-            if (perBarangTab) perBarangTab.click();
+        const load = () => {
+            fetchDetail(sessionId).then((data) => {
+                if (!isStillOpenFor(sessionId)) return; // closed or replaced while loading
+                render(data);
+            }).catch((err) => {
+                if (!isStillOpenFor(sessionId)) return;
+                const retry = UI.el('button', { class: 'btn btn-secondary', type: 'button', 'data-testid': 'jejak-retry' }, 'Coba lagi');
+                retry.addEventListener('click', () => {
+                    const body = document.querySelector('.drawer .drawer-body');
+                    if (body) body.innerHTML = '';
+                    if (body) body.appendChild(UI.el('div', { class: 'alert alert-info', 'data-testid': 'jejak-loading' }, 'Memuat data Stock Opname…'));
+                    load();
+                });
+                const body = document.querySelector('.drawer .drawer-body');
+                if (!body) return;
+                body.innerHTML = '';
+                body.appendChild(UI.el('div', { class: 'alert alert-error', 'data-testid': 'jejak-error' }, `Gagal memuat Jejak Stock Opname: ${err.message}`));
+                body.appendChild(retry);
+            });
+        };
+
+        function render(data) {
+            Drawer.open({
+                title: titleNode(session, data),
+                tabs: [
+                    { key: 'overview', label: 'Overview', render: (body) => body.appendChild(buildOverviewTab(data)) },
+                    { key: 'per-barang', label: 'Per Barang', render: (body) => body.appendChild(buildPerBarangTab(data)) },
+                    { key: 'rekonsiliasi', label: 'Rekonsiliasi', render: (body) => body.appendChild(buildRekonsiliasiTab(data)) },
+                    { key: 'audit', label: 'Audit', render: (body) => body.appendChild(buildAuditTab(data)) },
+                ],
+            });
+            // Tab order is Overview | Per Barang | ..., with Per Barang default.
+            // Drawer.open() always activates tabs[0] and shared drawer.js is
+            // deliberately not modified, so select it as a user would.
+            const panelNow = document.querySelector('.drawer');
+            const perBarang = panelNow && Array.from(panelNow.querySelectorAll('.drawer-tab')).find((b) => b.textContent === 'Per Barang');
+            if (perBarang) perBarang.click();
         }
+
+        load();
     }
 
-    return { open };
+    // _computeKpis/_drilldownRows are exposed only so the reconciliation test can
+    // compare them against the server's own totals.
+    return { open, _computeKpis: computeKpis, _drilldownRows: drilldownRows };
 })();
