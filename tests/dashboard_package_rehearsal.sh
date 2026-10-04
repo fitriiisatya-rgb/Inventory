@@ -15,6 +15,7 @@
 set -u
 cd "$(dirname "$0")/.."
 BASE_REV="${BASE_REV:-853cd69}"; V2_REV="${V2_REV:-e9072ec}"; V3_REV="${V3_REV:-9dcb367}"
+DASH_REV="${DASH_REV:-f4a94e8}"   # the commit the dashboard package was built from (later work, e.g. Stock IN/OUT V2, is a separate package)
 W="$(mktemp -d)"; trap 'rm -rf "${W:?}"' EXIT
 pass=0; fail=0
 ok()  { echo "PASS - $1"; pass=$((pass+1)); }
@@ -24,10 +25,12 @@ sha() { sha256sum "$1" | cut -d' ' -f1; }
 ZERO=$(printf 0%.0s {1..64})
 
 # ---- payload exactly as the package ships it
-PAY="$W/payload"; mkdir -p "$PAY"
-cp public/assets/js/dashboard.js "$PAY/dashboard.js"
-cp services/DashboardInventoryService.php "$PAY/DashboardInventoryService.php"
-awk '/^\/\* Dashboard redesign \(dashboard.js\)/{f=1} f' public/assets/css/app.css > "$PAY/dashboard_app_css_block.css"
+PAY="$W/payload"; DEV="$W/dev"; mkdir -p "$PAY" "$DEV"
+git show "$DASH_REV:public/assets/js/dashboard.js" > "$DEV/dashboard.js"; git show "$DASH_REV:services/DashboardInventoryService.php" > "$DEV/DashboardInventoryService.php"
+git show "$DASH_REV:public/assets/css/app.css" > "$DEV/app.css"; git show "$DASH_REV:public/index.php" > "$DEV/index.php"; git show "$DASH_REV:public/index.html" > "$DEV/index.html"
+cp "$DEV/dashboard.js" "$PAY/dashboard.js"
+cp "$DEV/DashboardInventoryService.php" "$PAY/DashboardInventoryService.php"
+awk '/^\/\* Dashboard redesign \(dashboard.js\)/{f=1} f' "$DEV/app.css" > "$PAY/dashboard_app_css_block.css"
 H_PJS=$(sha "$PAY/dashboard.js"); H_PSVC=$(sha "$PAY/DashboardInventoryService.php"); H_PBLK=$(sha "$PAY/dashboard_app_css_block.css")
 [ "$(grep -c '^/\* Dashboard redesign' "$PAY/dashboard_app_css_block.css")" = 1 ] && ok "css block extracted from dev app.css (single marker)" || bad "css block extraction"
 
@@ -111,17 +114,17 @@ run_tree() {
   php $IDX "$P/index.html" --expect-sha256=$H_IDX --apply >/dev/null && ok "[$label] apply: index.html" || bad "[$label] apply index"
 
   # ---- results
-  cmp -s "$P/assets/js/dashboard.js" public/assets/js/dashboard.js && ok "[$label] dashboard.js byte-identical to the tested dev file" || bad "[$label] dashboard.js differs"
-  cmp -s "$SV/DashboardInventoryService.php" services/DashboardInventoryService.php && ok "[$label] service byte-identical to the tested dev file" || bad "[$label] service differs"
+  cmp -s "$P/assets/js/dashboard.js" "$DEV/dashboard.js" && ok "[$label] dashboard.js byte-identical to the tested dev file" || bad "[$label] dashboard.js differs"
+  cmp -s "$SV/DashboardInventoryService.php" "$DEV/DashboardInventoryService.php" && ok "[$label] service byte-identical to the tested dev file" || bad "[$label] service differs"
   [ "$(grep -c "services/DashboardInventoryService.php" "$P/index.php")" = 1 ] && [ "$(grep -c "'GET /dashboard/inventory' =>" "$P/index.php")" = 1 ] && [ "$(grep -c "'GET /dashboard/inventory/detail' =>" "$P/index.php")" = 1 ] && ok "[$label] index.php: exactly one require and two routes" || bad "[$label] index.php counts"
   diff "$T/pre_index.php" "$P/index.php" | grep '^<' >/dev/null && bad "[$label] index.php: an existing line was removed/changed" || ok "[$label] index.php: additions only (no existing line removed or changed)"
   diff "$T/pre_app.css" "$P/assets/css/app.css" | grep '^<' >/dev/null && bad "[$label] app.css: an existing line was removed/changed" || ok "[$label] app.css: additions only"
   tail -c "$(wc -c < "$PAY/dashboard_app_css_block.css")" "$P/assets/css/app.css" | cmp -s - "$PAY/dashboard_app_css_block.css" && ok "[$label] app.css: file ends with exactly the tested block" || bad "[$label] app.css tail"
   [ "$(diff "$T/pre_index.html" "$P/index.html" | grep -c '^>')" = 2 ] && [ "$(diff "$T/pre_index.html" "$P/index.html" | grep -c '^<')" = 2 ] && grep -q 'dashboard.js?v=20261009-dash1' "$P/index.html" && grep -q 'app.css?v=20261009-dash1' "$P/index.html" && ok "[$label] index.html: exactly the two tags changed, both on 20261009-dash1" || bad "[$label] index.html diff"
   if [ "$v3" = 1 ]; then
-    cmp -s "$P/index.php" public/index.php && ok "[$label] index.php byte-identical to the tested dev file" || bad "[$label] index.php differs from dev"
-    cmp -s "$P/assets/css/app.css" public/assets/css/app.css && ok "[$label] app.css byte-identical to the tested dev file" || bad "[$label] app.css differs from dev"
-    diff <(grep -v 'stock-opname-report\.js' public/index.html) "$P/index.html" >/dev/null && ok "[$label] index.html byte-identical to dev (minus the dev-only stock-opname-report.js tag)" || bad "[$label] index.html differs from dev"
+    cmp -s "$P/index.php" "$DEV/index.php" && ok "[$label] index.php byte-identical to the tested dev file" || bad "[$label] index.php differs from dev"
+    cmp -s "$P/assets/css/app.css" "$DEV/app.css" && ok "[$label] app.css byte-identical to the tested dev file" || bad "[$label] app.css differs from dev"
+    diff <(grep -v 'stock-opname-report\.js' "$DEV/index.html") "$P/index.html" >/dev/null && ok "[$label] index.html byte-identical to dev (minus the dev-only stock-opname-report.js tag)" || bad "[$label] index.html differs from dev"
   fi
 
   # ---- double-apply refusal

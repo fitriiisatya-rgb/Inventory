@@ -3,13 +3,14 @@
 # Usage: bash scripts/build_dashboard_package.sh <output dir>   -> <out>/dashboard_production_deploy_package.tar.gz
 set -eu
 cd "$(dirname "$0")/.."
+DASH_REV="${DASH_REV:-f4a94e8}"   # commit the dashboard package is built from
 OUT="${1:?usage: build_dashboard_package.sh <output dir>}"
 N=dashboard_production_deploy_package
 D="$(mktemp -d)"; trap 'rm -rf "${D:?}"' EXIT
 R="$D/$N"; mkdir -p "$R/scripts/lib" "$R/payload"
-cp public/assets/js/dashboard.js "$R/payload/dashboard.js"
-cp services/DashboardInventoryService.php "$R/payload/DashboardInventoryService.php"
-awk '/^\/\* Dashboard redesign \(dashboard.js\)/{f=1} f' public/assets/css/app.css > "$R/payload/dashboard_app_css_block.css"
+git show "$DASH_REV:public/assets/js/dashboard.js" > "$R/payload/dashboard.js"
+git show "$DASH_REV:services/DashboardInventoryService.php" > "$R/payload/DashboardInventoryService.php"
+git show "$DASH_REV:public/assets/css/app.css" | awk '/^\/\* Dashboard redesign \(dashboard.js\)/{f=1} f' > "$R/payload/dashboard_app_css_block.css"
 for f in patch_dashboard_app_css_production.php patch_dashboard_index_html_production.php patch_dashboard_index_php_production.php install_dashboard_files_production.php rollback_dashboard_production.php dashboard_reconcile_check.php lib/jejak_patch_common.php; do cp "scripts/$f" "$R/scripts/$f"; done
 cp scripts/dashboard_package/collect_production_hashes_dashboard.sh scripts/dashboard_package/precheck_readonly.sql "$R/"
 H_SVC=$(sha256sum "$R/payload/DashboardInventoryService.php" | cut -d' ' -f1)
