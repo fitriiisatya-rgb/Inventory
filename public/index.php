@@ -64,6 +64,7 @@ require_once __DIR__ . '/../services/OpeningReconciliationService.php';
 require_once __DIR__ . '/../services/MovementReconciliationReviewService.php';
 require_once __DIR__ . '/../services/ImportHistoricalTransactionService.php';
 require_once __DIR__ . '/../services/InventoryHppReportService.php';
+require_once __DIR__ . '/../services/DashboardInventoryService.php';
 require_once __DIR__ . '/../services/InventoryMovementReportService.php';
 require_once __DIR__ . '/../services/InventoryReconciliationReportService.php';
 require_once __DIR__ . '/../services/InventorySummaryReportService.php';
@@ -2313,6 +2314,38 @@ $routes = [
             ),
             'OK'
         );
+    },
+
+    // Main Dashboard (READ-ONLY): one overview call for every card, plus the
+    // paginated rows behind a clicked card. INVENTORY_VIEW; a warehouse-scoped
+    // STOCK user is forced to their own warehouse, anyone else may ask for one
+    // warehouse or the whole company — same rule as the other inventory reports.
+    'GET /dashboard/inventory' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $requested = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $requested);
+        inv_ok(\App\Services\DashboardInventoryService::overview(
+            $pdo, $warehouseId, (string) ($query['period'] ?? 'month'), $query['date_from'] ?? null, $query['date_to'] ?? null
+        ), 'OK');
+    },
+
+    'GET /dashboard/inventory/detail' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $requested = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+        $warehouseId = inv_hpp_resolve_warehouse_scope($user, $requested);
+        inv_ok(\App\Services\DashboardInventoryService::detail(
+            $pdo, (string) ($query['type'] ?? ''), $warehouseId, (string) ($query['period'] ?? 'month'),
+            $query['date_from'] ?? null, $query['date_to'] ?? null,
+            [
+                'q' => $query['q'] ?? null,
+                'category_id' => isset($query['category_id']) && $query['category_id'] !== '' ? (int) $query['category_id'] : null,
+                // the dashboard's own warehouse selector is `warehouse_id`; this one only narrows rows INSIDE a company-wide view
+                'warehouse_id' => isset($query['row_warehouse_id']) && $query['row_warehouse_id'] !== '' ? (int) $query['row_warehouse_id'] : null,
+                'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
+            ]
+        ), 'OK');
     },
 
     'GET /inventory/value' => function () use ($pdo) {
