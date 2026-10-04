@@ -550,12 +550,6 @@ function inv_require_division_scope(array $user, ?int $divisionId): void
 }
 
 /**
- * Same "STOCK is always forced to their own warehouse, never a
- * company-wide rollup" pattern as GET /reports/stock and GET
- * /reports/transactions — centralized here since the HPP report has 5
- * routes that all need it identically.
- */
-/**
  * Pergerakan Stok Harian (redesign): common query parsing. Returns [start, end, warehouse(scope-resolved), category, q, item].
  * The warehouse is resolved through inv_hpp_resolve_warehouse_scope(), so a warehouse-limited user can never widen the scope
  * by editing the query string.
@@ -575,6 +569,12 @@ function inv_movement_params(array $user, array $query): array
     return [$start, $end, $warehouseId, $cat, $q, $item];
 }
 
+/**
+ * Same "STOCK is always forced to their own warehouse, never a
+ * company-wide rollup" pattern as GET /reports/stock and GET
+ * /reports/transactions — centralized here since the HPP report has 5
+ * routes that all need it identically.
+ */
 function inv_hpp_resolve_warehouse_scope(array $user, ?int $requestedWarehouseId): ?int
 {
     if ($user['role_code'] === 'STOCK') {
