@@ -1143,6 +1143,7 @@ html.dash-scroll-lock, body.dash-scroll-lock { overflow: hidden; }
     .dash-filter { width: 100%; } .dash-select { flex: 1; } .dash-select select { width: 100%; min-width: 0; }
     .dash-other-row { grid-template-columns: minmax(0, 1fr) auto; } .dash-other-tx { display: none; }
 }
+
 /* Stock IN / OUT V2 (transactions.js, stock-in-sheet.js, stock-out-sheet.js) —
    self-contained .tx2-* rules appended at EOF; no existing rule is touched. The palette
    below follows the approved mockups (navy surfaces, blue primary, green status) and is
