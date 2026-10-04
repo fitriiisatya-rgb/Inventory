@@ -65,6 +65,9 @@ require_once __DIR__ . '/../services/MovementReconciliationReviewService.php';
 require_once __DIR__ . '/../services/ImportHistoricalTransactionService.php';
 require_once __DIR__ . '/../services/InventoryHppReportService.php';
 require_once __DIR__ . '/../services/DashboardInventoryService.php';
+require_once __DIR__ . '/../services/PurchaseInvoiceService.php';
+require_once __DIR__ . '/../services/StockOutService.php';
+require_once __DIR__ . '/../services/StockOutDocumentService.php';
 require_once __DIR__ . '/../services/InventoryMovementReportService.php';
 require_once __DIR__ . '/../services/InventoryReconciliationReportService.php';
 require_once __DIR__ . '/../services/InventorySummaryReportService.php';
@@ -2412,6 +2415,115 @@ $routes = [
             ),
             'OK'
         );
+    },
+
+    // STOCK IN V2 — multi-line purchase sheet (per-item PPN + discount,
+    // one invoice discount, shipping). `quote` is read-only arithmetic
+    // (server = single source of truth for every number shown); `post` runs
+    // the unmodified PurchaseCostingGateway + FifoService::postIn() once per
+    // item inside ONE database transaction. See PurchaseInvoiceService.
+    'POST /stock-in/quote' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'TRANSACTION_IN_CREATE');
+        if (isset($input['warehouse_id'])) { inv_require_warehouse_scope($user, (int) $input['warehouse_id']); }
+        $quote = \App\Services\PurchaseInvoiceService::quote($pdo, $input);
+        unset($quote['_costing']);
+        inv_ok($quote, 'OK');
+    },
+
+    'POST /stock-in' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'TRANSACTION_IN_CREATE');
+        if (isset($input['warehouse_id'])) { inv_require_warehouse_scope($user, (int) $input['warehouse_id']); }
+        $result = Database::transaction(fn (PDO $tx) => \App\Services\PurchaseInvoiceService::post($tx, $input, (int) $user['id'], (string) $user['username']));
+        inv_ok($result, 'Transaction posted');
+    },
+
+    // STOCK OUT V2 — table-first issue to a bakery destination that also
+    // creates the Delivery Order + Invoice (see StockOutService). quote /
+    // markup-defaults / preview are read-only; POST /stock-out posts the real
+    // FIFO OUT per item + DO + Invoice atomically. Documents are re-printable.
+    'GET /stock-out/markup-defaults' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'TRANSACTION_OUT_CREATE');
+        $ids = array_filter(explode(',', (string) ($query['category_ids'] ?? '')), 'strlen');
+        inv_ok(\App\Services\StockOutService::markupDefaults($pdo, $ids), 'OK');
+    },
+
+    'POST /stock-out/quote' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'TRANSACTION_OUT_CREATE');
+        if (isset($input['warehouse_id'])) { inv_require_warehouse_scope($user, (int) $input['warehouse_id']); }
+        inv_ok(\App\Services\StockOutService::quote($pdo, $input), 'OK');
+    },
+
+    'POST /stock-out/preview/{kind}' => function (array $params) use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'TRANSACTION_OUT_CREATE');
+        if (isset($input['warehouse_id'])) { inv_require_warehouse_scope($user, (int) $input['warehouse_id']); }
+        if (!in_array($params['kind'], ['do', 'invoice'], true)) {
+            inv_error(404, 'NOT_FOUND', 'unknown preview kind');
+        }
+        $quote = \App\Services\StockOutService::quote($pdo, $input);
+        if (!$quote['valid']) {
+            throw new ValidationException($quote['errors']);
+        }
+        inv_html($params['kind'] === 'do'
+            ? \App\Services\StockOutDocumentService::renderDo(\App\Services\StockOutDocumentService::doModelFromQuote($quote, $input, (string) $user['username']))
+            : \App\Services\StockOutDocumentService::renderInvoice(\App\Services\StockOutDocumentService::invoiceModelFromQuote($quote, $input)));
+    },
+
+    'POST /stock-out' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'TRANSACTION_OUT_CREATE');
+        if (isset($input['warehouse_id'])) { inv_require_warehouse_scope($user, (int) $input['warehouse_id']); }
+        $result = Database::transaction(fn (PDO $tx) => \App\Services\StockOutService::post($tx, $input, (int) $user['id'], (string) $user['username']));
+        inv_ok($result, 'Transaction posted');
+    },
+
+    'GET /stock-out/recent' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $scope = ($user['role_code'] === 'STOCK' && $user['warehouse_id'] !== null) ? (int) $user['warehouse_id'] : null;
+        inv_ok(\App\Services\StockOutService::recent($pdo, $scope, (int) ($query['limit'] ?? 30)), 'OK');
+    },
+
+    'GET /stock-out/by-transaction/{txId}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $s = \App\Services\StockOutService::byTransaction($pdo, (int) $params['txId']);
+        if ($s !== null) { inv_require_warehouse_scope($user, (int) $s['from_warehouse_id']); }
+        inv_ok($s, 'OK');
+    },
+
+    'GET /stock-out/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $s = \App\Services\StockOutService::summary($pdo, (int) $params['id']);
+        inv_require_warehouse_scope($user, (int) $s['from_warehouse_id']);
+        inv_ok($s, 'OK');
+    },
+
+    // DO: any inventory viewer in scope. Invoice (selling prices): only roles that may create a Stock OUT or view Distribusi.
+    'GET /stock-out/{id}/print/do' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $s = \App\Services\StockOutService::summary($pdo, (int) $params['id']);
+        inv_require_warehouse_scope($user, (int) $s['from_warehouse_id']);
+        inv_html(\App\Services\StockOutDocumentService::renderDo(\App\Services\StockOutDocumentService::doModel($pdo, (int) $params['id'])));
+    },
+
+    'GET /stock-out/{id}/print/invoice' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        if (!AuthService::hasPermission($pdo, $user['role_code'], 'TRANSACTION_OUT_CREATE') && !AuthService::hasPermission($pdo, $user['role_code'], 'DISTRIBUTION_VIEW')) {
+            inv_error(403, 'FORBIDDEN', 'Invoice hanya dapat dilihat oleh pengguna Stock OUT / Distribusi.');
+        }
+        $s = \App\Services\StockOutService::summary($pdo, (int) $params['id']);
+        inv_require_warehouse_scope($user, (int) $s['from_warehouse_id']);
+        if (empty($s['invoice_id'])) {
+            inv_error(404, 'NOT_FOUND', 'delivery order has no invoice');
+        }
+        inv_html(\App\Services\StockOutDocumentService::renderInvoice(\App\Services\StockOutDocumentService::invoiceModel($pdo, (int) $s['invoice_id'])));
     },
 
     // PHASE V2.7 — read-only Cost Preview, called by the Transaksi Masuk
