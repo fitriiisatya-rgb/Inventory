@@ -265,6 +265,35 @@ const ItemSelector = (() => {
             unitSelect.innerHTML = '<option>Memuat...</option>';
             try {
                 units = await InvApi.itemUnits(itemId);
+                // STABILIZATION_TRANSFER_UNIT_BASE_BACKFILL — GET /items/{id}/units
+                // only ever returns item_unit_conversions rows (by design —
+                // that table holds "the purchase/middle unit being defined",
+                // not the base unit). The item's own base unit therefore
+                // silently drops out of every unit picker built on this
+                // endpoint whenever the item has at least one real
+                // conversion defined. Backfill it here, once, for every
+                // ItemSelector-based screen (Transfer included) — appended,
+                // never prepended, so today's default-selected option
+                // (first item, per the endpoint's own ORDER BY) is
+                // unchanged; skipped entirely if the base unit already has
+                // its own open conversion row, so it's never duplicated.
+                const selectedItem = Master.itemById(itemId);
+                const baseUnitId = selectedItem ? selectedItem.base_unit_id : null;
+                if (baseUnitId !== null && baseUnitId !== undefined
+                    && !units.some((u) => String(u.id) === String(baseUnitId))) {
+                    const baseUnit = Master.unitById(baseUnitId);
+                    if (baseUnit) {
+                        units = units.concat([{
+                            id: baseUnit.id,
+                            code: baseUnit.code,
+                            name: baseUnit.name,
+                            conversion_to_base: 1,
+                            is_purchase_default: false,
+                            reference_price: null,
+                            price_source: null,
+                        }]);
+                    }
+                }
                 unitSelect.innerHTML = units.map((u) => `<option value="${u.id}">${u.code} (${u.name})</option>`).join('')
                     || '<option value="">(belum ada satuan terdaftar)</option>';
                 if (preferredUnitId !== null && preferredUnitId !== undefined
