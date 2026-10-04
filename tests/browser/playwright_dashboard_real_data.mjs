@@ -397,6 +397,14 @@ try {
         await context.close();
     }
 
+    // realistic-magnitude view at the mockup's own viewport (Karang Tengah: small figures)
+    {
+        const { context, page: mp } = await newSession(browser, { viewport: { width: 1536, height: 1024 }, __name: 'mockup-1536' }, seed.admin);
+        await selectWh(mp, String(seed.wh.C));
+        await mp.screenshot({ path: path.join(shotDir, 'dashboard-mockup-1536-karang-tengah.png'), fullPage: true });
+        await context.close();
+    }
+
     // ============================================ 10. empty state + error state
     await selectWh(page, String(seed.wh.D));
     await setPeriod(page, 'today');

@@ -26,6 +26,41 @@ const Dashboard = (() => {
     const num = (v, d = 0) => (isNil(v) ? '—' : UI.formatNumber(v, d));
     const qty = (v) => (isNil(v) ? '—' : UI.formatNumber(v, 4));
 
+
+    // Line icons (feather-style, stroke = currentColor). Static, trusted constants.
+    const ICON_PATHS = {
+        box: '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>',
+        cart: '<circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>',
+        out: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
+        truck: '<rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/>',
+        clipboard: '<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/><polyline points="9 14 11 16 15 12"/>',
+        xcircle: '<circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>',
+        alert: '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+        clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+        heart: '<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>',
+        calendar: '<rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
+        activity: '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+        download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+        upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',
+        zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+        layers: '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
+        refresh: '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
+        home: '<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>',
+        bars: '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
+        chevron: '<polyline points="9 18 15 12 9 6"/>',
+        arrow: '<line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>',
+        repeat: '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
+    };
+    function icon(name, extraClass) {
+        const span = document.createElement('span');
+        span.className = `dash-ico${extraClass ? ` ${extraClass}` : ''}`;
+        span.setAttribute('aria-hidden', 'true');
+        span.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON_PATHS[name] || ''}</svg>`;
+        return span;
+    }
+    const tile = (name, tone) => UI.el('div', { class: `dash-tile tone-${tone}` }, [icon(name)]);
+    const chev = () => UI.el('span', { class: 'dash-chev-ico' }, [icon('chevron')]);
+
     // ------------------------------------------------------------ data access
     async function getJson(path, params) {
         const qs = new URLSearchParams();
@@ -83,13 +118,13 @@ const Dashboard = (() => {
         if (scoped) sel.setAttribute('disabled', 'disabled');
         sel.addEventListener('change', () => { state.warehouseId = sel.value; load(); });
 
-        const refresh = UI.el('button', { class: 'btn btn-primary btn-sm', type: 'button', 'data-testid': 'dash-refresh' }, '⟳ Refresh');
+        const refresh = UI.el('button', { class: 'btn btn-primary dash-refresh', type: 'button', 'data-testid': 'dash-refresh' }, [icon('refresh'), ' Refresh']);
         refresh.addEventListener('click', () => load());
 
         return UI.el('div', { class: 'dash-top' }, [
-            UI.el('div', { class: 'dash-filter' }, [UI.el('label', { for: 'dash-wh' }, 'Gudang:'), sel]),
+            UI.el('div', { class: 'dash-filter' }, [UI.el('label', { for: 'dash-wh' }, 'Gudang:'), UI.el('div', { class: 'dash-select' }, [icon('home', 'dash-select-ico'), sel])]),
             UI.el('div', { class: 'dash-updated' }, [
-                UI.el('span', { id: 'dash-updated', 'data-testid': 'dash-updated' }, 'Data diperbarui: —'),
+                icon('clock'), UI.el('span', { id: 'dash-updated', 'data-testid': 'dash-updated' }, 'Data diperbarui: —'),
                 refresh,
             ]),
         ]);
@@ -132,21 +167,25 @@ const Dashboard = (() => {
         const wrap = UI.el('div', { class: 'dash-stack' });
         wrap.appendChild(buildKpis(d));
         wrap.appendChild(buildMovement(d));
-        const grid = UI.el('div', { class: 'dash-cols' }, [buildAttention(d), buildActivity(d), buildTopLow(d), buildTopValue(d)]);
+        wrap.appendChild(buildAttention(d));
+        const grid = UI.el('div', { class: 'dash-cols' }, [
+            UI.el('div', { class: 'dash-col' }, [buildActivity(d), buildQuickActions()]),
+            UI.el('div', { class: 'dash-col' }, [buildTopLow(d), buildTopValue(d)]),
+        ]);
         wrap.appendChild(grid);
-        wrap.appendChild(buildQuickActions());
         return wrap;
     }
 
     // ----------------------------------------------------------------- KPI row
-    function kpi(testid, icon, label, valueNode, sub, onClick) {
+    function kpi(testid, iconName, tone, label, valueNode, sub, onClick) {
         const card = UI.el('div', { class: 'dash-card dash-kpi dash-click', role: 'button', tabindex: '0', 'data-testid': testid, title: 'Klik untuk lihat rincian' }, [
-            UI.el('div', { class: 'dash-kpi-icon' }, icon),
+            tile(iconName, tone),
             UI.el('div', { class: 'dash-kpi-main' }, [
                 UI.el('div', { class: 'dash-label' }, label),
                 UI.el('div', { class: 'dash-value', 'data-testid': `${testid}-value` }, [valueNode]),
                 sub ? UI.el('div', { class: 'dash-sub' }, sub) : null,
             ]),
+            chev(),
         ]);
         activate(card, onClick);
         return card;
@@ -156,27 +195,26 @@ const Dashboard = (() => {
     // the figure fits its card (min 0.62rem); the full value stays in the title.
     function fitValues(root) {
         const scope = root || document;
-        // size each figure to its own card first, then give every card of the same
-        // row the SMALLEST size so the row reads as one consistent set
-        [['.dash-kpis'], ['.dash-mv-cards']].forEach(([sel]) => {
-            scope.querySelectorAll(sel).forEach((group) => {
-                const vals = Array.from(group.querySelectorAll('.dash-value'));
-                let smallest = Infinity;
-                vals.forEach((v) => {
-                    v.style.fontSize = '';
-                    v.title = v.textContent;
-                    let px = parseFloat(getComputedStyle(v).fontSize);
-                    const base = px;
-                    let guard = 60;
-                    while (v.scrollWidth > v.clientWidth + 0.5 && px > 10 && guard-- > 0) {
-                        px -= 0.5;
-                        v.style.fontSize = `${px}px`;
-                    }
-                    smallest = Math.min(smallest, px);
-                    v.dataset.base = String(base);
-                });
-                vals.forEach((v) => { if (smallest < parseFloat(v.dataset.base)) v.style.fontSize = `${smallest}px`; });
-            });
+        const fit = (v) => {
+            v.style.fontSize = '';
+            v.title = v.textContent;
+            let px = parseFloat(getComputedStyle(v).fontSize);
+            let guard = 80;
+            while (v.scrollWidth > v.clientWidth + 0.5 && px > 10 && guard-- > 0) {
+                px -= 0.5;
+                v.style.fontSize = `${px}px`;
+            }
+            return px;
+        };
+        // KPI figures are sized individually; the four movement figures are all
+        // Rupiah of the same kind, so they share the SMALLEST fitted size and the
+        // row reads as one consistent set.
+        scope.querySelectorAll('.dash-kpis .dash-value').forEach(fit);
+        scope.querySelectorAll('.dash-mv-cards').forEach((group) => {
+            const vals = Array.from(group.querySelectorAll('.dash-value'));
+            const sizes = vals.map(fit);
+            const smallest = Math.min(...sizes);
+            vals.forEach((v, i) => { if (sizes[i] > smallest) v.style.fontSize = `${smallest}px`; });
         });
     }
     let resizeTimer = null;
@@ -192,13 +230,13 @@ const Dashboard = (() => {
         const sv = s.stock_value;
         const stockSub = sv.in_transit > 0 ? `Termasuk transit ${money(sv.in_transit)}` : 'HPP (rata-rata)';
         return UI.el('div', { class: 'dash-kpis' }, [
-            kpi('dash-kpi-sku', '📦', 'Total SKU Aktif', document.createTextNode(num(s.total_sku)), `${num(s.sku_with_stock)} SKU memiliki stok`,
+            kpi('dash-kpi-sku', 'box', 'blue', 'Total SKU Aktif', document.createTextNode(num(s.total_sku)), `${num(s.sku_with_stock)} SKU memiliki stok`,
                 () => goStockReport({})),
-            kpi('dash-kpi-value', '💰', 'Nilai Stok', document.createTextNode(money(sv.total)), stockSub,
+            kpi('dash-kpi-value', 'layers', 'gold', 'Nilai Stok', document.createTextNode(money(sv.total)), stockSub,
                 () => openDetail({ type: 'current_stock', title: 'Nilai Stok Saat Ini', totalLabel: 'GRAND TOTAL NILAI STOK (ON-HAND)' })),
-            kpi('dash-kpi-transfer', '🚚', 'Transfer Pending', document.createTextNode(num(s.pending_transfers)), 'Dalam proses',
+            kpi('dash-kpi-transfer', 'truck', 'blue', 'Transfer Pending', document.createTextNode(num(s.pending_transfers)), 'Dalam proses',
                 () => openDetail({ type: 'pending_transfers', title: 'Transfer Pending', totalLabel: 'TOTAL NILAI DALAM PERJALANAN' })),
-            kpi('dash-kpi-opname', '📋', 'Stock Opname Aktif', document.createTextNode(num(s.active_opname)), 'Sedang berjalan',
+            kpi('dash-kpi-opname', 'clipboard', 'green', 'Stock Opname Aktif', document.createTextNode(num(s.active_opname)), 'Sedang berjalan',
                 () => openDetail({ type: 'active_opname', title: 'Stock Opname Aktif', totalLabel: '' })),
         ]);
     }
@@ -211,10 +249,10 @@ const Dashboard = (() => {
 
     // ------------------------------------------------------- movement summary
     const MOVEMENT_CARDS = [
-        { key: 'opening_stock', type: 'opening_stock', label: 'Stok Awal', cls: 'is-open', icon: '📦', total: 'GRAND TOTAL STOK AWAL', title: 'Rincian Stok Awal', sub: (m) => `${num(m.sku_count)} SKU` },
-        { key: 'purchase_in', type: 'purchase_in', label: 'Pembelian / Stock IN', cls: 'is-in', icon: '🛒', total: 'GRAND TOTAL PEMBELIAN / STOCK IN', title: 'Rincian Pembelian / Stock IN', sub: (m) => `${num(m.tx_count)} transaksi` },
-        { key: 'stock_out', type: 'stock_out', label: 'Barang Keluar / Stock OUT', cls: 'is-out', icon: '📤', total: 'GRAND TOTAL BARANG KELUAR / STOCK OUT', title: 'Rincian Barang Keluar / Stock OUT', sub: (m) => `${num(m.tx_count)} transaksi` },
-        { key: 'closing_stock', type: 'closing_stock', label: 'Stok Akhir', cls: 'is-close', icon: '🧊', total: 'GRAND TOTAL STOK AKHIR', title: 'Rincian Stok Akhir', sub: (m) => `${num(m.sku_count)} SKU` },
+        { key: 'opening_stock', type: 'opening_stock', label: 'Stok Awal', cls: 'is-open', icon: 'box', total: 'GRAND TOTAL STOK AWAL', title: 'Rincian Stok Awal', sub: (m) => `${num(m.sku_count)} SKU` },
+        { key: 'purchase_in', type: 'purchase_in', label: 'Pembelian / Stock IN', cls: 'is-in', icon: 'cart', total: 'GRAND TOTAL PEMBELIAN / STOCK IN', title: 'Rincian Pembelian / Stock IN', sub: (m) => `${num(m.tx_count)} transaksi` },
+        { key: 'stock_out', type: 'stock_out', label: 'Barang Keluar / Stock OUT', cls: 'is-out', icon: 'out', total: 'GRAND TOTAL BARANG KELUAR / STOCK OUT', title: 'Rincian Barang Keluar / Stock OUT', sub: (m) => `${num(m.tx_count)} transaksi` },
+        { key: 'closing_stock', type: 'closing_stock', label: 'Stok Akhir', cls: 'is-close', icon: 'box', total: 'GRAND TOTAL STOK AKHIR', title: 'Rincian Stok Akhir', sub: (m) => `${num(m.sku_count)} SKU` },
     ];
 
     function periodLabel(d) {
@@ -232,26 +270,27 @@ const Dashboard = (() => {
         const section = UI.el('div', { class: 'dash-section dash-movement', 'data-testid': 'dash-movement' });
 
         const title = UI.el('div', { class: 'dash-section-title' }, [
-            UI.el('span', {}, '🔁 RINGKASAN PERGERAKAN STOK'),
+            icon('repeat', 'dash-title-ico c-gold'), UI.el('span', {}, 'RINGKASAN PERGERAKAN STOK'),
             UI.el('span', { class: 'dash-period-label', 'data-testid': 'dash-period-label' }, `(PERIODE: ${periodLabel(d)})`),
         ]);
         section.appendChild(UI.el('div', { class: 'dash-section-head' }, [title, buildPeriodControls(d)]));
 
         if (m.note) section.appendChild(UI.el('div', { class: 'dash-note', 'data-testid': 'dash-movement-note' }, m.note));
 
-        const cards = UI.el('div', { class: 'dash-mv-cards' }, MOVEMENT_CARDS.map((c) => {
+        const cards = UI.el('div', { class: 'dash-mv-cards' }, [].concat(...MOVEMENT_CARDS.map((c, idx) => {
             const node = m[c.key];
             const el = UI.el('div', { class: `dash-card dash-mv ${c.cls} dash-click`, role: 'button', tabindex: '0', 'data-testid': `dash-mv-${c.key}`, title: 'Klik untuk lihat rincian' }, [
-                UI.el('div', { class: 'dash-mv-icon' }, c.icon),
+                tile(c.icon, c.cls.replace('is-', '')),
                 UI.el('div', { class: 'dash-mv-main' }, [
                     UI.el('div', { class: 'dash-label' }, c.label),
                     UI.el('div', { class: 'dash-value dash-mv-value', 'data-testid': `dash-mv-${c.key}-value` }, money(node.value)),
                     UI.el('div', { class: 'dash-sub' }, c.sub(node)),
                 ]),
+                chev(),
             ]);
             activate(el, () => openDetail({ type: c.type, title: c.title, totalLabel: c.total, columnsFor: c.key }));
-            return el;
-        }));
+            return idx < MOVEMENT_CARDS.length - 1 ? [el, UI.el('div', { class: 'dash-mv-arrow', 'aria-hidden': 'true' }, [icon('arrow')])] : [el];
+        })));
         section.appendChild(cards);
 
         section.appendChild(buildOtherMovements(d));
@@ -340,23 +379,27 @@ const Dashboard = (() => {
     }
 
     // ------------------------------------------------------- attention + lists
+    const ATTN_STYLE = { out_of_stock: ['xcircle', 'red'], below_minimum: ['alert', 'orange'], dead_stock: ['clock', 'purple'], rusak: ['heart', 'pink'], expired: ['calendar', 'blue'] };
     function buildAttention(d) {
-        const rows = d.attention.map((a) => {
-            const tr = UI.el('tr', { class: 'dash-click', role: 'button', tabindex: '0', 'data-testid': `dash-attn-${a.key}`, title: a.hint }, [
-                UI.el('td', { class: 'wrap' }, [UI.el('div', { class: 'dash-attn-label' }, a.label), UI.el('div', { class: 'dash-sub' }, a.hint)]),
-                UI.el('td', { class: 'text-right' }, num(a.sku_count)),
-                UI.el('td', { class: 'text-right' }, a.value ? money(a.value) : (a.key === 'out_of_stock' ? '—' : money(0))),
-                UI.el('td', { class: 'text-right dash-chev' }, '›'),
+        const cards = d.attention.map((a) => {
+            const [ic, tone] = ATTN_STYLE[a.key] || ['alert', 'orange'];
+            const valueLine = a.key === 'out_of_stock' ? null : `Estimasi ${money(a.value || 0)}`;
+            const el = UI.el('div', { class: `dash-card dash-attn tone-card-${tone} dash-click`, role: 'button', tabindex: '0', 'data-testid': `dash-attn-${a.key}`, title: a.hint }, [
+                tile(ic, tone),
+                UI.el('div', { class: 'dash-attn-main' }, [
+                    UI.el('div', { class: 'dash-label' }, a.label),
+                    UI.el('div', { class: 'dash-attn-count' }, num(a.sku_count)),
+                    UI.el('div', { class: 'dash-sub' }, a.hint),
+                    valueLine ? UI.el('div', { class: 'dash-attn-val' }, valueLine) : null,
+                ]),
+                chev(),
             ]);
-            activate(tr, () => runAction(a));
-            return tr;
+            activate(el, () => runAction(a));
+            return el;
         });
         return UI.el('div', { class: 'dash-section', 'data-testid': 'dash-attention' }, [
-            UI.el('div', { class: 'dash-section-title' }, '⚠️ PERLU PERHATIAN'),
-            UI.el('div', { class: 'dash-table-wrap' }, [UI.el('table', { class: 'dash-table' }, [
-                UI.el('thead', {}, [UI.el('tr', {}, [UI.el('th', {}, 'Status'), UI.el('th', { class: 'text-right' }, 'Jumlah SKU'), UI.el('th', { class: 'text-right' }, 'Estimasi Nilai'), UI.el('th', { class: 'text-right' }, 'Aksi')])]),
-                UI.el('tbody', {}, rows),
-            ])]),
+            UI.el('div', { class: 'dash-section-title' }, [icon('alert', 'dash-title-ico c-orange'), UI.el('span', {}, 'ITEM PERLU PERHATIAN')]),
+            UI.el('div', { class: 'dash-attn-grid' }, cards),
         ]);
     }
 
@@ -369,13 +412,14 @@ const Dashboard = (() => {
 
     function buildActivity(d) {
         const a = d.today_activity;
-        const mini = (testid, icon, label, node, cls) => {
+        const mini = (testid, iconName, label, node, cls) => {
             const el = UI.el('div', { class: `dash-card dash-act ${cls} dash-click`, role: 'button', tabindex: '0', 'data-testid': testid, title: 'Buka History Transaksi' }, [
-                UI.el('div', { class: 'dash-act-icon' }, icon),
-                UI.el('div', {}, [
+                tile(iconName, cls.replace('is-', '')),
+                UI.el('div', { class: 'dash-act-main' }, [
                     UI.el('div', { class: 'dash-label' }, label),
-                    UI.el('div', { class: 'dash-act-count' }, `${num(node.count)} transaksi`),
-                    UI.el('div', { class: 'dash-sub' }, node.count > 0 ? money(node.value) : '—'),
+                    UI.el('div', { class: 'dash-act-count' }, num(node.count)),
+                    UI.el('div', { class: 'dash-sub' }, 'transaksi'),
+                    UI.el('div', { class: 'dash-act-val' }, node.count > 0 ? money(node.value) : '—'),
                 ]),
             ]);
             activate(el, () => window.InvNav && window.InvNav.goToTab('history-transaksi'));
@@ -395,24 +439,29 @@ const Dashboard = (() => {
             return tr;
         });
         return UI.el('div', { class: 'dash-section', 'data-testid': 'dash-activity' }, [
-            UI.el('div', { class: 'dash-section-title' }, [UI.el('span', {}, '📈 AKTIVITAS HARI INI'), UI.el('span', { class: 'dash-period-label' }, `(${d.today})`)]),
+            UI.el('div', { class: 'dash-section-title' }, [icon('activity', 'dash-title-ico c-green'), UI.el('span', {}, 'AKTIVITAS HARI INI'), UI.el('span', { class: 'dash-period-label' }, `(${d.today})`)]),
             UI.el('div', { class: 'dash-act-grid' }, [
-                mini('dash-act-in', '📥', 'Stock IN', a.stock_in, 'is-in'),
-                mini('dash-act-out', '📤', 'Stock OUT', a.stock_out, 'is-out'),
-                mini('dash-act-trf-out', '🚚', 'Transfer Keluar', a.transfer_out, 'is-trf'),
-                mini('dash-act-trf-in', '🚛', 'Transfer Diterima', a.transfer_in, 'is-trfin'),
+                mini('dash-act-in', 'download', 'Stock IN', a.stock_in, 'is-in'),
+                mini('dash-act-out', 'upload', 'Stock OUT', a.stock_out, 'is-out'),
+                mini('dash-act-trf-out', 'truck', 'Transfer Keluar', a.transfer_out, 'is-trf'),
+                mini('dash-act-trf-in', 'truck', 'Transfer Diterima', a.transfer_in, 'is-trfin'),
             ]),
             UI.el('div', { class: 'dash-table-wrap' }, [UI.el('table', { class: 'dash-table', 'data-testid': 'dash-recent' }, [
                 UI.el('thead', {}, [UI.el('tr', {}, ['Waktu', 'Jenis', 'No. Referensi', 'Gudang'].map((h) => UI.el('th', {}, h)).concat(['Jumlah Item', 'Nilai'].map((h) => UI.el('th', { class: 'text-right' }, h))).concat([UI.el('th', {}, 'Status')]))]),
                 UI.el('tbody', {}, recent.length ? recent : [UI.el('tr', {}, [UI.el('td', { colspan: '7', class: 'dash-empty' }, 'Belum ada aktivitas')])]),
             ])]),
+            (() => {
+                const more = UI.el('button', { class: 'dash-link dash-more', type: 'button', 'data-testid': 'dash-more-activity' }, ['Lihat semua aktivitas ', icon('arrow')]);
+                more.addEventListener('click', () => window.InvNav && window.InvNav.goToTab('history-transaksi'));
+                return more;
+            })(),
         ]);
     }
 
-    function topTable(testid, title, linkLabel, onLink, headers, rows) {
-        const head = UI.el('div', { class: 'dash-section-title' }, [UI.el('span', {}, title)]);
+    function topTable(testid, title, ico, icoClass, linkLabel, onLink, headers, rows) {
+        const head = UI.el('div', { class: 'dash-section-title' }, [UI.el('span', { class: 'dash-title-l' }, [icon(ico, `dash-title-ico ${icoClass}`), title])]);
         if (onLink) {
-            const link = UI.el('button', { class: 'dash-link', type: 'button', 'data-testid': `${testid}-link` }, `${linkLabel} →`);
+            const link = UI.el('button', { class: 'dash-link', type: 'button', 'data-testid': `${testid}-link` }, [`${linkLabel} `, icon('arrow')]);
             link.addEventListener('click', onLink);
             head.appendChild(link);
         }
@@ -427,35 +476,35 @@ const Dashboard = (() => {
 
     function buildTopLow(d) {
         const rows = d.top_low_stock.map((r, i) => UI.el('tr', { 'data-testid': 'dash-low-row' }, [
-            UI.el('td', {}, String(i + 1)), UI.el('td', {}, r.sku), UI.el('td', {}, r.name),
+            UI.el('td', {}, String(i + 1)), UI.el('td', {}, r.sku), UI.el('td', { class: 'wrap-sm' }, r.name),
             UI.el('td', { class: 'text-right' }, qty(r.qty)), UI.el('td', { class: 'text-right' }, qty(r.minimum)),
             UI.el('td', { class: 'text-right' }, [UI.el('span', { class: 'dash-gap' }, qty(r.gap))]),
         ]));
-        return topTable('dash-top-low', '🔻 TOP 5 STOK MENIPIS', 'Lihat Semua', () => goStockReport({ status: 'CRITICAL' }),
+        return topTable('dash-top-low', 'TOP 5 STOK MENIPIS', 'bars', 'c-red', 'Lihat Semua', () => goStockReport({ status: 'CRITICAL' }),
             [['#'], ['SKU'], ['Nama Barang'], ['Stok', true], ['Min', true], ['Selisih', true]], rows);
     }
 
     function buildTopValue(d) {
         const rows = d.top_inventory_value.map((r, i) => UI.el('tr', { 'data-testid': 'dash-value-row' }, [
-            UI.el('td', {}, String(i + 1)), UI.el('td', {}, r.sku), UI.el('td', {}, r.name),
+            UI.el('td', {}, String(i + 1)), UI.el('td', {}, r.sku), UI.el('td', { class: 'wrap-sm' }, r.name),
             UI.el('td', { class: 'text-right' }, qty(r.qty)), UI.el('td', { class: 'text-right' }, money(r.hpp)), UI.el('td', { class: 'text-right' }, money(r.value)),
         ]));
-        return topTable('dash-top-value', '💎 TOP 5 NILAI STOK', 'Lihat Semua', () => goStockReport({}),
+        return topTable('dash-top-value', 'TOP 5 NILAI STOK', 'layers', 'c-gold', 'Lihat Semua', () => goStockReport({}),
             [['#'], ['SKU'], ['Nama Barang'], ['Qty (base)', true], ['HPP', true], ['Nilai Stok', true]], rows);
     }
 
     function buildQuickActions() {
         const actions = [
-            { label: '📥 Stock IN', permission: 'TRANSACTION_IN_CREATE', tab: 'transaksi' },
-            { label: '📤 Stock OUT', permission: 'TRANSACTION_OUT_CREATE', tab: 'transaksi' },
-            { label: '🚚 Buat Transfer', permission: 'WAREHOUSE_TRANSFER_MANAGE', tab: 'transfer' },
-            { label: '📋 Mulai Stock Opname', permission: 'STOCK_OPNAME_MANAGE', tab: 'opname' },
+            { label: 'Stock IN', ic: 'download', permission: 'TRANSACTION_IN_CREATE', tab: 'transaksi' },
+            { label: 'Stock OUT', ic: 'upload', permission: 'TRANSACTION_OUT_CREATE', tab: 'transaksi' },
+            { label: 'Buat Transfer', ic: 'truck', permission: 'WAREHOUSE_TRANSFER_MANAGE', tab: 'transfer' },
+            { label: 'Mulai Stock Opname', ic: 'clipboard', permission: 'STOCK_OPNAME_MANAGE', tab: 'opname' },
         ].filter((a) => Auth.hasPermission(a.permission));
         if (!actions.length) return UI.el('div', {});
         return UI.el('div', { class: 'dash-section dash-quick-row', 'data-testid': 'dash-quick' }, [
-            UI.el('div', { class: 'dash-section-title' }, '⚡ Quick Actions'),
+            UI.el('div', { class: 'dash-section-title' }, [icon('zap', 'dash-title-ico c-gold'), UI.el('span', {}, 'Quick Actions')]),
             UI.el('div', { class: 'quick-actions' }, actions.map((a) => {
-                const b = UI.el('button', { class: 'btn btn-primary btn-sm', type: 'button' }, a.label);
+                const b = UI.el('button', { class: 'btn btn-primary dash-qa', type: 'button' }, [icon(a.ic), ` ${a.label}`]);
                 b.addEventListener('click', () => document.querySelector(`[data-tab="${a.tab}"]`)?.click());
                 return b;
             })),
