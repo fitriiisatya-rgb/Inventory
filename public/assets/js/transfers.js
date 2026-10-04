@@ -182,9 +182,14 @@ const Transfers = (() => {
     // PHASE V2.14.8, requirement D — "Stok Tersedia" always reflects
     // GUDANG ASAL, reusing the exact same InvApi.currentStock() endpoint
     // Distribution Order's own quick-add table already uses (no new
-    // endpoint), displayed as the plain base-unit quantity — the same
-    // convention that table and Kartu Stok already use, never a
-    // unit-converted figure invented for this screen.
+    // endpoint). entry.stockBase itself is always the raw BASE quantity
+    // the API returns — never touch that value, never touch inventory.
+    // STABILIZATION — the DISPLAYED figure (what's actually rendered
+    // into stockCell) now follows the currently SELECTED input unit via
+    // renderStockDisplay()/currentUnitFactor() below, since "Stok
+    // Tersedia" showing a raw base number regardless of the unit someone
+    // just picked was confusing UX (base stock 192 KG shown even after
+    // switching to KARTON, where the real answer is 192/32 = 6 KARTON).
     async function refreshStockFor(idx) {
         const entry = lineSelectors.get(idx);
         if (!entry) return;
@@ -196,7 +201,7 @@ const Transfers = (() => {
             const current = lineSelectors.get(idx);
             if (!current || current.itemId !== entry.itemId) return; // selection changed while awaiting
             current.stockBase = Number(stock.qty_base);
-            current.stockCell.textContent = UI.formatNumber(current.stockBase);
+            renderStockDisplay(idx);
             checkQtyWarning(idx);
         } catch (err) {
             entry.stockCell.textContent = '-';
@@ -207,19 +212,58 @@ const Transfers = (() => {
         lineSelectors.forEach((entry, idx) => { if (entry.itemId) refreshStockFor(idx); });
     }
 
+    // The conversion_to_base of whichever unit is CURRENTLY selected in
+    // this line's ItemSelector — reads straight from its own already-
+    // loaded state (never a new fetch), exactly as checkQtyWarning()
+    // already did for its base-equivalent comparison below. Base unit
+    // itself always carries conversion_to_base = 1 (see item-selector.js's
+    // own base-unit backfill), so this is correct for every unit in the
+    // dropdown, not just conversions.
+    function currentUnitFactor(idx) {
+        const entry = lineSelectors.get(idx);
+        if (!entry) return 1;
+        const state = entry.ctl.getState();
+        const unit = (state.units || []).find((u) => String(u.id) === String(state.unitId));
+        const factor = unit ? Number(unit.conversion_to_base) : 1;
+        return factor > 0 ? factor : 1;
+    }
+
+    // STABILIZATION — renders entry.stockBase (the real, unconverted base
+    // quantity — never mutated) divided by the selected unit's factor:
+    // available_in_selected_unit = available_base_qty / conversion_to_base.
+    // Called after every fresh currentStock() fetch AND whenever the
+    // selected unit alone changes (ItemSelector's onChange fires on a
+    // pure unit change too — see addLine()'s onChange below) — never a
+    // new network call for a unit-only change, since base stock doesn't
+    // depend on which unit is selected. UI.formatNumber() already caps
+    // at 2 decimals (id-ID locale) — the same convention every other
+    // quantity on this screen uses — so this naturally preserves
+    // fractional results (e.g. 192/500 KARTON = "0,38") without any
+    // extra rounding logic here.
+    function renderStockDisplay(idx) {
+        const entry = lineSelectors.get(idx);
+        if (!entry) return;
+        if (entry.stockBase === null) { entry.stockCell.textContent = '-'; return; }
+        entry.stockCell.textContent = UI.formatNumber(entry.stockBase / currentUnitFactor(idx));
+    }
+
     // Requirement E — inline-only warning; TransferService's own backend
-    // validation is completely unchanged and remains the real gate.
+    // validation is completely unchanged and remains the real gate. The
+    // comparison itself is or has ever been in BASE terms on both sides
+    // (entered qty, in the selected unit, converted UP via *factor,
+    // against the real base stock) — correct direction, never changed
+    // here. Only the NUMBER SHOWN in the warning text now matches what
+    // "Stok Tersedia" itself displays (the selected-unit-converted
+    // figure), so the two never contradict each other on screen.
     function checkQtyWarning(idx) {
         const entry = lineSelectors.get(idx);
         if (!entry) return;
         const qty = Number(entry.qtyInput.value);
         if (!qty || entry.stockBase === null) { entry.qtyWarn.style.display = 'none'; return; }
-        const state = entry.ctl.getState();
-        const unit = (state.units || []).find((u) => String(u.id) === String(state.unitId));
-        const factor = unit ? Number(unit.conversion_to_base) : 1;
+        const factor = currentUnitFactor(idx);
         const qtyBaseEquivalent = qty * factor;
         if (qtyBaseEquivalent > entry.stockBase) {
-            entry.qtyWarn.textContent = `⚠ Melebihi stok tersedia (${UI.formatNumber(entry.stockBase)})`;
+            entry.qtyWarn.textContent = `⚠ Melebihi stok tersedia (${UI.formatNumber(entry.stockBase / factor)})`;
             entry.qtyWarn.style.display = 'block';
         } else {
             entry.qtyWarn.style.display = 'none';

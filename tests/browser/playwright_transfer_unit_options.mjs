@@ -179,6 +179,14 @@ try {
         // warehouse, and re-select the same item — "Stok Tersedia" reads
         // live currentStock() exactly like the create form's own column
         // does, so this proves the real post-receive base quantity.
+        //
+        // STABILIZATION — "Stok Tersedia" now follows the SELECTED unit
+        // (see transfers.js's renderStockDisplay()/currentUnitFactor()),
+        // and this item's default-selected unit (purchase-default, first
+        // in the dropdown) is KARTON, factor 100 — so the column shows
+        // 37/100 = 0,37 by default, not the raw base 37. Explicitly
+        // switch to PCS (the base unit, factor 1) to assert the real
+        // post-receive BASE quantity this check's own name describes.
         await page.reload();
         await openTransferTab(page);
         await page.selectOption('#transfer-from-wh', String(seed.dst_warehouse_id));
@@ -188,8 +196,12 @@ try {
         await page.waitForSelector('.item-selector-option', { state: 'visible', timeout: 8000 });
         await page.locator('.item-selector-option', { hasText: seed.sku_submit }).first().click();
         await page.waitForTimeout(600);
+        const unitSelect2 = row2.locator('select.item-selector-unit');
+        const pcsOptionText2 = (await unitSelect2.locator('option').allTextContents()).find((t) => t.startsWith('PCS '));
+        await unitSelect2.selectOption({ label: pcsOptionText2 });
+        await page.waitForTimeout(400);
         const stockText = await row2.locator('.compact-col-stock').first().textContent();
-        check('G1. after transferring 37 PCS (base unit) and confirming receive, destination "Stok Tersedia" reads exactly 37', (stockText || '').trim().replace(/\./g, '') === '37', `stockText="${stockText}"`);
+        check('G1. after transferring 37 PCS (base unit) and confirming receive, destination "Stok Tersedia" in the base unit (PCS) reads exactly 37', (stockText || '').trim().replace(/\./g, '') === '37', `stockText="${stockText}"`);
     }
 
     await browser.close();
