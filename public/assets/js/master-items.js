@@ -31,8 +31,11 @@ const MasterItems = (() => {
         const supplierOptions = Master.suppliers().filter((s) => s.is_active).map((s) => ({ value: s.id, label: s.name }));
 
         const summaryBox = UI.el('div', { class: 'grid-4', style: 'margin-bottom:14px;' });
+        container.appendChild(MasterCommon.pageHeader({
+            title: 'Master Barang', description: 'Kelola data barang, satuan, kategori, dan harga.', buttonLabel: 'Tambah Barang',
+            canCreate: canManage, onCreate: openCreate,
+        }));
         const card = UI.el('div', { class: 'card' }, [
-            UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '📦 Master Barang')]),
             summaryBox,
         ]);
         const tableHost = UI.el('div');
@@ -98,6 +101,84 @@ const MasterItems = (() => {
             onRowClick: (row) => openDetail(row),
             emptyMessage: 'Tidak ada barang yang cocok dengan filter ini.',
         });
+    }
+
+    // ============================================================
+    // "Tambah Barang" — Master Barang stays centralised (one row, no per-warehouse copy). POST /items
+    // creates the item, its identity conversion, the optional purchase-unit conversion and the optional
+    // Harga Beli (append-only item_price_history, exactly like Edit Barang) in ONE transaction.
+    // Category / Supplier / Units come from the existing masters — a supplier is never auto-created.
+    // ============================================================
+    async function openCreate() {
+        if (Master.units().length === 0) {
+            try { await Master.loadAll(); } catch (err) { /* loadAll never throws */ }
+        }
+        if (Master.units().length === 0) {
+            UI.toast('Gagal memuat daftar satuan (GET /units) — Tambah Barang tidak bisa dibuka. Muat ulang halaman atau hubungi IT.', 'error');
+            return;
+        }
+        const unitOpts = Master.units().map((u) => ({ value: u.id, label: `${u.code} (${u.name})` }));
+        const unitCode = (id) => { const u = Master.unitById(id); return u ? u.code : ''; };
+        const res = await MasterCommon.recordModal({
+            title: 'Tambah Barang',
+            wide: true,
+            testid: 'mdm-modal-item',
+            initial: { is_active: true },
+            fields: [
+                { key: 'sku', label: 'SKU / Kode', type: 'text', required: true, placeholder: 'Contoh: B123', maxLength: 40, half: false },
+                { key: 'name', label: 'Nama Barang', type: 'text', required: true, placeholder: 'Contoh: Roti Coklat', maxLength: 200, half: false },
+                { key: 'category_id', label: 'Kategori', type: 'select', required: true, emptyLabel: 'Pilih Kategori', options: Master.categories().filter((c) => c.is_active).map((c) => ({ value: c.id, label: c.name })) },
+                { key: 'default_supplier_id', label: 'Supplier', type: 'select', emptyLabel: 'Tanpa Supplier', options: Master.suppliers().filter((v) => v.is_active).map((v) => ({ value: v.id, label: v.name })) },
+                { key: 'base_unit_id', label: 'Satuan Dasar', type: 'select', required: true, emptyLabel: 'Pilih Satuan', options: unitOpts, half: true },
+                { key: 'purchase_unit_id', label: 'Satuan Beli', type: 'select', emptyLabel: 'Sama dengan satuan dasar', options: unitOpts },
+                { key: 'purchase_conversion', label: 'Konversi', type: 'decimal', placeholder: 'Contoh: 10' },
+                { key: 'price', label: 'Harga Beli (Rp)', type: 'decimal', placeholder: '0' },
+                { key: 'is_active', label: 'Status', type: 'toggle' },
+            ],
+            onChange: (key, v, ctl) => {
+                const hasPurchase = !!v.purchase_unit_id;
+                ctl.setHidden('purchase_conversion', !hasPurchase);
+                if (hasPurchase) {
+                    const base = v.base_unit_id ? unitCode(v.base_unit_id) : 'satuan dasar';
+                    ctl.setLabel('purchase_conversion', `Konversi (1 ${unitCode(v.purchase_unit_id)} = … ${base})`);
+                }
+                const priceUnit = hasPurchase ? unitCode(v.purchase_unit_id) : (v.base_unit_id ? unitCode(v.base_unit_id) : '');
+                ctl.setLabel('price', priceUnit ? `Harga Beli (Rp / ${priceUnit})` : 'Harga Beli (Rp)');
+                ctl.setHint('price', 'Opsional. Boleh dikosongkan — harga juga terisi otomatis dari Stock IN.');
+            },
+            validate: (v) => {
+                const errs = {};
+                if (v.purchase_unit_id) {
+                    if (v.base_unit_id && String(v.purchase_unit_id) === String(v.base_unit_id)) errs.purchase_unit_id = 'Satuan Beli harus berbeda dari Satuan Dasar (atau kosongkan).';
+                    const f = MasterCommon.parseDecimal(v.purchase_conversion);
+                    if (Number.isNaN(f) || f <= 0) errs.purchase_conversion = 'Konversi wajib diisi dan harus lebih dari 0.';
+                }
+                if (v.price) {
+                    const p = MasterCommon.parseDecimal(v.price);
+                    if (Number.isNaN(p) || p < 0) errs.price = 'Harga Beli tidak boleh negatif.';
+                }
+                return errs;
+            },
+            onSubmit: async (v) => {
+                const payload = {
+                    sku: v.sku, name: v.name, category_id: Number(v.category_id),
+                    default_supplier_id: v.default_supplier_id ? Number(v.default_supplier_id) : null,
+                    base_unit_id: Number(v.base_unit_id),
+                    status: v.is_active ? 'ACTIVE' : 'INACTIVE',
+                };
+                if (v.purchase_unit_id) {
+                    payload.purchase_unit_id = Number(v.purchase_unit_id);
+                    payload.purchase_conversion = MasterCommon.parseDecimal(v.purchase_conversion);
+                }
+                if (v.price) payload.price = MasterCommon.parseDecimal(v.price);
+                await InvApi.createItem(payload);
+                return true;
+            },
+        });
+        if (!res) return;
+        UI.toast('Barang berhasil ditambahkan.', 'success');
+        if (dtHandle) dtHandle.reload();
+        Master.loadAll().catch(() => {});
     }
 
     function renderSummary(box, summary) {

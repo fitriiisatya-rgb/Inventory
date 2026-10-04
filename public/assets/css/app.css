@@ -1343,3 +1343,51 @@ html.tx2-scroll-lock, body.tx2-scroll-lock { overflow: hidden; }
     .sidebar-collapsed .sidebar-group.flyout > .sidebar-submenu .sidebar-link.active { box-shadow: none; }
 }
 @media (prefers-reduced-motion: reduce) { .sidebar, .sidebar-link, .sidebar-group-header { transition: none; } }
+
+/* Master Data compact create modal (master-common.js: pageHeader + recordModal) — presentation only. Page header with a
+   compact primary button top-right; a small centered modal (internal scroll only when long) with 2-column compact fields,
+   field-level errors, a green/gray switch for Status, Batal / Simpan footer. Uses the existing tokens, no new palette. */
+.mdm-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.mdm-head-text { min-width: 0; }
+.mdm-title { font-size: 1.35rem; font-weight: 800; line-height: 1.2; margin: 0; }
+.mdm-desc { margin: 4px 0 0; font-size: 0.85rem; color: var(--text2); }
+.mdm-add { padding: 8px 16px; font-size: 0.85rem; font-weight: 700; white-space: nowrap; }
+body.mdm-lock { overflow: hidden; }
+.mdm-overlay { padding: 12px; }
+.modal-content.mdm-modal { padding: 0; width: 100%; max-width: 480px; max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px); display: flex; flex-direction: column; overflow: hidden; border-radius: 14px; box-shadow: 0 24px 60px rgba(0,0,0,0.55); }
+.modal-content.mdm-modal.mdm-wide { max-width: 640px; }
+.mdm-modal-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px 10px; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
+.mdm-modal-head h3 { margin: 0; font-size: 1.02rem; font-weight: 800; flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.mdm-modal-ico { width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, #f59e0b, #ea7a12); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 0.85rem; flex: 0 0 auto; }
+.mdm-x { background: transparent; border: none; color: var(--text2); font-size: 1.5rem; line-height: 1; cursor: pointer; width: 32px; height: 32px; border-radius: 8px; }
+.mdm-x:hover { background: var(--bg3); color: var(--text); }
+.mdm-form { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+.mdm-body { padding: 12px 16px 4px; overflow-y: auto; overscroll-behavior: contain; min-height: 0; flex: 1 1 auto; }
+.mdm-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
+.mdm-field { min-width: 0; }
+.mdm-field:has(textarea), .mdm-field.mdm-full { grid-column: 1 / -1; }
+.mdm-label { display: block; font-size: 0.74rem; font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--text); margin-bottom: 4px; }
+.mdm-req { color: #ff6b6b; }
+.mdm-modal input[type="text"], .mdm-modal input[type="email"], .mdm-modal select, .mdm-modal textarea { width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 8px; min-height: 34px; }
+.mdm-modal textarea { resize: vertical; min-height: 64px; }
+.mdm-modal .invalid { border-color: #ef4444 !important; box-shadow: 0 0 0 2px rgba(239,68,68,0.18); }
+.mdm-err { margin-top: 4px; font-size: 0.74rem; color: #ff7b7b; }
+.mdm-hint { margin-top: 4px; font-size: 0.72rem; color: var(--text3); }
+.mdm-form-error { margin: 10px 0 4px; font-size: 0.82rem; }
+.mdm-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 16px 14px; border-top: 1px solid var(--border); flex: 0 0 auto; }
+.mdm-btn { min-width: 88px; padding: 8px 18px; font-size: 0.85rem; font-weight: 700; }
+.mdm-switch { display: inline-flex; align-items: center; gap: 8px; position: relative; min-height: 34px; cursor: pointer; }
+.mdm-switch-input { position: absolute; opacity: 0; width: 38px; height: 22px; margin: 0; cursor: pointer; z-index: 1; }
+.mdm-switch-track { width: 38px; height: 22px; border-radius: 22px; background: #3a4562; position: relative; transition: background 0.15s; flex: 0 0 auto; }
+.mdm-switch-track::after { content: ""; position: absolute; left: 3px; top: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform 0.15s; }
+.mdm-switch-input:checked + .mdm-switch-track { background: #2f7bff; }
+.mdm-switch-input:checked + .mdm-switch-track::after { transform: translateX(16px); }
+.mdm-switch-input:focus-visible + .mdm-switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mdm-switch-text { font-size: 0.85rem; color: var(--text); }
+@media (max-width: 560px) {
+    .mdm-grid { grid-template-columns: minmax(0, 1fr); }
+    .mdm-title { font-size: 1.15rem; }
+    .mdm-head { align-items: center; }
+    .mdm-overlay { padding: 8px; align-items: flex-end; }
+    .modal-content.mdm-modal { border-radius: 14px 14px 10px 10px; }
+}

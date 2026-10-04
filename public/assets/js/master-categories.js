@@ -1,12 +1,11 @@
 /**
- * PHASE V2 — Master Kategori. List + inline create/edit form.
+ * PHASE V2 — Master Kategori. List + "Tambah Kategori" / Edit in a compact modal (MasterCommon.recordModal).
  * items.category (the original free-text field) is never touched from
  * here — this only manages the normalized categories table and each
  * item's category_id, via the item detail drawer / stock report (not
  * this page, which is category-master-only).
  */
 const MasterCategories = (() => {
-    let editingId = null;
     let filters = { q: '', active: '', sort: 'name' };
     let tableHost = null;
 
@@ -14,7 +13,10 @@ const MasterCategories = (() => {
         container.innerHTML = '<div class="alert alert-info">Memuat kategori...</div>';
         try {
             container.innerHTML = '';
-            container.appendChild(buildForm());
+            container.appendChild(MasterCommon.pageHeader({
+                title: 'Kategori', description: 'Kelola data kategori barang.', buttonLabel: 'Tambah Kategori',
+                canCreate: Auth.hasPermission('MASTER_CATEGORY_MANAGE'), onCreate: () => openForm(null),
+            }));
             container.appendChild(buildToolbar());
             tableHost = UI.el('div');
             container.appendChild(tableHost);
@@ -72,68 +74,28 @@ const MasterCategories = (() => {
         }
     }
 
-    function buildForm() {
-        const canManage = Auth.hasPermission('MASTER_CATEGORY_MANAGE');
-        const card = UI.el('div', { class: 'card', id: 'category-form-card' }, [
-            UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title', id: 'category-form-title' }, '➕ Kategori Baru')]),
-            UI.el('div', { id: 'category-form-alert' }),
-            UI.el('div', { class: 'grid-2', html: `
-                <div class="form-group"><label>Kode</label><input type="text" id="category-code"></div>
-                <div class="form-group"><label>Nama</label><input type="text" id="category-name"></div>
-            ` }),
-            !canManage ? UI.el('div', { class: 'alert alert-warning' }, 'Anda tidak memiliki izin untuk menambah/mengubah kategori.') : null,
-            UI.el('div', { style: 'display:flex; gap:10px;' }, [
-                UI.el('button', { class: 'btn btn-primary', id: 'category-save-btn', ...(canManage ? {} : { disabled: 'disabled' }) }, 'Simpan'),
-                UI.el('button', { class: 'btn btn-secondary', id: 'category-cancel-btn', style: 'display:none;' }, 'Batal Edit'),
-            ]),
-        ]);
-        setTimeout(wireForm, 0);
-        return card;
-    }
-
-    function wireForm() {
-        document.getElementById('category-save-btn').addEventListener('click', save);
-        document.getElementById('category-cancel-btn').addEventListener('click', () => { editingId = null; resetForm(); });
-    }
-
-    function resetForm() {
-        document.getElementById('category-code').value = '';
-        document.getElementById('category-name').value = '';
-        document.getElementById('category-form-title').textContent = '➕ Kategori Baru';
-        document.getElementById('category-cancel-btn').style.display = 'none';
-        document.getElementById('category-form-alert').innerHTML = '';
-    }
-
-    function fillForm(c) {
-        document.getElementById('category-code').value = c.code || '';
-        document.getElementById('category-name').value = c.name || '';
-        document.getElementById('category-form-title').textContent = `✏️ Edit Kategori: ${c.name}`;
-        document.getElementById('category-cancel-btn').style.display = '';
-    }
-
-    async function save() {
-        const alertBox = document.getElementById('category-form-alert');
-        alertBox.innerHTML = '';
-        const code = document.getElementById('category-code').value.trim();
-        const name = document.getElementById('category-name').value.trim();
-        if (!code || !name) {
-            alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Kode dan Nama wajib diisi.'));
-            return;
-        }
-        try {
-            if (editingId) {
-                await InvApi.updateCategory(editingId, { name });
-                UI.toast('Kategori berhasil diperbarui.', 'success');
-            } else {
-                await InvApi.createCategory({ code, name });
-                UI.toast('Kategori berhasil ditambahkan.', 'success');
-            }
-            editingId = null;
-            resetForm();
-            await reload();
-        } catch (err) {
-            alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal menyimpan kategori.'));
-        }
+    // Create + Edit share one compact modal. The category code is fixed once created (the API only
+    // updates the name / status), so it is read-only when editing.
+    async function openForm(c) {
+        const res = await MasterCommon.recordModal({
+            title: c ? `Edit Kategori: ${c.name}` : 'Tambah Kategori',
+            testid: 'mdm-modal-category',
+            initial: c ? { code: c.code, name: c.name, is_active: !!c.is_active } : { is_active: true },
+            fields: [
+                { key: 'code', label: 'Kode Kategori', type: 'text', required: true, placeholder: 'Contoh: KTG005', maxLength: 60, ...(c ? { readonly: true } : {}) },
+                { key: 'name', label: 'Nama Kategori', type: 'text', required: true, placeholder: 'Contoh: Cake', maxLength: 100 },
+                { key: 'is_active', label: 'Status', type: 'toggle' },
+            ],
+            onSubmit: async (vals) => {
+                if (c) await InvApi.updateCategory(c.id, { name: vals.name, is_active: !!vals.is_active });
+                else await InvApi.createCategory({ code: vals.code, name: vals.name, is_active: !!vals.is_active });
+                return true;
+            },
+        });
+        if (!res) return;
+        UI.toast(c ? 'Kategori berhasil diperbarui.' : 'Kategori berhasil ditambahkan.', 'success');
+        Master.loadAll().catch(() => {});
+        await reload();
     }
 
     function buildTable(categories) {
@@ -146,7 +108,7 @@ const MasterCategories = (() => {
             UI.el('td', {}, MasterCommon.statusBadge(!!c.is_active)),
             UI.el('td', {}, (canManage || canTrace) ? MasterCommon.actionsMenu([
                 canTrace ? { label: 'Lihat Jejak', onClick: () => TraceDrawer.openEntity('category', c.id) } : null,
-                canManage ? { label: 'Edit', onClick: () => { editingId = c.id; fillForm(c); document.getElementById('category-form-card').scrollIntoView({ behavior: 'smooth' }); } } : null,
+                canManage ? { label: 'Edit', onClick: () => openForm(c) } : null,
                 canManage ? { label: c.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(c) } : null,
                 canManage ? { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(c) } : null,
             ]) : '—'),
@@ -156,7 +118,7 @@ const MasterCategories = (() => {
             UI.el('div', { class: 'table-wrapper' }, [
                 UI.el('table', {}, [
                     UI.el('thead', {}, [UI.el('tr', {}, ['Kode', 'Nama', 'Jumlah Item', 'Status', 'Aksi'].map((h) => UI.el('th', {}, h)))]),
-                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '5' }, 'Belum ada kategori — buat kategori pertama di atas, atau backfill via scripts/backfill_item_categories.php')])]),
+                    UI.el('tbody', {}, rows.length ? rows : [UI.el('tr', {}, [UI.el('td', { colspan: '5' }, 'Belum ada kategori — klik "+ Tambah Kategori" untuk membuat yang pertama.')])]),
                 ]),
             ]),
         ]);
@@ -170,6 +132,7 @@ const MasterCategories = (() => {
         try {
             await InvApi.updateCategory(c.id, { is_active: !c.is_active });
             UI.toast('Status kategori diperbarui.', 'success');
+            Master.loadAll().catch(() => {});
             await reload();
         } catch (err) {
             UI.handleApiError(err);

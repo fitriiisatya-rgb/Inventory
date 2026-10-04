@@ -139,6 +139,9 @@ const InvApi = (() => {
         listCategories: (params = {}) => request('GET', `/categories${qs(params)}`),
         listUnits: () => request('GET', '/units'),
         createCategory: (payload) => request('POST', '/categories', payload),
+        createItem: (payload) => request('POST', '/items', payload),
+        createWarehouse: (payload) => request('POST', '/warehouses', payload),
+        createDivision: (payload) => request('POST', '/divisions', payload),
         updateCategory: (id, payload) => request('PUT', `/categories/${id}`, payload),
         deleteCategory: (id) => request('DELETE', `/categories/${id}`),
 

@@ -29,6 +29,7 @@ require_once __DIR__ . '/../services/TransactionHistoryService.php';
 require_once __DIR__ . '/../services/SupplierService.php';
 require_once __DIR__ . '/../services/BakeryDestinationService.php';
 require_once __DIR__ . '/../services/MasterDataSafetyService.php';
+require_once __DIR__ . '/../services/MasterRecordService.php';
 require_once __DIR__ . '/../services/WarehouseReportService.php';
 require_once __DIR__ . '/../services/WarehouseCutoverService.php';
 require_once __DIR__ . '/../services/WarehouseCutoverImportService.php';
@@ -113,6 +114,7 @@ use App\Services\TransactionHistoryService;
 use App\Services\SupplierService;
 use App\Services\BakeryDestinationService;
 use App\Services\MasterDataSafetyService;
+use App\Services\MasterRecordService;
 use App\Services\WarehouseReportService;
 use App\Services\WarehouseCutoverService;
 use App\Services\WarehouseCutoverImportService;
@@ -963,8 +965,15 @@ $routes = [
         if ($existing->fetchColumn() !== false) {
             throw new ValidationException(["category code '{$code}' already exists"]);
         }
-        $stmt = $pdo->prepare('INSERT INTO categories (code, name, is_active) VALUES (:c, :n, 1)');
-        $stmt->execute(['c' => $code, 'n' => $name]);
+        // Master Data "Tambah Kategori": a second category with the same NAME (any case) would be indistinguishable in every dropdown.
+        $sameName = $pdo->prepare('SELECT id FROM categories WHERE LOWER(name) = LOWER(:n)');
+        $sameName->execute(['n' => $name]);
+        if ($sameName->fetchColumn() !== false) {
+            throw new ValidationException(["category name '{$name}' already exists"]);
+        }
+        $isActive = array_key_exists('is_active', $input) ? (int) (bool) $input['is_active'] : 1;
+        $stmt = $pdo->prepare('INSERT INTO categories (code, name, is_active) VALUES (:c, :n, :a)');
+        $stmt->execute(['c' => $code, 'n' => $name, 'a' => $isActive]);
         $categoryId = (int) $pdo->lastInsertId();
         AuditService::log($pdo, $user['id'], $user['username'], 'CATEGORY_CREATE', 'categories', $categoryId, null, ['code' => $code, 'name' => $name], null);
         inv_ok(['success' => true, 'category_id' => $categoryId], 'Category created');
@@ -5184,6 +5193,31 @@ $routes = [
             'warehouse_id' => $singleWarehouseId,
         ]);
         inv_ok(['rows' => $rows, 'total' => count($rows)], 'OK');
+    },
+
+    // Master Data "Tambah ..." — the three creates that had no endpoint (Barang, Gudang, Divisi).
+    // Same permissions the matching PUT/DELETE already require; the whole creation is one transaction
+    // (item + conversions + price + audit all-or-nothing). Supplier / Bakery / Kategori already had POST routes.
+    'POST /items' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_ITEM_MANAGE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        inv_ok(Database::transaction(fn (PDO $tx) => MasterRecordService::createItem($tx, $input)), 'Item created');
+    },
+    'POST /warehouses' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_WAREHOUSE_MANAGE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        inv_ok(Database::transaction(fn (PDO $tx) => MasterRecordService::createWarehouse($tx, $input)), 'Warehouse created');
+    },
+    'POST /divisions' => function () use ($pdo, $input) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'MASTER_DIVISION_MANAGE');
+        $input['created_by'] = $user['id'];
+        $input['username'] = $user['username'];
+        inv_ok(Database::transaction(fn (PDO $tx) => MasterRecordService::createDivision($tx, $input)), 'Division created');
     },
 
     'PUT /warehouses/{id}' => function (array $params) use ($pdo, $input) {

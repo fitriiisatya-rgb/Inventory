@@ -10,9 +10,11 @@ const MasterDivisions = (() => {
         container.innerHTML = '';
         const canManage = Auth.hasPermission('MASTER_DIVISION_MANAGE');
 
-        const card = UI.el('div', { class: 'card' }, [
-            UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '🗂️ Master Divisi')]),
-        ]);
+        container.appendChild(MasterCommon.pageHeader({
+            title: 'Master Divisi', description: 'Kelola data divisi pengguna barang.', buttonLabel: 'Tambah Divisi',
+            canCreate: canManage, onCreate: openCreate,
+        }));
+        const card = UI.el('div', { class: 'card' });
         const tableHost = UI.el('div');
         card.appendChild(tableHost);
         container.appendChild(card);
@@ -46,6 +48,28 @@ const MasterDivisions = (() => {
             onRowClick: (row) => openDetail(row),
             emptyMessage: 'Tidak ada divisi yang cocok dengan filter ini.',
         });
+    }
+
+    // "Tambah Divisi": only the columns the table really has (code, name, status).
+    async function openCreate() {
+        const res = await MasterCommon.recordModal({
+            title: 'Tambah Divisi',
+            testid: 'mdm-modal-division',
+            initial: { is_active: true },
+            fields: [
+                { key: 'code', label: 'Kode Divisi', type: 'text', required: true, placeholder: 'Contoh: DIV005', maxLength: 30 },
+                { key: 'name', label: 'Nama Divisi', type: 'text', required: true, placeholder: 'Contoh: Produksi Roti', maxLength: 100 },
+                { key: 'is_active', label: 'Status', type: 'toggle' },
+            ],
+            onSubmit: async (vals) => {
+                await InvApi.createDivision({ code: vals.code, name: vals.name, is_active: !!vals.is_active });
+                return true;
+            },
+        });
+        if (!res) return;
+        UI.toast('Divisi berhasil ditambahkan.', 'success');
+        if (dtHandle) dtHandle.reload();
+        Master.loadAll().catch(() => {});
     }
 
     function buildActions(row, canManage) {

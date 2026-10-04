@@ -26,6 +26,14 @@ final class BakeryDestinationService
             throw new ValidationException(['code and name cannot be blank']);
         }
 
+        // Master Data "Tambah Bakery": column-length guards so an over-long value is a clear field error.
+        $errors = [];
+        if (mb_strlen($code) > 30) { $errors[] = 'code must be at most 30 characters'; }
+        if (mb_strlen($name) > 150) { $errors[] = 'name must be at most 150 characters'; }
+        if ($errors) {
+            throw new ValidationException($errors);
+        }
+
         $existing = $pdo->prepare('SELECT id FROM bakery_destinations WHERE code = :c');
         $existing->execute(['c' => $code]);
         if ($existing->fetchColumn() !== false) {
@@ -34,7 +42,7 @@ final class BakeryDestinationService
 
         $stmt = $pdo->prepare(
             'INSERT INTO bakery_destinations (code, name, address, city_area, pic_name, phone, route_cluster, notes, is_active)
-             VALUES (:code, :name, :address, :city_area, :pic_name, :phone, :route_cluster, :notes, 1)'
+             VALUES (:code, :name, :address, :city_area, :pic_name, :phone, :route_cluster, :notes, :is_active)'
         );
         $stmt->execute([
             'code' => $code, 'name' => $name,
@@ -44,6 +52,7 @@ final class BakeryDestinationService
             'phone' => self::nullableTrim($p['phone'] ?? null),
             'route_cluster' => self::nullableTrim($p['route_cluster'] ?? null),
             'notes' => self::nullableTrim($p['notes'] ?? null),
+            'is_active' => array_key_exists('is_active', $p) ? (int) (bool) $p['is_active'] : 1,
         ]);
         $destinationId = (int) $pdo->lastInsertId();
 

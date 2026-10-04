@@ -28,6 +28,17 @@ final class SupplierService
             throw new ValidationException(['code and name cannot be blank']);
         }
 
+        // Master Data "Tambah Supplier": column-length / format guards so an over-long value is a clear
+        // field error instead of a database truncation failure.
+        $errors = [];
+        if (mb_strlen($code) > 30) { $errors[] = 'code must be at most 30 characters'; }
+        if (mb_strlen($name) > 150) { $errors[] = 'name must be at most 150 characters'; }
+        $email = self::nullableTrim($p['email'] ?? null);
+        if ($email !== null && filter_var($email, FILTER_VALIDATE_EMAIL) === false) { $errors[] = 'email is not a valid email address'; }
+        if ($errors) {
+            throw new ValidationException($errors);
+        }
+
         $existing = $pdo->prepare('SELECT id FROM suppliers WHERE code = :c');
         $existing->execute(['c' => $code]);
         if ($existing->fetchColumn() !== false) {
@@ -36,15 +47,16 @@ final class SupplierService
 
         $stmt = $pdo->prepare(
             'INSERT INTO suppliers (code, name, contact_name, address, phone, email, notes, is_active)
-             VALUES (:code, :name, :contact_name, :address, :phone, :email, :notes, 1)'
+             VALUES (:code, :name, :contact_name, :address, :phone, :email, :notes, :is_active)'
         );
         $stmt->execute([
             'code' => $code, 'name' => $name,
             'contact_name' => self::nullableTrim($p['contact_name'] ?? null),
             'address' => self::nullableTrim($p['address'] ?? null),
             'phone' => self::nullableTrim($p['phone'] ?? null),
-            'email' => self::nullableTrim($p['email'] ?? null),
+            'email' => $email,
             'notes' => self::nullableTrim($p['notes'] ?? null),
+            'is_active' => array_key_exists('is_active', $p) ? (int) (bool) $p['is_active'] : 1,
         ]);
         $supplierId = (int) $pdo->lastInsertId();
 

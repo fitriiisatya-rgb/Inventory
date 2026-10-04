@@ -41,9 +41,11 @@ const MasterWarehouses = (() => {
         container.innerHTML = '';
         const canManage = Auth.hasPermission('MASTER_WAREHOUSE_MANAGE');
 
-        const card = UI.el('div', { class: 'card' }, [
-            UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title' }, '🏬 Master Gudang')]),
-        ]);
+        container.appendChild(MasterCommon.pageHeader({
+            title: 'Master Gudang', description: 'Kelola data gudang penyimpanan.', buttonLabel: 'Tambah Gudang',
+            canCreate: canManage, onCreate: openCreate,
+        }));
+        const card = UI.el('div', { class: 'card' });
         const tableHost = UI.el('div');
         card.appendChild(tableHost);
         container.appendChild(card);
@@ -85,6 +87,30 @@ const MasterWarehouses = (() => {
             onRowClick: (row) => openDetail(row),
             emptyMessage: 'Tidak ada gudang yang cocok dengan filter ini.',
         });
+    }
+
+    // "Tambah Gudang": code / name / type / status. A new warehouse is a plain master row — the cutover
+    // activation lock is never set from here and no item data is copied (Master Barang stays centralised).
+    async function openCreate() {
+        const res = await MasterCommon.recordModal({
+            title: 'Tambah Gudang',
+            testid: 'mdm-modal-warehouse',
+            initial: { warehouse_type: 'MAIN', is_active: true },
+            fields: [
+                { key: 'code', label: 'Kode Gudang', type: 'text', required: true, placeholder: 'Contoh: GD005', maxLength: 30 },
+                { key: 'name', label: 'Nama Gudang', type: 'text', required: true, placeholder: 'Contoh: Gudang Baru', maxLength: 100 },
+                { key: 'warehouse_type', label: 'Tipe Gudang', type: 'select', required: true, options: [{ value: 'MAIN', label: 'Gudang Utama (MAIN)' }, { value: 'TRANSIT', label: 'Transit (TRANSIT)' }] },
+                { key: 'is_active', label: 'Status', type: 'toggle' },
+            ],
+            onSubmit: async (vals) => {
+                await InvApi.createWarehouse({ code: vals.code, name: vals.name, warehouse_type: vals.warehouse_type, is_active: !!vals.is_active });
+                return true;
+            },
+        });
+        if (!res) return;
+        UI.toast('Gudang berhasil ditambahkan.', 'success');
+        if (dtHandle) dtHandle.reload();
+        Master.loadAll().catch(() => {});
     }
 
     function buildActions(row, canManage) {

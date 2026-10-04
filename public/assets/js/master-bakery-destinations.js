@@ -1,10 +1,9 @@
 /**
- * PHASE V2 — Master Bakery Tujuan. List + inline create/edit form.
+ * PHASE V2 — Master Bakery Tujuan. List + "Tambah Bakery" / Edit in a compact modal (MasterCommon.recordModal).
  * A bakery destination is a distribution endpoint for OUT transactions —
  * never a warehouse, never a division. Soft-delete only.
  */
 const MasterBakeryDestinations = (() => {
-    let editingId = null;
     let filters = { q: '', city_area: '', route_cluster: '', active: '', sort: 'name' };
     let tableHost = null;
 
@@ -12,7 +11,10 @@ const MasterBakeryDestinations = (() => {
         container.innerHTML = '<div class="alert alert-info">Memuat bakery tujuan...</div>';
         try {
             container.innerHTML = '';
-            container.appendChild(buildForm());
+            container.appendChild(MasterCommon.pageHeader({
+                title: 'Bakery Tujuan', description: 'Kelola data tujuan distribusi bakery.', buttonLabel: 'Tambah Bakery',
+                canCreate: Auth.hasPermission('MASTER_BAKERY_DESTINATION_MANAGE'), onCreate: () => openForm(null),
+            }));
             container.appendChild(buildToolbar());
             tableHost = UI.el('div');
             container.appendChild(tableHost);
@@ -79,90 +81,40 @@ const MasterBakeryDestinations = (() => {
         }
     }
 
-    function buildForm() {
-        const canManage = Auth.hasPermission('MASTER_BAKERY_DESTINATION_MANAGE');
-        const card = UI.el('div', { class: 'card', id: 'bakery-form-card' }, [
-            UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title', id: 'bakery-form-title' }, '➕ Bakery Tujuan Baru')]),
-            UI.el('div', { id: 'bakery-form-alert' }),
-            UI.el('div', { class: 'grid-3', html: `
-                <div class="form-group"><label>Kode</label><input type="text" id="bakery-code"></div>
-                <div class="form-group"><label>Nama</label><input type="text" id="bakery-name"></div>
-                <div class="form-group"><label>PIC</label><input type="text" id="bakery-pic-name"></div>
-                <div class="form-group"><label>Telepon</label><input type="text" id="bakery-phone"></div>
-                <div class="form-group"><label>Kota / Area</label><input type="text" id="bakery-city-area"></div>
-                <div class="form-group"><label>Rute / Cluster</label><input type="text" id="bakery-route-cluster"></div>
-                <div class="form-group"><label>Alamat</label><input type="text" id="bakery-address"></div>
-                <div class="form-group"><label>Catatan</label><input type="text" id="bakery-notes"></div>
-            ` }),
-            !canManage ? UI.el('div', { class: 'alert alert-warning' }, 'Anda tidak memiliki izin untuk menambah/mengubah bakery tujuan.') : null,
-            UI.el('div', { style: 'display:flex; gap:10px;' }, [
-                UI.el('button', { class: 'btn btn-primary', id: 'bakery-save-btn', ...(canManage ? {} : { disabled: 'disabled' }) }, 'Simpan'),
-                UI.el('button', { class: 'btn btn-secondary', id: 'bakery-cancel-btn', style: 'display:none;' }, 'Batal Edit'),
-            ]),
-        ]);
-        setTimeout(wireForm, 0);
-        return card;
-    }
-
-    function wireForm() {
-        document.getElementById('bakery-save-btn').addEventListener('click', save);
-        document.getElementById('bakery-cancel-btn').addEventListener('click', () => { editingId = null; resetForm(); });
-    }
-
-    function resetForm() {
-        ['code', 'name', 'pic-name', 'phone', 'city-area', 'route-cluster', 'address', 'notes'].forEach((f) => {
-            const el = document.getElementById(`bakery-${f}`);
-            if (el) el.value = '';
+    // Create + Edit share one compact modal. The API is the authority (duplicate code, required); its
+    // message is shown under the matching field and the entered values stay in the form.
+    async function openForm(b) {
+        const res = await MasterCommon.recordModal({
+            title: b ? `Edit Bakery Tujuan: ${b.name}` : 'Tambah Bakery Tujuan',
+            wide: true,
+            testid: 'mdm-modal-bakery',
+            initial: b ? { code: b.code, name: b.name, address: b.address, city_area: b.city_area, pic_name: b.pic_name, phone: b.phone, route_cluster: b.route_cluster, notes: b.notes, is_active: !!b.is_active } : { is_active: true },
+            fields: [
+                { key: 'code', label: 'Kode Bakery', type: 'text', required: true, placeholder: 'Contoh: BK005', maxLength: 30 },
+                { key: 'name', label: 'Nama Bakery', type: 'text', required: true, placeholder: 'Contoh: Bakery Baru', maxLength: 150 },
+                { key: 'address', label: 'Alamat', type: 'textarea', placeholder: 'Contoh: Jl. Jend Sudirman No. 36', maxLength: 255 },
+                { key: 'city_area', label: 'Kota / Area', type: 'text', placeholder: 'Sukabumi', maxLength: 100 },
+                { key: 'pic_name', label: 'PIC', type: 'text', placeholder: 'Nama PIC', maxLength: 100 },
+                { key: 'phone', label: 'Telepon', type: 'text', placeholder: '0812-xxxx-xxxx', maxLength: 30 },
+                { key: 'route_cluster', label: 'Route / Cluster', type: 'text', placeholder: 'Route / Cluster', maxLength: 100 },
+                { key: 'notes', label: 'Catatan', type: 'textarea', placeholder: 'Catatan tambahan', maxLength: 255 },
+                { key: 'is_active', label: 'Status', type: 'toggle' },
+            ],
+            onSubmit: async (vals) => {
+                const payload = {
+                    code: vals.code, name: vals.name, address: vals.address || null, city_area: vals.city_area || null,
+                    pic_name: vals.pic_name || null, phone: vals.phone || null, route_cluster: vals.route_cluster || null,
+                    notes: vals.notes || null, is_active: !!vals.is_active,
+                };
+                if (b) await InvApi.updateBakeryDestination(b.id, payload);
+                else await InvApi.createBakeryDestination(payload);
+                return true;
+            },
         });
-        document.getElementById('bakery-form-title').textContent = '➕ Bakery Tujuan Baru';
-        document.getElementById('bakery-cancel-btn').style.display = 'none';
-        document.getElementById('bakery-form-alert').innerHTML = '';
-    }
-
-    function fillForm(b) {
-        document.getElementById('bakery-code').value = b.code || '';
-        document.getElementById('bakery-name').value = b.name || '';
-        document.getElementById('bakery-pic-name').value = b.pic_name || '';
-        document.getElementById('bakery-phone').value = b.phone || '';
-        document.getElementById('bakery-city-area').value = b.city_area || '';
-        document.getElementById('bakery-route-cluster').value = b.route_cluster || '';
-        document.getElementById('bakery-address').value = b.address || '';
-        document.getElementById('bakery-notes').value = b.notes || '';
-        document.getElementById('bakery-form-title').textContent = `✏️ Edit Bakery Tujuan: ${b.name}`;
-        document.getElementById('bakery-cancel-btn').style.display = '';
-    }
-
-    async function save() {
-        const alertBox = document.getElementById('bakery-form-alert');
-        alertBox.innerHTML = '';
-        const payload = {
-            code: document.getElementById('bakery-code').value.trim(),
-            name: document.getElementById('bakery-name').value.trim(),
-            pic_name: document.getElementById('bakery-pic-name').value.trim() || null,
-            phone: document.getElementById('bakery-phone').value.trim() || null,
-            city_area: document.getElementById('bakery-city-area').value.trim() || null,
-            route_cluster: document.getElementById('bakery-route-cluster').value.trim() || null,
-            address: document.getElementById('bakery-address').value.trim() || null,
-            notes: document.getElementById('bakery-notes').value.trim() || null,
-        };
-        if (!payload.code || !payload.name) {
-            alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Kode dan Nama wajib diisi.'));
-            return;
-        }
-        try {
-            if (editingId) {
-                await InvApi.updateBakeryDestination(editingId, payload);
-                UI.toast('Bakery tujuan berhasil diperbarui.', 'success');
-            } else {
-                await InvApi.createBakeryDestination(payload);
-                UI.toast('Bakery tujuan berhasil ditambahkan.', 'success');
-            }
-            editingId = null;
-            resetForm();
-            await reload();
-        } catch (err) {
-            alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal menyimpan bakery tujuan.'));
-        }
+        if (!res) return;
+        UI.toast(b ? 'Bakery tujuan berhasil diperbarui.' : 'Bakery tujuan berhasil ditambahkan.', 'success');
+        Master.loadAll().catch(() => {});
+        await reload();
     }
 
     function buildTable(destinations) {
@@ -178,7 +130,7 @@ const MasterBakeryDestinations = (() => {
             UI.el('td', {}, MasterCommon.statusBadge(!!b.is_active)),
             UI.el('td', {}, (canManage || canTrace) ? MasterCommon.actionsMenu([
                 canTrace ? { label: 'Lihat Jejak', onClick: () => TraceDrawer.openEntity('bakery_destination', b.id) } : null,
-                canManage ? { label: 'Edit', onClick: () => { editingId = b.id; fillForm(b); document.getElementById('bakery-form-card').scrollIntoView({ behavior: 'smooth' }); } } : null,
+                canManage ? { label: 'Edit', onClick: () => openForm(b) } : null,
                 canManage ? { label: b.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(b) } : null,
                 canManage ? { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(b) } : null,
             ]) : '—'),
@@ -202,6 +154,7 @@ const MasterBakeryDestinations = (() => {
         try {
             await InvApi.updateBakeryDestination(b.id, { is_active: !b.is_active });
             UI.toast('Status bakery tujuan diperbarui.', 'success');
+            Master.loadAll().catch(() => {});
             await reload();
         } catch (err) {
             UI.handleApiError(err);

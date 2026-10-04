@@ -1,10 +1,9 @@
 /**
- * PHASE V2 — Master Vendor/Supplier. List + inline create/edit form.
- * Soft-delete only (toggle Aktif/Nonaktif) — never a hard delete, matching
+ * PHASE V2 — Master Vendor/Supplier. List + "Tambah Supplier" / Edit in a compact modal
+ * (MasterCommon.recordModal; no permanent inline form). Soft-delete only (toggle Aktif/Nonaktif) — never a hard delete, matching
  * the backend's own rule for anything referenced by transactions/items.
  */
 const MasterVendors = (() => {
-    let editingId = null;
     let filters = { q: '', active: '', sort: 'name' };
     let tableHost = null;
 
@@ -12,7 +11,10 @@ const MasterVendors = (() => {
         container.innerHTML = '<div class="alert alert-info">Memuat vendor...</div>';
         try {
             container.innerHTML = '';
-            container.appendChild(buildForm());
+            container.appendChild(MasterCommon.pageHeader({
+                title: 'Vendor / Supplier', description: 'Kelola data vendor / supplier.', buttonLabel: 'Tambah Supplier',
+                canCreate: Auth.hasPermission('MASTER_SUPPLIER_MANAGE'), onCreate: () => openForm(null),
+            }));
             container.appendChild(buildToolbar());
             tableHost = UI.el('div');
             container.appendChild(tableHost);
@@ -72,87 +74,39 @@ const MasterVendors = (() => {
         }
     }
 
-    function buildForm() {
-        const canManage = Auth.hasPermission('MASTER_SUPPLIER_MANAGE');
-        const card = UI.el('div', { class: 'card', id: 'vendor-form-card' }, [
-            UI.el('div', { class: 'card-header' }, [UI.el('div', { class: 'card-title', id: 'vendor-form-title' }, '➕ Vendor Baru')]),
-            UI.el('div', { id: 'vendor-form-alert' }),
-            UI.el('div', { class: 'grid-3', html: `
-                <div class="form-group"><label>Kode</label><input type="text" id="vendor-code"></div>
-                <div class="form-group"><label>Nama</label><input type="text" id="vendor-name"></div>
-                <div class="form-group"><label>PIC / Contact Person</label><input type="text" id="vendor-contact-name"></div>
-                <div class="form-group"><label>Telepon</label><input type="text" id="vendor-phone"></div>
-                <div class="form-group"><label>Email</label><input type="email" id="vendor-email"></div>
-                <div class="form-group"><label>Alamat</label><input type="text" id="vendor-address"></div>
-                <div class="form-group"><label>Catatan</label><input type="text" id="vendor-notes"></div>
-            ` }),
-            !canManage ? UI.el('div', { class: 'alert alert-warning' }, 'Anda tidak memiliki izin untuk menambah/mengubah vendor.') : null,
-            UI.el('div', { style: 'display:flex; gap:10px;' }, [
-                UI.el('button', { class: 'btn btn-primary', id: 'vendor-save-btn', ...(canManage ? {} : { disabled: 'disabled' }) }, 'Simpan'),
-                UI.el('button', { class: 'btn btn-secondary', id: 'vendor-cancel-btn', style: 'display:none;' }, 'Batal Edit'),
-            ]),
-        ]);
-        setTimeout(wireForm, 0);
-        return card;
-    }
-
-    function wireForm() {
-        document.getElementById('vendor-save-btn').addEventListener('click', save);
-        document.getElementById('vendor-cancel-btn').addEventListener('click', () => { editingId = null; resetForm(); });
-    }
-
-    function resetForm() {
-        ['code', 'name', 'contact-name', 'phone', 'email', 'address', 'notes'].forEach((f) => {
-            const el = document.getElementById(`vendor-${f}`);
-            if (el) el.value = '';
+    // Create + Edit share one compact modal. The API is the authority (duplicate code, required, e-mail);
+    // its message is shown under the matching field and the entered values stay in the form.
+    async function openForm(v) {
+        const res = await MasterCommon.recordModal({
+            title: v ? `Edit Supplier: ${v.name}` : 'Tambah Supplier',
+            wide: false,
+            testid: 'mdm-modal-supplier',
+            initial: v ? { code: v.code, name: v.name, contact_name: v.contact_name, phone: v.phone, email: v.email, address: v.address, notes: v.notes, is_active: !!v.is_active } : { is_active: true },
+            fields: [
+                { key: 'code', label: 'Kode Supplier', type: 'text', required: true, placeholder: 'Contoh: SUP005', maxLength: 30 },
+                { key: 'name', label: 'Nama Supplier', type: 'text', required: true, placeholder: 'Contoh: PT Baru', maxLength: 150 },
+                { key: 'contact_name', label: 'PIC', type: 'text', placeholder: 'Nama PIC', maxLength: 100 },
+                { key: 'phone', label: 'Telepon', type: 'text', placeholder: '0812-xxxx-xxxx', maxLength: 30 },
+                { key: 'email', label: 'Email', type: 'email', placeholder: 'nama@perusahaan.com', maxLength: 150 },
+                { key: 'is_active', label: 'Status', type: 'toggle', ...(v ? {} : {}) },
+                { key: 'address', label: 'Alamat', type: 'textarea', placeholder: 'Alamat lengkap', maxLength: 255 },
+                { key: 'notes', label: 'Catatan', type: 'textarea', placeholder: 'Catatan tambahan', maxLength: 255 },
+            ],
+            onSubmit: async (vals) => {
+                const payload = {
+                    code: vals.code, name: vals.name,
+                    contact_name: vals.contact_name || null, phone: vals.phone || null, email: vals.email || null,
+                    address: vals.address || null, notes: vals.notes || null, is_active: !!vals.is_active,
+                };
+                if (v) await InvApi.updateSupplier(v.id, payload);
+                else await InvApi.createSupplier(payload);
+                return true;
+            },
         });
-        document.getElementById('vendor-form-title').textContent = '➕ Vendor Baru';
-        document.getElementById('vendor-cancel-btn').style.display = 'none';
-        document.getElementById('vendor-form-alert').innerHTML = '';
-    }
-
-    function fillForm(v) {
-        document.getElementById('vendor-code').value = v.code || '';
-        document.getElementById('vendor-name').value = v.name || '';
-        document.getElementById('vendor-contact-name').value = v.contact_name || '';
-        document.getElementById('vendor-phone').value = v.phone || '';
-        document.getElementById('vendor-email').value = v.email || '';
-        document.getElementById('vendor-address').value = v.address || '';
-        document.getElementById('vendor-notes').value = v.notes || '';
-        document.getElementById('vendor-form-title').textContent = `✏️ Edit Vendor: ${v.name}`;
-        document.getElementById('vendor-cancel-btn').style.display = '';
-    }
-
-    async function save() {
-        const alertBox = document.getElementById('vendor-form-alert');
-        alertBox.innerHTML = '';
-        const payload = {
-            code: document.getElementById('vendor-code').value.trim(),
-            name: document.getElementById('vendor-name').value.trim(),
-            contact_name: document.getElementById('vendor-contact-name').value.trim() || null,
-            phone: document.getElementById('vendor-phone').value.trim() || null,
-            email: document.getElementById('vendor-email').value.trim() || null,
-            address: document.getElementById('vendor-address').value.trim() || null,
-            notes: document.getElementById('vendor-notes').value.trim() || null,
-        };
-        if (!payload.code || !payload.name) {
-            alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, 'Kode dan Nama wajib diisi.'));
-            return;
-        }
-        try {
-            if (editingId) {
-                await InvApi.updateSupplier(editingId, payload);
-                UI.toast('Vendor berhasil diperbarui.', 'success');
-            } else {
-                await InvApi.createSupplier(payload);
-                UI.toast('Vendor berhasil ditambahkan.', 'success');
-            }
-            editingId = null;
-            resetForm();
-            await reload();
-        } catch (err) {
-            alertBox.appendChild(UI.el('div', { class: 'alert alert-error' }, (err && err.message) || 'Gagal menyimpan vendor.'));
-        }
+        if (!res) return;
+        UI.toast(v ? 'Supplier berhasil diperbarui.' : 'Supplier berhasil ditambahkan.', 'success');
+        Master.loadAll().catch(() => {});
+        await reload();
     }
 
     function buildTable(suppliers) {
@@ -168,7 +122,7 @@ const MasterVendors = (() => {
             UI.el('td', {}, MasterCommon.statusBadge(!!v.is_active)),
             UI.el('td', {}, (canManage || canTrace) ? MasterCommon.actionsMenu([
                 canTrace ? { label: 'Lihat Jejak', onClick: () => TraceDrawer.openEntity('supplier', v.id) } : null,
-                canManage ? { label: 'Edit', onClick: () => { editingId = v.id; fillForm(v); document.getElementById('vendor-form-card').scrollIntoView({ behavior: 'smooth' }); } } : null,
+                canManage ? { label: 'Edit', onClick: () => openForm(v) } : null,
                 canManage ? { label: v.is_active ? 'Nonaktifkan' : 'Aktifkan', onClick: () => toggleActive(v) } : null,
                 canManage ? { label: 'Hapus Permanen', danger: true, onClick: () => doDelete(v) } : null,
             ]) : '—'),
@@ -192,6 +146,7 @@ const MasterVendors = (() => {
         try {
             await InvApi.updateSupplier(v.id, { is_active: !v.is_active });
             UI.toast('Status vendor diperbarui.', 'success');
+            Master.loadAll().catch(() => {});
             await reload();
         } catch (err) {
             UI.handleApiError(err);
