@@ -215,7 +215,7 @@ foreach ($ov['attention'] as $a) {
 }
 
 $act = $ov['today_activity'];
-$cnt = static fn (string $type, string $status = 'POSTED') => (int) $GLOBALS['pdo']->query("SELECT COUNT(DISTINCT t.id) FROM inventory_transactions t WHERE t.transaction_type='{$type}' AND t.status='{$status}' AND DATE(t.transaction_date)=CURDATE() AND t.inventory_effect=1")->fetchColumn();
+$cnt = static fn (string $type, string $status = 'POSTED') => (int) $GLOBALS['pdo']->query("SELECT COUNT(DISTINCT t.id) FROM inventory_transactions t WHERE t.transaction_type='{$type}' AND t.status='{$status}' AND DATE(t.transaction_date)='" . date('Y-m-d') . "' AND t.inventory_effect=1")->fetchColumn(); // app-timezone 'today' (MariaDB CURDATE() is UTC and differs from Asia/Jakarta for 7h a day)
 check('Aktivitas Hari Ini: counts == independent SQL (IN 1, OUT 1, TRANSFER_OUT 1, TRANSFER_IN 1)', $act['stock_in']['count'] === $cnt('IN') && $act['stock_out']['count'] === $cnt('OUT') && $act['transfer_out']['count'] === $cnt('TRANSFER_OUT') && $act['transfer_in']['count'] === $cnt('TRANSFER_IN') && $act['stock_in']['count'] === 1 && $act['transfer_in']['count'] === 1, json_encode($act));
 check('Aktivitas Hari Ini: stock IN value = 25 x 2.200 = 55.000, stock OUT = 5 x FIFO cost', near($act['stock_in']['value'], 55000.0) && $act['stock_out']['value'] > 0);
 $actA = D::overview($pdo, $W['A'], 'today')['today_activity'];
