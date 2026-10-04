@@ -9,7 +9,7 @@
 # Usage: [UI_REV=<commit>] bash tests/ui2_package_rehearsal.sh
 set -u
 cd "$(dirname "$0")/.."
-BASE_REV="${BASE_REV:-853cd69}"; V2_REV="${V2_REV:-e9072ec}"; V3_REV="${V3_REV:-9dcb367}"; DASH_REV="${DASH_REV:-f4a94e8}"; TX_REV="${TX_REV:-5cdf4f8}"; UI_REV="${UI_REV:-HEAD}"
+BASE_REV="${BASE_REV:-853cd69}"; V2_REV="${V2_REV:-e9072ec}"; V3_REV="${V3_REV:-9dcb367}"; DASH_REV="${DASH_REV:-f4a94e8}"; TX_REV="${TX_REV:-5cdf4f8}"; UI_REV="${UI_REV:-6775b7f}"
 W="$(mktemp -d)"; trap 'rm -rf "${W:?}"' EXIT
 pass=0; fail=0
 ok()  { echo "PASS - $1"; pass=$((pass+1)); }

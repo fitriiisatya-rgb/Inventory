@@ -4,7 +4,7 @@
 # DASH_REV is the commit whose dashboard files were delivered to production (the "old" side of the CSS replacement).
 set -eu
 cd "$(dirname "$0")/.."
-UI_REV="${UI_REV:-HEAD}"
+UI_REV="${UI_REV:-6775b7f}"   # pinned: the commit the delivered UI2 package was built from (later blocks are appended after the sidebar block)
 DASH_REV="${DASH_REV:-f4a94e8}"
 OUT="${1:?usage: build_ui2_package.sh <output dir>}"
 N=ui2_production_deploy_package
