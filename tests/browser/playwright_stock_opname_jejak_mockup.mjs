@@ -123,8 +123,8 @@ try {
     check('Default active tab is "Per Barang"', activeTabLabel === 'Per Barang', activeTabLabel);
 
     const tabLabels = await page.locator('.drawer-tab').allTextContents();
-    check('All 4 tabs present (Per Barang/Overview/Rekonsiliasi/Audit)',
-        ['Per Barang', 'Overview', 'Rekonsiliasi', 'Audit'].every((t) => tabLabels.includes(t)),
+    check('All 4 tabs present, order Overview|Per Barang|Rekonsiliasi|Audit',
+        tabLabels.map((t) => t.trim()).join('|') === 'Overview|Per Barang|Rekonsiliasi|Audit',
         tabLabels.join(', '));
 
     check('Informasi Sesi Stock Opname section renders', await page.isVisible('.drawer-section-title >> text=Informasi Sesi Stock Opname'));
@@ -134,10 +134,10 @@ try {
     const kpiValue = (await page.locator('.drawer-body .hpp-kpi-card').first().locator('.hpp-kpi-value').textContent() || '').trim();
     check('First KPI (Nilai Stok Sistem) shows Rp125.460.000', kpiValue.includes('125.460.000'), kpiValue);
 
-    await page.waitForSelector('.drawer-body .so-report-table tbody tr', { state: 'visible', timeout: 5000 });
-    const itemRowCount = await page.locator('.drawer-body .so-report-table tbody tr').count();
+    await page.waitForSelector('.drawer-body .jejak-table tbody tr', { state: 'visible', timeout: 5000 });
+    const itemRowCount = await page.locator('.drawer-body .jejak-table tbody tr').count();
     check('Per Barang table renders item rows + total row', itemRowCount === 11, `rows=${itemRowCount}`); // 10 mock items + 1 total row
-    check('Total row shows "TOTAL"', (await page.locator('.drawer-body .so-report-total-row').textContent() || '').includes('TOTAL'));
+    check('Total row shows "TOTAL"', (await page.locator('.drawer-body .jejak-total-row').textContent() || '').includes('TOTAL'));
 
     const bottomSummaryTexts = await page.locator('.drawer-body .hpp-kpi-row').nth(1).locator('.hpp-kpi-value').allTextContents();
     check('Bottom summary shows 96/18/9/5', bottomSummaryTexts.join(',') === '96,18,9 SKU,5 SKU', bottomSummaryTexts.join(','));
@@ -152,13 +152,13 @@ try {
     // ============================================================
     await page.fill('.drawer-body input[placeholder="Cari SKU atau nama barang..."]', 'Roti');
     await page.waitForTimeout(150);
-    let filteredRows = await page.locator('.drawer-body .so-report-table tbody tr').count();
+    let filteredRows = await page.locator('.drawer-body .jejak-table tbody tr').count();
     check('Search filter narrows rows without throwing', filteredRows === 3, `rows=${filteredRows}`); // 2 "Roti" items + total row
 
     await page.fill('.drawer-body input[placeholder="Cari SKU atau nama barang..."]', '');
     await page.selectOption('.drawer-body select', { label: 'Bahan Baku' });
     await page.waitForTimeout(150);
-    filteredRows = await page.locator('.drawer-body .so-report-table tbody tr').count();
+    filteredRows = await page.locator('.drawer-body .jejak-table tbody tr').count();
     check('Category filter narrows rows without throwing', filteredRows === 4, `rows=${filteredRows}`); // 3 Bahan Baku items + total row
     await page.selectOption('.drawer-body select', { label: 'Semua Kategori' });
 

@@ -45,15 +45,34 @@ const ReportOpname = (() => {
                 { key: 'variance_value', label: 'Selisih Nilai', render: (r) => varianceCell(r.variance_value, true) },
                 { key: 'created_by', label: 'Dibuat Oleh', render: (r) => r.created_by },
                 { key: 'finalized_at', label: 'Finalisasi', render: (r) => r.finalized_at || '-' },
+                { key: 'actions', label: 'Aksi', render: (r) => detailButton(r) },
             ],
             fetchPage: async (state) => {
                 const clean = {};
                 Object.keys(state).forEach((k) => { if (state[k] !== undefined && state[k] !== '') clean[k] = state[k]; });
                 return InvApi.opnameReport(clean);
             },
-            onRowClick: (row) => TraceDrawer.openOpname(row.id),
+            // Row click opens the "Jejak Stock Opname" drawer (stock-opname-report-
+            // jejak.js — PREVIEW, simulated data). The real session trace stays
+            // one click away on the "Lihat Detail" button in the Aksi column.
+            onRowClick: (row) => {
+                if (typeof StockOpnameJejak !== 'undefined') StockOpnameJejak.open(row);
+                else TraceDrawer.openOpname(row.id);
+            },
             emptyMessage: 'Tidak ada sesi stock opname untuk filter ini.',
         });
+    }
+
+    // "Lihat Detail" keeps the pre-existing real TraceDrawer for the session;
+    // stopPropagation keeps the click from also reaching the row's own
+    // click handler (which opens the Jejak preview drawer).
+    function detailButton(row) {
+        const btn = UI.el('button', { class: 'btn btn-secondary btn-sm', type: 'button' }, 'Lihat Detail');
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            TraceDrawer.openOpname(row.id);
+        });
+        return btn;
     }
 
     function varianceCell(value, isMoney) {
