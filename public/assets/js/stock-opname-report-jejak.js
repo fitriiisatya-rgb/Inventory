@@ -8,7 +8,12 @@
  * ALL DATA IN THIS FILE IS MOCK, clearly isolated in buildMockDetail()
  * below. Nothing here calls InvApi, posts anything, or touches
  * StockOpnameService/TransferService/FifoService/the DB. Cetak Laporan /
- * Export Excel / Posting Adjustment are safe no-op toasts only.
+ * Export Excel are safe no-op toasts only; Posting Adjustment is
+ * hard-disabled (see open()/buildPerBarangTab()) and can never fire a
+ * click handler, let alone a real posting call. The drawer header always
+ * carries a "PREVIEW UI — DATA SIMULASI" badge + explanatory note so this
+ * can never be mistaken for a live report even once linked from a real
+ * menu.
  *
  * Shaped loosely after stock-opname-report.js's own REAL detail response
  * (detail.session / detail.finance_summary / detail.items) so swapping
@@ -17,6 +22,22 @@
 const StockOpnameJejak = (() => {
     function money(n) { return UI.formatMoney(n); }
     function num(n) { return UI.formatNumber(n, 0); }
+
+    // PRODUCTION PREVIEW — derives the drawer header's "#N" from the real
+    // session_number's trailing digit group (e.g. "SO-20260930-0012" -> 12)
+    // instead of the raw DB id, when that's safely parseable. Falls back to
+    // the raw id unchanged if session_number is missing/unparseable.
+    function deriveSessionDisplayNumber(session) {
+        const raw = session && session.session_number;
+        if (typeof raw === 'string') {
+            const match = raw.match(/(\d+)(?!.*\d)/);
+            if (match) {
+                const parsed = parseInt(match[1], 10);
+                if (!Number.isNaN(parsed)) return String(parsed);
+            }
+        }
+        return String((session && session.id) ?? '');
+    }
 
     // ---- MOCK DATA — replace with a real API call in a future round. ----
     function buildMockDetail(session) {
@@ -145,10 +166,19 @@ const StockOpnameJejak = (() => {
         const actionsRow = UI.el('div', { style: 'display:flex; gap:10px; justify-content:flex-end; margin-top:16px; flex-wrap:wrap;' });
         const printBtn = UI.el('button', { class: 'btn btn-secondary' }, '🖨 Cetak Laporan');
         const excelBtn = UI.el('button', { class: 'btn btn-secondary' }, '📊 Export Excel');
-        const postBtn = UI.el('button', { class: 'btn btn-primary' }, '✅ Posting Adjustment');
+        // PRODUCTION PREVIEW — Posting Adjustment is hard-disabled (the
+        // `disabled` attribute itself blocks the browser from ever firing a
+        // click on it, so there is no code path here that can perform a
+        // real posting) and visually marked as preview-only. Never wire
+        // this to StockOpnameService or any posting endpoint until a real
+        // backend/data-model round explicitly authorizes it.
+        const postBtn = UI.el('button', {
+            class: 'btn btn-primary',
+            disabled: 'disabled',
+            title: 'Preview — Posting Adjustment belum tersedia di tahap ini (data simulasi).',
+        }, '✅ Posting Adjustment (Preview)');
         printBtn.addEventListener('click', () => UI.toast('Mockup — Cetak Laporan belum terhubung ke data nyata.', 'info'));
         excelBtn.addEventListener('click', () => UI.toast('Mockup — Export Excel belum terhubung ke data nyata.', 'info'));
-        postBtn.addEventListener('click', () => UI.toast('Mockup — Posting Adjustment belum tersedia di tahap ini.', 'info'));
         actionsRow.appendChild(printBtn);
         actionsRow.appendChild(excelBtn);
         actionsRow.appendChild(postBtn);
@@ -263,11 +293,20 @@ const StockOpnameJejak = (() => {
         const s = detail.session;
 
         const titleNode = UI.el('div', {}, [
-            UI.el('div', { style: 'font-size:1.1rem; font-weight:800;' }, `Jejak Stock Opname #${session.id ?? ''}`),
+            UI.el('div', { style: 'font-size:1.1rem; font-weight:800; display:flex; align-items:center; gap:8px; flex-wrap:wrap;' }, [
+                `Jejak Stock Opname #${deriveSessionDisplayNumber(session)}`,
+                // PRODUCTION PREVIEW — reuses the existing .badge/.badge-warning
+                // pair (app.css:84/95) as-is; no new badge CSS introduced.
+                UI.el('span', { class: 'badge badge-warning', 'data-testid': 'jejak-preview-badge' }, 'PREVIEW UI — DATA SIMULASI'),
+            ]),
             UI.el('div', { style: 'font-size:0.78rem; color:var(--text3); font-weight:500; margin-top:2px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;' }, [
                 UI.el('span', {}, `${s.number} · ${s.date} · ${s.warehouse_code}`),
                 UI.el('span', { class: `badge ${UI.badgeClass(s.status)}` }, s.status),
             ]),
+            // PRODUCTION PREVIEW — reuses the existing .hpp-subtitle muted-text
+            // style (app.css:776) as-is; no new text-style CSS introduced.
+            UI.el('div', { class: 'hpp-subtitle', style: 'margin-top:4px;', 'data-testid': 'jejak-preview-note' },
+                'Tampilan ini masih menggunakan data simulasi dan belum terhubung ke data Stock Opname aktual.'),
         ]);
 
         Drawer.open({

@@ -98,8 +98,23 @@ try {
     check('Drawer title includes session number', titleText.includes(seed.session_number), titleText);
     check('Drawer is widened (.drawer-xl)', await page.locator('.drawer.drawer-xl').count() === 1);
 
-    const statusBadgeText = (await page.locator('.drawer-title .badge').first().textContent() || '').trim();
+    const statusBadgeText = (await page.locator('.drawer-title .badge-posted').first().textContent() || '').trim();
     check('Drawer header shows POSTED status badge', statusBadgeText === 'POSTED', statusBadgeText);
+
+    // ============================================================
+    // B2 — PRODUCTION PREVIEW safeguard: preview badge + explanatory note.
+    // ============================================================
+    const previewBadge = page.locator('[data-testid="jejak-preview-badge"]');
+    check('Preview badge is visible in drawer header', await previewBadge.isVisible());
+    check('Preview badge reads "PREVIEW UI — DATA SIMULASI"',
+        (await previewBadge.textContent() || '').trim() === 'PREVIEW UI — DATA SIMULASI',
+        await previewBadge.textContent());
+
+    const previewNote = page.locator('[data-testid="jejak-preview-note"]');
+    check('Preview explanatory note is visible in drawer header', await previewNote.isVisible());
+    check('Preview note text matches required wording',
+        (await previewNote.textContent() || '').includes('data simulasi dan belum terhubung ke data Stock Opname aktual'),
+        await previewNote.textContent());
 
     // ============================================================
     // C — Per Barang tab is default-active and renders.
@@ -154,6 +169,27 @@ try {
     await page.waitForTimeout(150);
     check('Cetak Laporan shows mock toast (no navigation/crash)', page.url().includes(base));
 
+    // E2 — PRODUCTION PREVIEW safeguard: Posting Adjustment is hard-disabled
+    // and cannot fire any posting request, no matter how it's clicked.
+    const postBtn = page.locator('.drawer-body button:has-text("Posting Adjustment")');
+    check('Posting Adjustment button is visible', await postBtn.isVisible());
+    check('Posting Adjustment button has the disabled attribute', await postBtn.isDisabled());
+    check('Posting Adjustment button label marks it as Preview', (await postBtn.textContent() || '').includes('(Preview)'));
+
+    let postingRequestFired = false;
+    const requestWatcher = (req) => {
+        if (req.method() === 'POST' && /posting|adjustment|stock-opname/i.test(req.url())) postingRequestFired = true;
+    };
+    page.on('request', requestWatcher);
+    // Disabled buttons never dispatch a 'click' event in a real browser even
+    // when force-clicked — this proves there is no code path, not just that
+    // we didn't exercise one.
+    await postBtn.click({ force: true, timeout: 1500 }).catch(() => { /* expected: disabled elements may refuse the click entirely */ });
+    await page.waitForTimeout(300);
+    page.off('request', requestWatcher);
+    check('Posting Adjustment click never fired a posting/adjustment network request', !postingRequestFired);
+    check('Drawer remains open after attempted Posting Adjustment click (no real action taken)', await page.isVisible('.drawer.open'));
+
     // ============================================================
     // F — tabs switch.
     // ============================================================
@@ -188,6 +224,15 @@ try {
         await detailBtn.click();
         await page.waitForTimeout(400);
         check('Existing "Lihat Detail" button unaffected by row-click wiring', !(await page.locator('.drawer.open').count()));
+        check('Real detail view shows the actual session number (not mock drawer)',
+            (await page.locator('body').textContent() || '').includes(seed.session_number));
+        // The mockup drawer stays in the DOM when closed (Drawer.close() only
+        // removes the .open class — pre-existing, untouched behavior — it's
+        // translated off-screen via CSS, not display:none), so presence alone
+        // doesn't prove separation. What matters: it is definitely closed/
+        // inert while the real detail view is what's on screen.
+        check('Mockup drawer is closed/inert while the real detail view is shown (fully separate flow)',
+            (await page.locator('.drawer.open').count()) === 0);
     } else {
         check('Existing action buttons row present (skip detail-click, none found)', true);
     }
