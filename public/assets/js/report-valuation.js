@@ -12,6 +12,40 @@ const ReportValuation = (() => {
     let S = null;
     const $ = (id) => document.getElementById(id);
 
+    // ------------------------------------------------------------------ API (self-contained, read-only GET)
+    // The page issues its own same-origin GETs (session cookie; no CSRF needed for GET) instead of going through InvApi, so it works whichever api-client file a deployment
+    // actually executes (some installations load a hotfixed api-client-v2163eod.js next to api-client.js).
+    const qsOf = (params) => {
+        const clean = {};
+        Object.keys(params || {}).forEach((k) => { if (params[k] !== undefined && params[k] !== null && params[k] !== '') clean[k] = params[k]; });
+        const q = new URLSearchParams(clean).toString();
+        return q ? `?${q}` : '';
+    };
+    async function apiGet(path, params) {
+        let res;
+        try {
+            res = await fetch(`/api${path}${qsOf(params)}`, { method: 'GET', credentials: 'include', headers: { Accept: 'application/json' } });
+        } catch (e) {
+            const err = new Error('Sistem sedang tidak dapat terhubung ke server.');
+            err.code = 'NETWORK_ERROR';
+            throw err;
+        }
+        let payload;
+        try { payload = await res.json(); } catch (e) { payload = null; }
+        if (!payload || !payload.success) {
+            const err = new Error((payload && payload.error && payload.error.message) || `Request failed (${res.status})`);
+            err.code = (payload && payload.error && payload.error.code) || 'UNKNOWN_ERROR';
+            err.status = res.status;
+            throw err;
+        }
+        return payload.data;
+    }
+    const ValApi = {
+        overview: (p) => apiGet('/reports/inventory-valuation', p),
+        item: (p) => apiGet('/reports/inventory-valuation/item', p),
+        exportUrl: (p) => `/api/reports/inventory-valuation/export${qsOf(p)}`,
+    };
+
     // ------------------------------------------------------------------ formatting
     const esc = (v) => String(v === null || v === undefined ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const nil = (v) => v === null || v === undefined || v === '';
@@ -43,7 +77,7 @@ const ReportValuation = (() => {
         container.innerHTML = '';
         container.classList.add('val');
         const exportBtn = UI.el('button', { class: 'btn btn-success val-export-btn', 'data-testid': 'val-export', type: 'button' }, '⬇ Export Excel');
-        exportBtn.addEventListener('click', () => window.open(InvApi.valuationExportUrl(params({ view: undefined })), '_blank'));
+        exportBtn.addEventListener('click', () => window.open(ValApi.exportUrl(params({ view: undefined })), '_blank'));
         container.appendChild(UI.el('div', { class: 'val-head' }, [
             UI.el('div', {}, [
                 UI.el('h2', { class: 'val-title', 'data-testid': 'val-title', id: 'val-title' }, ''),
@@ -138,11 +172,16 @@ const ReportValuation = (() => {
         const main = $('val-main');
         main.innerHTML = '<div class="val-loading" data-testid="val-loading">Memuat nilai stok & HPP…</div>';
         $('val-kpis').innerHTML = ''; $('val-compare').innerHTML = ''; $('val-banner').innerHTML = '';
+        const state = S;
+        const ticket = (state.loadTicket = (state.loadTicket || 0) + 1);   // a newer load / a reset supersedes this one: never paint a stale or half-initialised response
         try {
             const view = S.view;
             const extra = view === 'day' ? { view: 'day', bucket: S.bucket, item_id: S.dayOnlyItem && S.itemId ? S.itemId : undefined } : { view: 'item', page: S.page, per_page: S.perPage };
-            S.overview = await InvApi.valuationOverview(params(extra));
+            const data = await ValApi.overview(params(extra));
+            if (S !== state || state.loadTicket !== ticket) return;
+            S.overview = data;
         } catch (err) {
+            if (S !== state || state.loadTicket !== ticket) return;
             main.innerHTML = '';
             main.appendChild(UI.el('div', { class: 'alert alert-error', 'data-testid': 'val-error' }, `Gagal memuat laporan: ${err.message}`));
             return;
@@ -159,9 +198,14 @@ const ReportValuation = (() => {
         if (!host) return;
         if (S.itemId === null) { host.innerHTML = ''; host.appendChild(UI.el('div', { class: 'val-empty' }, 'Tidak ada barang dengan stok / pergerakan pada filter ini.')); return; }
         host.innerHTML = '<div class="val-loading" data-testid="val-loading">Memuat detail barang…</div>';
+        const state = S;
+        const ticket = (state.detailTicket = (state.detailTicket || 0) + 1);
         try {
-            S.detail = await InvApi.valuationItem(params({ item_id: S.itemId }));
+            const data = await ValApi.item(params({ item_id: S.itemId }));
+            if (S !== state || state.detailTicket !== ticket) return;
+            S.detail = data;
         } catch (err) {
+            if (S !== state || state.detailTicket !== ticket) return;
             host.innerHTML = '';
             host.appendChild(UI.el('div', { class: 'alert alert-error' }, `Gagal memuat detail: ${err.message}`));
             return;
@@ -448,7 +492,7 @@ const ReportValuation = (() => {
                 UI.el('li', {}, 'Saat ada barang keluar, HPP menggunakan average cost pada saat itu; barang keluar sendiri tidak mengubah average.'),
                 UI.el('li', {}, 'Nilai persediaan = saldo qty × average cost berjalan.'),
             ]),
-            UI.el('div', { class: 'val-example', 'data-testid': 'val-avg-example' }, [UI.el('b', {}, `Contoh Perhitungan — ${d.item.name}`), ex.length ? ex : UI.el('div', {}, d.average_unknown ? 'Average tidak dapat direkonstruksi untuk barang ini.' : 'Belum ada pembelian / pemakaian pada periode ini untuk dicontohkan.')]),
+            UI.el('div', { class: 'val-example', 'data-testid': 'val-avg-example' }, [UI.el('b', {}, `Contoh Perhitungan — ${d.item.name}`)].concat(ex.length ? ex : [UI.el('div', {}, d.average_unknown ? 'Average tidak dapat direkonstruksi untuk barang ini.' : 'Belum ada pembelian / pemakaian pada periode ini untuk dicontohkan.')])),
         ]);
     }
 

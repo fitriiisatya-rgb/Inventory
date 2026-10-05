@@ -94,7 +94,7 @@ async function setFilters(page, f) {
     await page.waitForTimeout(500);
     await waitIdle(page);
 }
-async function pickMethod(page, m) { await page.click(tid(`val-method-${m}`)); await page.waitForTimeout(400); await waitIdle(page); }
+async function pickMethod(page, m) { await page.click(tid(`val-method-${m}`)); await page.waitForTimeout(400); await waitIdle(page); await page.waitForSelector(`${tid('val-detail')}, ${tid('val-days-table')}`, { timeout: 20000 }).catch(async () => { await page.screenshot({ path: path.join(shotDir, 'valuation-debug.png') }); console.log('DEBUG console errors:', JSON.stringify(consoleErrors.slice(-5))); }); }
 async function pickView(page, v) { await page.click(tid(`val-view-${v}`)); await page.waitForTimeout(400); await waitIdle(page); }
 const text = async (loc) => (await loc.innerText()).replace(/\s+/g, ' ').trim();
 const colIndex = (page, table, label) => page.evaluate(([t, l]) => Array.from(document.querySelectorAll(`[data-testid="${t}"] thead th`)).findIndex((th) => th.textContent.trim().toLowerCase().startsWith(l.toLowerCase())), [table, label]);
@@ -156,7 +156,7 @@ try {
     check('H Average history of P: avg before/after columns; the change 1.000 → 1.050 is highlighted; OUT: HPP Rp 84.000 = 80 × 1.050; saldo 120 / Rp 126.000', await hist.count() === 3 && await page.locator('.val-avgchg').count() === 2
         && hasMoney(await cellOf(page, 'val-history-table', 'tr[data-testid="val-history-row"]:nth-of-type(3)', 'Average Cost Sesudah'), 1050) && hasMoney(await cellOf(page, 'val-history-table', 'tr[data-testid="val-history-row"]:nth-of-type(4)', 'HPP Keluar Average'), 84000) && hasMoney(await cellOf(page, 'val-history-table', 'tr[data-testid="val-history-row"]:nth-of-type(4)', 'Saldo Nilai Akhir'), 126000));
     const fm = await text(page.locator(tid('val-formula')));
-    check('I "Rumus Average Cost" panel: Average Cost = Total Nilai Persediaan / Total Qty Tersedia + a REAL example from the item: (Rp 100.000 + Rp 110.000) / (100 + 100) = Rp 210.000 / 200 = Rp 1.050; outbound 80 × Rp 1.050 = Rp 84.000 → sisa 120 bernilai Rp 126.000', fm.includes('Total Nilai Persediaan') && fm.includes('Total Qty Tersedia') && fm.includes('(Rp 100.000 + Rp 110.000) / (100 + 100) = Rp 210.000 / 200 = Rp 1.050') && fm.includes('80 pcs × Rp 1.050 = Rp 84.000') && fm.includes('sisa 120 pcs bernilai Rp 126.000'), fm.slice(0, 400));
+    check('I "Rumus Average Cost" panel: Average Cost = Total Nilai Persediaan / Total Qty Tersedia + a REAL example from the item: (Rp 100.000 + Rp 110.000) / (100 + 100) = Rp 210.000 / 200 = Rp 1.050; outbound 80 × Rp 1.050 = Rp 84.000 → sisa 120 bernilai Rp 126.000', fm.includes('Total Nilai Persediaan') && fm.includes('Total Qty Tersedia') && fm.includes('(Rp 100.000 + Rp 110.000) / (100 + 100) = Rp 210.000 / 200 = Rp 1.050') && fm.includes('80 PCS × Rp 1.050 = Rp 84.000') && fm.includes('sisa 120 PCS bernilai Rp 126.000'), fm.slice(0, 700));
     const st = await text(page.locator(tid('val-avg-steps')));
     check('I "Penjelasan Proses Perhitungan" lists the real steps (numbered): masuk → average cost, keluar → HPP at the current average', (await page.locator(`${tid('val-avg-steps')} li`).count()) === 3 && st.includes('Average cost = (Rp 0 + Rp 100.000) / (0 + 100)') && st.includes('HPP memakai average cost saat ini'), st.slice(0, 260));
     check('I the Average mode does not show the FIFO layer panels', await page.locator(tid('val-layers-active')).count() === 0 && await page.locator(tid('val-fifo-queue')).count() === 0);
