@@ -207,7 +207,23 @@ final class InOutReportService
         if (in_array($st, ['POSTED', 'VOID'], true)) {
             $lines = array_values(array_filter($lines, static fn ($l) => $st === 'POSTED' ? $l['status'] === 'POSTED' : $l['status'] !== 'POSTED'));
         }
-        return self::inGroup($lines) + ['lines' => $lines];
+        $g = self::inGroup($lines);
+        // an item filter narrows which LINES match; flag an invoice that only partly matches (sibling lines counted WITHOUT the item filter)
+        $itemFilter = !empty($f['category_id']) || !empty($f['item_id']) || trim((string) ($f['q'] ?? '')) !== '';
+        $total = [];
+        if ($itemFilter && $lines) {
+            $all = self::inEnrich(self::inFetch($pdo, array_diff_key($f, ['category_id' => 1, 'q' => 1, 'item_id' => 1]) + ['historical' => $hist], false));
+            foreach ($all as $l) {
+                $total[$l['group_key']] = ($total[$l['group_key']] ?? 0) + 1;
+            }
+        }
+        foreach ($g['invoices'] as &$inv) {
+            $inv['lines_matched'] = count($inv['lines']);
+            $inv['lines_total'] = $total[$inv['group_key']] ?? count($inv['lines']);
+            $inv['partial'] = $inv['lines_total'] > $inv['lines_matched'];
+        }
+        unset($inv);
+        return $g + ['lines' => $lines];
     }
 
     private static function inFetch(PDO $pdo, array $f, bool $itemFilters): array
@@ -1057,7 +1073,7 @@ final class InOutReportService
                 'ship_date' => substr((string) $h['ship_date'], 0, 10), 'from' => $h['fw_name'], 'from_id' => (int) $h['fw_id'], 'to' => $h['tw_name'], 'to_id' => (int) $h['tw_id'],
                 'items' => count($matched), 'skus' => count($matched), 'qty_text' => self::qtyText($matched, 'qty', 'base_unit'), 'value' => $value, 'created_by' => $h['created_by'],
                 'dispatched_by' => $first['out_created_by'] ?? $h['created_by'], 'dispatched_at' => $dispAt, 'received_by' => $h['received_by'], 'received_at' => $recv, 'lead_hours' => $leadH,
-                'lead_time' => $leadH === null ? null : ($leadH >= 24 ? round($leadH / 24, 1) . ' hari' : round($leadH, 1) . ' jam'),
+                'lead_time' => $leadH === null ? null : ($leadH >= 24 ? str_replace('.', ',', (string) round($leadH / 24, 1)) . ' hari' : str_replace('.', ',', (string) round($leadH, 1)) . ' jam'),
                 'notes' => $h['status'] === 'CANCELLED' ? $h['cancel_reason'] : ($h['status'] === 'REVERSED' ? $h['reverse_reason'] : null),
                 'cancel' => $h['status'] === 'CANCELLED' ? ['reason' => $h['cancel_reason'], 'at' => $h['cancelled_at'], 'by' => $h['cancelled_by']] : null,
                 'reverse' => $h['status'] === 'REVERSED' ? ['reason' => $h['reverse_reason'], 'at' => $h['reversed_at'], 'by' => $h['reversed_by']] : null,
@@ -1137,8 +1153,8 @@ final class InOutReportService
         foreach ($rows as $r) {
             if ($r['active']) {
                 $v += (float) $r['value'];
+                $items += $r['items'];
             }
-            $items += $r['items'];
         }
         return ['totals' => ['items' => $items, 'value' => round($v, 4)], 'count' => count($rows)];
     }

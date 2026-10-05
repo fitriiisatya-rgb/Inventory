@@ -190,9 +190,9 @@
         } else if (name === 'laporan-pembelian') {
             ReportPurchase.render(document.getElementById('tab-laporan-pembelian'));
         } else if (name === 'laporan-inout') {
-            ReportInOut.render(document.getElementById('tab-laporan-inout'));
+            ReportIO.render(document.getElementById('tab-laporan-inout'), { tab: 'in' });
         } else if (name === 'laporan-transfer') {
-            ReportTransferList.render(document.getElementById('tab-laporan-transfer'));
+            ReportIO.render(document.getElementById('tab-laporan-transfer'), { tab: 'transfer' });
         } else if (name === 'laporan-opname') {
             ReportOpname.render(document.getElementById('tab-laporan-opname'));
         } else if (name === 'laporan-adjustment') {
