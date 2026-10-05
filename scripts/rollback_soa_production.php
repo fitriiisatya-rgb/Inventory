@@ -5,14 +5,15 @@ declare(strict_types=1);
  * PRODUCTION ROLLBACK for the Laporan Stock Opname audit redesign package — returns production to the exact files it had before.
  *
  * Reads the <target>.soa-patch.json state files and
- *   restores     public/index.php, public/index.html, public/assets/css/app.css, public/assets/js/api-client.js,
- *                public/assets/js/stock-opname-report.js
- *   deletes      services/StockOpnameAuditReportService.php   (the one NEW file)
+ *   restores     public/index.php, public/index.html (incl. the exact previous Jejak / app.css / app.js references), public/assets/css/app.css,
+ *                public/assets/js/app.js
+ *   restores OR deletes public/assets/js/stock-opname-report.js   (restored when the package REPLACED a file, deleted when the package created it)
+ *   deletes      services/StockOpnameAuditReportService.php   (the other NEW file)
  *
  * TWO-PHASE and FAIL-CLOSED: phase 1 verifies EVERY target — all six must have a state file; each must still be
  * byte-identical to what the package wrote (nobody edited it since); each backup must still hash to the recorded
  * preimage — before phase 2 touches ANY of them. If anything is off, nothing is changed. Other packages' state files
- * (Jejak / Dashboard / Stock IN-OUT V2 / UI2 / Master Data / sidebar cleanup) are never read or modified. The report is read-only: it never created data, so there is no data to roll back.
+ * (Jejak / Dashboard / Stock IN-OUT V2 / UI2 / Master Data / sidebar cleanup / Pergerakan Stok / Pembelian) are never read or modified. The report is read-only: it never created data, so there is no data to roll back.
  * Dry-run by default.
  *
  * Usage:
@@ -46,7 +47,7 @@ $targets = [
     "{$public}/index.php",
     "{$public}/index.html",
     "{$public}/assets/css/app.css",
-    "{$public}/assets/js/api-client.js",
+    "{$public}/assets/js/app.js",
     "{$public}/assets/js/stock-opname-report.js",
     "{$services}/StockOpnameAuditReportService.php",
 ];

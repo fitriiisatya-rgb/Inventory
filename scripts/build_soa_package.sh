@@ -32,11 +32,11 @@ r1 = new.index("    'GET /reports/opname' => function () use ($pdo, $query) {\n"
 assert r0 < r1
 w('soa_index_php_routes.txt', new[r0:r1])
 PY
-for f in patch_soa_app_css_production.php patch_soa_index_html_production.php patch_soa_index_php_production.php patch_soa_api_client_production.php install_soa_files_production.php rollback_soa_production.php soa_readonly_check.php opname_audit_reconcile_check.php lib/jejak_patch_common.php; do cp "scripts/$f" "$R/scripts/$f"; done
+for f in patch_soa_app_css_production.php patch_soa_index_html_production.php patch_soa_index_php_production.php patch_soa_app_js_production.php install_soa_files_production.php rollback_soa_production.php soa_readonly_check.php opname_audit_reconcile_check.php lib/jejak_patch_common.php; do cp "scripts/$f" "$R/scripts/$f"; done
 cp scripts/soa_package/precheck_readonly.sql "$R/"
 hp() { sha256sum "$R/payload/$1" | cut -d' ' -f1; }
 REFS=""
-for f in public/index.php public/index.html public/assets/css/app.css public/assets/js/api-client.js public/assets/js/stock-opname-report.js; do
+for f in public/index.php public/index.html public/assets/css/app.css public/assets/js/app.js public/assets/js/stock-opname-report.js; do
   REFS="$REFS   $(git show "$SOA_BASE:$f" | sha256sum | cut -d' ' -f1)  $f (repo @ $SOA_BASE)\n"
 done
 python3 - "$R/collect_production_hashes_soa.sh" "scripts/soa_package/collect_production_hashes_soa.sh" "$REFS" <<'PY'

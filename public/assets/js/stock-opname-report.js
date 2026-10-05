@@ -18,6 +18,42 @@
 const StockOpnameReport = (() => {
     let S = null;
     const $ = (id) => document.getElementById(id);
+
+    // ---- API access. SELF-CONTAINED on purpose: this page issues its own read-only GETs (same-origin, session cookie, no CSRF needed for GET) instead of going through
+    // InvApi, so it works whichever api-client file a deployment actually executes (some installations load a hotfixed api-client-v2163eod.js next to api-client.js).
+    const qsOf = (params) => {
+        const clean = {};
+        Object.keys(params || {}).forEach((k) => { if (params[k] !== undefined && params[k] !== null && params[k] !== '') clean[k] = params[k]; });
+        const s = new URLSearchParams(clean).toString();
+        return s ? `?${s}` : '';
+    };
+    async function apiGet(path, params) {
+        let res;
+        try {
+            res = await fetch(`/api${path}${qsOf(params)}`, { method: 'GET', credentials: 'include', headers: { Accept: 'application/json' } });
+        } catch (e) {
+            const err = new Error('Sistem sedang tidak dapat terhubung ke server.');
+            err.code = 'NETWORK_ERROR';
+            throw err;
+        }
+        let payload;
+        try { payload = await res.json(); } catch (e) { payload = null; }
+        if (!payload || !payload.success) {
+            const err = new Error((payload && payload.error && payload.error.message) || `Request failed (${res.status})`);
+            err.code = (payload && payload.error && payload.error.code) || 'UNKNOWN_ERROR';
+            err.status = res.status;
+            throw err;
+        }
+        return payload.data;
+    }
+    const OpnameApi = {
+        sessions: (p) => apiGet('/reports/opname-audit/sessions', p),
+        items: (p) => apiGet('/reports/opname-audit/items', p),
+        itemDetail: (p) => apiGet('/reports/opname-audit/item-detail', p),
+        exportUrl: (p) => `/api/reports/opname-audit/export${qsOf(p)}`,
+        finalExportUrl: (id) => `/api/stock-opname/${id}/export/final`,
+        printUrl: (id) => `/api/stock-opname-reports/${id}/print`,
+    };
     const COL_KEY = 'soa_hidden_cols_v1';
 
     // ------------------------------------------------------------------ formatting
@@ -108,7 +144,7 @@ const StockOpnameReport = (() => {
 
     function exportUrl(kind) {
         const p = S.selected || S.view === 'items' ? itemParams({ kind }) : { ...baseParams(), kind };
-        return InvApi.opnameAuditExportUrl({ ...p, page: undefined, per_page: undefined });
+        return OpnameApi.exportUrl({ ...p, page: undefined, per_page: undefined });
     }
 
     function buildFilterCard() {
@@ -190,7 +226,7 @@ const StockOpnameReport = (() => {
         $('soa-banner').innerHTML = '';
         renderLayout();
         try {
-            S.sessions = await InvApi.opnameAuditSessions({ ...baseParams(), page: S.page, per_page: S.perPage });
+            S.sessions = await OpnameApi.sessions({ ...baseParams(), page: S.page, per_page: S.perPage });
         } catch (err) {
             card.innerHTML = '';
             card.appendChild(UI.el('div', { class: 'alert alert-error', 'data-testid': 'soa-error' }, `Gagal memuat laporan: ${err.message}`));
@@ -208,7 +244,7 @@ const StockOpnameReport = (() => {
         card.innerHTML = '<div class="soa-loading" data-testid="soa-items-loading">Memuat rincian item…</div>';
         renderLayout();
         try {
-            S.items = await InvApi.opnameAuditItems(itemParams({ page: S.itemPage, per_page: S.itemPerPage }));
+            S.items = await OpnameApi.items(itemParams({ page: S.itemPage, per_page: S.itemPerPage }));
         } catch (err) {
             card.innerHTML = '';
             card.appendChild(UI.el('div', { class: 'alert alert-error', 'data-testid': 'soa-items-error' }, `Gagal memuat rincian item: ${err.message}`));
@@ -350,11 +386,11 @@ const StockOpnameReport = (() => {
         det.addEventListener('click', () => { selectSession(r); setView('items'); });
         const out = [det, ' ', jej];
         const print = UI.el('button', { type: 'button', class: 'btn btn-sm btn-secondary', 'data-testid': 'soa-print' }, 'Cetak');
-        print.addEventListener('click', () => window.open(InvApi.stockOpnameReportPrintUrl(r.id), '_blank'));
+        print.addEventListener('click', () => window.open(OpnameApi.printUrl(r.id), '_blank'));
         out.push(' ', print);
         if (canUseExports() && r.status === 'POSTED') {
             const xl = UI.el('button', { type: 'button', class: 'btn btn-sm btn-secondary', 'data-testid': 'soa-excel-final' }, 'Excel Final');
-            xl.addEventListener('click', () => window.open(InvApi.opnameExportFinalUrl(r.id), '_blank'));
+            xl.addEventListener('click', () => window.open(OpnameApi.finalExportUrl(r.id), '_blank'));
             out.push(' ', xl);
         }
         return out;
@@ -521,7 +557,7 @@ const StockOpnameReport = (() => {
         wideDrawer(`${row.sku} — ${row.name}`, { render: (body) => { body.innerHTML = '<div class="alert alert-info" data-testid="soa-drawer-loading">Memuat detail item…</div>'; } });
         let d;
         try {
-            d = await InvApi.opnameAuditItemDetail({ session_id: row.session_id, line_id: row.line_id });
+            d = await OpnameApi.itemDetail({ session_id: row.session_id, line_id: row.line_id });
         } catch (err) {
             const body = document.querySelector('.drawer .drawer-body');
             if (body) { body.innerHTML = ''; body.appendChild(UI.el('div', { class: 'alert alert-error', 'data-testid': 'soa-drawer-error' }, `Gagal memuat detail: ${err.message}`)); }
