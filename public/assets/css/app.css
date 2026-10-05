@@ -1568,7 +1568,8 @@ td.soa-aksi-col { background: #161e33; }
 .soa-col-btn { padding: 5px 12px; font-size: 0.78rem; }
 .soa-colmenu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 70; width: 270px; max-height: 340px; overflow: auto; background: var(--card); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 30px rgba(0,0,0,0.5); padding: 8px; }
 .soa-colmenu[hidden] { display: none; }
-.soa-colopt { display: block; padding: 4px 6px; font-size: 0.8rem; cursor: pointer; }
+.soa-colopt { display: flex; align-items: center; gap: 8px; padding: 4px 6px; margin: 0; font-size: 0.8rem; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text); cursor: pointer; }
+.soa-colopt input { width: auto; min-height: 0; margin: 0; padding: 0; flex: 0 0 auto; }
 .soa-unitline { font-size: 0.74rem; color: var(--text2); margin-top: 8px; overflow-wrap: anywhere; }
 .soa-pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-top: 10px; font-size: 0.78rem; color: var(--text2); }
 .soa-pager-nav { display: flex; align-items: center; gap: 4px; }

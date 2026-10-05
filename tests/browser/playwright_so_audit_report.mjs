@@ -255,15 +255,23 @@ try {
     // ---- column visibility
     await page.click(tid('soa-cols-items'));
     const before = (await page.locator(`${tid('soa-items-table')} thead th`).allInnerTexts()).length;
-    await page.locator('.soa-colmenu input[data-col="adj_by"]').first().check();
+    await page.locator('#soa-items-card .soa-colmenu input[data-col="adj_by"]').check();
     await page.waitForTimeout(300);
     check('column control "Kolom": showing a hidden column adds it to the table (and is remembered)', lc(await page.locator(`${tid('soa-items-table')} thead th`).allInnerTexts()).includes('adjustment oleh') && (await page.locator(`${tid('soa-items-table')} thead th`).count()) === before + 1);
-    await page.click(tid('soa-cols-items')).catch(() => {});
+    await page.screenshot({ path: path.join(shotDir, 'so-audit-column-menu.png') });
+    check('column menu: checkbox and label share one row (compact list, not stacked)', await page.evaluate(() => { const l = document.querySelector('#soa-items-card .soa-colopt'); const i = l.querySelector('input'); return Math.abs(i.getBoundingClientRect().top - l.getBoundingClientRect().top) < 14 && l.getBoundingClientRect().height < 34; }));
+    await page.click('.soa-title');
+    check('clicking outside closes the column menu', await page.locator('#soa-items-card .soa-colmenu').isHidden());
     await page.evaluate(() => { try { localStorage.removeItem('soa_hidden_cols_v1'); } catch (e) { /* */ } });
+    await page.evaluate(() => { document.getElementById('soa-items-card').scrollIntoView({ block: 'start' }); });
     await page.screenshot({ path: path.join(shotDir, 'so-audit-items-left.png') });
+    await page.evaluate(() => { const s = document.querySelector('[data-testid="soa-items-scroll"]'); const th = Array.from(s.querySelectorAll('thead th')).find((x) => x.textContent.trim().toLowerCase().startsWith('good')); s.scrollLeft += (th.getBoundingClientRect().left - s.getBoundingClientRect().left) - 420; });
+    await page.waitForTimeout(300);
+    await shot(page, 'items-conditions');
     await page.evaluate(() => { document.querySelector('[data-testid="soa-items-scroll"]').scrollLeft = 99999; });
     await page.waitForTimeout(300);
     await shot(page, 'items-right');
+    await page.evaluate(() => { document.querySelector('[data-testid="soa-items-scroll"]').scrollLeft = 0; });
 
     // ---- exports == screen
     await page.evaluate(() => { window.__opened = []; window.open = (u) => { window.__opened.push(u); return null; }; });

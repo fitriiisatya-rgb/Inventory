@@ -429,9 +429,9 @@ const StockOpnameReport = (() => {
         const cells = cols.map((c, i) => {
             const stick = c.key === 'no' ? ' sticky1' : c.key === 'sku' ? ' sticky2' : c.key === 'name' ? ' sticky3' : '';
             let content = '';
-            if (i === 0 || c.key === 'sku') content = i === 0 || cols[0].key !== 'no' ? `TOTAL ${UI.formatNumber(res.footer.count, 0)} item` : '';
-            if (c.key === 'no') content = 'TOTAL';
-            if (c.key === 'sku') content = `${UI.formatNumber(res.footer.count, 0)} item`;
+            if (i === 0) content = `TOTAL ${UI.formatNumber(res.footer.count, 0)} item`; // first visible column (SKU / No. may be hidden)
+            if (c.key === 'no') content = '';
+            if (c.key === 'sku') content = `TOTAL ${UI.formatNumber(res.footer.count, 0)} item`;
             if (Object.prototype.hasOwnProperty.call(sums, c.key)) content = c.type === 'variance_money' ? UI.el('span', { class: tone(sums[c.key]) }, sgnRp(sums[c.key])) : rp(sums[c.key]);
             return UI.el('td', { class: `${NUMERIC.has(c.type) ? 'num' : ''}${stick}`, 'data-col': c.key }, [content]);
         });
