@@ -311,7 +311,7 @@ try {
 
     // ---- reconciliation CLI (read-only) on both sessions
     const rec = sh(`php scripts/opname_audit_reconcile_check.php --app-root=. --session=${L.session_id},${V.session_id}`);
-    check('AG/AH read-only reconciliation CLI over both sessions: all checks PASS (exit 0)', /16 \/ 16 checks passed — all reconcile/.test(rec), rec.split('\n').slice(-3).join(' | '));
+    check('AG/AH read-only reconciliation CLI over both sessions: all checks PASS (exit 0)', /\d+ \/ \d+ checks passed — all reconcile/.test(rec), rec.split('\n').slice(-3).join(' | '));
 
     // ---- warehouse permission (STOCK user of another warehouse)
     const o = await newSession(browser, { viewport: { width: 1536, height: 864 }, __name: 'outsider' }, seed.outsider);

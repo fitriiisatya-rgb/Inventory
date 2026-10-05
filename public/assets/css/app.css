@@ -1597,6 +1597,7 @@ td.soa-aksi-col { background: #161e33; }
 @media (max-width: 1400px) { .soa-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } .soa-filter-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } .soa-f-wide { grid-column: 1 / -1; } }
 @media (max-width: 900px) { .soa { --soa-kpi: 1.2rem; } .soa-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .soa-filter-grid, .soa-itemfilters { grid-template-columns: repeat(2, minmax(0, 1fr)); } .soa-kv { grid-template-columns: minmax(0, 1fr); } .soa-lb-info { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 560px) { .soa-kpis { grid-template-columns: minmax(0, 1fr); } .soa-filter-grid, .soa-itemfilters { grid-template-columns: minmax(0, 1fr); } .soa-title { font-size: 1.15rem; } .soa-filter-actions .btn { flex: 1; } .soa-export-menu { min-width: 260px; } .soa-lb-nav { width: 34px; } }
+.soa-warn { color: #fbbf24; font-weight: 700; }
 
 /* Laporan Pembelian redesign (report-purchase.js) — presentation only. Same refined type scale as the Dashboard / Pergerakan Stok reports (KPI 1.4-1.6rem, body 0.8-0.9rem),
    dark Inventory Pro tokens. Invoice + item tables scroll horizontally inside their own container with a sticky header and a sticky GRAND TOTAL row. */

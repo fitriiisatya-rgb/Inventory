@@ -387,6 +387,63 @@ try {
     if (is_resource($proc)) { proc_terminate($proc); }
 }
 
+// ================================================================== SESSION-11-LIKE: real posted FINDINGS_V1 data the first fixture did not cover
+// Production Session 11 (SCM, FINDINGS_V1, POSTED) has final Deadstock quantities on its lines for items that have NO non-VOID condition finding, and 395 linked OPNAME
+// adjustments whose Σ(qty × cost) at raw precision differs from the Σ of per-row 2-dp roundings. Both are reproduced here on the fixture's own V1 session (TEST database only):
+// the DEADSTOCK / EXPIRED / DAMAGED quantity rows of two lines are removed (the persisted final_* snapshot stays) and fractional-cost adjustments are linked to eight lines.
+echo "\n== Session-11-like data (snapshot without findings; raw-precision adjustments) ==\n";
+R::resetCache();
+$sid = $V['session_id'];
+$wh = (int) $pdo->query("SELECT warehouse_id FROM stock_opname_sessions WHERE id = {$sid}")->fetchColumn();
+$byItemB = static fn (array $built): array => array_column($built['items'], null, 'item_id');
+$b0 = $byItemB(R::build($pdo, $sid));
+$deadId = $V['items']['dead']['id'];
+$mixId = $V['items']['mix']['id'];
+$snapDead = $b0[$deadId]['deadstock_qty'];
+$snapMixDead = $b0[$mixId]['deadstock_qty'];
+$finalCols = $pdo->query("SELECT final_deadstock_qty d, final_rusak_qty r, final_expired_qty e FROM stock_opname_lines WHERE id = {$b0[$mixId]['line_id']}")->fetch();
+// 1) snapshot WITHOUT findings: drop every condition quantity row of those two lines (the real findings remain; only their condition rows are gone)
+$pdo->exec("DELETE q FROM stock_opname_finding_quantities q JOIN stock_opname_findings f ON f.id = q.finding_id WHERE f.session_id = {$sid} AND f.stock_opname_line_id IN ({$b0[$deadId]['line_id']}, {$b0[$mixId]['line_id']}) AND q.condition_type IN ('DEADSTOCK','EXPIRED','DAMAGED')");
+// 2) eight fractional-cost OPNAME adjustments linked to V1 lines (sum of per-row 2-dp roundings ≠ raw sum)
+$lineIds = array_slice(array_column($b0, 'line_id'), 0, 8);
+$k = 0;
+foreach ($lineIds as $lid) {
+    $itemId = (int) $pdo->query("SELECT item_id FROM stock_opname_lines WHERE id = {$lid}")->fetchColumn();
+    $k++;
+    $qty = -2.5;                      // qty × cost = -(2500.01225 + 0.1k): every row rounds by 0.00225 in the same direction, so Σ of the roundings drifts from the raw Σ by 0.018
+    $cost = round(1000.0049 + 0.04 * $k, 4);
+    $pdo->prepare("INSERT INTO stock_adjustments (item_id, warehouse_id, adjustment_type, qty_base_delta, before_qty_base, after_qty_base, unit_cost_base, reference_no, reason, created_by)
+                   VALUES (:i, :w, 'OPNAME', :q, 50, :a, :c, :r, 'session-11-like fixture', :u)")->execute(['i' => $itemId, 'w' => $wh, 'q' => $qty, 'a' => 50 + $qty, 'c' => $cost, 'r' => 'ADJ-S11-' . $k, 'u' => $V['users']['f1a']['id']]);
+    $pdo->exec('UPDATE stock_opname_lines SET adjustment_id = ' . (int) $pdo->lastInsertId() . " WHERE id = {$lid}");
+}
+R::resetCache();
+$b1 = R::build($pdo, $sid);
+$i1 = $byItemB($b1);
+check('S11 the persisted final Deadstock snapshot is shown UNCHANGED when its findings are absent (dead item: ' . $snapDead . '; mix item: ' . $snapMixDead . ') — not erased, zeroed or inferred', near($i1[$deadId]['deadstock_qty'], $snapDead) && near($i1[$mixId]['deadstock_qty'], $snapMixDead) && $snapDead > 0 && $snapMixDead > 0);
+check('S11 the condition source is stated ("Snapshot final (stock_opname_lines.final_*)") and the missing finding is FLAGGED, per condition, on the row', str_contains($i1[$deadId]['condition_source'], 'Snapshot final') && $i1[$deadId]['condition_audit']['rows']['deadstock']['status'] === 'tanpa_temuan' && str_contains((string) $i1[$deadId]['condition_flag'], 'Deadstock') && $i1[$mixId]['condition_audit']['rows']['rusak']['status'] === 'tanpa_temuan' && $i1[$mixId]['condition_audit']['rows']['expired']['status'] === 'tanpa_temuan');
+check('S11 an item whose findings DO record its condition stays "cocok" (rusak item) and has no flag', $i1[$V['items']['rusak']['id']]['condition_audit']['rows']['rusak']['status'] === 'cocok' && $i1[$V['items']['rusak']['id']]['condition_flag'] === null);
+check('S11 the session discloses how many items have a snapshot without findings (cond_flagged = 2) and the data-quality note says nothing was erased / inferred', $b1['session_row']['cond_flagged'] === 2 && count(array_filter($b1['session_row']['data_quality'], static fn ($n) => str_contains($n, 'tidak dihapus'))) === 1);
+$det = R::itemDetail($pdo, $sid, $i1[$deadId]['line_id']);
+check('S11 the item drawer carries a conditions block (snapshot vs per-team findings) while the finding HISTORY is still listed exactly as recorded (findings exist, none with a deadstock quantity)', isset($det['conditions']['rows']['deadstock']) && $det['conditions']['rows']['deadstock']['findings'] === [] && count($det['count_history']) >= 2 && count(array_filter($det['count_history'], static fn ($h) => $h['source'] === 'FINDING' && count(array_filter($h['quantities'], static fn ($q) => $q['condition'] === 'DEADSTOCK')) > 0)) === 0);
+$cols = array_column(R::exportTable($pdo, 'items', [$sid], [])['headers'] ?? [], null);
+check('S11 the items export carries "Sumber Kondisi" and "Catatan Kondisi" (export == screen)', in_array('Sumber Kondisi', $cols, true) && in_array('Catatan Kondisi', $cols, true));
+// ---- E: raw precision
+$sqlRaw = (string) $pdo->query("SELECT SUM(qty_base_delta * unit_cost_base) FROM stock_adjustments WHERE reason = 'session-11-like fixture'")->fetchColumn();
+$rowsRaw = $pdo->query("SELECT qty_base_delta * unit_cost_base FROM stock_adjustments WHERE reason = 'session-11-like fixture'")->fetchAll(PDO::FETCH_COLUMN);
+$roundedSum = array_sum(array_map(static fn ($v) => round((float) $v, 2), $rowsRaw));
+check('S11 fixture sensitivity: Σ per-row 2-dp roundings (' . number_format($roundedSum, 2, '.', '') . ') differs from the raw Σ (' . $sqlRaw . ') by more than the tolerance — the old behaviour would FAIL', abs($roundedSum - (float) $sqlRaw) > 0.001);
+$fixAdj = array_values(array_filter($b1['adjustments'], static fn ($a) => $a['reason'] === 'session-11-like fixture'));
+check('S11 every adjustment value is raw qty × unit cost (max row diff < 1e-6), 8 linked', count($fixAdj) === 8 && max(array_map(static fn ($a, $r) => abs($a['value'] - (float) $r), $fixAdj, $rowsRaw)) < 1e-6);
+check('S11 session adjustment value == independent SQL Σ at raw precision within Rp 0.001 (report ' . $b1['session_row']['adj_value'] . ' / SQL ' . $sqlRaw . ')', abs((float) $b1['session_row']['adj_value'] - (float) $sqlRaw) <= 0.001);
+$itemsAll = R::items($pdo, [$sid], ['per_page' => 100]);
+check('S11 the items footer adjustment total (raw) == the session adjustment value, and the KPI adjustment value keeps the raw precision', abs((float) $itemsAll['footer']['money']['adj_value'] - (float) $sqlRaw) <= 0.001 && abs((float) R::sessions($pdo, ['warehouse_id' => $wh])['kpi']['adjustment_value'] - (float) $sqlRaw) <= 0.001);
+// ---- the reconciliation CLI on exactly this data (READ-ONLY): every A-G check passes for BOTH models
+$out = [];
+exec('DB_DATABASE=' . escapeshellarg((string) getenv('DB_DATABASE')) . ' DB_USERNAME=' . escapeshellarg((string) getenv('DB_USERNAME')) . ' DB_PASSWORD=' . escapeshellarg((string) getenv('DB_PASSWORD')) . ' php ' . escapeshellarg(__DIR__ . '/../scripts/opname_audit_reconcile_check.php') . ' --app-root=' . escapeshellarg(__DIR__ . '/..') . " --session={$sid}," . $L['session_id'] . ' 2>&1', $out, $rc);
+$txt = implode("\n", $out);
+check('S11 reconciliation CLI over the FINDINGS_V1 session (snapshot without findings + raw adjustments) and the legacy session: exit 0, every D / E check PASS, the snapshot-without-finding case is announced', $rc === 0 && !str_contains($txt, 'FAIL -') && str_contains($txt, 'D3. finding history') && str_contains($txt, 'NOTE: kondisi final berasal dari snapshot posting') && preg_match('/E2\. adjustment total/', $txt) === 1, substr($txt, -400));
+check('S11 the CLI states the explicit decimal tolerance and warns that per-row rounding would differ', str_contains($txt, 'tolerance Rp 0.001') && str_contains($txt, 'would be Rp'));
+
 $pass = count(array_filter($results));
 echo "\n{$pass} / " . count($results) . " PASSED\n";
 exit($pass === count($results) ? 0 : 1);

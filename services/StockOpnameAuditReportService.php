@@ -45,6 +45,7 @@ final class StockOpnameAuditReportService
         ['sku', 'SKU', 'text', true], ['name', 'Nama Barang', 'text', true], ['category', 'Kategori', 'text', true], ['unit', 'Satuan', 'text', true],
         ['system_qty', 'Qty Sistem', 'qty', true], ['final_qty', 'Qty Fisik Final (Total)', 'qty', true],
         ['good_qty', 'Good / Stok Layak', 'qty', true], ['expired_qty', 'Expired', 'qty', true], ['rusak_qty', 'Rusak', 'qty', true], ['deadstock_qty', 'Deadstock', 'qty', true],
+        ['condition_source', 'Sumber Kondisi', 'text', false], ['condition_flag', 'Catatan Kondisi', 'text', false],
         ['variance_qty', 'Selisih Qty', 'variance', true], ['hpp', 'HPP / Unit Cost', 'money', true],
         ['system_value', 'Nilai Sistem', 'money', true], ['final_value', 'Nilai Fisik', 'money', true], ['variance_value', 'Selisih Nilai', 'variance_money', true],
         ['p_hitung', 'Petugas Hitung (P1)', 'people', true], ['p_verifikasi', 'Petugas Verifikasi (P2)', 'people', true],
@@ -216,7 +217,12 @@ final class StockOpnameAuditReportService
             $q = array_map(static fn ($v) => round($v, 6), $q);
         }
         unset($q);
-        return ['count' => count($rows), 'money' => array_map(static fn ($v) => round($v, 2), $money), 'qty_by_unit' => $byUnit];
+        // system / final / variance values already follow the Jejak per-row 2-dp rule; the adjustment value is RAW (only floating-point noise below 1e-6 is trimmed)
+        $moneyOut = [];
+        foreach ($money as $k => $v) {
+            $moneyOut[$k] = $k === 'adj_value' ? round($v, 6) : round($v, 2);
+        }
+        return ['count' => count($rows), 'money' => $moneyOut, 'qty_by_unit' => $byUnit];
     }
 
     // ======================================================================
@@ -245,6 +251,7 @@ final class StockOpnameAuditReportService
                 'good_qty' => $item['good_qty'], 'expired_qty' => $item['expired_qty'], 'rusak_qty' => $item['rusak_qty'], 'deadstock_qty' => $item['deadstock_qty'],
                 'variance_qty' => $item['variance_qty'], 'variance_value' => $item['variance_value'], 'hpp' => $item['hpp'],
             ],
+            'conditions' => $item['condition_audit'],
             'count_history' => $b['history_by_line'][$lineId] ?? [],
             'evidence' => $item['evidence'],
             'reconciliation' => [
@@ -370,6 +377,7 @@ final class StockOpnameAuditReportService
         $times = [];       // line => role => [min, max] (non-voided)
         $fnotes = [];      // line => role => list<string> (non-voided finding notes)
         $history = [];     // line => list
+        $condFind = [];    // line => condition => team => Σ base qty of NON-voided findings (history only — NOT the source of the final condition)
         $findingIds = [];  // line => list<int>
         foreach ($findings as $f) {
             $lid = (int) $f['stock_opname_line_id'];
@@ -381,6 +389,11 @@ final class StockOpnameAuditReportService
                 $times[$lid][$f['team_role']] = [min($t[0], $at), max($t[1], $at)];
                 if ($f['notes'] !== null && trim((string) $f['notes']) !== '') {
                     $fnotes[$lid][$f['team_role']][] = (string) $f['notes'];
+                }
+                foreach ($qtyByFinding[(int) $f['id']] ?? [] as $q) {
+                    if (in_array($q['condition'], ['DAMAGED', 'EXPIRED', 'DEADSTOCK'], true)) {
+                        $condFind[$lid][$q['condition']][$f['team_role']] = ($condFind[$lid][$q['condition']][$f['team_role']] ?? 0.0) + $q['base_qty'];
+                    }
                 }
             }
             $history[$lid][] = [
@@ -446,6 +459,7 @@ final class StockOpnameAuditReportService
                 $good = ($total !== null && $condKnown) ? round($total - ($rusak + $expired + $dead), 6) : null;
             }
             $hpp = (float) $j['hpp'];
+            $cAudit = self::conditionAudit((string) $j['condition_basis'], $isV1, $recorded, ['rusak' => $rusak, 'expired' => $expired, 'deadstock' => $dead], $condFind[$lid] ?? []);
             $line = $adjByLine[$lid] ?? [];
             $last = $line ? end($line) : null;
             $ms = (string) $l['match_status'];
@@ -462,11 +476,12 @@ final class StockOpnameAuditReportService
                 'note_petugas' => $isV1 ? self::notePetugasV1($fnotes[$lid] ?? []) : self::notePetugas($l), 'note_supervisor' => self::nz($l['final_notes']), 'note_general' => self::nz($l['notes']),
                 'adj_ref' => $line ? implode(', ', array_values(array_unique(array_filter(array_map(static fn ($a) => $a['reference_no'] ?? ('ADJ-' . $a['adjustment_id']), $line))))) : null,
                 'adj_qty' => $line ? round(array_sum(array_column($line, 'qty')), 6) : null,
-                'adj_value' => $line ? round(array_sum(array_column($line, 'value')), 2) : null,
+                'adj_value' => $line ? array_sum(array_column($line, 'value')) : null,
                 'adj_at' => $last['created_at'] ?? null, 'adj_by' => $last['created_by'] ?? null,
                 'match_status' => $ms, 'is_excluded' => (int) $l['is_excluded'] === 1,
                 'line_status' => self::LINE_STATUS[$ms] ?? $ms, 'model' => $isV1 ? 'FINDINGS_V1' : 'Legacy',
                 'condition_basis' => $j['condition_basis'], 'conditions_recorded' => $recorded,
+                'condition_source' => $cAudit['source_label'], 'condition_flag' => $cAudit['flag'], 'condition_audit' => $cAudit,
             ];
             if (!$isV1) {
                 $legacyHistory[$lid] = self::legacyHistory($pdo, $l);
@@ -502,6 +517,7 @@ final class StockOpnameAuditReportService
 
     private static function sessionRow(PDO $pdo, array $s, array $jejak, array $items, array $adjustments, string $model): array
     {
+        $condFlagged = count(array_filter($items, static fn (array $i) => $i['condition_flag'] !== null));
         $isV1 = $model === 'FINDINGS_V1';
         $bucket = ['MATCH' => 0, 'MISMATCH' => 0, 'RECOUNTED' => 0, 'PENDING' => 0, 'EXCLUDED' => 0];
         $role = ['hit' => [], 'ver' => []];
@@ -520,7 +536,7 @@ final class StockOpnameAuditReportService
         ksort($byUnit);
         $varText = $byUnit ? implode(' · ', array_map(static fn ($u, $q) => sprintf('%s %s%s', $u, $q > 0 ? '+' : '', rtrim(rtrim(number_format($q, 4, '.', ''), '0'), '.')), array_keys($byUnit), $byUnit)) : null;
 
-        $adjValue = round(array_sum(array_column($adjustments, 'value')), 2);
+        $adjValue = array_sum(array_column($adjustments, 'value'));   // RAW precision: Σ(qty × unit_cost_base) of the real stock_adjustments, never rounded per row
         $status = (string) $s['status'];
         if ($status === 'POSTED') {
             $adjStatus = $adjustments ? 'Terposting' : 'Posted — tanpa adjustment';
@@ -559,7 +575,8 @@ final class StockOpnameAuditReportService
             'variance_by_unit' => $varText, 'variance_by_unit_raw' => $byUnit, 'variance_value' => $jejak['kpi']['selisih_nominal']['value'],
             'adj_status' => $adjStatus, 'adj_count' => count($adjustments), 'adj_value' => $adjustments ? $adjValue : null,
             'created_by' => $s['created_by'], 'created_at' => $s['created_at'],
-            'data_quality' => $jejak['data_quality']['notes'],
+            'cond_flagged' => $condFlagged,
+            'data_quality' => array_merge($jejak['data_quality']['notes'], $condFlagged > 0 ? [$condFlagged . ' item: kondisi (Rusak / Expired / Deadstock) berasal dari snapshot final posting (stock_opname_lines.final_*) dan tidak ada temuan kondisi non-VOID yang setara — ditampilkan apa adanya (tidak dihapus / dikosongkan / ditebak); tab "Riwayat Hitung" memperlihatkan temuan yang memang ada.'] : []),
         ];
     }
 
@@ -597,9 +614,10 @@ final class StockOpnameAuditReportService
         }
         $k['verified'] = $k['match'] + $k['mismatch'] + $k['recounted'];
         $k['match_pct'] = $k['verified'] > 0 ? round($k['match'] * 100 / $k['verified'], 1) : null;
-        foreach (['variance_value', 'variance_positive', 'variance_negative', 'adjustment_value'] as $m) {
+        foreach (['variance_value', 'variance_positive', 'variance_negative'] as $m) {
             $k[$m] = round($k[$m], 2);
         }
+        $k['adjustment_value'] = round($k['adjustment_value'], 6);   // RAW Σ — the screen / export format it as currency; nothing was rounded per row
         $k['conditions'] = $cond;
         return $k;
     }
@@ -723,6 +741,51 @@ final class StockOpnameAuditReportService
         return [$p1, $p2, $l['recount_submitted_at'] ?? ($both ? max($both) : null)];
     }
 
+    /**
+     * Where the shown final condition quantities (Rusak / Expired / Deadstock) come from, set against the finding HISTORY. The persisted snapshot is
+     * stock_opname_lines.final_{rusak,expired,deadstock}_qty (the value Jejak / posting use) — in a real posted FINDINGS_V1 session it can exist WITHOUT any
+     * non-voided condition finding, so findings are shown beside it as history, never used to overwrite / zero / infer it.
+     * status per condition: 'cocok' (equals a team's recorded finding, or 0 with none), 'tanpa_temuan' (snapshot > 0 but no non-voided finding records it),
+     * 'berbeda' (findings exist but none equals the snapshot), 'tidak_dicatat' (snapshot unknown).
+     *
+     * @param array<string,?float> $snapshot
+     * @param array<string,array<string,float>> $findings condition (DAMAGED|EXPIRED|DEADSTOCK) => team => Σ base qty (non-voided)
+     * @return array<string,mixed>
+     */
+    private static function conditionAudit(string $basis, bool $isV1, bool $recorded, array $snapshot, array $findings): array
+    {
+        $labels = [
+            'final' => 'Snapshot final (stock_opname_lines.final_*)', 'single_side' => 'Satu sisi saja (P1 / P2) — belum final', 'unresolved' => 'Belum final (P1 ≠ P2)', 'none' => 'Belum dihitung',
+        ];
+        $label = $recorded ? ($labels[$basis] ?? $basis) : 'Tidak dicatat (sesi legacy lama)';
+        $map = ['rusak' => ['DAMAGED', 'Rusak'], 'expired' => ['EXPIRED', 'Expired'], 'deadstock' => ['DEADSTOCK', 'Deadstock']];
+        $rows = [];
+        $flags = [];
+        foreach ($map as $key => [$cond, $name]) {
+            $snap = $snapshot[$key];
+            $sides = [];
+            foreach ($findings[$cond] ?? [] as $team => $qty) {
+                $sides[$team] = round($qty, 6);
+            }
+            if ($snap === null) {
+                $status = 'tidak_dicatat';
+            } elseif (!$isV1) {
+                $status = 'legacy';
+            } elseif ($sides === []) {
+                $status = $snap > self::EPS ? 'tanpa_temuan' : 'cocok';
+            } else {
+                $status = in_array(round((float) $snap, 6), array_values($sides), true) ? 'cocok' : 'berbeda';
+            }
+            if ($status === 'tanpa_temuan') {
+                $flags[] = "{$name} " . rtrim(rtrim(number_format((float) $snap, 6, '.', ''), '0'), '.') . ': snapshot final tanpa temuan kondisi di riwayat';
+            } elseif ($status === 'berbeda') {
+                $flags[] = "{$name} " . rtrim(rtrim(number_format((float) $snap, 6, '.', ''), '0'), '.') . ': berbeda dari temuan tercatat';
+            }
+            $rows[$key] = ['label' => $name, 'snapshot' => $snap, 'findings' => $sides, 'status' => $status];
+        }
+        return ['basis' => $basis, 'source_label' => $label, 'rows' => $rows, 'flag' => $flags ? implode('; ', $flags) : null];
+    }
+
     /** True when ANY condition column of the line was ever written (legacy sessions older than V2.14.9 have none: unknown, not 0). */
     private static function conditionsRecorded(array $l): bool
     {
@@ -818,7 +881,7 @@ final class StockOpnameAuditReportService
             $cost = (float) $r['unit_cost_base'];
             return [
                 'line_id' => (int) $r['line_id'], 'adjustment_id' => (int) $r['adjustment_id'], 'sku' => $r['sku'], 'name' => $r['name'], 'type' => $r['adjustment_type'],
-                'reference_no' => $r['reference_no'], 'reason' => $r['reason'], 'qty' => $qty, 'hpp' => $cost, 'value' => round($qty * $cost, 2),
+                'reference_no' => $r['reference_no'], 'reason' => $r['reason'], 'qty' => $qty, 'hpp' => $cost, 'value' => $qty * $cost,   // raw qty (6 dp) × unit cost (4 dp): rounding is for DISPLAY only
                 'created_by' => $r['created_by'], 'created_at' => $r['created_at'],
             ];
         }, $stmt->fetchAll());

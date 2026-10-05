@@ -225,9 +225,14 @@ const StockOpnameReport = (() => {
         $('soa-kpis').innerHTML = '';
         $('soa-banner').innerHTML = '';
         renderLayout();
+        const state = S;
+        const ticket = (state.loadTicket = (state.loadTicket || 0) + 1);   // a newer load (or a re-render) supersedes this one: never paint a stale / half-initialised response
         try {
-            S.sessions = await OpnameApi.sessions({ ...baseParams(), page: S.page, per_page: S.perPage });
+            const data = await OpnameApi.sessions({ ...baseParams(), page: S.page, per_page: S.perPage });
+            if (S !== state || state.loadTicket !== ticket) return;
+            S.sessions = data;
         } catch (err) {
+            if (S !== state || state.loadTicket !== ticket) return;
             card.innerHTML = '';
             card.appendChild(UI.el('div', { class: 'alert alert-error', 'data-testid': 'soa-error' }, `Gagal memuat laporan: ${err.message}`));
             return;
@@ -259,6 +264,11 @@ const StockOpnameReport = (() => {
         if (S.sessions && S.sessions.truncated) {
             host.appendChild(UI.el('div', { class: 'alert alert-warning', 'data-testid': 'soa-truncated' }, 'Terdapat lebih dari 200 sesi pada filter ini — hanya 200 sesi terbaru yang dihitung. Persempit periode agar KPI dan export lengkap.'));
         }
+        const flagged = ((S.sessions && S.sessions.rows) || []).filter((r) => r.cond_flagged > 0);
+        if (flagged.length) {
+            host.appendChild(UI.el('div', { class: 'alert alert-info', 'data-testid': 'soa-cond-note' },
+                `${flagged.map((r) => `${r.session_number}: ${UI.formatNumber(r.cond_flagged, 0)} item`).join(' · ')} — kondisi (Rusak / Expired / Deadstock) berasal dari snapshot final posting (stock_opname_lines.final_*) dan tidak ada temuan kondisi non-VOID yang setara. Angkanya ditampilkan apa adanya (tidak dihapus, dikosongkan atau ditebak); "Riwayat Hitung" memperlihatkan temuan yang benar-benar ada. Kolom "Sumber Kondisi" / "Catatan Kondisi" tersedia di Rincian Item dan export.`));
+        }
     }
 
     // ------------------------------------------------------------------ KPI
@@ -267,6 +277,7 @@ const StockOpnameReport = (() => {
         return e.length ? e.map(([u, q]) => `${u} ${UI.formatNumber(q, 3)}`).join(' · ') : '—';
     }
     function renderKpis() {
+        if (!S.sessions) return;
         const k = S.sessions.kpi;
         const card = (key, cls, label, value, sub) => UI.el('div', { class: `soa-kpi ${cls}`, 'data-testid': `soa-kpi-${key}` }, [
             UI.el('div', { class: 'soa-kpi-label' }, label),
@@ -354,6 +365,7 @@ const StockOpnameReport = (() => {
     // ------------------------------------------------------------------ Ringkasan Sesi
     function renderSessions() {
         const res = S.sessions;
+        if (!res) return;
         const card = $('soa-sessions-card');
         card.innerHTML = '';
         const cols = res.columns.filter((c) => visible('sessions', c));
@@ -576,9 +588,23 @@ const StockOpnameReport = (() => {
             ],
         });
     }
+    const COND_STATUS = { cocok: 'cocok dengan temuan', tanpa_temuan: 'snapshot — TANPA temuan kondisi', berbeda: 'berbeda dari temuan', tidak_dicatat: 'tidak dicatat', legacy: 'sesi legacy (tanpa temuan)' };
+    function conditionBlock(d) {
+        const c = d.conditions;
+        if (!c) return null;
+        const rows = Object.keys(c.rows).map((k) => {
+            const r = c.rows[k];
+            const f = Object.keys(r.findings).length ? Object.keys(r.findings).map((t) => `${t} ${qn(r.findings[t])}`).join(' · ') : 'tidak ada temuan non-VOID';
+            return [r.label, qn(r.snapshot), f, UI.el('span', { class: r.status === 'tanpa_temuan' || r.status === 'berbeda' ? 'soa-warn' : '' }, COND_STATUS[r.status] || r.status)];
+        });
+        return UI.el('div', { 'data-testid': 'soa-condition-block' }, [
+            UI.el('div', { class: 'soa-hint' }, `Sumber kondisi final: ${c.source_label}. Nilai di tabel Ringkasan = snapshot persisten; kolom "Temuan" hanya riwayat (tidak dipakai untuk mengubah snapshot).`),
+            simpleTable(['Kondisi', 'Snapshot final (ditampilkan)', 'Temuan non-VOID per tim (riwayat)', 'Status'], rows, 'soa-condition-table'),
+        ]);
+    }
     function summaryTab(d) {
         const s = d.item;
-        return UI.el('div', { 'data-testid': 'soa-tab-ringkasan' }, [
+        return UI.el('div', { 'data-testid': 'soa-tab-ringkasan' }, [conditionBlock(d),
             kv([['Satuan', s.unit], ['Qty Sistem', qn(s.system_qty)], ['Qty Fisik Final (Total)', qn(s.final_qty)], ['Good / Stok Layak', qn(s.good_qty)], ['Expired', qn(s.expired_qty)], ['Rusak', qn(s.rusak_qty)],
                 ['Deadstock', qn(s.deadstock_qty)], ['Selisih Qty', UI.el('span', { class: tone(s.variance_qty) }, sgnQty(s.variance_qty))], ['HPP / Unit Cost (snapshot sesi)', rp(s.hpp)],
                 ['Nilai Sistem', rp(s.system_value)], ['Nilai Fisik', rp(s.final_value)], ['Selisih Nilai', UI.el('span', { class: tone(s.variance_value) }, sgnRp(s.variance_value))],
@@ -594,7 +620,7 @@ const StockOpnameReport = (() => {
             h.quantities && h.quantities.length ? h.quantities.map((q) => `${q.condition} ${UI.formatNumber(q.input_qty, 3)} ${q.unit}`).join(', ') : '—',
             h.voided ? `VOID oleh ${h.voided.by} (${fmtTs(h.voided.at)}): ${h.voided.reason || '—'}` : (h.backfilled ? 'Waktu di-backfill' : ''), h.notes,
         ]);
-        return UI.el('div', { 'data-testid': 'soa-tab-riwayat' }, [simpleTable(['Tim', 'Petugas', 'Aksi', 'Waktu hitung', 'Qty', 'Expired', 'Rusak', 'Deadstock', 'Rincian satuan input', 'Status', 'Catatan'], rows, 'soa-history-table')]);
+        return UI.el('div', { 'data-testid': 'soa-tab-riwayat' }, [d.conditions && d.conditions.flag ? UI.el('div', { class: 'alert alert-info', 'data-testid': 'soa-history-condflag' }, `Riwayat temuan tidak memuat kondisi yang sama dengan snapshot final: ${d.conditions.flag}.`) : null, simpleTable(['Tim', 'Petugas', 'Aksi', 'Waktu hitung', 'Qty', 'Expired', 'Rusak', 'Deadstock', 'Rincian satuan input', 'Status', 'Catatan'], rows, 'soa-history-table')]);
     }
     function evidenceTab(d) {
         if (!d.evidence.length) return UI.el('div', { class: 'soa-empty', 'data-testid': 'soa-tab-evidence' }, d.item.model === 'Legacy' ? '— (sesi legacy tidak menyimpan evidence)' : 'Tidak ada evidence');

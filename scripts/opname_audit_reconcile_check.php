@@ -7,9 +7,11 @@ declare(strict_types=1);
  *   A. item rows == COUNT(stock_opname_lines) == the session's Total Item
  *   B. Match + Mismatch + Recount + Pending + Excluded == Total Item (and == a per-status SQL count)
  *   C. Σ item Selisih Nilai == the session Selisih Nilai == the Jejak KPI (production rounding: per-row round(qty x HPP, 2))
- *   D. conditions: Good + Expired + Rusak + Deadstock == Qty Fisik Final where all are known; every shown condition equals the stored
- *      source (legacy final_* / one-sided p*_ columns; FINDINGS_V1 non-voided finding quantities)
- *   E. adjustment total == independent SQL over the real linked stock_adjustments
+ *   D. conditions: Good + Expired + Rusak + Deadstock == Qty Fisik Final where all are known; every shown condition equals its PERSISTED snapshot
+ *      (stock_opname_lines.final_*; NOT reconstructed from findings — a posted FINDINGS_V1 session may have a snapshot without findings); the finding history is
+ *      compared and every difference is disclosed by the report, never hidden or inferred
+ *   E. adjustment total == independent SQL Σ(qty_base_delta × unit_cost_base) over the real linked stock_adjustments at RAW precision (no per-row rounding;
+ *      tolerance Rp 0.001 = floating-point accumulation bound only, stated in the output)
  *   F. every petugas shown is a real user AND, for FINDINGS_V1, has a NON-voided finding on that line (no voided actor is ever shown)
  *   G. every evidence reference exists as a photo row attached to a finding AND the file exists on disk
  * Any difference is printed with session / SKU / amount and the exit code is 1 — do NOT deploy on a non-zero exit.
@@ -82,23 +84,40 @@ foreach ($ids as $sid) {
     $sum = round($sum, 2);
     $j = StockOpnameJejakService::detail($pdo, $sid);
     $check('C. Σ item Selisih Nilai == session Selisih Nilai == Jejak KPI', $near($sum, (float) $s['variance_value']) && $near($sum, $j['kpi']['selisih_nominal']['value']), "Σ {$sum} / session {$s['variance_value']} / jejak {$j['kpi']['selisih_nominal']['value']}");
-    // D
+    // D — the persisted FINAL condition snapshot is stock_opname_lines.final_{rusak,expired,deadstock}_qty (what Jejak / posting use). In a real POSTED FINDINGS_V1 session
+    //     it can exist WITHOUT any non-VOID condition finding (e.g. Session 11 SCM), so findings are HISTORY: they are compared, disclosed, never required.
     $bad = [];
     foreach ($b['items'] as $it) {
         $parts = [$it['good_qty'], $it['expired_qty'], $it['rusak_qty'], $it['deadstock_qty']];
         if ($it['final_qty'] !== null && !in_array(null, $parts, true) && !$near((float) $it['final_qty'], round(array_sum($parts), 6), 0.000001)) { $bad[] = "{$it['sku']}: good+E+R+D != final"; }
     }
-    if ($s['counting_model'] === 'LEGACY_DUAL_COUNT') {
-        $rows = $pdo->query("SELECT sol.id, sol.final_rusak_qty, sol.final_expired_qty, sol.final_deadstock_qty FROM stock_opname_lines sol WHERE sol.session_id = {$sid}")->fetchAll();
-        $byLine = [];
-        foreach ($rows as $r) { $byLine[(int) $r['id']] = $r; }
-        foreach ($b['items'] as $it) {
-            $r = $byLine[$it['line_id']];
-            foreach (['rusak' => 'rusak_qty', 'expired' => 'expired_qty', 'deadstock' => 'deadstock_qty'] as $col => $key) {
-                if ($r["final_{$col}_qty"] !== null && !$near((float) $r["final_{$col}_qty"], (float) $it[$key], 0.000001)) { $bad[] = "{$it['sku']}: {$col} {$it[$key]} != stored final {$r["final_{$col}_qty"]}"; }
+    $check('D1. Good + Expired + Rusak + Deadstock == Qty Fisik Final (Total) for every item where all four are known', $bad === [], implode(' | ', array_slice($bad, 0, 5)));
+    $lineRows = [];
+    foreach ($pdo->query("SELECT * FROM stock_opname_lines WHERE session_id = {$sid}")->fetchAll() as $r) { $lineRows[(int) $r['id']] = $r; }
+    $bad = [];
+    $snapshotRows = 0;
+    foreach ($b['items'] as $it) {
+        $r = $lineRows[$it['line_id']];
+        foreach (['rusak', 'expired', 'deadstock'] as $col) {
+            $shown = $it["{$col}_qty"];
+            $final = $r["final_{$col}_qty"];
+            if ($final !== null) {
+                $snapshotRows++;
+                if ($shown === null || !$near((float) $final, (float) $shown, 0.000001)) { $bad[] = "{$it['sku']}: {$col} shown " . var_export($shown, true) . " != persisted final_{$col}_qty {$final}"; }
+            } elseif ($shown !== null) {
+                // no persisted final: only a single team's own recorded value (or 0 once counted) may be shown
+                $allowed = [0.0];
+                foreach (['p1', 'p2'] as $side) { if ($r["{$side}_{$col}_qty"] !== null) { $allowed[] = (float) $r["{$side}_{$col}_qty"]; } }
+                if (!in_array(round((float) $shown, 6), array_map(static fn ($v) => round($v, 6), $allowed), true)) { $bad[] = "{$it['sku']}: {$col} {$shown} has no persisted source"; }
             }
         }
-    } else {
+    }
+    $check("D2. every shown Rusak / Expired / Deadstock equals its PERSISTED snapshot (stock_opname_lines.final_*; {$snapshotRows} snapshot values), never recomputed from findings", $bad === [], implode(' | ', array_slice($bad, 0, 5)));
+    // D3 — the finding history is compared with the snapshot and every difference is DISCLOSED by the report (flag + drawer), none hidden / erased / inferred
+    $bad = [];
+    $withoutFinding = 0;
+    $differs = 0;
+    if ($s['counting_model'] === 'FINDINGS_V1') {
         $q = $pdo->query(
             "SELECT f.stock_opname_line_id l, q.condition_type c, f.team_role t, SUM(q.base_qty_contribution) s
                FROM stock_opname_findings f JOIN stock_opname_finding_quantities q ON q.finding_id = f.id
@@ -108,19 +127,44 @@ foreach ($ids as $sid) {
         foreach ($q as $r) { $src[(int) $r['l']][$r['c']][$r['t']] = (float) $r['s']; }
         foreach ($b['items'] as $it) {
             foreach (['rusak' => ['DAMAGED', 'rusak_qty'], 'expired' => ['EXPIRED', 'expired_qty'], 'deadstock' => ['DEADSTOCK', 'deadstock_qty']] as $name => [$cond, $key]) {
-                if ($it[$key] === null) { continue; }
-                $sides = $src[$it['line_id']][$cond] ?? [];
-                // the shown value must be one the teams actually recorded (or 0 when nobody recorded that condition)
-                if (!($sides === [] && abs((float) $it[$key]) < 1e-9) && !in_array(round((float) $it[$key], 6), array_map(static fn ($v) => round($v, 6), $sides), true)) { $bad[] = "{$it['sku']}: {$name} {$it[$key]} not among recorded " . json_encode($sides); }
+                $snap = $it[$key];
+                if ($snap === null) { continue; }
+                $sides = array_map(static fn ($v) => round($v, 6), $src[$it['line_id']][$cond] ?? []);
+                $expected = $sides === [] ? ($snap > 1e-9 ? 'tanpa_temuan' : 'cocok') : (in_array(round((float) $snap, 6), $sides, true) ? 'cocok' : 'berbeda');
+                $got = $it['condition_audit']['rows'][$name]['status'] ?? null;
+                if ($got !== $expected) { $bad[] = "{$it['sku']}: {$name} status {$got} != expected {$expected}"; }
+                if ($expected !== 'cocok') {
+                    $expected === 'tanpa_temuan' ? $withoutFinding++ : $differs++;
+                    if ($it['condition_flag'] === null || !str_contains((string) $it['condition_flag'], ucfirst($name))) { $bad[] = "{$it['sku']}: {$name} difference from the findings is not flagged"; }
+                }
             }
         }
     }
-    $check('D. condition split: Good + Expired + Rusak + Deadstock == Qty Fisik Final, and every condition equals its stored source', $bad === [], implode(' | ', array_slice($bad, 0, 5)));
-    // E
+    $check("D3. finding history vs snapshot: {$withoutFinding} snapshot value(s) without any non-VOID finding and {$differs} differing — every one is flagged in the report (none hidden, erased or inferred)", $bad === [], implode(' | ', array_slice($bad, 0, 5)));
+    if ($withoutFinding + $differs > 0) { echo "    NOTE: kondisi final berasal dari snapshot posting (final_*), bukan dari temuan — ditampilkan apa adanya; riwayat temuan ditampilkan terpisah.\n"; }
+    // E — RAW precision: Σ(qty_base_delta × unit_cost_base) of the real linked stock_adjustments, never rounded per row. The tolerance is ONLY the floating-point accumulation
+    //     bound of summing ~10^3 exact decimal products in a double (≈1e-6 each at Rp 10^9 magnitude): 0.001 Rp, three orders of magnitude below any real discrepancy.
+    $ADJ_TOL = 0.001;
     $adjIds = array_column($b['adjustments'], 'adjustment_id');
-    $dbAdj = $adjIds ? (float) $pdo->query('SELECT COALESCE(SUM(qty_base_delta * unit_cost_base),0) FROM stock_adjustments WHERE adjustment_type = \'OPNAME\' AND id IN (' . implode(',', array_map('intval', $adjIds)) . ')')->fetchColumn() : 0.0;
-    $check('E. adjustment total == independent SQL over the linked stock_adjustments', $near(round(array_sum(array_column($b['adjustments'], 'value')), 2), round($dbAdj, 2)) && $near((float) ($s['adj_value'] ?? 0), round($dbAdj, 2)), count($adjIds) . " adjustments, Rp {$dbAdj}");
-    if ($s['status'] === 'POSTED') { $check('E2. a POSTED session shows its adjustment status explicitly (never blank)', $s['adj_status'] !== ''); }
+    $dbAdjStr = $adjIds ? (string) $pdo->query('SELECT COALESCE(SUM(qty_base_delta * unit_cost_base),0) FROM stock_adjustments WHERE adjustment_type = \'OPNAME\' AND id IN (' . implode(',', array_map('intval', $adjIds)) . ')')->fetchColumn() : '0';
+    $dbAdj = (float) $dbAdjStr;
+    $rawSum = array_sum(array_column($b['adjustments'], 'value'));
+    $perRow = true;
+    $rowDiff = 0.0;
+    $roundedSum = 0.0;
+    $rawRows = $adjIds ? $pdo->query('SELECT id, qty_base_delta * unit_cost_base AS v FROM stock_adjustments WHERE id IN (' . implode(',', array_map('intval', $adjIds)) . ')')->fetchAll(PDO::FETCH_KEY_PAIR) : [];
+    foreach ($b['adjustments'] as $a) {
+        $d = abs($a['value'] - (float) $rawRows[$a['adjustment_id']]);
+        $rowDiff = max($rowDiff, $d);
+        if ($d > 1e-6) { $perRow = false; }
+        $roundedSum += round((float) $rawRows[$a['adjustment_id']], 2);
+    }
+    $check('E1. every adjustment value == qty_base_delta × unit_cost_base at RAW precision (no per-row rounding; max row difference ' . number_format($rowDiff, 10, '.', '') . ')', $perRow);
+    $itemAdj = array_sum(array_map(static fn ($i) => (float) ($i['adj_value'] ?? 0), $b['items']));
+    $check("E2. adjustment total: report Rp " . number_format((float) ($s['adj_value'] ?? 0), 6, '.', '') . " == Σ item rows Rp " . number_format($itemAdj, 6, '.', '') . " == independent SQL Rp {$dbAdjStr} (tolerance Rp {$ADJ_TOL} = float-accumulation bound only)",
+        abs((float) ($s['adj_value'] ?? 0) - $dbAdj) <= $ADJ_TOL && abs($rawSum - $dbAdj) <= $ADJ_TOL && abs($itemAdj - $dbAdj) <= $ADJ_TOL, count($adjIds) . ' linked adjustments');
+    if (abs($roundedSum - $dbAdj) > 0.0005) { echo '    NOTE: Σ of per-row 2-dp rounded values would be Rp ' . number_format($roundedSum, 2, '.', '') . ' (differs from the raw total by Rp ' . number_format(abs($roundedSum - $dbAdj), 4, '.', '') . ') — the report does NOT round per row; only the currency display / export formatting rounds.' . "\n"; }
+    if ($s['status'] === 'POSTED') { $check('E3. a POSTED session shows its adjustment status explicitly (never blank)', $s['adj_status'] !== ''); }
     // F
     $badActors = [];
     $userCount = $pdo->prepare('SELECT COUNT(*) FROM users WHERE username = :u');
