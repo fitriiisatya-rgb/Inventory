@@ -437,6 +437,10 @@ const InvApi = (() => {
         stockOpnameReports: (params) => request('GET', `/stock-opname-reports${qs(params)}`),
         stockOpnameReportDetail: (id, params) => request('GET', `/stock-opname-reports/${id}${qs(params)}`),
         stockOpnameReportPrintUrl: (id) => `/api/stock-opname-reports/${id}/print`,
+        opnameAuditSessions: (params) => request('GET', `/reports/opname-audit/sessions${qs(params)}`),
+        opnameAuditItems: (params) => request('GET', `/reports/opname-audit/items${qs(params)}`),
+        opnameAuditItemDetail: (params) => request('GET', `/reports/opname-audit/item-detail${qs(params)}`),
+        opnameAuditExportUrl: (params) => `/api/reports/opname-audit/export${qs(params)}`,
 
         // ---- stock adjustments ----
         postAdjustment: (payload) => request('POST', '/stock-adjustments', payload),
