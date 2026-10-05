@@ -65,6 +65,7 @@ require_once __DIR__ . '/../services/OpeningReconciliationService.php';
 require_once __DIR__ . '/../services/MovementReconciliationReviewService.php';
 require_once __DIR__ . '/../services/ImportHistoricalTransactionService.php';
 require_once __DIR__ . '/../services/InventoryHppReportService.php';
+require_once __DIR__ . '/../services/InventoryValuationService.php';
 require_once __DIR__ . '/../services/DashboardInventoryService.php';
 require_once __DIR__ . '/../services/InventoryMovementReportService.php';
 require_once __DIR__ . '/../services/MovementDailyReportService.php';
@@ -681,6 +682,24 @@ function inv_pur_filters(array $user, array $query): array
         'q' => isset($query['q']) && trim((string) $query['q']) !== '' ? trim((string) $query['q']) : null, 'historical' => (string) ($query['historical'] ?? ''),
         'bucket' => (string) ($query['bucket'] ?? 'day'), 'inv_q' => (string) ($query['inv_q'] ?? ''), 'sort' => (string) ($query['sort'] ?? 'date'), 'dir' => (string) ($query['dir'] ?? 'desc'),
         'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 25),
+    ];
+}
+
+/**
+ * Laporan Nilai Stok & HPP (dual valuation FIFO + Average): request parsing for GET /reports/inventory-valuation*. The warehouse is resolved through
+ * inv_hpp_resolve_warehouse_scope(), so a warehouse-limited user can never widen the scope by editing the query string. Read-only.
+ */
+function inv_val_filters(array $user, array $query): array
+{
+    $wh = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+    $wh = inv_hpp_resolve_warehouse_scope($user, $wh);
+    $int = static fn (string $k): ?int => isset($query[$k]) && $query[$k] !== '' ? (int) $query[$k] : null;
+    return [
+        'start_date' => (string) ($query['start_date'] ?? ($query['date_from'] ?? '')), 'end_date' => (string) ($query['end_date'] ?? ($query['date_to'] ?? '')),
+        'method' => (string) ($query['method'] ?? 'fifo'), 'view' => (string) ($query['view'] ?? 'item'), 'bucket' => (string) ($query['bucket'] ?? 'day'),
+        'warehouse_id' => $wh, 'category_id' => $int('category_id'), 'item_id' => $int('item_id'),
+        'q' => isset($query['q']) && trim((string) $query['q']) !== '' ? trim((string) $query['q']) : null,
+        'sort' => (string) ($query['sort'] ?? 'name'), 'dir' => (string) ($query['dir'] ?? 'asc'), 'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
     ];
 }
 
@@ -1525,6 +1544,59 @@ $routes = [
     // real transaction_id/item_id/warehouse_id/batch_id so the frontend
     // opens them through the EXISTING TraceDrawer/TraceService endpoints.
     // ============================================================
+    // LAPORAN NILAI STOK & HPP (dual valuation FIFO + Average) — READ-ONLY (GET), INVENTORY_VIEW, warehouse scope enforced server-side. FIFO = the operational method
+    // (actual layers / allocations); Average = analytical moving weighted average. The existing /reports/inventory-hpp/* routes are untouched.
+    'GET /reports/inventory-valuation' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        try {
+            inv_ok(\App\Services\InventoryValuationService::overview($pdo, inv_val_filters($user, $query)), 'OK');
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        }
+    },
+
+    'GET /reports/inventory-valuation/item' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        try {
+            inv_ok(\App\Services\InventoryValuationService::itemDetail($pdo, inv_val_filters($user, $query)), 'OK');
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        } catch (\App\Services\NotFoundException $e) {
+            inv_error(404, 'NOT_FOUND', $e->getMessage());
+        }
+    },
+
+    // Excel for the SELECTED method (+ one FIFO-vs-Average comparison sheet); same filters as the screen.
+    'GET /reports/inventory-valuation/export' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $f = inv_val_filters($user, $query);
+        try {
+            $name = static fn (string $t, string $c, ?int $id) => $id === null ? 'Semua' : (string) ($GLOBALS['pdo']->query("SELECT {$c} FROM {$t} WHERE id = " . (int) $id)->fetchColumn() ?: $id);
+            $meta = [
+                'Laporan' => 'Laporan Nilai Stok & HPP', 'Periode' => $f['start_date'] . ' s/d ' . $f['end_date'], 'Gudang' => $name('warehouses', 'name', $f['warehouse_id']),
+                'Kategori' => $name('categories', 'name', $f['category_id']), 'Pencarian barang' => (string) ($f['q'] ?? ''), 'Dibuat' => date('Y-m-d H:i:s'), 'Dibuat oleh' => (string) $user['username'],
+                'Catatan' => 'Metode operasional sistem: FIFO. Average = moving weighted average analitis (read-only, tidak mengubah posting / HPP tersimpan).',
+            ];
+            $sheets = \App\Services\InventoryValuationService::exportWorkbook($pdo, $f, $meta);
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        }
+        $path = sys_get_temp_dir() . '/val_' . bin2hex(random_bytes(6)) . '.xlsx';
+        ExcelWriterService::write($path, $sheets);
+        try {
+            header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            header('Content-Disposition: attachment; filename="nilai-stok-hpp-' . strtolower($f['method']) . '-' . date('Ymd_His') . '.xlsx"');
+            header('Content-Length: ' . filesize($path));
+            readfile($path);
+        } finally {
+            @unlink($path);
+        }
+        exit;
+    },
+
     'GET /reports/inventory-hpp/summary' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');

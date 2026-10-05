@@ -178,7 +178,7 @@
         } else if (name === 'closing') {
             Closing.render(document.getElementById('tab-closing'));
         } else if (name === 'laporan-hpp') {
-            ReportHpp.render(document.getElementById('tab-laporan-hpp'));
+            ReportValuation.render(document.getElementById('tab-laporan-hpp'));
         } else if (name === 'laporan-ringkasan') {
             ReportSummary.render(document.getElementById('tab-laporan-ringkasan'));
         } else if (name === 'laporan-pergerakan') {

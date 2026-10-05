@@ -201,6 +201,9 @@ const InvApi = (() => {
         hppDayDetail: (params) => request('GET', `/reports/inventory-hpp/day-detail${qs(params)}`),
         hppVarianceBridge: (params) => request('GET', `/reports/inventory-hpp/variance-bridge${qs(params)}`),
         hppExportUrl: (params) => `/api/reports/inventory-hpp/export${qs(params)}`,
+        valuationOverview: (params) => request('GET', `/reports/inventory-valuation${qs(params)}`),
+        valuationItem: (params) => request('GET', `/reports/inventory-valuation/item${qs(params)}`),
+        valuationExportUrl: (params) => `/api/reports/inventory-valuation/export${qs(params)}`,
 
         // ---- PHASE V2.6B: Pergerakan Stok Harian + Rekonsiliasi Arus Stok (read-only) ----
         movementDaily: (params) => request('GET', `/reports/movement/daily${qs(params)}`),
