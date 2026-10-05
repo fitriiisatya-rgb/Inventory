@@ -81,6 +81,7 @@ require_once __DIR__ . '/../services/SlowMovementReportService.php';
 require_once __DIR__ . '/../services/ExcelWriterService.php';
 require_once __DIR__ . '/../services/PurchaseCostingService.php';
 require_once __DIR__ . '/../services/PurchaseCostingGateway.php';
+require_once __DIR__ . '/../services/PurchaseReportService.php';
 require_once __DIR__ . '/../services/PurchaseInvoiceService.php';
 require_once __DIR__ . '/../services/StockOutService.php';
 require_once __DIR__ . '/../services/StockOutDocumentService.php';
@@ -659,6 +660,28 @@ function inv_require_company_wide_audit_scope(array $user): void
     if (!empty($user['warehouse_id'])) {
         inv_error(403, 'FORBIDDEN', 'Audit Transaksi is a company-wide report and is not available to a warehouse-scoped role.');
     }
+}
+
+/**
+ * Laporan Pembelian (redesign): request parsing for GET /reports/purchase-v2/*. The warehouse is resolved through inv_hpp_resolve_warehouse_scope(), so a
+ * warehouse-limited user can never widen the scope by editing the query string. Supplier / category / item filters only ever NARROW the result.
+ */
+function inv_pur_filters(array $user, array $query): array
+{
+    $start = (string) ($query['start_date'] ?? '');
+    $end = (string) ($query['end_date'] ?? '');
+    if ($start === '' || $end === '' || strtotime($start) === false || strtotime($end) === false || strtotime($start) > strtotime($end)) {
+        inv_error(422, 'VALIDATION_ERROR', 'start_date and end_date are required and start_date must not be after end_date');
+    }
+    $wh = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+    $wh = inv_hpp_resolve_warehouse_scope($user, $wh);
+    $int = static fn (string $k): ?int => isset($query[$k]) && $query[$k] !== '' ? (int) $query[$k] : null;
+    return [
+        'start_date' => $start, 'end_date' => $end, 'warehouse_id' => $wh, 'supplier_id' => $int('supplier_id'), 'category_id' => $int('category_id'), 'item_id' => $int('item_id'),
+        'q' => isset($query['q']) && trim((string) $query['q']) !== '' ? trim((string) $query['q']) : null, 'historical' => (string) ($query['historical'] ?? ''),
+        'bucket' => (string) ($query['bucket'] ?? 'day'), 'inv_q' => (string) ($query['inv_q'] ?? ''), 'sort' => (string) ($query['sort'] ?? 'date'), 'dir' => (string) ($query['dir'] ?? 'desc'),
+        'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 25),
+    ];
 }
 
 /**
@@ -1913,6 +1936,100 @@ $routes = [
     // Report 4 — Laporan Pembelian: qualifying purchase = type IN, POSTED,
     // never a transfer/production/opening/adjustment (TransactionHistoryService's
     // own type filter already excludes everything else by construction).
+    // LAPORAN PEMBELIAN (redesign) — READ-ONLY (GET), INVENTORY_VIEW, warehouse scope enforced server-side like every other report here. Real Stock IN V2
+    // invoice financials (PurchaseReportService); the existing /reports/purchase* routes are untouched.
+    'GET /reports/purchase-v2/overview' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        try {
+            inv_ok(\App\Services\PurchaseReportService::overview($pdo, inv_pur_filters($user, $query)), 'OK');
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        }
+    },
+
+    'GET /reports/purchase-v2/invoices' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        try {
+            inv_ok(\App\Services\PurchaseReportService::invoices($pdo, inv_pur_filters($user, $query)), 'OK');
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        }
+    },
+
+    'GET /reports/purchase-v2/items' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        try {
+            inv_ok(\App\Services\PurchaseReportService::items($pdo, inv_pur_filters($user, $query)), 'OK');
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        }
+    },
+
+    // One invoice (all of its lines) by its transaction ids; every transaction must be a Stock IN inside the caller's warehouse scope.
+    'GET /reports/purchase-v2/invoice-detail' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $ids = array_values(array_unique(array_filter(array_map('intval', explode(',', (string) ($query['tx_ids'] ?? ''))), static fn (int $i) => $i > 0)));
+        if ($ids === [] || count($ids) > 300) {
+            inv_error(422, 'VALIDATION_ERROR', 'tx_ids is required (1-300 transaction ids)');
+        }
+        $st = $pdo->prepare("SELECT warehouse_id FROM inventory_transactions WHERE id = :id AND transaction_type = 'IN'");
+        foreach ($ids as $id) {
+            $st->execute(['id' => $id]);
+            $wh = $st->fetchColumn();
+            if ($wh === false) {
+                inv_error(404, 'NOT_FOUND', "purchase transaction {$id} not found");
+            }
+            inv_require_warehouse_scope($user, (int) $wh);
+        }
+        try {
+            inv_ok(\App\Services\PurchaseReportService::invoiceDetail($pdo, $ids), 'OK');
+        } catch (\App\Services\NotFoundException $e) {
+            inv_error(404, 'NOT_FOUND', $e->getMessage());
+        }
+    },
+
+    // kind = workbook (Ringkasan / Detail Invoice / Detail Barang / Baris Invoice-Barang, .xlsx) | invoices | items | lines (.csv). Same rows + columns as the screen.
+    'GET /reports/purchase-v2/export' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $f = inv_pur_filters($user, $query);
+        $kind = (string) ($query['kind'] ?? 'workbook');
+        $svc = \App\Services\PurchaseReportService::class;
+        try {
+            if ($kind === 'workbook') {
+                $name = static fn (string $t, string $c, ?int $id) => $id === null ? 'Semua' : (string) ($GLOBALS['pdo']->query("SELECT {$c} FROM {$t} WHERE id = " . (int) $id)->fetchColumn() ?: $id);
+                $meta = [
+                    'Laporan' => 'Laporan Pembelian', 'Periode' => $f['start_date'] . ' s/d ' . $f['end_date'], 'Gudang' => $name('warehouses', 'name', $f['warehouse_id']),
+                    'Supplier' => $name('suppliers', 'name', $f['supplier_id']), 'Kategori' => $name('categories', 'name', $f['category_id']), 'Pencarian barang' => (string) ($f['q'] ?? ''),
+                    'Data' => $f['historical'] === '1' ? 'Historis saja' : ($f['historical'] === 'all' ? 'Live + Historis' : 'Live saja'), 'Dibuat' => date('Y-m-d H:i:s'), 'Dibuat oleh' => (string) $user['username'],
+                    'Catatan' => 'Nilai invoice (pembayaran), bukan nilai persediaan FIFO. Total hanya invoice POSTED; invoice VOID dilaporkan terpisah.',
+                ];
+                $path = sys_get_temp_dir() . '/pur_' . bin2hex(random_bytes(6)) . '.xlsx';
+                \App\Services\ExcelWriterService::write($path, $svc::exportWorkbook($pdo, $f, $meta));
+                try {
+                    header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+                    header('Content-Disposition: attachment; filename="laporan-pembelian-' . date('Ymd_His') . '.xlsx"');
+                    header('Content-Length: ' . filesize($path));
+                    readfile($path);
+                } finally {
+                    @unlink($path);
+                }
+                exit;
+            }
+            if (!in_array($kind, ['invoices', 'items', 'lines'], true)) {
+                inv_error(422, 'VALIDATION_ERROR', 'unknown export kind');
+            }
+            $t = $svc::exportTable($pdo, $kind, $f);
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        }
+        inv_export_csv(['laporan-pembelian', $kind, $f['start_date'], $f['end_date']], $t['headers'], $t['rows'], static fn (array $r) => $r);
+    },
+
     'GET /reports/purchase' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
