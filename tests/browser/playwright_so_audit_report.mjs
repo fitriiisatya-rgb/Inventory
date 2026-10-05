@@ -329,6 +329,27 @@ try {
     check('VIEWER (INVENTORY_VIEW only): can open the report and see sessions; "Excel Final" (supervisor export) is NOT offered', await vw.page.locator(tid('soa-session-row')).count() >= 2 && await vw.page.locator(tid('soa-excel-final')).count() === 0);
     await vw.context.close();
 
+    // ---- Session-11-like data (V3): a final Deadstock snapshot WITHOUT any non-VOID deadstock finding (the test DB only); the report must show it unchanged, say where it comes from and flag the missing finding
+    const deadSnap = Number(sql(`SELECT l.final_deadstock_qty FROM stock_opname_lines l WHERE l.session_id = ${V.session_id} AND l.item_id = ${V.items.dead.id}`));
+    sql(`DELETE q FROM stock_opname_finding_quantities q JOIN stock_opname_findings f ON f.id = q.finding_id WHERE f.session_id = ${V.session_id} AND f.stock_opname_line_id = (SELECT id FROM stock_opname_lines WHERE session_id = ${V.session_id} AND item_id = ${V.items.dead.id}) AND q.condition_type = 'DEADSTOCK'`);
+    await page.click(tid('soa-view-sessions'));
+    await setFilters(page, { from: day, to: day });
+    check('V3 the session list shows a note: conditions of 1 item come from the posted snapshot, no equivalent finding (nothing erased / inferred)', (await page.locator(tid('soa-cond-note')).innerText()).includes(V.session_number) && (await page.locator(tid('soa-cond-note')).innerText()).includes('snapshot final posting'));
+    await page.locator(`${tid('soa-session-row')}[data-session-id="${V.session_id}"]`).click();
+    await page.waitForSelector(tid('soa-item-row'));
+    const deadSel = `[data-sku="${V.items.dead.sku}"]`;
+    check(`V3 the Deadstock of that item is still the stored snapshot (${deadSnap}), not zero`, deadSnap > 0 && (await cellOf(page, 'soa-items-table', `${tid('soa-item-row')}${deadSel}`, 'Deadstock')).replace(/[^0-9]/g, '') === String(deadSnap).replace(/[^0-9]/g, ''));
+    await page.locator(`${tid('soa-item-row')}${deadSel} ${tid('soa-item-detail')}`).click();
+    await page.waitForSelector(tid('soa-condition-block'));
+    const cb = (await page.locator(tid('soa-condition-block')).innerText()).replace(/\s+/g, ' ');
+    check('V3 the drawer separates the snapshot from the history: "Snapshot final (stock_opname_lines.final_*)", Deadstock status "snapshot — TANPA temuan kondisi", "tidak ada temuan non-VOID"', cb.includes('Snapshot final (stock_opname_lines.final_*)') && cb.includes('TANPA temuan kondisi') && cb.includes('tidak ada temuan non-VOID'), cb.slice(0, 220));
+    await page.locator('.drawer.open .drawer-tab', { hasText: 'Riwayat Hitung' }).click();
+    check('V3 "Riwayat Hitung" still lists exactly the findings that exist and notes that they do not carry the snapshot condition', await page.locator('.drawer.open [data-testid="soa-history-table"] tbody tr').count() >= 2 && (await page.locator(tid('soa-history-condflag')).innerText()).includes('Deadstock'));
+    await page.evaluate(() => Drawer.close());
+    await page.waitForTimeout(300);
+    const rec2 = sh(`php scripts/opname_audit_reconcile_check.php --app-root=. --session=${L.session_id},${V.session_id}`);
+    check('V3 reconciliation CLI on the snapshot-without-finding data: every check PASSes (D2 snapshot, D3 disclosed, E raw) and the case is announced', /\d+ \/ \d+ checks passed — all reconcile/.test(rec2) && rec2.includes('NOTE: kondisi final berasal dari snapshot posting') && !rec2.includes('FAIL -'), rec2.split('\n').slice(-3).join(' | '));
+
     // ---- Jejak still reachable from the report
     await page.click(tid('soa-view-sessions'));
     await page.waitForTimeout(300);
