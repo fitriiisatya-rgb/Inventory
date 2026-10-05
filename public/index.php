@@ -73,6 +73,7 @@ require_once __DIR__ . '/../services/InventorySummaryReportService.php';
 require_once __DIR__ . '/../services/TransferReportService.php';
 require_once __DIR__ . '/../services/StockOpnameReportService.php';
 require_once __DIR__ . '/../services/StockOpnameJejakService.php';
+require_once __DIR__ . '/../services/StockOpnameAuditReportService.php';
 require_once __DIR__ . '/../services/StockOpnamePrintService.php';
 require_once __DIR__ . '/../services/AdjustmentReportService.php';
 require_once __DIR__ . '/../services/ExpiryReportService.php';
@@ -480,6 +481,53 @@ function inv_require_so_warehouse_scope(array $user, int $warehouseId): void
     }
     // STOCK (and any other role) — unchanged, existing general guard.
     inv_require_warehouse_scope($user, $warehouseId);
+}
+
+/**
+ * Laporan Stock Opname (audit redesign): request parsing for GET /reports/opname-audit/*. The warehouse filter is resolved through the same
+ * two guards GET /reports/opname uses (inv_hpp_resolve_warehouse_scope + the Stock-Opname-specific override), so a STOCK user or a
+ * warehouse-scoped ADMIN can never widen the scope by editing the query string.
+ */
+function inv_soa_filters(array $user, array $query): array
+{
+    $wh = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+    $wh = inv_so_resolve_warehouse_scope($user, inv_hpp_resolve_warehouse_scope($user, $wh));
+    return [
+        'date_from' => $query['date_from'] ?? null, 'date_to' => $query['date_to'] ?? null, 'warehouse_id' => $wh,
+        'status' => $query['status'] ?? null, 'q' => $query['q'] ?? null,
+        'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 25),
+    ];
+}
+
+/** Session ids a report call covers: an explicit session_ids list (every session warehouse-scope-checked) or every session matching the filters. */
+function inv_soa_session_ids(PDO $pdo, array $user, array $query): array
+{
+    if (isset($query['session_ids']) && $query['session_ids'] !== '') {
+        $ids = array_values(array_unique(array_filter(array_map('intval', explode(',', (string) $query['session_ids'])), static fn (int $i) => $i > 0)));
+        if (count($ids) > \App\Services\StockOpnameAuditReportService::MAX_SESSIONS) {
+            inv_error(422, 'VALIDATION_ERROR', 'too many sessions requested');
+        }
+        $st = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        foreach ($ids as $id) {
+            $st->execute(['id' => $id]);
+            $wh = $st->fetchColumn();
+            if ($wh === false) {
+                inv_error(404, 'NOT_FOUND', "opname session {$id} not found");
+            }
+            inv_require_so_warehouse_scope($user, (int) $wh);
+        }
+        return $ids;
+    }
+    return array_slice(\App\Services\StockOpnameAuditReportService::sessionIds($pdo, inv_soa_filters($user, $query)), 0, \App\Services\StockOpnameAuditReportService::MAX_SESSIONS);
+}
+
+/** Line-level filters of the audit report (the same set drives the screen and every export). */
+function inv_soa_line_filters(array $query): array
+{
+    return [
+        'q' => $query['item_q'] ?? ($query['q'] ?? null), 'condition' => $query['condition'] ?? null, 'match_status' => $query['match_status'] ?? null,
+        'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
+    ];
 }
 
 /**
@@ -2062,6 +2110,103 @@ $routes = [
     },
 
     // Report 8 — Stock Opname.
+    // LAPORAN STOCK OPNAME (audit redesign) — READ-ONLY (GET), INVENTORY_VIEW, warehouse scope enforced server-side exactly like
+    // GET /reports/opname. Built on StockOpnameJejakService (the approved Jejak read model); never writes.
+    'GET /reports/opname-audit/sessions' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        inv_ok(\App\Services\StockOpnameAuditReportService::sessions($pdo, inv_soa_filters($user, $query)), 'OK');
+    },
+
+    'GET /reports/opname-audit/items' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $ids = inv_soa_session_ids($pdo, $user, $query);
+        inv_ok(\App\Services\StockOpnameAuditReportService::items($pdo, $ids, inv_soa_line_filters($query)), 'OK');
+    },
+
+    'GET /reports/opname-audit/item-detail' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $sessionId = (int) ($query['session_id'] ?? 0);
+        $lineId = (int) ($query['line_id'] ?? 0);
+        if ($sessionId <= 0 || $lineId <= 0) {
+            inv_error(422, 'VALIDATION_ERROR', 'session_id and line_id are required');
+        }
+        $wh = $pdo->prepare('SELECT warehouse_id FROM stock_opname_sessions WHERE id = :id');
+        $wh->execute(['id' => $sessionId]);
+        $warehouseId = $wh->fetchColumn();
+        if ($warehouseId === false) {
+            inv_error(404, 'NOT_FOUND', 'opname session not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $warehouseId);
+        try {
+            inv_ok(\App\Services\StockOpnameAuditReportService::itemDetail($pdo, $sessionId, $lineId), 'OK');
+        } catch (\App\Services\NotFoundException $e) {
+            inv_error(404, 'NOT_FOUND', $e->getMessage());
+        }
+    },
+
+    // Evidence photo for the report: INVENTORY_VIEW + the session's warehouse scope; only photos attached to a finding are ever served.
+    'GET /reports/opname-audit/photo/{id}' => function (array $params) use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $st = $pdo->prepare('SELECT p.*, s.warehouse_id FROM stock_opname_finding_photos p JOIN stock_opname_sessions s ON s.id = p.session_id WHERE p.id = :id AND p.finding_id IS NOT NULL');
+        $st->execute(['id' => (int) $params['id']]);
+        $photo = $st->fetch();
+        if (!$photo) {
+            inv_error(404, 'NOT_FOUND', 'photo not found');
+        }
+        inv_require_so_warehouse_scope($user, (int) $photo['warehouse_id']);
+        $path = \App\Services\StockOpnamePhotoService::absolutePath((string) $photo['storage_path']);
+        if (!is_file($path)) {
+            inv_error(404, 'NOT_FOUND', 'photo file missing on disk');
+        }
+        header('Content-Type: ' . $photo['mime_type']);
+        header('Content-Length: ' . (string) filesize($path));
+        header('Cache-Control: private, max-age=3600');
+        readfile($path);
+        exit;
+    },
+
+    // kind = workbook (6 sheets + Info, .xlsx) | sessions | items | evidence | history | adjustments | audit (.csv). Same rows and column catalogue as the screen.
+    'GET /reports/opname-audit/export' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $kind = (string) ($query['kind'] ?? 'workbook');
+        $ids = inv_soa_session_ids($pdo, $user, $query);
+        $lineFilters = inv_soa_line_filters($query);
+        $svc = \App\Services\StockOpnameAuditReportService::class;
+        if ($kind === 'workbook') {
+            $f = inv_soa_filters($user, $query);
+            $whLabel = $f['warehouse_id'] !== null ? ($pdo->query('SELECT name FROM warehouses WHERE id = ' . (int) $f['warehouse_id'])->fetchColumn() ?: 'Semua') : 'Semua Gudang';
+            $meta = [
+                'Laporan' => 'Laporan Stock Opname', 'Periode' => ($query['date_from'] ?? 'semua') . ' s/d ' . ($query['date_to'] ?? 'semua'), 'Gudang' => $whLabel,
+                'Status' => ($query['status'] ?? '') !== '' ? (string) $query['status'] : 'Semua', 'Pencarian' => (string) ($query['q'] ?? ''),
+                'Filter item' => trim(($lineFilters['condition'] ?? '') . ' ' . ($lineFilters['match_status'] ?? '')),
+                'Jumlah sesi' => (string) count($ids), 'Dibuat' => date('Y-m-d H:i:s'), 'Dibuat oleh' => (string) $user['username'],
+                'Catatan' => 'Evidence berupa referensi URL (/api/reports/opname-audit/photo/{id}); gambar tidak disematkan.',
+            ];
+            $sheets = $svc::exportWorkbook($pdo, $ids, $lineFilters, $meta);
+            $path = sys_get_temp_dir() . '/soa_' . bin2hex(random_bytes(6)) . '.xlsx';
+            \App\Services\ExcelWriterService::write($path, $sheets);
+            try {
+                header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+                header('Content-Disposition: attachment; filename="laporan-stock-opname-' . date('Ymd_His') . '.xlsx"');
+                header('Content-Length: ' . filesize($path));
+                readfile($path);
+            } finally {
+                @unlink($path);
+            }
+            exit;
+        }
+        if (!in_array($kind, ['sessions', 'items', 'evidence', 'history', 'adjustments', 'audit'], true)) {
+            inv_error(422, 'VALIDATION_ERROR', 'unknown export kind');
+        }
+        $t = $svc::exportTable($pdo, $kind, $ids, $lineFilters);
+        inv_export_csv(['laporan-stock-opname', $kind, date('Ymd')], $t['headers'], $t['rows'], static fn (array $r) => $r);
+    },
+
     'GET /reports/opname' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
