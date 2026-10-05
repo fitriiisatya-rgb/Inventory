@@ -44,8 +44,9 @@ async function startServer() {
             req.pipe(up);
             return;
         }
-        const file = path.join(repoRoot, 'public', urlPath === '/' ? 'index.html' : urlPath);
-        if (!file.startsWith(path.join(repoRoot, 'public')) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end('nf'); return; }
+        const staticRoot = process.env.VAL_STATIC_ROOT || path.join(repoRoot, 'public');   // VAL_STATIC_ROOT: serve a PRODUCTION-LAYOUT tree patched by the package scripts instead of the dev public/
+        const file = path.join(staticRoot, urlPath === '/' ? 'index.html' : urlPath);
+        if (!file.startsWith(staticRoot) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end('nf'); return; }
         res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
         fs.createReadStream(file).pipe(res);
     });
