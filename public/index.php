@@ -66,6 +66,7 @@ require_once __DIR__ . '/../services/MovementReconciliationReviewService.php';
 require_once __DIR__ . '/../services/ImportHistoricalTransactionService.php';
 require_once __DIR__ . '/../services/InventoryHppReportService.php';
 require_once __DIR__ . '/../services/InventoryValuationService.php';
+require_once __DIR__ . '/../services/InOutReportService.php';
 require_once __DIR__ . '/../services/DashboardInventoryService.php';
 require_once __DIR__ . '/../services/InventoryMovementReportService.php';
 require_once __DIR__ . '/../services/MovementDailyReportService.php';
@@ -700,6 +701,26 @@ function inv_val_filters(array $user, array $query): array
         'warehouse_id' => $wh, 'category_id' => $int('category_id'), 'item_id' => $int('item_id'),
         'q' => isset($query['q']) && trim((string) $query['q']) !== '' ? trim((string) $query['q']) : null,
         'sort' => (string) ($query['sort'] ?? 'name'), 'dir' => (string) ($query['dir'] ?? 'asc'), 'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 50),
+    ];
+}
+
+/**
+ * Laporan IN / OUT / Transfer: request parsing for GET /reports/io/*. The warehouse is resolved through inv_hpp_resolve_warehouse_scope(), so a warehouse-limited
+ * user can never widen the scope by editing the query string; every other filter only NARROWS. Read-only.
+ */
+function inv_io_filters(array $user, array $query): array
+{
+    $wh = isset($query['warehouse_id']) && $query['warehouse_id'] !== '' ? (int) $query['warehouse_id'] : null;
+    $wh = inv_hpp_resolve_warehouse_scope($user, $wh);
+    $int = static fn (string $k): ?int => isset($query[$k]) && $query[$k] !== '' ? (int) $query[$k] : null;
+    $str = static fn (string $k): string => isset($query[$k]) ? trim((string) $query[$k]) : '';
+    return [
+        'start_date' => (string) ($query['start_date'] ?? ($query['date_from'] ?? '')), 'end_date' => (string) ($query['end_date'] ?? ($query['date_to'] ?? '')),
+        'warehouse_id' => $wh, 'category_id' => $int('category_id'), 'item_id' => $int('item_id'), 'q' => $str('q') !== '' ? $str('q') : null, 'gq' => $str('gq'),
+        'supplier_id' => $int('supplier_id'), 'bakery_destination_id' => $int('bakery_destination_id'), 'division_id' => $int('division_id'),
+        'from_warehouse_id' => $int('from_warehouse_id'), 'to_warehouse_id' => $int('to_warehouse_id'), 'status' => $str('status'),
+        'in_source' => $str('in_source'), 'out_source' => $str('out_source'), 'bucket' => $str('bucket') !== '' ? $str('bucket') : 'day',
+        'sort' => $str('sort'), 'dir' => $str('dir') !== '' ? $str('dir') : 'desc', 'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 25),
     ];
 }
 
@@ -2237,6 +2258,125 @@ $routes = [
             'net_movement' => round($inSummary['total_value'] - $outSummary['total_value'], 4),
             'transaction_count' => $inSummary['transaction_count'] + $outSummary['transaction_count'],
         ], 'OK');
+    },
+
+    // LAPORAN IN / OUT / TRANSFER — READ-ONLY (GET), INVENTORY_VIEW, warehouse scope enforced server-side (inv_io_filters). One service, three tabs: in | out | transfer.
+    // The older /reports/in-out* and /reports/transfer routes above stay untouched.
+    'GET /reports/io/options' => function () use ($pdo) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $scope = inv_hpp_resolve_warehouse_scope($user, null);
+        inv_ok(\App\Services\InOutReportService::options($pdo, $user['role_code'] === 'STOCK' ? $scope : null), 'OK');
+    },
+
+    'GET /reports/io/overview' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $f = inv_io_filters($user, $query);
+        try {
+            $svc = \App\Services\InOutReportService::class;
+            inv_ok(match ((string) ($query['tab'] ?? 'in')) {
+                'in' => $svc::inOverview($pdo, $f), 'out' => $svc::outOverview($pdo, $f), 'transfer' => $svc::trfOverview($pdo, $f),
+                default => inv_error(422, 'VALIDATION_ERROR', 'tab must be in, out or transfer'),
+            }, 'OK');
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        }
+    },
+
+    'GET /reports/io/list' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $f = inv_io_filters($user, $query);
+        try {
+            $svc = \App\Services\InOutReportService::class;
+            inv_ok(match ((string) ($query['tab'] ?? 'in')) {
+                'in' => $svc::inList($pdo, $f), 'out' => $svc::outList($pdo, $f), 'transfer' => $svc::trfList($pdo, $f),
+                default => inv_error(422, 'VALIDATION_ERROR', 'tab must be in, out or transfer'),
+            }, 'OK');
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        }
+    },
+
+    // Item-level detail of ONE document: in -> tx_ids (comma separated), out -> do_id | tx_id (with the FIFO layers), transfer -> id.
+    'GET /reports/io/detail' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $scope = inv_hpp_resolve_warehouse_scope($user, null);
+        $svc = \App\Services\InOutReportService::class;
+        $int = static fn (string $k): ?int => isset($query[$k]) && $query[$k] !== '' ? (int) $query[$k] : null;
+        try {
+            switch ((string) ($query['tab'] ?? 'in')) {
+                case 'in':
+                    $ids = array_values(array_filter(array_map('intval', explode(',', (string) ($query['tx_ids'] ?? ''))), static fn ($v) => $v > 0));
+                    if (!$ids) {
+                        inv_error(422, 'VALIDATION_ERROR', 'tx_ids is required');
+                    }
+                    inv_ok($svc::inDetail($pdo, array_slice($ids, 0, 500), $scope), 'OK');
+                    break;
+                case 'out':
+                    inv_ok($svc::outDetail($pdo, $int('do_id'), $int('tx_id'), $scope), 'OK');
+                    break;
+                case 'transfer':
+                    $id = $int('id');
+                    if ($id === null || $id <= 0) {
+                        inv_error(422, 'VALIDATION_ERROR', 'id is required');
+                    }
+                    inv_ok($svc::trfDetail($pdo, $id, $scope), 'OK');
+                    break;
+                default:
+                    inv_error(422, 'VALIDATION_ERROR', 'tab must be in, out or transfer');
+            }
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        } catch (\App\Services\NotFoundException $e) {
+            inv_error(404, 'NOT_FOUND', $e->getMessage());
+        }
+    },
+
+    // Excel of the SELECTED tab with the same filters as the screen (export totals == screen totals by construction).
+    'GET /reports/io/export' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        $f = inv_io_filters($user, $query);
+        $tab = (string) ($query['tab'] ?? 'in');
+        if (!in_array($tab, ['in', 'out', 'transfer'], true)) {
+            inv_error(422, 'VALIDATION_ERROR', 'tab must be in, out or transfer');
+        }
+        try {
+            $name = static fn (string $t, string $c, ?int $id) => $id === null ? 'Semua' : (string) ($GLOBALS['pdo']->query("SELECT {$c} FROM {$t} WHERE id = " . (int) $id)->fetchColumn() ?: $id);
+            $titles = ['in' => 'Barang Masuk (IN)', 'out' => 'Barang Keluar (OUT)', 'transfer' => 'Transfer Antar Gudang'];
+            $meta = [
+                'Laporan' => 'Laporan IN / OUT — ' . $titles[$tab], 'Periode' => $f['start_date'] . ' s/d ' . $f['end_date'], 'Gudang' => $name('warehouses', 'name', $f['warehouse_id']),
+                'Kategori' => $name('categories', 'name', $f['category_id']), 'Pencarian barang' => (string) ($f['q'] ?? ''), 'Pencarian tabel' => $f['gq'],
+            ];
+            if ($tab === 'in') {
+                $meta += ['Supplier' => $name('suppliers', 'name', $f['supplier_id']), 'Jenis IN' => $f['in_source'] ?: 'Semua', 'Status' => $f['status'] ?: 'Semua'];
+            } elseif ($tab === 'out') {
+                $meta += ['Bakery Tujuan' => $name('bakery_destinations', 'name', $f['bakery_destination_id']), 'Divisi' => $name('divisions', 'name', $f['division_id']),
+                    'Jenis OUT' => $f['out_source'] ?: 'Semua', 'Status' => $f['status'] ?: 'Semua'];
+            } else {
+                $meta += ['Gudang Asal' => $name('warehouses', 'name', $f['from_warehouse_id']), 'Gudang Tujuan' => $name('warehouses', 'name', $f['to_warehouse_id']), 'Status' => $f['status'] ?: 'Semua'];
+            }
+            $meta += ['Dibuat' => date('Y-m-d H:i:s'), 'Dibuat oleh' => (string) $user['username'],
+                'Catatan' => 'Hanya data nyata dari sistem; baris VOID/CANCELLED/REVERSED ditampilkan tetapi tidak dihitung pada total. Nilai tidak diketahui ditulis "—", bukan 0.'];
+            $svc = \App\Services\InOutReportService::class;
+            $sheets = match ($tab) { 'in' => $svc::inExport($pdo, $f, $meta), 'out' => $svc::outExport($pdo, $f, $meta), default => $svc::trfExport($pdo, $f, $meta) };
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        }
+        $path = sys_get_temp_dir() . '/io_' . bin2hex(random_bytes(6)) . '.xlsx';
+        ExcelWriterService::write($path, $sheets);
+        try {
+            header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            header('Content-Disposition: attachment; filename="laporan-' . ['in' => 'barang-masuk', 'out' => 'barang-keluar', 'transfer' => 'transfer'][$tab] . '-' . date('Ymd_His') . '.xlsx"');
+            header('Content-Length: ' . filesize($path));
+            readfile($path);
+        } finally {
+            @unlink($path);
+        }
+        exit;
     },
 
     // Report 12 — Distribusi per Bakery: qualifying OUT rows with a real
