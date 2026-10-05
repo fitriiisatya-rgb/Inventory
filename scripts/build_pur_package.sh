@@ -4,7 +4,7 @@
 # PUR_BASE = the last commit BEFORE the feature (source of the reference hashes in the collect script); PUR_REV = the tested feature commit.
 set -eu
 cd "$(dirname "$0")/.."
-PUR_REV="${PUR_REV:-adbe3ca}"
+PUR_REV="${PUR_REV:-af5ead4}"
 PUR_BASE="${PUR_BASE:-ffdfcaa}"
 OUT="${1:?usage: build_pur_package.sh <output dir>}"
 N=pur_production_deploy_package

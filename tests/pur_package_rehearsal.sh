@@ -8,7 +8,7 @@
 # Usage: [PUR_REV=<commit>] [PUR_BASE=<commit>] bash tests/pur_package_rehearsal.sh
 set -u
 cd "$(dirname "$0")/.."
-PUR_REV="${PUR_REV:-adbe3ca}"; PUR_BASE="${PUR_BASE:-ffdfcaa}"
+PUR_REV="${PUR_REV:-af5ead4}"; PUR_BASE="${PUR_BASE:-ffdfcaa}"
 OLD_REVS="${OLD_REVS:-9dcb367 6775b7f}"   # 3090330^ has no PurchaseCostingGateway (Stock IN V2 absent: the package then refuses — checked below)
 W="$(mktemp -d)"; trap 'rm -rf "${W:?}"' EXIT
 pass=0; fail=0
