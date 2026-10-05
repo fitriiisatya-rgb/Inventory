@@ -12,7 +12,7 @@
 # Usage: [SOA_REV=<commit>] [SOA_BASE=<commit>] bash tests/soa_package_rehearsal.sh
 set -u
 cd "$(dirname "$0")/.."
-SOA_REV="${SOA_REV:-ad6e7ac}"; SOA_BASE="${SOA_BASE:-55fc7f8}"
+SOA_REV="${SOA_REV:-62796cc}"; SOA_BASE="${SOA_BASE:-55fc7f8}"; SOA_SRV_REV="${SOA_SRV_REV:-ad6e7ac}"
 OLD_REVS="${OLD_REVS:-9dcb367 6775b7f}"
 W="$(mktemp -d)"; trap 'rm -rf "${W:?}"' EXIT
 pass=0; fail=0
@@ -22,13 +22,14 @@ expect_fail() { local d="$1"; shift; if "$@" >"$W/out.txt" 2>&1; then bad "$d (u
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 ZERO=$(printf 0%.0s {1..64})
 
-SOA_REV="$SOA_REV" SOA_BASE="$SOA_BASE" bash scripts/build_soa_package.sh "$W/out" >/dev/null 2>&1 || { echo "FAIL - package build"; exit 1; }
+SOA_REV="$SOA_REV" SOA_SRV_REV="$SOA_SRV_REV" SOA_BASE="$SOA_BASE" bash scripts/build_soa_package.sh "$W/out" >/dev/null 2>&1 || { echo "FAIL - package build"; exit 1; }
 tar -C "$W" -xzf "$W/out/soa_production_deploy_package.tar.gz"
 PK="$W/soa_production_deploy_package"; PAY="$PK/payload"; S="$PK/scripts"
 ( cd "$PK" && sha256sum -c SHA256SUMS >/dev/null 2>&1 ) && ok "package SHA256SUMS verify" || bad "package SHA256SUMS"
-[ ! -e "$S/patch_soa_api_client_production.php" ] && ! grep -rq "api-client" "$S"/patch_soa_*.php "$S"/install_soa_files_production.php "$S"/rollback_soa_production.php && ok "the package does not touch api-client.js / api-client-v2163eod.js (no patcher, no reference)" || bad "package still references api-client"
+[ ! -e "$S/patch_soa_api_client_production.php" ] && ! grep -rq "assets/js/api-client" "$S"/patch_soa_*.php "$S"/install_soa_files_production.php "$S"/rollback_soa_production.php "$S"/soa_readonly_check.php && ok "the package does not touch api-client.js / api-client-v2163eod.js (no patcher, no reference)" || bad "package still references api-client"
 DEV="$W/dev"; mkdir -p "$DEV"
-for f in services/StockOpnameAuditReportService.php public/index.php public/index.html public/assets/css/app.css public/assets/js/app.js public/assets/js/stock-opname-report.js; do git show "$SOA_REV:$f" > "$DEV/$(basename "$f")"; done
+for f in services/StockOpnameAuditReportService.php public/index.php public/assets/css/app.css; do git show "$SOA_SRV_REV:$f" > "$DEV/$(basename "$f")"; done
+for f in public/assets/js/app.js public/assets/js/stock-opname-report.js; do git show "$SOA_REV:$f" > "$DEV/$(basename "$f")"; done
 cmp -s "$PAY/StockOpnameAuditReportService.php" "$DEV/StockOpnameAuditReportService.php" && cmp -s "$PAY/stock-opname-report.js" "$DEV/stock-opname-report.js" && ok "service + stock-opname-report.js payloads byte-identical to the tested dev files" || bad "payload != dev"
 ! grep -q "InvApi\." "$PAY/stock-opname-report.js" && grep -q "const OpnameApi" "$PAY/stock-opname-report.js" && ok "stock-opname-report.js is self-contained (own read-only GET helper, no InvApi dependency)" || bad "report js depends on InvApi"
 tail -c "$(wc -c < "$PAY/soa_app_css_block.css")" "$DEV/app.css" | cmp -s - "$PAY/soa_app_css_block.css" && [ "$(grep -c '^/\* Laporan Stock Opname audit redesign (stock-opname-report.js' "$PAY/soa_app_css_block.css")" = 1 ] && ok "css block == dev app.css tail (single marker, ends at EOF)" || bad "css block"
@@ -232,6 +233,6 @@ a = open(sys.argv[1], encoding='utf-8').read(); d = open(sys.argv[2], encoding='
 old = "ReportOpname.render(document.getElementById('tab-laporan-opname'));"; new = "StockOpnameReport.render(document.getElementById('tab-laporan-opname'));"
 sys.exit(0 if d.count(old) == 1 and d.replace(old, new, 1) == a else 1)
 PY
-[ $eq = 1 ] && ok "patched $SOA_BASE index.php / app.css / stock-opname-report.js are byte-identical to the tested dev files ($SOA_REV); app.js == dev with the one route line re-pointed" || bad "patched != tested dev files"
+[ $eq = 1 ] && ok "patched $SOA_BASE index.php / app.css / stock-opname-report.js are byte-identical to the tested dev files ($SOA_SRV_REV / $SOA_REV); app.js == dev with the one route line re-pointed" || bad "patched != tested dev files"
 
 echo; echo "$pass passed, $fail failed"; [ "$fail" = 0 ]

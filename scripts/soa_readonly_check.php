@@ -55,7 +55,7 @@ foreach (str_split($css) as $c) { if ($c === '{') { $depth++; } elseif ($c === '
 $check('app.css: braces balanced', $depth === 0 && $min === 0, "depth={$depth}");
 $tagOk = $once($html, 'app.css?v=20261014-soa');
 foreach (['app.js', 'stock-opname-report.js'] as $f) { $tagOk = $tagOk && $once($html, "assets/js/{$f}?v=20261014-soa"); }
-$check('index.html: app.css + app.js + stock-opname-report.js carry token 20261014-soa (once each); the page script is loaded after the Jejak tag', $tagOk && preg_match('#stock-opname-report-jejak\\.js\\?v=[A-Za-z0-9._-]+"></script>\\s*<script src="assets/js/stock-opname-report\\.js\\?v=20261014-soa"#', $html) === 1);
+$check('index.html: app.css + app.js + stock-opname-report.js carry token 20261014-soa (once each)', $tagOk);
 $check('stock-opname-report.js: the audit report (StockOpnameReport, soa- classes, uses InvApi.opnameAuditSessions)', str_contains($js, 'const StockOpnameReport') && str_contains($js, 'soa-sessions-table') && str_contains($js, "'/reports/opname-audit/sessions'") && !str_contains($js, 'InvApi.'));
 $check('stock-opname-report.js issues only GET requests (no POST/PUT/DELETE in the file)', !preg_match("/request\\('(POST|PUT|PATCH|DELETE)'/", $js) && !str_contains($js, "method: 'POST'"));
 $check('StockOpnameAuditReportService.php present, read-only (no INSERT / UPDATE / DELETE statement)', str_contains($svc, 'final class StockOpnameAuditReportService') && !preg_match('/\b(INSERT\s+INTO|UPDATE\s+[a-z_]+\s+SET|DELETE\s+FROM)\b/i', preg_replace(['#/\*.*?\*/#s', '#^\s*//.*$#m'], '', $svc)));

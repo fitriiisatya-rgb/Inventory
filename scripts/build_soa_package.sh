@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # Builds the fail-closed Laporan Stock Opname audit-redesign production package (NOT a deploy).
 # Usage: [SOA_REV=<commit>] [SOA_BASE=<commit>] bash scripts/build_soa_package.sh <output dir>   -> <out>/soa_production_deploy_package.tar.gz
-# SOA_BASE = the last commit BEFORE the feature (source of the reference hashes in the collect script); SOA_REV = the tested feature commit.
+# SOA_BASE = the last commit BEFORE the feature (source of the reference hashes in the collect script); SOA_REV = the commit of the tested report page (stock-opname-report.js);
+# SOA_SRV_REV = the commit of the tested service / index.php helper + routes / css block (unchanged since; later features also touched index.php and app.css, which must not leak into this package).
 set -eu
 cd "$(dirname "$0")/.."
-SOA_REV="${SOA_REV:-ad6e7ac}"
+SOA_REV="${SOA_REV:-62796cc}"
 SOA_BASE="${SOA_BASE:-55fc7f8}"
+SOA_SRV_REV="${SOA_SRV_REV:-ad6e7ac}"
 OUT="${1:?usage: build_soa_package.sh <output dir>}"
 N=soa_production_deploy_package
 D="$(mktemp -d)"; trap 'rm -rf "${D:?}"' EXIT
 R="$D/$N"; mkdir -p "$R/scripts/lib" "$R/payload"
-git show "$SOA_REV:services/StockOpnameAuditReportService.php" > "$R/payload/StockOpnameAuditReportService.php"
+git show "$SOA_SRV_REV:services/StockOpnameAuditReportService.php" > "$R/payload/StockOpnameAuditReportService.php"
 git show "$SOA_REV:public/assets/js/stock-opname-report.js" > "$R/payload/stock-opname-report.js"
-git show "$SOA_REV:public/assets/css/app.css" > "$D/ui_app.css"
-git show "$SOA_REV:public/index.php" > "$D/new_index.php"
+git show "$SOA_SRV_REV:public/assets/css/app.css" > "$D/ui_app.css"
+git show "$SOA_SRV_REV:public/index.php" > "$D/new_index.php"
 python3 - "$D/ui_app.css" "$D/new_index.php" "$R/payload" <<'PY'
 import sys
 css = open(sys.argv[1], encoding='utf-8').read()
@@ -48,4 +50,4 @@ sed "s/@@H_SVC@@/$(hp StockOpnameAuditReportService.php)/g; s/@@H_HELPER@@/$(hp 
 ( cd "$R" && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum | sed 's#  \./#  #' > SHA256SUMS )
 mkdir -p "$OUT"
 tar -C "$D" -czf "$OUT/$N.tar.gz" "$N"
-echo "built $OUT/$N.tar.gz (from $SOA_REV, base $SOA_BASE)"; sha256sum "$OUT/$N.tar.gz"
+echo "built $OUT/$N.tar.gz (page $SOA_REV, server/css $SOA_SRV_REV, base $SOA_BASE)"; sha256sum "$OUT/$N.tar.gz"

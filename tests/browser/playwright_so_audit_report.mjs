@@ -45,8 +45,9 @@ async function startServer() {
             req.pipe(up);
             return;
         }
-        const file = path.join(repoRoot, 'public', urlPath === '/' ? 'index.html' : urlPath);
-        if (!file.startsWith(path.join(repoRoot, 'public')) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end('nf'); return; }
+        const staticRoot = process.env.SOA_STATIC_ROOT || path.join(repoRoot, 'public');   // SOA_STATIC_ROOT: serve a PRODUCTION-LAYOUT tree patched by the package scripts instead of the dev public/
+        const file = path.join(staticRoot, urlPath === '/' ? 'index.html' : urlPath);
+        if (!file.startsWith(staticRoot) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end('nf'); return; }
         res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
         fs.createReadStream(file).pipe(res);
     });
@@ -79,8 +80,9 @@ const day = '2026-09-30';
 const rpFmt = (n) => 'Rp ' + Number(n).toLocaleString('id-ID', { maximumFractionDigits: 2 });
 const api = (page, p, q) => page.evaluate(async ([pp, qq]) => (await (await fetch(`/api${pp}?${new URLSearchParams(qq)}`, { credentials: 'include' })).json()).data, [p, q]);
 async function openReport(page) {
-    await page.evaluate(() => document.querySelector('.sidebar-link[data-tab="opname-laporan"]').click());
-    await page.waitForSelector('#tab-opname-laporan.active .soa-title');
+    const tab = process.env.SOA_TAB || 'opname-laporan';   // SOA_TAB=laporan-opname: the production route the package re-points
+    await page.evaluate((t) => document.querySelector(`.sidebar-link[data-tab="${t}"]`).click(), tab);
+    await page.waitForSelector(`#tab-${tab}.active .soa-title`);
     await page.waitForFunction(() => !document.querySelector('.soa-loading'), null, { timeout: 20000 });
 }
 const waitIdle = (page) => page.waitForFunction(() => !document.querySelector('.soa-loading'), null, { timeout: 20000 });
