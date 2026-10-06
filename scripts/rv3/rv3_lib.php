@@ -285,10 +285,10 @@ function rv3_op_html_sidebar(?string $cur, array $op, string $dir): array
                 $extra[$a['tab']] ??= $hide($a['markup']);
             }
         }
-        $out = substr($out, 0, $cPos) . rv3_legacy_container($legacyKnown + $extra, $ind) . substr($out, $cSpan[1]);
+        $out = substr($out, 0, $cPos) . rv3_legacy_container($legacyKnown + $extra, "                ") . substr($out, $cSpan[1]);
     } else {
         $after = rv3_div_span($out, $gStart)[1];
-        $out = substr($out, 0, $after) . "\n            " . $op['legacy_comment_block'] . "\n            " . rv3_legacy_container($legacyKnown + $extra, $ind) . substr($out, $after);
+        $out = substr($out, 0, $after) . "\n            " . $op['legacy_comment_block'] . "\n            " . rv3_legacy_container($legacyKnown + $extra, "                ") . substr($out, $after);
         $note = ' (hidden container created)';
     }
     // an "opname-laporan" link left OUTSIDE the hidden container (the old Stock Opname group) becomes a comment: the same data-tab lives in the hidden container
