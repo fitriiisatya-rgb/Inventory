@@ -82,6 +82,25 @@ final class InOutReportService
         ['received', 'Diterima', 'text', true],
     ];
 
+    /** "Per Baris Barang" view: one row per item line (same figures as the transaction tables, one level down). */
+    public const IN_LINEVIEW_COLUMNS = [
+        ['date', 'Tanggal', 'date', true], ['reference', 'No. Invoice / Referensi', 'text', true], ['supplier', 'Supplier', 'text', true], ['warehouse', 'Gudang', 'text', true],
+        ['sku', 'SKU', 'text', true], ['name', 'Barang', 'text', true], ['unit', 'Satuan', 'text', true], ['qty', 'Qty', 'qty', true], ['price', 'Harga Beli', 'money', true],
+        ['dpp', 'DPP / Subtotal', 'money', true], ['ppn', 'PPN', 'money', true], ['item_discount', 'Diskon Item', 'money', true], ['invoice_discount', 'Alokasi Diskon Invoice', 'money', true],
+        ['freight', 'Alokasi Ongkir', 'money', true], ['total', 'Total Baris', 'money', true], ['inventory_cost', 'Final Cost (FIFO)', 'money', true], ['status', 'Status', 'status', true],
+    ];
+    public const OUT_LINEVIEW_COLUMNS = [
+        ['date', 'Tanggal', 'date', true], ['do_number', 'No. DO', 'text', true], ['invoice_number', 'No. Invoice', 'text', true], ['warehouse', 'Gudang Asal', 'text', true], ['bakery', 'Bakery', 'text', true],
+        ['sku', 'SKU', 'text', true], ['name', 'Barang', 'text', true], ['unit', 'Satuan', 'text', true], ['qty', 'Qty', 'qty', true], ['hpp_unit', 'HPP FIFO / satuan', 'money', true],
+        ['hpp', 'HPP FIFO Total', 'money', true], ['sell_price', 'Harga Jual', 'money', true], ['sell', 'Nilai Jual', 'money', true], ['shipping', 'Alokasi Ongkir', 'money', true],
+        ['margin', 'Margin', 'money', true], ['status', 'Status', 'status', true],
+    ];
+    public const TRF_LINEVIEW_COLUMNS = [
+        ['created_date', 'Tanggal', 'date', true], ['number', 'No. Transfer', 'text', true], ['from', 'Gudang Asal', 'text', true], ['to', 'Gudang Tujuan', 'text', true],
+        ['sku', 'SKU', 'text', true], ['name', 'Barang', 'text', true], ['unit', 'Satuan', 'text', true], ['qty', 'Qty Transfer', 'qty', true], ['qty_received', 'Qty Diterima', 'qty', true],
+        ['unit_cost', 'Cost / satuan', 'money', true], ['value', 'Nilai Cost', 'money', true], ['status', 'Status', 'status', true],
+    ];
+
     // ======================================================================
     // options
     // ======================================================================
@@ -109,6 +128,73 @@ final class InOutReportService
     }
 
     // ======================================================================
+    // "Per Baris Barang" view
+    // ======================================================================
+
+    /** @return array<string,mixed> */
+    private static function inLines(array $d, array $f): array
+    {
+        $rows = [];
+        foreach (self::inSearch($d['invoices'], (string) ($f['gq'] ?? '')) as $inv) {
+            foreach ($inv['lines'] as $l) {
+                if ($l['matched']) {
+                    $rows[] = $l + ['tx_ids' => $inv['tx_ids']];
+                }
+            }
+        }
+        $t = ['dpp' => 0.0, 'ppn' => 0.0, 'item_discount' => 0.0, 'invoice_discount' => 0.0, 'freight' => 0.0, 'total' => 0.0, 'inventory_cost' => 0.0];
+        foreach ($rows as $r) {
+            if ($r['counted']) {
+                foreach ($t as $k => $_) {
+                    $t[$k] += (float) ($r[$k] ?? 0);
+                }
+            }
+        }
+        return self::page($rows, $f) + ['view' => 'lines', 'columns' => self::columns(self::IN_LINEVIEW_COLUMNS), 'footer' => ['totals' => array_map(static fn ($v) => round($v, 4), $t), 'count' => count($rows)]];
+    }
+
+    /** @return array<string,mixed> */
+    private static function outLines(array $d, array $f): array
+    {
+        $rows = [];
+        foreach (self::outSearch($d['documents'], (string) ($f['gq'] ?? '')) as $doc) {
+            foreach ($doc['lines'] as $l) {
+                if ($l['matched']) {
+                    $rows[] = array_merge($l, ['do_number' => $doc['do_number'], 'invoice_number' => $doc['invoice_number'], 'bakery' => $doc['bakery'], 'warehouse' => $doc['warehouse'], 'date' => $doc['date'],
+                        'status' => $doc['status'], 'do_id' => $doc['do_id'], 'tx_ids' => $doc['tx_ids']]);
+                }
+            }
+        }
+        $t = ['hpp' => 0.0, 'sell' => 0.0, 'shipping' => 0.0, 'margin' => 0.0];
+        foreach ($rows as $r) {
+            if ($r['counted']) {
+                foreach ($t as $k => $_) {
+                    $t[$k] += (float) ($r[$k] ?? 0);
+                }
+            }
+        }
+        return self::page($rows, $f) + ['view' => 'lines', 'columns' => self::columns(self::OUT_LINEVIEW_COLUMNS), 'footer' => ['totals' => array_map(static fn ($v) => round($v, 4), $t), 'count' => count($rows)]];
+    }
+
+    /** @return array<string,mixed> */
+    private static function trfLines(array $d, array $f): array
+    {
+        $rows = [];
+        $value = 0.0;
+        foreach (self::trfSearch($d['transfers'], (string) ($f['gq'] ?? '')) as $t) {
+            foreach ($t['items_detail'] as $it) {
+                if ($it['matched']) {
+                    $rows[] = $it + ['number' => $t['number'], 'from' => $t['from'], 'to' => $t['to'], 'created_date' => $t['created_date'], 'status' => $t['status'], 'id' => $t['id'], 'unit' => $it['base_unit']];
+                    if ($t['active']) {
+                        $value += (float) $it['value'];
+                    }
+                }
+            }
+        }
+        return self::page($rows, $f) + ['view' => 'lines', 'columns' => self::columns(self::TRF_LINEVIEW_COLUMNS), 'footer' => ['totals' => ['value' => round($value, 4)], 'count' => count($rows)]];
+    }
+
+    // ======================================================================
     // IN
     // ======================================================================
 
@@ -129,6 +215,9 @@ final class InOutReportService
     public static function inList(PDO $pdo, array $f): array
     {
         $d = self::inDataset($pdo, $f);
+        if (($f['view'] ?? '') === 'lines') {
+            return self::inLines($d, $f);
+        }
         $rows = self::sortRows(self::inSearch($d['invoices'], (string) ($f['gq'] ?? '')), $f, ['total' => 'total', 'supplier' => 'supplier', 'reference' => 'reference', 'date' => 'transaction_at']);
         return self::page($rows, $f) + ['columns' => self::columns(self::IN_COLUMNS), 'footer' => self::inFooter($rows)];
     }
@@ -191,6 +280,46 @@ final class InOutReportService
         }
         return ['Ringkasan IN' => ['headers' => ['Keterangan', 'Nilai'], 'rows' => $sum], 'Transaksi IN' => $inv + ['freeze_header' => true, 'autofilter' => true],
             'Rincian Item IN' => $lt + ['freeze_header' => true, 'autofilter' => true]];
+    }
+
+    /**
+     * "Download Semua Tab": ONE workbook with a sheet per tab (Barang Masuk / Barang Keluar / Transfer) plus the item-level and FIFO / layer sheets of each tab.
+     * Only the COMMON filters (period, warehouse, category, item search, table search) apply to every tab; a tab-specific filter (supplier, bakery, division, status, jenis,
+     * gudang asal / tujuan) narrows only its own tab — a status is applied to a tab only when it is a valid status of that tab.
+     * @return array<string,array<string,mixed>>
+     */
+    public static function exportAll(PDO $pdo, array $f, array $meta): array
+    {
+        $common = array_intersect_key($f, array_flip(['start_date', 'end_date', 'warehouse_id', 'category_id', 'item_id', 'q', 'gq']));
+        $st = (string) ($f['status'] ?? '');
+        $fin = $common + array_intersect_key($f, array_flip(['supplier_id', 'in_source'])) + ['status' => in_array($st, ['POSTED', 'VOID'], true) ? $st : ''];
+        $fout = $common + array_intersect_key($f, array_flip(['bakery_destination_id', 'division_id', 'out_source'])) + ['status' => in_array($st, ['DISPATCHED', 'RECEIVED', 'RECEIVED_WITH_DISCREPANCY', 'COMPLETED', 'CANCELLED', 'POSTED', 'VOID'], true) ? $st : ''];
+        $ftr = $common + array_intersect_key($f, array_flip(['from_warehouse_id', 'to_warehouse_id'])) + ['status' => in_array($st, ['PENDING', 'RECEIVED', 'CANCELLED', 'REVERSED'], true) ? $st : ''];
+        $in = self::inExport($pdo, $fin, []);
+        $out = self::outExport($pdo, $fout, []);
+        $tr = self::trfExport($pdo, $ftr, []);
+        $sum = [];
+        foreach ($meta as $k => $v) {
+            $sum[] = [$k, (string) $v];
+        }
+        $sum[] = ['', ''];
+        foreach (['Barang Masuk (IN)' => $in['Ringkasan IN'], 'Barang Keluar (OUT)' => $out['Ringkasan OUT'], 'Transfer Antar Gudang' => $tr['Ringkasan Transfer']] as $title => $sheet) {
+            $sum[] = [mb_strtoupper($title), ''];
+            foreach ($sheet['rows'] as $r) {
+                if (($r[0] ?? '') !== '') {
+                    $sum[] = [$r[0], $r[1]];
+                }
+            }
+            $sum[] = ['', ''];
+        }
+        return [
+            'Ringkasan' => ['headers' => ['Keterangan', 'Nilai'], 'rows' => $sum],
+            'Barang Masuk' => $in['Transaksi IN'] + ['freeze_header' => true, 'autofilter' => true],
+            'Barang Keluar' => $out['Transaksi OUT'] + ['freeze_header' => true, 'autofilter' => true],
+            'Transfer' => $tr['Daftar Transfer'] + ['freeze_header' => true, 'autofilter' => true],
+            'Rincian Barang Masuk' => $in['Rincian Item IN'], 'Rincian Barang Keluar' => $out['Rincian Item OUT'], 'FIFO Allocation' => $out['FIFO Allocation'],
+            'Rincian Transfer' => $tr['Rincian Item Transfer'], 'Layer Cost Transfer' => $tr['Layer Cost Transfer'],
+        ];
     }
 
     /** @return array{invoices:list<array<string,mixed>>, lines:list<array<string,mixed>>, disclosures:array<string,mixed>} */
@@ -463,6 +592,9 @@ final class InOutReportService
     public static function outList(PDO $pdo, array $f): array
     {
         $d = self::outDataset($pdo, $f);
+        if (($f['view'] ?? '') === 'lines') {
+            return self::outLines($d, $f);
+        }
         $rows = self::sortRows(self::outSearch($d['documents'], (string) ($f['gq'] ?? '')), $f, ['hpp' => 'hpp', 'sell' => 'sell', 'bakery' => 'bakery', 'do_number' => 'do_number', 'date' => 'transaction_at']);
         return self::page($rows, $f) + ['columns' => self::columns(self::OUT_COLUMNS), 'footer' => self::outFooter($rows)];
     }
@@ -871,6 +1003,9 @@ final class InOutReportService
     public static function trfList(PDO $pdo, array $f): array
     {
         $d = self::trfDataset($pdo, $f);
+        if (($f['view'] ?? '') === 'lines') {
+            return self::trfLines($d, $f);
+        }
         $rows = self::sortRows(self::trfSearch($d['transfers'], (string) ($f['gq'] ?? '')), $f, ['value' => 'value', 'number' => 'id', 'from' => 'from', 'to' => 'to', 'date' => 'created_at']);
         return self::page($rows, $f) + ['columns' => self::columns(self::TRF_COLUMNS), 'footer' => self::trfFooter($rows)];
     }
@@ -1421,8 +1556,14 @@ final class InOutReportService
     /** @return array{headers:list<string>,rows:list<list<mixed>>} */
     private static function table(array $cols, array $rows): array
     {
-        return ['headers' => array_map(static fn (array $c) => $c[1], $cols),
+        return ['headers' => array_map(static fn (array $c) => $c[1], $cols), 'types' => array_map(static fn (array $c) => self::exportType($c[2]), $cols),
             'rows' => array_map(static fn (array $r) => array_map(static fn (array $c) => self::cell($c[2], $r[$c[0]] ?? null), $cols), $rows)];
+    }
+
+    /** catalogue type -> export column type (typed Excel cells + print formatting) */
+    private static function exportType(string $t): string
+    {
+        return match ($t) { 'date' => 'date', 'ts' => 'ts', 'money' => 'money', 'qty' => 'qty', 'num' => 'qty', 'int' => 'int', 'pct', 'rate' => 'pct', default => 'text' };
     }
 
     private static function totalRow(array $cols, array $totals, string $label): array

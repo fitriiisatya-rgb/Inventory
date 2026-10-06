@@ -73,6 +73,7 @@ require_once __DIR__ . '/../services/InventoryReconciliationReportService.php';
 require_once __DIR__ . '/../services/InventorySummaryReportService.php';
 require_once __DIR__ . '/../services/TransferReportService.php';
 require_once __DIR__ . '/../services/InOutReportService.php';
+require_once __DIR__ . '/../services/ReportExportService.php';
 require_once __DIR__ . '/../services/StockOpnameReportService.php';
 require_once __DIR__ . '/../services/StockOpnameJejakService.php';
 require_once __DIR__ . '/../services/StockOpnameAuditReportService.php';
@@ -719,9 +720,27 @@ function inv_io_filters(array $user, array $query): array
         'warehouse_id' => $wh, 'category_id' => $int('category_id'), 'item_id' => $int('item_id'), 'q' => $str('q') !== '' ? $str('q') : null, 'gq' => $str('gq'),
         'supplier_id' => $int('supplier_id'), 'bakery_destination_id' => $int('bakery_destination_id'), 'division_id' => $int('division_id'),
         'from_warehouse_id' => $int('from_warehouse_id'), 'to_warehouse_id' => $int('to_warehouse_id'), 'status' => $str('status'),
-        'in_source' => $str('in_source'), 'out_source' => $str('out_source'), 'bucket' => $str('bucket') !== '' ? $str('bucket') : 'day',
+        'in_source' => $str('in_source'), 'out_source' => $str('out_source'), 'view' => $str('view'), 'bucket' => $str('bucket') !== '' ? $str('bucket') : 'day',
         'sort' => $str('sort'), 'dir' => $str('dir') !== '' ? $str('dir') : 'desc', 'page' => (int) ($query['page'] ?? 1), 'per_page' => (int) ($query['per_page'] ?? 25),
     ];
+}
+
+/**
+ * Reports v3: ONE delivery path for every report export. The same sheets feed both outputs — the xlsx download (named Laporan_<Report>_<period>.xlsx, typed cells) and, with
+ * format=json, the tables the print view ("Cetak") renders — so Excel, print and the screen filters can never disagree. Read-only.
+ */
+function inv_rv3_deliver(array $query, string $title, string $fileBase, string $period, array $meta, array $sheets): void
+{
+    $file = \App\Services\ReportExportService::fileName($fileBase, $period);
+    if (($query['format'] ?? '') === 'json') {
+        $pairs = [];
+        foreach ($meta as $k => $v) {
+            $pairs[] = [(string) $k, (string) $v];
+        }
+        inv_ok(\App\Services\ReportExportService::toPayload($title, $file, $pairs, $sheets), 'OK');
+    }
+    \App\Services\ReportExportService::streamXlsx($sheets, $file);
+    exit;
 }
 
 /**
@@ -1597,25 +1616,18 @@ $routes = [
         try {
             $name = static fn (string $t, string $c, ?int $id) => $id === null ? 'Semua' : (string) ($GLOBALS['pdo']->query("SELECT {$c} FROM {$t} WHERE id = " . (int) $id)->fetchColumn() ?: $id);
             $meta = [
-                'Laporan' => 'Laporan Nilai Stok & HPP', 'Periode' => $f['start_date'] . ' s/d ' . $f['end_date'], 'Gudang' => $name('warehouses', 'name', $f['warehouse_id']),
+                'Laporan' => 'Laporan Nilai HPP', 'Metode Penilaian' => $f['method'] === 'average' ? 'AVERAGE' : 'FIFO', 'Tampilan' => $f['view'] === 'day' ? 'Per Hari' : 'Per Barang',
+                'Periode' => $f['start_date'] . ' s/d ' . $f['end_date'], 'Gudang' => $name('warehouses', 'name', $f['warehouse_id']),
                 'Kategori' => $name('categories', 'name', $f['category_id']), 'Pencarian barang' => (string) ($f['q'] ?? ''), 'Dibuat' => date('Y-m-d H:i:s'), 'Dibuat oleh' => (string) $user['username'],
-                'Catatan' => 'Metode operasional sistem: FIFO. Average = moving weighted average analitis (read-only, tidak mengubah posting / HPP tersimpan).',
+                'Catatan' => $f['method'] === 'average' ? 'Analytical Average — tidak mengubah FIFO operasional (moving weighted average, read-only).' : 'Metode operasional sistem: FIFO (layer stok nyata). Average hanya pembanding analitis.',
             ];
             $sheets = \App\Services\InventoryValuationService::exportWorkbook($pdo, $f, $meta);
         } catch (\App\Services\ValidationException $e) {
             inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
         }
-        $path = sys_get_temp_dir() . '/val_' . bin2hex(random_bytes(6)) . '.xlsx';
-        ExcelWriterService::write($path, $sheets);
-        try {
-            header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-            header('Content-Disposition: attachment; filename="nilai-stok-hpp-' . strtolower($f['method']) . '-' . date('Ymd_His') . '.xlsx"');
-            header('Content-Length: ' . filesize($path));
-            readfile($path);
-        } finally {
-            @unlink($path);
-        }
-        exit;
+        $methodLabel = $f['method'] === 'average' ? 'Average' : 'FIFO';
+        inv_rv3_deliver($query, 'Laporan Nilai HPP', 'Laporan_Nilai_HPP_' . $methodLabel . '_' . ($f['view'] === 'day' ? 'Per_Hari' : 'Per_Barang'),
+            \App\Services\ReportExportService::periodLabel($f['start_date'], $f['end_date']), $meta, $sheets);
     },
 
     'GET /reports/inventory-hpp/summary' => function () use ($pdo, $query) {
@@ -2101,17 +2113,7 @@ $routes = [
                     'Data' => $f['historical'] === '1' ? 'Historis saja' : ($f['historical'] === 'all' ? 'Live + Historis' : 'Live saja'), 'Dibuat' => date('Y-m-d H:i:s'), 'Dibuat oleh' => (string) $user['username'],
                     'Catatan' => 'Nilai invoice (pembayaran), bukan nilai persediaan FIFO. Total hanya invoice POSTED; invoice VOID dilaporkan terpisah.',
                 ];
-                $path = sys_get_temp_dir() . '/pur_' . bin2hex(random_bytes(6)) . '.xlsx';
-                \App\Services\ExcelWriterService::write($path, $svc::exportWorkbook($pdo, $f, $meta));
-                try {
-                    header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-                    header('Content-Disposition: attachment; filename="laporan-pembelian-' . date('Ymd_His') . '.xlsx"');
-                    header('Content-Length: ' . filesize($path));
-                    readfile($path);
-                } finally {
-                    @unlink($path);
-                }
-                exit;
+                inv_rv3_deliver($query, 'Laporan Pembelian', 'Laporan_Pembelian', \App\Services\ReportExportService::periodLabel($f['start_date'], $f['end_date']), $meta, $svc::exportWorkbook($pdo, $f, $meta));
             }
             if (!in_array($kind, ['invoices', 'items', 'lines'], true)) {
                 inv_error(422, 'VALIDATION_ERROR', 'unknown export kind');
@@ -2335,20 +2337,20 @@ $routes = [
         }
     },
 
-    // Excel of the SELECTED tab with the same filters as the screen (export totals == screen totals by construction).
+    // Excel (or, with format=json, the print tables) of the SELECTED tab with the same filters as the screen; tab=all = one workbook with all three tabs (export totals == screen totals by construction).
     'GET /reports/io/export' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
         $f = inv_io_filters($user, $query);
         $tab = (string) ($query['tab'] ?? 'in');
-        if (!in_array($tab, ['in', 'out', 'transfer'], true)) {
-            inv_error(422, 'VALIDATION_ERROR', 'tab must be in, out or transfer');
+        if (!in_array($tab, ['in', 'out', 'transfer', 'all'], true)) {
+            inv_error(422, 'VALIDATION_ERROR', 'tab must be in, out, transfer or all');
         }
         try {
             $name = static fn (string $t, string $c, ?int $id) => $id === null ? 'Semua' : (string) ($GLOBALS['pdo']->query("SELECT {$c} FROM {$t} WHERE id = " . (int) $id)->fetchColumn() ?: $id);
-            $titles = ['in' => 'Barang Masuk (IN)', 'out' => 'Barang Keluar (OUT)', 'transfer' => 'Transfer Antar Gudang'];
+            $titles = ['in' => 'Barang Masuk (IN)', 'out' => 'Barang Keluar (OUT)', 'transfer' => 'Transfer Antar Gudang', 'all' => 'Semua Tab (Barang Masuk, Barang Keluar, Transfer)'];
             $meta = [
-                'Laporan' => 'Laporan IN / OUT — ' . $titles[$tab], 'Periode' => $f['start_date'] . ' s/d ' . $f['end_date'], 'Gudang' => $name('warehouses', 'name', $f['warehouse_id']),
+                'Laporan' => 'Laporan IN / OUT', 'Tab' => $titles[$tab], 'Periode' => $f['start_date'] . ' s/d ' . $f['end_date'], 'Gudang' => $name('warehouses', 'name', $f['warehouse_id']),
                 'Kategori' => $name('categories', 'name', $f['category_id']), 'Pencarian barang' => (string) ($f['q'] ?? ''), 'Pencarian tabel' => $f['gq'],
             ];
             if ($tab === 'in') {
@@ -2356,27 +2358,20 @@ $routes = [
             } elseif ($tab === 'out') {
                 $meta += ['Bakery Tujuan' => $name('bakery_destinations', 'name', $f['bakery_destination_id']), 'Divisi' => $name('divisions', 'name', $f['division_id']),
                     'Jenis OUT' => $f['out_source'] ?: 'Semua', 'Status' => $f['status'] ?: 'Semua'];
-            } else {
+            } elseif ($tab === 'transfer') {
                 $meta += ['Gudang Asal' => $name('warehouses', 'name', $f['from_warehouse_id']), 'Gudang Tujuan' => $name('warehouses', 'name', $f['to_warehouse_id']), 'Status' => $f['status'] ?: 'Semua'];
+            } else {
+                $meta += ['Catatan filter' => 'Filter khusus tab (supplier, bakery, divisi, status, jenis, gudang asal/tujuan) hanya menyempit tab miliknya; filter umum berlaku di semua tab.'];
             }
             $meta += ['Dibuat' => date('Y-m-d H:i:s'), 'Dibuat oleh' => (string) $user['username'],
                 'Catatan' => 'Hanya data nyata dari sistem; baris VOID/CANCELLED/REVERSED ditampilkan tetapi tidak dihitung pada total. Nilai tidak diketahui ditulis "—", bukan 0.'];
             $svc = \App\Services\InOutReportService::class;
-            $sheets = match ($tab) { 'in' => $svc::inExport($pdo, $f, $meta), 'out' => $svc::outExport($pdo, $f, $meta), default => $svc::trfExport($pdo, $f, $meta) };
+            $sheets = match ($tab) { 'in' => $svc::inExport($pdo, $f, $meta), 'out' => $svc::outExport($pdo, $f, $meta), 'transfer' => $svc::trfExport($pdo, $f, $meta), default => $svc::exportAll($pdo, $f, $meta) };
         } catch (\App\Services\ValidationException $e) {
             inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
         }
-        $path = sys_get_temp_dir() . '/io_' . bin2hex(random_bytes(6)) . '.xlsx';
-        ExcelWriterService::write($path, $sheets);
-        try {
-            header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-            header('Content-Disposition: attachment; filename="laporan-' . ['in' => 'barang-masuk', 'out' => 'barang-keluar', 'transfer' => 'transfer'][$tab] . '-' . date('Ymd_His') . '.xlsx"');
-            header('Content-Length: ' . filesize($path));
-            readfile($path);
-        } finally {
-            @unlink($path);
-        }
-        exit;
+        $base = ['in' => 'Laporan_IN_OUT_Barang_Masuk', 'out' => 'Laporan_IN_OUT_Barang_Keluar', 'transfer' => 'Laporan_IN_OUT_Transfer', 'all' => 'Laporan_IN_OUT_Semua_Tab'][$tab];
+        inv_rv3_deliver($query, 'Laporan IN / OUT — ' . $titles[$tab], $base, \App\Services\ReportExportService::periodLabel($f['start_date'], $f['end_date']), $meta, $sheets);
     },
 
     // Report 12 — Distribusi per Bakery: qualifying OUT rows with a real

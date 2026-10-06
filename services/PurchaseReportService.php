@@ -749,8 +749,15 @@ final class PurchaseReportService
     {
         return [
             'headers' => array_map(static fn (array $c) => $c[1], $cols),
+            'types' => array_map(static fn (array $c) => self::exportType($c[2]), $cols),
             'rows' => array_map(static fn (array $r) => array_map(static fn (array $c) => self::cell($c[2], $r[$c[0]] ?? null), $cols), $rows),
         ];
+    }
+
+    /** catalogue type -> export column type (typed Excel cells + print formatting) */
+    private static function exportType(string $t): string
+    {
+        return match ($t) { 'date' => 'date', 'ts' => 'ts', 'money' => 'money', 'qty' => 'qty', 'num' => 'qty', 'int' => 'int', 'pct', 'rate' => 'pct', default => 'text' };
     }
 
     /** The visible GRAND TOTAL row: money columns carry the footer sum, the first column the label, everything else blank. */

@@ -130,9 +130,14 @@ final class InventoryValuationService
         $cmp = self::comparison($c);
         $kpi = self::kpis($c);
         $sheets = [];
-        // ---- Ringkasan
+        $view = (string) ($c['f']['view'] ?? 'item');
+        // ---- Ringkasan (the active mode is stated on the first rows: Metode Penilaian / Tampilan; Average is labelled analytical)
         $sum = [];
-        foreach (array_merge(['Metode' => $label, 'Metode operasional sistem' => 'FIFO'], $meta) as $k => $v) {
+        $modeRows = ['Metode Penilaian' => $label, 'Tampilan' => $view === 'day' ? 'Per Hari' : 'Per Barang', 'Metode operasional sistem' => 'FIFO'];
+        if ($m === 'average') {
+            $modeRows['Catatan metode'] = 'Analytical Average — tidak mengubah FIFO operasional';
+        }
+        foreach (array_merge($modeRows, $meta) as $k => $v) {
             $sum[] = [$k, (string) $v];
         }
         $sum[] = ['', ''];
@@ -148,15 +153,22 @@ final class InventoryValuationService
             $sum[] = [$r[0], self::cellNum($r[1])];
         }
         $sheets[$m === 'fifo' ? 'Ringkasan FIFO' : 'Ringkasan Average'] = ['headers' => ['Keterangan', 'Nilai'], 'rows' => $sum];
-        // ---- per item
-        $sheets[$m === 'fifo' ? 'Nilai Stok per Barang' : 'Average per Barang'] = self::itemSheet($rows, $m) + ['freeze_header' => true, 'autofilter' => true];
-        // ---- history
+        // ---- the active view first ("Per Hari" or "Per Barang"), the other view + history + layers after it
+        $itemName = $m === 'fifo' ? 'Nilai Stok per Barang' : 'Average per Barang';
+        $dayName = $m === 'fifo' ? 'Nilai Stok Per Hari FIFO' : 'Average Per Hari';
+        $itemSheet = self::itemSheet($rows, $m) + ['freeze_header' => true, 'autofilter' => true];
+        $daySheet = self::daySheet($c, $m) + ['freeze_header' => true, 'autofilter' => true];
+        if ($view === 'day') {
+            $sheets[$dayName] = $daySheet;
+            $sheets[$itemName] = $itemSheet;
+        } else {
+            $sheets[$itemName] = $itemSheet;
+            $sheets[$dayName] = $daySheet;
+        }
         $sheets[$m === 'fifo' ? 'Riwayat FIFO' : 'Riwayat Average'] = self::historySheet($c, $m) + ['freeze_header' => true, 'autofilter' => true];
         if ($m === 'fifo') {
             $sheets['Layer Aktif'] = self::layerSheet($c, true) + ['freeze_header' => true, 'autofilter' => true];
             $sheets['Layer Terpakai'] = self::layerSheet($c, false) + ['freeze_header' => true, 'autofilter' => true];
-        } else {
-            $sheets['Per Hari'] = self::daySheet($c, 'average') + ['freeze_header' => true];
         }
         $rec = self::reconciliation($c);
         $rr = [];
@@ -1409,8 +1421,16 @@ final class InventoryValuationService
     {
         $rows = [];
         foreach (self::dailyRows($ctx) as $r) {
+            if ($m === 'fifo') {
+                $a = $r['fifo'];
+                $rows[] = [$r['date'], $a['opening'], $a['cost_in'], $a['hpp'], $a['transfer'], $a['adjustment'], $a['closing'], $a['layers'], $a['layer_value'], $a['variance']];
+                continue;
+            }
             $a = $r['avg'];
             $rows[] = [$r['date'], $a['opening'], $a['cost_in'], $a['hpp'], $a['transfer'], $a['adjustment'], $a['closing'], $a['eod_cost'] ?? '—'];
+        }
+        if ($m === 'fifo') {
+            return ['headers' => ['Tanggal', 'Nilai Stok Awal FIFO', 'Nilai Masuk', 'HPP Keluar FIFO', 'Transfer Bersih', 'Adjustment & Koreksi', 'Nilai Stok Akhir FIFO', 'Jumlah Layer Aktif', 'Nilai Layer Aktif', 'Variance (ledger − layer)'], 'rows' => $rows];
         }
         return ['headers' => ['Tanggal', 'Nilai Stok Awal Average', 'Nilai Masuk', 'HPP Keluar Average', 'Transfer Bersih', 'Adjustment & Koreksi', 'Nilai Stok Akhir Average', 'Average Cost End-of-Day'], 'rows' => $rows];
     }

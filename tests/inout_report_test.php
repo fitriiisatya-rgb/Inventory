@@ -284,6 +284,38 @@ check('S the workbooks are valid xlsx files with 3 / 4 / 4 sheets', $xlsxOk($xin
 $fxls = S::inExport($pdo, $base + ['gq' => 'INV-A'], $meta);
 check('S export honours the table search + filters (INV-A only)', count($fxls['Transaksi IN']['rows']) === 1 + 1);
 
+// ================================================================ Z. per-line view + all-tabs export + typed workbook
+echo "\n== Z. per-line view / all tabs ==\n";
+$li = S::inList($pdo, $base + ['view' => 'lines']);
+$lo = S::outList($pdo, $base + ['view' => 'lines']);
+$lt = S::trfList($pdo, $base + ['view' => 'lines']);
+check('Z IN per-line view: 8 lines (7 counted + the voided one), footer totals = the transaction table (Grand Total 146.025,5, PPN, ongkir)', $li['view'] === 'lines' && $li['pagination']['total'] === 8 && near($li['footer']['totals']['total'], $n['total']) && near($li['footer']['totals']['ppn'], 9530) && near($li['footer']['totals']['freight'], 21000) && near($li['footer']['totals']['dpp'], 112000));
+$l0 = $li['rows'][0];
+check('Z IN line columns: SKU, Barang, Satuan, Qty, Harga Beli, DPP, PPN, Diskon, Alokasi Ongkir, Total, Final Cost; each row knows its invoice (tx_ids)', isset($l0['sku'], $l0['unit'], $l0['qty'], $l0['price'], $l0['dpp'], $l0['tx_ids']) && count($li['columns']) === 17 && in_array('Final Cost (FIFO)', array_column($li['columns'], 'label'), true));
+check('Z OUT per-line view: 5 counted lines + the reversed one; HPP / Nilai Jual / Ongkir / Margin footers = KPI', $lo['pagination']['total'] === 6 && near($lo['footer']['totals']['hpp'], $no['hpp']) && near($lo['footer']['totals']['sell'], $no['sell']) && near($lo['footer']['totals']['shipping'], $no['shipping']) && near($lo['footer']['totals']['margin'], $no['margin']));
+$legacyLine = rowBy($lo['rows'], 'invoice_number', '—');
+check('Z OUT legacy line: Harga Jual / Nilai Jual / Margin are null (unknown, not 0) while HPP is real', $legacyLine !== null && $legacyLine['sell'] === null && $legacyLine['sell_price'] === null && $legacyLine['margin'] === null && near($legacyLine['hpp'], 2000));
+check('Z Transfer per-line view: 6 item lines (T1 x2, T2, T3, T4, T5), footer value = KPI (active only)', $lt['pagination']['total'] === 6 && near($lt['footer']['totals']['value'], $nt['value']));
+check('Z per-line view honours the item filter and the table search (X only → 3 IN lines: A, C + ... ; search "legacy" → 1)', S::inList($pdo, $base + ['view' => 'lines', 'q' => $fx['items']['X']['sku']])['pagination']['total'] === 2 && S::inList($pdo, $base + ['view' => 'lines', 'gq' => 'po-legacy'])['pagination']['total'] === 1);
+$xall = S::exportAll($pdo, $base + ['supplier_id' => $fx['sup']['2'], 'status' => 'PENDING'], ['Laporan' => 'x']);
+check('Z all-tabs workbook: Ringkasan, Barang Masuk, Barang Keluar, Transfer + 5 detail sheets', array_keys($xall) === ['Ringkasan', 'Barang Masuk', 'Barang Keluar', 'Transfer', 'Rincian Barang Masuk', 'Rincian Barang Keluar', 'FIFO Allocation', 'Rincian Transfer', 'Layer Cost Transfer']);
+$inRows = array_filter($xall['Barang Masuk']['rows'], static fn ($r) => !str_starts_with((string) $r[0], 'TOTAL'));
+$trRows = array_filter($xall['Transfer']['rows'], static fn ($r) => !str_starts_with((string) $r[0], 'TOTAL'));
+check('Z a tab-specific filter narrows only its own tab: supplier S2 → 1 IN row; status PENDING is not a valid IN/OUT status (ignored there) but narrows Transfer to T2; OUT keeps all 4 documents', count($inRows) === 1 && count($trRows) === 1 && count(array_filter($xall['Barang Keluar']['rows'], static fn ($r) => !str_starts_with((string) $r[0], 'TOTAL'))) === 4);
+$xa = S::exportAll($pdo, $base, ['Laporan' => 'x']);
+$sumA = array_column($xa['Ringkasan']['rows'], 1, 0);
+check('Z all-tabs summary carries every tab: Total Nilai Masuk, Total HPP Keluar, Total Transfer (aktif) — equal to the KPI cards', near((float) ($sumA['Total Nilai Masuk'] ?? -1), $n['total']) && near((float) ($sumA['Total HPP Keluar'] ?? -1), $no['hpp']) && (int) ($sumA['Total Transfer (aktif)'] ?? -1) === 3);
+$types = $xin['Transaksi IN']['types'];
+check('Z every transaction sheet carries column types (date / money / int / qty / text) for the typed Excel cells + print formatting', $types[0] === 'date' && in_array('money', $types, true) && in_array('int', $types, true) && count($types) === count($xin['Transaksi IN']['headers']));
+$tmp = sys_get_temp_dir() . '/io_typed_' . bin2hex(random_bytes(3)) . '.xlsx';
+\App\Services\ReportExportService::write($tmp, $xa);
+$zz = new ZipArchive();
+$zz->open($tmp);
+$sh2 = (string) $zz->getFromName('xl/worksheets/sheet2.xml');
+$zz->close();
+@unlink($tmp);
+check('Z the workbook has real Excel dates (serial numbers) and numeric money cells in Barang Masuk', preg_match('#<c r="A2" s="\d+"><v>4\d{4}</v></c>#', $sh2) === 1 && preg_match('#<c r="N2" s="\d+"><v>[\d.]+</v></c>#', $sh2) === 1);
+
 // ================================================================ X. unknown / empty / validation / Y. reconciliation
 echo "\n== X / Y ==\n";
 $empty = ['start_date' => '2025-01-01', 'end_date' => '2025-01-31'];
@@ -393,6 +425,17 @@ try {
         $x = http('GET', "{$baseUrl}/reports/io/export?{$qs}&tab={$tab}", null, $viewer['jar'], null, true);
         check("S export tab={$tab} over HTTP: 200 xlsx, a valid zip with {$sheets} sheets", $x['status'] === 200 && stripos($x['headers'], 'spreadsheetml') !== false && (function () use ($x, $sheets) { $f = tempnam(sys_get_temp_dir(), 'x') . '.xlsx'; file_put_contents($f, $x['raw']); $z = new ZipArchive(); $ok = $z->open($f) === true && $z->locateName("xl/worksheets/sheet{$sheets}.xml") !== false && $z->locateName('xl/worksheets/sheet' . ($sheets + 1) . '.xml') === false; $z->close(); @unlink($f); return $ok; })());
     }
+    $r = http('GET', "{$baseUrl}/reports/io/list?{$qs}&tab=in&view=lines", null, $viewer['jar']);
+    check('Z HTTP per-line view: tab=in&view=lines → 8 lines with the line columns', $r['status'] === 200 && ($r['body']['data']['pagination']['total'] ?? 0) === 8 && ($r['body']['data']['view'] ?? '') === 'lines');
+    $x = http('GET', "{$baseUrl}/reports/io/export?{$qs}&tab=in", null, $viewer['jar'], null, true);
+    check('Z HTTP export file name: Laporan_IN_OUT_Barang_Masuk_2026-09.xlsx (type + period)', $x['status'] === 200 && str_contains($x['headers'], 'filename="Laporan_IN_OUT_Barang_Masuk_2026-09.xlsx"'), '');
+    $x = http('GET', "{$baseUrl}/reports/io/export?{$qs}&tab=all", null, $viewer['jar'], null, true);
+    check('Z HTTP export tab=all: Laporan_IN_OUT_Semua_Tab_2026-09.xlsx, a valid zip with 9 sheets', $x['status'] === 200 && str_contains($x['headers'], 'Laporan_IN_OUT_Semua_Tab_2026-09.xlsx') && (function () use ($x) { $f = tempnam(sys_get_temp_dir(), 'x') . '.xlsx'; file_put_contents($f, $x['raw']); $z = new ZipArchive(); $ok = $z->open($f) === true && $z->locateName('xl/worksheets/sheet9.xml') !== false && $z->locateName('xl/worksheets/sheet10.xml') === false; $z->close(); @unlink($f); return $ok; })());
+    $r = http('GET', "{$baseUrl}/reports/io/export?{$qs}&tab=out&format=json&bakery_destination_id={$fx['bakery']['2']}", null, $viewer['jar']);
+    $pj = $r['body']['data'] ?? [];
+    check('Z HTTP format=json (the print tables): title, file name, meta with the filters, sheets + types — bakery filter reflected (only O2)', $r['status'] === 200 && ($pj['file_name'] ?? '') === 'Laporan_IN_OUT_Barang_Keluar_2026-09.xlsx' && str_contains(json_encode($pj['meta'] ?? []), 'IO Bakery Dua')
+        && ($pj['sheets'][1]['name'] ?? '') === 'Transaksi OUT' && count($pj['sheets'][1]['rows'] ?? []) === 2 && count($pj['sheets'][1]['types'] ?? []) === count($pj['sheets'][1]['headers'] ?? [1]));
+    check('Z HTTP export tab=zzz → 422', http('GET', "{$baseUrl}/reports/io/export?{$qs}&tab=zzz", null, $viewer['jar'])['status'] === 422);
     check('existing routes unaffected: GET /reports/in-out and /reports/transfer still answer', http('GET', "{$baseUrl}/reports/in-out?date_from=2026-09-01&date_to=2026-09-30", null, $adm['jar'])['status'] === 200 && http('GET', "{$baseUrl}/reports/transfer?date_from=2026-09-01&date_to=2026-09-30", null, $adm['jar'])['status'] === 200);
     $beforeHttp = snap($pdo);
     $writeOk = true;
