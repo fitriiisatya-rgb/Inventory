@@ -326,6 +326,7 @@ function rv3_mkdir(string $d): void
 
 function rv3_overlay(string $app, string $payloadDir, string $dest): void
 {
+    $app = realpath($app) ?: $app;                  // symlinks into the application must be absolute
     rv3_mkdir("{$dest}/services");
     foreach (glob("{$app}/services/*.php") ?: [] as $f) {
         copy($f, "{$dest}/services/" . basename($f));
@@ -333,8 +334,9 @@ function rv3_overlay(string $app, string $payloadDir, string $dest): void
     foreach (glob("{$payloadDir}/services/*.php") ?: [] as $f) {
         copy($f, "{$dest}/services/" . basename($f));
     }
-    foreach (['config', 'vendor'] as $d) {
-        if (is_dir("{$app}/{$d}")) {
+    // every other top-level directory of the application (config, storage with the evidence photos, vendor, …) is linked in, so code that resolves paths relative to services/ sees the real ones
+    foreach (scandir($app) ?: [] as $d) {
+        if ($d !== '.' && $d !== '..' && $d !== 'services' && is_dir("{$app}/{$d}") && !is_link("{$app}/{$d}") || ($d !== 'services' && is_link("{$app}/{$d}"))) {
             @symlink("{$app}/{$d}", "{$dest}/{$d}");
         }
     }
