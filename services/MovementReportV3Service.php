@@ -249,6 +249,44 @@ final class MovementReportV3Service
         return $out;
     }
 
+    /**
+     * Server-side sorted + paginated per-item table (the screen never receives more than one page). Totals cover the WHOLE filtered set, values only
+     * (quantities of different units are never added).
+     * @return array{rows:list<array<string,mixed>>,pagination:array<string,int>,totals:array<string,float|int>}
+     */
+    public static function itemsPage(PDO $pdo, string $start, string $end, ?int $wh, ?int $cat, ?string $q, ?int $item, string $sort = 'sku', string $dir = 'asc', int $page = 1, int $perPage = 25, ?string $move = null): array
+    {
+        $all = self::perItem($pdo, $start, $end, $wh, $cat, $q, $item);
+        if ($move !== null && $move !== '') {
+            $key = ['in' => 'in_value', 'out' => 'out_value', 'transfer' => 'tin_value', 'adjustment' => 'adjustment_value'][$move] ?? null;
+            if ($key !== null) {
+                $all = array_values(array_filter($all, static fn ($r) => abs((float) $r[$key]) > self::EPS || ($move === 'transfer' && abs((float) $r['tout_value']) > self::EPS)));
+            }
+        }
+        $sumKeys = ['opening_value', 'in_value', 'out_value', 'tin_value', 'tout_value', 'adjustment_value', 'closing_value'];
+        $totals = ['sku_count' => count($all), 'tx_count' => 0];
+        foreach ($sumKeys as $k) {
+            $totals[$k] = 0.0;
+        }
+        foreach ($all as $r) {
+            foreach ($sumKeys as $k) {
+                $totals[$k] += (float) $r[$k];
+            }
+            $totals['tx_count'] += (int) $r['tx_count'];
+        }
+        foreach ($sumKeys as $k) {
+            $totals[$k] = round($totals[$k], 4);
+        }
+        $allowed = ['sku', 'name', 'category', 'unit', 'opening_qty', 'opening_value', 'in_qty', 'in_value', 'out_qty', 'out_value', 'tin_qty', 'tin_value', 'tout_qty', 'tout_value', 'adjustment_qty', 'adjustment_value', 'closing_qty', 'closing_value', 'tx_count'];
+        $sort = in_array($sort, $allowed, true) ? $sort : 'sku';
+        $mul = strtolower($dir) === 'desc' ? -1 : 1;
+        usort($all, static fn ($a, $b) => ($mul * (is_numeric($a[$sort]) ? $a[$sort] <=> $b[$sort] : strcmp((string) $a[$sort], (string) $b[$sort]))) ?: strcmp($a['sku'], $b['sku']));
+        $perPage = max(1, min(200, $perPage));
+        $pages = max(1, (int) ceil(count($all) / $perPage));
+        $page = max(1, min($page, $pages));
+        return ['rows' => array_slice($all, ($page - 1) * $perPage, $perPage), 'pagination' => ['page' => $page, 'per_page' => $perPage, 'total' => count($all), 'total_pages' => $pages], 'totals' => $totals];
+    }
+
     // ======================================================================
     // workbook
     // ======================================================================

@@ -163,6 +163,8 @@ table.dense1 th, table.dense1 td { font-size: 7.5pt; padding: 2px 3px; } table.d
      * pick = [{ sheet:'Harian', columns?:['Tanggal',…] (labels to keep, in this order), title?, note?, maxRows?, total?:true }]
      * The sheet's own TOTAL row (first cell "TOTAL…") is lifted into the table footer.
      */
+    /** The server sends meta as an object {label: value}; the print spec wants [[label, value]]. */
+    const metaPairs = (m) => (Array.isArray(m) ? m : Object.entries(m || {}));
     function specFromPayload(payload, pick, extra) {
         const sections = [];
         (pick || []).forEach((p) => {
@@ -179,7 +181,7 @@ table.dense1 th, table.dense1 td { font-size: 7.5pt; padding: 2px 3px; } table.d
             }
             sections.push({ title: p.title || sh.name, note: p.note, columns: cols, rows, totalRow, maxRows: p.maxRows });
         });
-        return { title: payload.title, meta: payload.meta || [], sections, ...(extra || {}) };
+        return { title: payload.title, meta: metaPairs(payload.meta), sections, ...(extra || {}) };
     }
 
     // ------------------------------------------------------------------ the two header buttons
@@ -237,5 +239,5 @@ table.dense1 th, table.dense1 td { font-size: 7.5pt; padding: 2px 3px; } table.d
         return wrap;
     }
 
-    return { apiGet, qsOf, download, printDocument, buildPrintHtml, specFromPayload, fmtCell, actions, get lastPrintHtml() { return lastPrintHtml; } };
+    return { apiGet, qsOf, download, printDocument, buildPrintHtml, specFromPayload, metaPairs, fmtCell, actions, get lastPrintHtml() { return lastPrintHtml; } };
 })();

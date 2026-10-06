@@ -101,6 +101,11 @@ final class StockOpnameAuditReportService
             'pagination' => ['page' => $page, 'per_page' => $perPage, 'total' => count($ids), 'total_pages' => max(1, (int) ceil(count($ids) / $perPage))],
             'truncated' => $truncated,
             'session_ids' => $ids,
+            // compact picker list over ALL matching sessions (not only the current page) — presentation helper of the Rincian Item context selector
+            'options' => array_map(static fn (array $b) => [
+                'id' => $b['session_row']['id'], 'session_number' => $b['session_row']['session_number'], 'session_date' => $b['session_row']['session_date'],
+                'warehouse' => $b['session_row']['warehouse'], 'status' => $b['session_row']['status'], 'total_items' => $b['session_row']['total_items'],
+            ], $built),
             'statuses' => ['OPEN' => 'Open / Counting', 'FINALIZED' => 'Finalized', 'POSTED' => 'Posted', 'CANCELLED' => 'Cancelled'],
         ];
     }
@@ -156,6 +161,8 @@ final class StockOpnameAuditReportService
             'footer' => self::itemFooter($rows),
             'pagination' => ['page' => $page, 'per_page' => $perPage, 'total' => count($rows), 'total_pages' => max(1, (int) ceil(count($rows) / $perPage))],
             'session_ids' => array_values($sessionIds),
+            // the session summary rows of the covered sessions (context header / print of the selected session) — already built + cached for the item rows above
+            'sessions' => array_map(fn (int $id) => self::build($pdo, $id)['session_row'], array_values(array_map('intval', $sessionIds))),
         ];
     }
 
@@ -536,6 +543,9 @@ final class StockOpnameAuditReportService
         ksort($byUnit);
         $varText = $byUnit ? implode(' · ', array_map(static fn ($u, $q) => sprintf('%s %s%s', $u, $q > 0 ? '+' : '', rtrim(rtrim(number_format($q, 4, '.', ''), '0'), '.')), array_keys($byUnit), $byUnit)) : null;
 
+        $adjPos = array_sum(array_filter(array_column($adjustments, 'value'), static fn ($v) => $v > 0));
+        $adjNeg = array_sum(array_filter(array_column($adjustments, 'value'), static fn ($v) => $v < 0));
+        $evidenceCount = array_sum(array_map(static fn (array $i) => count($i['evidence']), $items));
         $adjValue = array_sum(array_column($adjustments, 'value'));   // RAW precision: Σ(qty × unit_cost_base) of the real stock_adjustments, never rounded per row
         $status = (string) $s['status'];
         if ($status === 'POSTED') {
@@ -574,6 +584,7 @@ final class StockOpnameAuditReportService
             'pending' => $bucket['PENDING'], 'excluded' => $bucket['EXCLUDED'],
             'variance_by_unit' => $varText, 'variance_by_unit_raw' => $byUnit, 'variance_value' => $jejak['kpi']['selisih_nominal']['value'],
             'adj_status' => $adjStatus, 'adj_count' => count($adjustments), 'adj_value' => $adjustments ? $adjValue : null,
+            'adj_pos' => $adjustments ? $adjPos : null, 'adj_neg' => $adjustments ? $adjNeg : null, 'evidence_count' => $isV1 ? $evidenceCount : null,   // legacy sessions keep no evidence: unknown, not 0
             'created_by' => $s['created_by'], 'created_at' => $s['created_at'],
             'cond_flagged' => $condFlagged,
             'data_quality' => array_merge($jejak['data_quality']['notes'], $condFlagged > 0 ? [$condFlagged . ' item: kondisi (Rusak / Expired / Deadstock) berasal dari snapshot final posting (stock_opname_lines.final_*) dan tidak ada temuan kondisi non-VOID yang setara — ditampilkan apa adanya (tidak dihapus / dikosongkan / ditebak); tab "Riwayat Hitung" memperlihatkan temuan yang memang ada.'] : []),
@@ -587,7 +598,7 @@ final class StockOpnameAuditReportService
             'variance_value' => 0.0, 'variance_positive' => 0.0, 'variance_negative' => 0.0, 'adjustment_value' => 0.0, 'adjustment_count' => 0];
         $cond = [];
         foreach (['good', 'expired', 'rusak', 'deadstock'] as $c) {
-            $cond[$c] = ['sku' => 0, 'by_unit' => []];
+            $cond[$c] = ['sku' => 0, 'by_unit' => [], 'unknown' => 0];   // unknown = item rows on which this condition was never recorded (null, shown "—")
         }
         foreach ($built as $b) {
             $r = $b['session_row'];
@@ -605,6 +616,9 @@ final class StockOpnameAuditReportService
                     $k[$it['variance_value'] < 0 ? 'variance_negative' : 'variance_positive'] += $it['variance_value'];
                 }
                 foreach (['good' => 'good_qty', 'expired' => 'expired_qty', 'rusak' => 'rusak_qty', 'deadstock' => 'deadstock_qty'] as $c => $key) {
+                    if ($it[$key] === null) {
+                        $cond[$c]['unknown']++;
+                    }
                     if ($it[$key] !== null && $it[$key] > self::EPS) {
                         $cond[$c]['sku']++;
                         $cond[$c]['by_unit'][$it['unit']] = round(($cond[$c]['by_unit'][$it['unit']] ?? 0.0) + $it[$key], 6);
@@ -650,10 +664,14 @@ final class StockOpnameAuditReportService
         return [
             'headers' => array_map(static fn (array $c) => $c[1], $cols),
             'rows' => array_map(static fn (array $r) => array_map(static fn (array $c) => self::cell($c[2], $r[$c[0]] ?? null), $cols), $rows),
+            // workbook cell types (ReportExportService): numbers stay numbers (Rupiah / qty / count formats), ISO dates / datetimes become real Excel dates
+            'types' => array_map(static fn (array $c) => match ($c[2]) {
+                'date' => 'date', 'ts' => 'ts', 'int' => 'int', 'qty', 'variance' => 'qty', 'money', 'variance_money' => 'money', default => 'text',
+            }, $cols),
         ];
     }
 
-    /** @return array{headers:list<string>,rows:list<list<mixed>>} one CSV / one sheet */
+    /** @return array{headers:list<string>,rows:list<list<mixed>>,types:list<string>} one CSV / one sheet */
     public static function exportTable(PDO $pdo, string $kind, array $sessionIds, array $f): array
     {
         $sessions = array_map(fn (int $id) => self::build($pdo, $id)['session_row'], $sessionIds);

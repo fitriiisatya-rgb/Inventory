@@ -94,9 +94,9 @@
         transfer: 'Transfer', 'distribusi-do': 'Delivery Order', 'distribusi-invoice': 'Invoice', 'distribusi-pricing': 'Pricing Distribusi', 'distribusi-laporan': 'Laporan Distribusi', produksi: 'Produksi', opname: 'Proses Stock Opname', 'opname-laporan': 'Laporan Stock Opname', import: 'Import',
         audit: 'Audit Log', closing: 'Tutup Buku', 'laporan-hpp': 'Laporan Nilai Stok & HPP',
         'laporan-ringkasan': 'Ringkasan Inventory',
-        'laporan-pergerakan': 'Pergerakan Stok Harian', 'laporan-rekonsiliasi': 'Rekonsiliasi Arus Stok',
+        'laporan-pergerakan': 'Laporan Pergerakan Stok', 'laporan-rekonsiliasi': 'Rekonsiliasi Arus Stok',
         'laporan-stok': 'Laporan Stok', 'laporan-pembelian': 'Laporan Pembelian', 'laporan-inout': 'Laporan IN / OUT',
-        'laporan-transfer': 'Laporan Transfer', 'laporan-opname': 'Laporan P1/P2 Stock Opname',
+        'laporan-transfer': 'Laporan Transfer', 'laporan-opname': 'Laporan Stock Opname',
         'laporan-adjustment': 'Adjustment / Selisih', 'laporan-expiry': 'Expired / Near Expired',
         'laporan-supplier': 'Pembelian per Supplier', 'laporan-bakery': 'Distribusi per Bakery',
         'laporan-slow-movement': 'Slow / No Movement', 'laporan-audit': 'Audit Transaksi',
@@ -166,7 +166,7 @@
             }
             StockOpname.render(document.getElementById('tab-opname'));
         } else if (name === 'opname-laporan') {
-            StockOpnameReport.render(document.getElementById('tab-opname-laporan'));
+            ReportOpnameAudit.render(document.getElementById('tab-opname-laporan'));
         } else if (name === 'opname-saya') {
             StockOpname.renderMySessions(document.getElementById('tab-opname-saya'));
         } else if (name === 'import') {
@@ -182,7 +182,7 @@
         } else if (name === 'laporan-ringkasan') {
             ReportSummary.render(document.getElementById('tab-laporan-ringkasan'));
         } else if (name === 'laporan-pergerakan') {
-            ReportMovement.render(document.getElementById('tab-laporan-pergerakan'));
+            ReportPergerakan.render(document.getElementById('tab-laporan-pergerakan'));
         } else if (name === 'laporan-rekonsiliasi') {
             ReportReconciliation.render(document.getElementById('tab-laporan-rekonsiliasi'));
         } else if (name === 'laporan-stok') {
@@ -194,7 +194,7 @@
         } else if (name === 'laporan-transfer') {
             ReportIO.render(document.getElementById('tab-laporan-transfer'), { tab: 'transfer' });
         } else if (name === 'laporan-opname') {
-            ReportOpname.render(document.getElementById('tab-laporan-opname'));
+            ReportOpnameAudit.render(document.getElementById('tab-laporan-opname'));
         } else if (name === 'laporan-adjustment') {
             ReportAdjustment.render(document.getElementById('tab-laporan-adjustment'));
         } else if (name === 'laporan-expiry') {

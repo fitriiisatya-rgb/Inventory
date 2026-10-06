@@ -1854,6 +1854,17 @@ $routes = [
         }
     },
 
+    'GET /reports/movement/v3/items' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        [$start, $end, $wh, $cat, $q, $item] = inv_movement_params($user, $query);
+        try {
+            inv_ok(\App\Services\MovementReportV3Service::itemsPage($pdo, $start, $end, $wh, $cat, $q, $item, (string) ($query['sort'] ?? 'sku'), (string) ($query['dir'] ?? 'asc'), (int) ($query['page'] ?? 1), (int) ($query['per_page'] ?? 25), isset($query['move']) ? (string) $query['move'] : null), 'OK');
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        }
+    },
+
     'GET /reports/movement/v3/export' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
@@ -2527,7 +2538,7 @@ $routes = [
         exit;
     },
 
-    // kind = workbook (6 sheets + Info, .xlsx) | sessions | items | evidence | history | adjustments | audit (.csv). Same rows and column catalogue as the screen.
+    // kind = workbook (6 sheets + Info, .xlsx, reports-v3 typed workbook; ?format=json = print tables) | sessions | items | evidence | history | adjustments | audit (.csv). Same rows and column catalogue as the screen.
     'GET /reports/opname-audit/export' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
@@ -2536,27 +2547,24 @@ $routes = [
         $lineFilters = inv_soa_line_filters($query);
         $svc = \App\Services\StockOpnameAuditReportService::class;
         if ($kind === 'workbook') {
+            // Reports v3 delivery: typed cells (numbers / Rupiah / real dates), frozen header + filter, Laporan_Stock_Opname_<SO number | period>.xlsx; ?format=json = the print tables.
             $f = inv_soa_filters($user, $query);
             $whLabel = $f['warehouse_id'] !== null ? ($pdo->query('SELECT name FROM warehouses WHERE id = ' . (int) $f['warehouse_id'])->fetchColumn() ?: 'Semua') : 'Semua Gudang';
+            $sessNos = [];
+            foreach ($ids as $sid) {
+                $sessNos[] = (string) $svc::build($pdo, (int) $sid)['session_row']['session_number'];
+            }
+            $explicit = isset($query['session_ids']) && $query['session_ids'] !== '';
             $meta = [
                 'Laporan' => 'Laporan Stock Opname', 'Periode' => ($query['date_from'] ?? 'semua') . ' s/d ' . ($query['date_to'] ?? 'semua'), 'Gudang' => $whLabel,
                 'Status' => ($query['status'] ?? '') !== '' ? (string) $query['status'] : 'Semua', 'Pencarian' => (string) ($query['q'] ?? ''),
-                'Filter item' => trim(($lineFilters['condition'] ?? '') . ' ' . ($lineFilters['match_status'] ?? '')),
+                'Sesi dipilih' => $explicit ? implode(', ', $sessNos) : 'Semua sesi sesuai filter',
+                'Filter item' => trim(($lineFilters['q'] ?? '') . ' ' . ($lineFilters['condition'] ?? '') . ' ' . ($lineFilters['match_status'] ?? '')),
                 'Jumlah sesi' => (string) count($ids), 'Dibuat' => date('Y-m-d H:i:s'), 'Dibuat oleh' => (string) $user['username'],
                 'Catatan' => 'Evidence berupa referensi URL (/api/reports/opname-audit/photo/{id}); gambar tidak disematkan.',
             ];
-            $sheets = $svc::exportWorkbook($pdo, $ids, $lineFilters, $meta);
-            $path = sys_get_temp_dir() . '/soa_' . bin2hex(random_bytes(6)) . '.xlsx';
-            \App\Services\ExcelWriterService::write($path, $sheets);
-            try {
-                header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-                header('Content-Disposition: attachment; filename="laporan-stock-opname-' . date('Ymd_His') . '.xlsx"');
-                header('Content-Length: ' . filesize($path));
-                readfile($path);
-            } finally {
-                @unlink($path);
-            }
-            exit;
+            $period = ($explicit && count($ids) === 1 && $sessNos !== []) ? $sessNos[0] : \App\Services\ReportExportService::rangeLabel($query['date_from'] ?? null, $query['date_to'] ?? null);
+            inv_rv3_deliver($query, 'Laporan Stock Opname', 'Laporan_Stock_Opname', $period, $meta, $svc::exportWorkbook($pdo, $ids, $lineFilters, $meta));
         }
         if (!in_array($kind, ['sessions', 'items', 'evidence', 'history', 'adjustments', 'audit'], true)) {
             inv_error(422, 'VALIDATION_ERROR', 'unknown export kind');

@@ -171,10 +171,18 @@ try {
     $pj = $r['body']['data'] ?? [];
     check('E format=json (the print tables): file name, meta with the warehouse + "Kuantitas" mode, Harian sheet 32 rows, types', $r['status'] === 200 && ($pj['file_name'] ?? '') === 'Laporan_Pergerakan_Stok_2026-10-01_2026-10-31.xlsx' && str_contains(json_encode($pj['meta'] ?? []), 'Kuantitas')
         && ($pj['sheets'][1]['name'] ?? '') === 'Harian' && count($pj['sheets'][1]['rows'] ?? []) === 32 && ($pj['sheets'][1]['types'][0] ?? '') === 'date');
+    $r = http('GET', "{$baseUrl}/reports/movement/v3/items?{$qs}&per_page=3&page=2&sort=closing_value&dir=desc", null, $viewer['jar']);
+    $d = $r['body']['data'] ?? [];
+    check('E items route: server-side pagination (3 per page, page 2 of 3, 7 items), sorted by closing value desc, totals cover the WHOLE set (closing 326.500)', $r['status'] === 200 && count($d['rows'] ?? []) === 3 && ($d['pagination']['total'] ?? 0) === 7 && ($d['pagination']['total_pages'] ?? 0) === 3
+        && near((float) ($d['totals']['closing_value'] ?? -1), 326500) && ($d['rows'][0]['closing_value'] ?? 0) >= ($d['rows'][1]['closing_value'] ?? 0));
+    $r = http('GET', "{$baseUrl}/reports/movement/v3/items?{$qs}&move=transfer", null, $viewer['jar']);
+    check('E items route move=transfer lists only item R; a search narrows too', ($r['body']['data']['pagination']['total'] ?? 0) === 1 && ($r['body']['data']['rows'][0]['tin_value'] ?? 0) == 32000
+        && ($r['body']['data']['rows'][0]['sku'] ?? '') === $fx['items']['R']['sku']);
+    check('E items: unauthenticated → 401; per_page is clamped (9999 → 200)', http('GET', "{$baseUrl}/reports/movement/v3/items?{$qs}")['status'] === 401 && (http('GET', "{$baseUrl}/reports/movement/v3/items?{$qs}&per_page=9999", null, $viewer['jar'])['body']['data']['pagination']['per_page'] ?? 0) === 200);
     check('E existing movement routes unaffected: GET /reports/movement/overview still 200', http('GET', "{$baseUrl}/reports/movement/overview?{$qs}", null, $admin['jar'])['status'] === 200);
     $b4 = snap($pdo);
     $writeOk = true;
-    foreach (['/overview', '/export'] as $route) {
+    foreach (['/overview', '/items', '/export'] as $route) {
         foreach (['POST', 'PUT', 'PATCH', 'DELETE'] as $verb) {
             if (http($verb, "{$baseUrl}/reports/movement/v3{$route}", [], $admin['jar'], $admin['csrf'])['status'] !== 404) { $writeOk = false; }
         }
