@@ -1599,6 +1599,7 @@ td.soa-aksi-col { background: #161e33; }
 @media (max-width: 560px) { .soa-kpis { grid-template-columns: minmax(0, 1fr); } .soa-filter-grid, .soa-itemfilters { grid-template-columns: minmax(0, 1fr); } .soa-title { font-size: 1.15rem; } .soa-filter-actions .btn { flex: 1; } .soa-export-menu { min-width: 260px; } .soa-lb-nav { width: 34px; } }
 .soa-warn { color: #fbbf24; font-weight: 700; }
 
+/* ===== RV3 BLOCK pur 20261008 BEGIN ===== */
 /* Laporan Pembelian redesign (report-purchase.js) — presentation only. Same refined type scale as the Dashboard / Pergerakan Stok reports (KPI 1.4-1.6rem, body 0.8-0.9rem),
    dark Inventory Pro tokens. Invoice + item tables scroll horizontally inside their own container with a sticky header and a sticky GRAND TOTAL row. */
 .pur { --pur-kpi: 1.55rem; --pur-gap: 10px; display: flex; flex-direction: column; gap: var(--pur-gap); min-width: 0; }
@@ -1739,9 +1740,12 @@ td.soa-aksi-col { background: #161e33; }
 @media (max-width: 900px) { .pur-kpis, .pur-kpis.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pur-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pur-kv { grid-template-columns: minmax(0, 1fr); } .pur-search { min-width: 0; width: 100%; } }
 @media (max-width: 560px) { .pur-kpis, .pur-kpis.four, .pur-filter-grid { grid-template-columns: minmax(0, 1fr); } }
 
+/* ===== RV3 BLOCK pur 20261008 END ===== */
+
+/* ===== RV3 BLOCK val 20261008 BEGIN ===== */
 /* Nilai Stok & HPP dual valuation (report-valuation.js) — presentation only. Same refined type scale as the Dashboard / Pergerakan Stok / Pembelian reports (KPI 1.4-1.6rem, body 0.8-0.9rem),
    dark Inventory Pro tokens. Item + history + daily tables scroll horizontally inside their own container with a sticky header and a sticky TOTAL row. */
-.pur { --val-kpi: 1.55rem; --val-gap: 10px; display: flex; flex-direction: column; gap: var(--val-gap); min-width: 0; }
+.val { --val-kpi: 1.55rem; --val-gap: 10px; display: flex; flex-direction: column; gap: var(--val-gap); min-width: 0; }
 .val-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .val-title { font-size: 1.35rem; font-weight: 800; margin: 0; line-height: 1.2; }
 .val-desc { margin: 4px 0 0; font-size: 0.82rem; color: var(--text2); max-width: 70ch; }
@@ -1922,6 +1926,9 @@ td.soa-aksi-col { background: #161e33; }
 @media (max-width: 1200px) { .val-detail-grid, .val-pick { grid-template-columns: minmax(0, 1fr); } .val-compare .val-cmp-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 560px) { .val-compare .val-cmp-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
+/* ===== RV3 BLOCK val 20261008 END ===== */
+
+/* ===== RV3 BLOCK io 20261008 BEGIN ===== */
 /* Laporan IN / OUT / Transfer (report-io.js) — presentation only. Same refined type scale as the Dashboard / Pembelian / Nilai Stok reports, dark Inventory Pro tokens. Tables scroll
    horizontally inside their own container with a sticky header and a sticky TOTAL row; the three tabs always fit ONE row (iPad landscape included). */
 .io { --io-kpi: 1.3rem; --io-gap: 10px; display: flex; flex-direction: column; gap: var(--io-gap); min-width: 0; }
@@ -2033,6 +2040,8 @@ td.soa-aksi-col { background: #161e33; }
 @media (max-width: 1200px) { .io-filter-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } .io-kv { grid-template-columns: repeat(3, minmax(0, 1fr)); } .io-tab { padding: 10px 10px; font-size: 0.85rem; gap: 6px; } .io-kpi-ic { width: 36px; height: 36px; font-size: 1.05rem; } .io-kpi { padding: 9px 10px; gap: 8px; } }
 @media (max-width: 900px) { .io-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .io-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .io-kv { grid-template-columns: repeat(2, minmax(0, 1fr)); } .io-tab-ic { display: none; } }
 @media (max-width: 640px) { .io-tab { padding: 9px 6px; font-size: 0.72rem; text-align: center; justify-content: center; } .io-tab-tx { white-space: normal; } .io-title { font-size: 1.2rem; } .io-filter-grid { grid-template-columns: minmax(0, 1fr); } .io-kpis { grid-template-columns: minmax(0, 1fr); } .io-search { min-width: 0; width: 100%; } .io-filter-actions .btn { flex: 1; } .io-kv { grid-template-columns: minmax(0, 1fr); } }
+
+/* ===== RV3 BLOCK io 20261008 END ===== */
 
 /* ===== RV3 REPORT FAMILY 20261008 BEGIN =====
    Shared look of the five reports (Pergerakan, IN / OUT, Pembelian, Nilai HPP, Stock Opname): one compact filter card, one KPI grid (no card-in-card),
@@ -2187,6 +2196,7 @@ td.soa-aksi-col { background: #161e33; }
 .pur-svg, .val-svg { max-height: 240px; }
 .pur-table th, .pur-table td, .val-table th, .val-table td { padding: 6px 8px; } .pur-table, .val-table { font-size: 0.77rem; }
 .pur-note { padding: 6px 11px; font-size: 0.76rem; }
+.val-cmp { background: transparent !important; border: 0 !important; border-left: 2px solid var(--border) !important; border-radius: 0 !important; padding: 2px 12px !important; } .val-cmp.hl { border-left-color: #f59e0b !important; }
 @media (max-width: 1100px) { .pur-filter-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 640px) { .pur-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 /* ===== RV3 REPORT FAMILY 20261008 END ===== */
