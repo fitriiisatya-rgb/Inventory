@@ -87,7 +87,7 @@ const ReportIO = (() => {
     function freshState(tab) {
         const r = quickRange('month');
         return { root: null, tab: tab || 'in', start: r.start, end: r.end, quick: 'month', warehouse: '', category: '', q: '', supplier: '', bakery: '', division: '', from: '', to: '', status: '', source: '',
-            gq: '', bucket: 'day', page: 1, perPage: 10, sort: '', dir: 'desc', options: null, overview: null, list: null, selected: null, detail: null, loadTicket: 0, detailTicket: 0, listTicket: 0 };
+            gq: '', view: 'tx', bucket: 'day', page: 1, perPage: 10, sort: '', dir: 'desc', options: null, overview: null, list: null, selected: null, detail: null, loadTicket: 0, detailTicket: 0, listTicket: 0 };
     }
     function params(extra) {
         const p = { tab: S.tab, start_date: S.start, end_date: S.end, warehouse_id: S.warehouse || undefined, category_id: S.category || undefined, q: S.q || undefined, status: S.status || undefined, bucket: S.bucket };
@@ -106,8 +106,7 @@ const ReportIO = (() => {
         S.root = container;
         container.innerHTML = '';
         container.classList.add('io');
-        const exportBtn = UI.el('button', { class: 'btn btn-success io-export-btn', 'data-testid': 'io-export', type: 'button' }, '⬇ Export Excel');
-        exportBtn.addEventListener('click', () => window.open(IoApi.exportUrl(params({ gq: S.gq || undefined })), '_blank'));
+        const exportBtn = ReportTools.actions({ id: 'io', print: doPrint, excel: () => doExcel(S.tab), extras: [{ label: 'Download Semua Tab (3 sheet)', testid: 'io-excel-all', run: () => doExcel('all') }] });
         container.appendChild(UI.el('div', { class: 'io-head' }, [
             UI.el('div', {}, [
                 UI.el('h2', { class: 'io-title', 'data-testid': 'io-title' }, 'Laporan IN / OUT'),
@@ -154,25 +153,25 @@ const ReportIO = (() => {
         const statuses = tab === 'in' ? o.in_status : tab === 'out' ? o.out_status : o.trf_status;
         const field = (label, inner, cls) => `<div class="io-f ${cls || ''}"><label>${label}</label>${inner}</div>`;
         const parts = [
-            field('Periode Tanggal', `<div class="io-dates"><input type="date" id="io-start" data-testid="io-start" value="${esc(S.start)}"><span>—</span><input type="date" id="io-end" data-testid="io-end" value="${esc(S.end)}"></div><div class="io-chips">${chips}</div>`, 'io-f-period'),
-            field('Gudang', `<select id="io-wh" data-testid="io-wh" ${scoped ? 'disabled' : ''}>${opts(o.warehouses, S.warehouse, 'Semua Gudang')}</select>`),
-            field('Kategori', `<select id="io-cat" data-testid="io-cat">${opts(o.categories, S.category, 'Semua Kategori')}</select>`),
-            field('Barang / SKU', `<input type="text" id="io-q" data-testid="io-q" placeholder="Cari nama barang / SKU…" autocomplete="off" value="${esc(S.q)}">`),
+            field('Periode Tanggal', `<div class="io-dates"><input type="date" id="io-start" data-testid="io-start" value="${esc(S.start)}"><span>—</span><input type="date" id="io-end" data-testid="io-end" value="${esc(S.end)}"></div><div class="io-chips">${chips}</div>`, 'io-f-period s4'),
+            field('Gudang', `<select id="io-wh" data-testid="io-wh" ${scoped ? 'disabled' : ''}>${opts(o.warehouses, S.warehouse, 'Semua Gudang')}</select>`, 's2'),
+            field('Kategori', `<select id="io-cat" data-testid="io-cat">${opts(o.categories, S.category, 'Semua Kategori')}</select>`, 's2'),
+            field('Barang / SKU', `<input type="text" id="io-q" data-testid="io-q" placeholder="Cari nama barang / SKU…" autocomplete="off" value="${esc(S.q)}">`, 's4'),
         ];
-        if (tab === 'in') parts.push(field('Supplier', `<select id="io-sup" data-testid="io-sup">${opts(o.suppliers, S.supplier, 'Semua Supplier')}</select>`));
+        if (tab === 'in') parts.push(field('Supplier', `<select id="io-sup" data-testid="io-sup">${opts(o.suppliers, S.supplier, 'Semua Supplier')}</select>`, 's4'));
         if (tab === 'out') {
-            parts.push(field('Bakery Tujuan', `<select id="io-bak" data-testid="io-bak">${opts(o.bakeries, S.bakery, 'Semua Bakery')}</select>`));
-            parts.push(field('Divisi', `<select id="io-div" data-testid="io-div">${opts(o.divisions, S.division, 'Semua Divisi')}</select>`));
+            parts.push(field('Bakery Tujuan', `<select id="io-bak" data-testid="io-bak">${opts(o.bakeries, S.bakery, 'Semua Bakery')}</select>`, 's3'));
+            parts.push(field('Divisi', `<select id="io-div" data-testid="io-div">${opts(o.divisions, S.division, 'Semua Divisi')}</select>`, 's2'));
         }
         if (tab === 'transfer') {
-            parts.push(field('Gudang Asal', `<select id="io-from" data-testid="io-from">${opts(o.all_warehouses, S.from, 'Semua Gudang Asal')}</select>`));
-            parts.push(field('Gudang Tujuan', `<select id="io-to" data-testid="io-to">${opts(o.all_warehouses, S.to, 'Semua Gudang Tujuan')}</select>`));
+            parts.push(field('Gudang Asal', `<select id="io-from" data-testid="io-from">${opts(o.all_warehouses, S.from, 'Semua Gudang Asal')}</select>`, 's3'));
+            parts.push(field('Gudang Tujuan', `<select id="io-to" data-testid="io-to">${opts(o.all_warehouses, S.to, 'Semua Gudang Tujuan')}</select>`, 's3'));
         }
-        if (tab !== 'transfer') parts.push(field(tab === 'in' ? 'Jenis Transaksi IN' : 'Jenis Transaksi OUT', `<select id="io-src" data-testid="io-src">${opts(sources, S.source, 'Semua Jenis')}</select>`));
-        parts.push(field('Status', `<select id="io-status" data-testid="io-status">${opts(statuses, S.status, 'Semua Status')}</select>`));
+        if (tab !== 'transfer') parts.push(field(tab === 'in' ? 'Jenis Transaksi IN' : 'Jenis Transaksi OUT', `<select id="io-src" data-testid="io-src">${opts(sources, S.source, 'Semua Jenis')}</select>`, 's2'));
+        parts.push(field('Status', `<select id="io-status" data-testid="io-status">${opts(statuses, S.status, 'Semua Status')}</select>`, 's2'));
+        parts.push(`<div class="io-f io-f-actions ${tab === 'in' ? 's4' : tab === 'out' ? 's3' : 's4'}"><div class="io-filter-actions"><button type="button" class="btn btn-primary" id="io-apply" data-testid="io-apply">Terapkan</button><button type="button" class="btn btn-secondary" id="io-reset" data-testid="io-reset">Reset</button></div></div>`);
         const host = q$('#io-filters');
-        host.innerHTML = `<div class="io-filter-title"><span class="io-filter-ic">⏷</span> Filter Laporan</div><div class="io-filter-grid io-grid-${tab}">${parts.join('')}</div>
-            <div class="io-filter-actions"><button type="button" class="btn btn-primary" id="io-apply" data-testid="io-apply">⏷ Terapkan Filter</button><button type="button" class="btn btn-secondary" id="io-reset" data-testid="io-reset">↺ Reset</button></div>`;
+        host.innerHTML = `<div class="io-filter-grid io-grid-${tab}">${parts.join('')}</div>`;
         host.querySelectorAll('.io-chip').forEach((b) => b.addEventListener('click', () => {
             const k = b.dataset.quick;
             S.quick = k;
@@ -201,7 +200,7 @@ const ReportIO = (() => {
         const detail = q$('#io-detail'); detail.hidden = true; detail.innerHTML = '';
         q$('#io-kpis').innerHTML = '<div class="io-loading">Memuat laporan…</div>';
         try {
-            const [ov, ls] = await Promise.all([IoApi.overview(params()), IoApi.list(params({ gq: S.gq || undefined, page: S.page, per_page: S.perPage, sort: S.sort || undefined, dir: S.dir }))]);
+            const [ov, ls] = await Promise.all([IoApi.overview(params()), IoApi.list(params({ gq: S.gq || undefined, page: S.page, per_page: S.perPage, sort: S.sort || undefined, dir: S.dir, view: S.view === 'lines' ? 'lines' : undefined }))]);
             if (state !== S || ticket !== state.loadTicket) return;
             S.overview = ov; S.list = ls;
             renderBanner(); renderKpis(); renderChart(); renderList();
@@ -216,7 +215,7 @@ const ReportIO = (() => {
         const state = S;
         const ticket = (state.listTicket += 1);
         try {
-            const ls = await IoApi.list(params({ gq: S.gq || undefined, page: S.page, per_page: S.perPage, sort: S.sort || undefined, dir: S.dir }));
+            const ls = await IoApi.list(params({ gq: S.gq || undefined, page: S.page, per_page: S.perPage, sort: S.sort || undefined, dir: S.dir, view: S.view === 'lines' ? 'lines' : undefined }));
             if (state !== S || ticket !== state.listTicket) return;
             S.list = ls; renderList();
         } catch (err) {
@@ -324,7 +323,7 @@ const ReportIO = (() => {
         const bar = (r) => (S.tab === 'in' ? r.total : S.tab === 'out' ? r.hpp : r.value);
         const bar2 = S.tab === 'out' ? (r) => r.sell : null;
         const NS = 'http://www.w3.org/2000/svg';
-        const W = 900; const H = 230; const L = 66; const R = 40; const T = 12; const B = 32;
+        const W = 1100; const H = 210; const L = 66; const R = 40; const T = 10; const B = 28;
         const svg = document.createElementNS(NS, 'svg');
         svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('class', 'io-svg'); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', titles[0]); svg.setAttribute('data-testid', 'io-chart');
         const max = niceMax(Math.max(...rows.map(bar), ...(bar2 ? rows.map(bar2) : [0]), 0));
@@ -444,26 +443,30 @@ const ReportIO = (() => {
         return '';
     }
     const rowKey = (r) => (S.tab === 'in' ? r.tx_ids.join(',') : S.tab === 'out' ? (r.do_id ? `d${r.do_id}` : `t${r.tx_ids[0]}`) : String(r.id));
-    const isVoid = (r) => (S.tab === 'in' ? r.status !== 'POSTED' : S.tab === 'out' ? r.items === 0 : !r.active);
+    const isVoid = (r) => (S.view === 'lines' ? r.counted === false : S.tab === 'in' ? r.status !== 'POSTED' : S.tab === 'out' ? r.items === 0 : !r.active);
 
     function renderList() {
         const res = S.list;
         const host = q$('#io-list');
         host.innerHTML = '';
-        const cols = res.columns.filter((c) => visible(S.tab, c));
+        const tableKey = `${S.tab}${S.view === 'lines' ? ':lines' : ''}`;
+        const cols = res.columns.filter((c) => visible(tableKey, c));
         const search = UI.el('input', { type: 'text', class: 'io-search', 'data-testid': 'io-gq', placeholder: TITLES[S.tab][2], value: S.gq });
         let timer = null;
         search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { S.gq = search.value.trim(); S.page = 1; reloadList(); }, 350); });
-        const dl = UI.el('button', { type: 'button', class: 'btn btn-secondary', 'data-testid': 'io-download-detail' }, '⬇ Download Detail');
-        dl.addEventListener('click', () => window.open(IoApi.exportUrl(params({ gq: S.gq || undefined })), '_blank'));
+        const viewSeg = UI.el('div', { class: 'io-seg', role: 'group', 'aria-label': 'Tampilan tabel', 'data-testid': 'io-view' }, [['tx', 'Per Transaksi'], ['lines', 'Per Baris Barang']].map(([k, label]) => {
+            const b = UI.el('button', { type: 'button', class: `io-seg-btn${S.view === k ? ' on' : ''}`, 'data-testid': `io-view-${k}`, 'aria-pressed': S.view === k ? 'true' : 'false' }, label);
+            b.addEventListener('click', () => { if (S.view === k) return; S.view = k; S.page = 1; S.sort = ''; S.dir = 'desc'; S.selected = null; reloadList(); });
+            return b;
+        }));
         host.appendChild(UI.el('div', { class: 'io-card-head' }, [
             UI.el('div', { class: 'io-card-title' }, [`🧾 ${TITLES[S.tab][0]} `, UI.el('span', { class: 'io-card-sub' }, '(klik baris atau 👁 untuk rincian item)')]),
-            UI.el('div', { class: 'io-card-tools' }, [search, dl, columnMenu(S.tab, res.columns, renderList)]),
+            UI.el('div', { class: 'io-card-tools' }, [viewSeg, search, columnMenu(`${S.tab}${S.view === 'lines' ? ':lines' : ''}`, res.columns, renderList)]),
         ]));
         if (!res.rows.length) { host.appendChild(UI.el('div', { class: 'io-empty', 'data-testid': 'io-empty' }, 'Tidak ada transaksi pada periode ini.')); return; }
         const sortable = SORTABLE[S.tab];
         const head = UI.el('tr', {}, cols.map((c) => {
-            const k = sortable[c.key];
+            const k = S.view === 'lines' ? null : sortable[c.key];
             const th = UI.el('th', { class: `${NUMERIC.has(c.type) ? 'num' : ''}${k ? ' sortable' : ''}`, ...(k ? { 'data-sort': k } : {}) }, c.label + (k && S.sort === k ? (S.dir === 'asc' ? ' ▲' : ' ▼') : ''));
             if (k) th.addEventListener('click', () => { if (S.sort === k) S.dir = S.dir === 'asc' ? 'desc' : 'asc'; else { S.sort = k; S.dir = 'desc'; } S.page = 1; reloadList(); });
             return th;
@@ -484,7 +487,7 @@ const ReportIO = (() => {
         if (S.tab === 'in' && f.incomplete_components > 0) host.appendChild(UI.el('div', { class: 'io-hint' }, `${f.incomplete_components} transaksi legacy/historis hanya memiliki nilai Total — kolom komponen "—" dan tidak ikut dijumlahkan.`));
         if (S.tab === 'out' && f.unpriced > 0) host.appendChild(UI.el('div', { class: 'io-hint' }, `${f.unpriced} transaksi tanpa invoice (legacy): Nilai Jual / Margin tidak diketahui ("—") dan tidak dijumlahkan; HPP tetap dihitung.`));
         if (S.tab === 'transfer') host.appendChild(UI.el('div', { class: 'io-hint' }, 'GRAND TOTAL hanya menjumlahkan transfer aktif (PENDING + RECEIVED); transfer dibatalkan / di-reverse tercoret.'));
-        host.appendChild(pager(res.pagination, (p) => { S.page = p; reloadList(); }, S.tab === 'transfer' ? 'transfer' : 'transaksi', (n) => { S.perPage = n; S.page = 1; reloadList(); }));
+        host.appendChild(pager(res.pagination, (p) => { S.page = p; reloadList(); }, S.view === 'lines' ? 'baris barang' : S.tab === 'transfer' ? 'transfer' : 'transaksi', (n) => { S.perPage = n; S.page = 1; reloadList(); }));
     }
 
     // ------------------------------------------------------------------ detail (inline, under the table)
@@ -613,6 +616,44 @@ const ReportIO = (() => {
             ]));
         }
         Object.values(d.notes || {}).forEach((t) => host.appendChild(UI.el('div', { class: 'io-hint' }, t)));
+    }
+
+    // ------------------------------------------------------------------ Cetak + Download Excel (follow the active tab, filters, view and the visible columns)
+    const TAB_TITLE = { in: 'Barang Masuk (IN)', out: 'Barang Keluar (OUT)', transfer: 'Transfer Antar Gudang' };
+    async function doExcel(tab) {
+        await ReportTools.download(IoApi.exportUrl(params({ tab, gq: S.gq || undefined })), 'Laporan_IN_OUT.xlsx');
+    }
+    const selText = (id, all) => { const e = q$(`#${id}`); const t = e && e.selectedOptions && e.selectedOptions[0] ? e.selectedOptions[0].textContent.trim() : ''; return e && e.value ? t : all; };
+    const PRINT_TYPE = { date: 'date', ts: 'ts', money: 'money', qty: 'qty', int: 'int', pct: 'pct', rate: 'pct', num: 'qty' };
+    async function doPrint() {
+        const tableKey = `${S.tab}${S.view === 'lines' ? ':lines' : ''}`;
+        const base = params({ gq: S.gq || undefined, per_page: 100, sort: S.sort || undefined, dir: S.dir, view: S.view === 'lines' ? 'lines' : undefined });
+        let res = await IoApi.list({ ...base, page: 1 });
+        const rows = res.rows.slice();
+        const first = res;
+        for (let p = 2; p <= Math.min(first.pagination.total_pages, 40); p += 1) {
+            res = await IoApi.list({ ...base, page: p });
+            rows.push(...res.rows);
+        }
+        const cols = first.columns.filter((c) => visible(tableKey, c));
+        const f = first.footer || { totals: {} };
+        const totalRow = cols.map((c, i) => (i === 0 ? 'GRAND TOTAL' : (Object.prototype.hasOwnProperty.call(f.totals, c.key) && ['money', 'int', 'qty'].includes(c.type) ? f.totals[c.key] : null)));
+        const meta = [['Periode', `${fmtDate(S.start)} s/d ${fmtDate(S.end)}`], ['Gudang', selText('io-wh', 'Semua Gudang')], ['Kategori', selText('io-cat', 'Semua Kategori')], ['Barang / SKU', S.q || ''], ['Pencarian tabel', S.gq || ''],
+            ['Tab', TAB_TITLE[S.tab]], ['Tampilan', S.view === 'lines' ? 'Per Baris Barang' : 'Per Transaksi']];
+        if (S.tab === 'in') meta.push(['Supplier', selText('io-sup', 'Semua Supplier')], ['Jenis IN', selText('io-src', 'Semua Jenis')]);
+        if (S.tab === 'out') meta.push(['Bakery', selText('io-bak', 'Semua Bakery')], ['Divisi', selText('io-div', 'Semua Divisi')], ['Jenis OUT', selText('io-src', 'Semua Jenis')]);
+        if (S.tab === 'transfer') meta.push(['Gudang Asal', selText('io-from', 'Semua Gudang Asal')], ['Gudang Tujuan', selText('io-to', 'Semua Gudang Tujuan')]);
+        meta.push(['Status', selText('io-status', 'Semua Status')]);
+        const n = S.overview.kpi.nominal;
+        const kpis = S.tab === 'in' ? [{ label: 'Total Nilai Barang Masuk', value: rp(n.total) }, { label: 'Transaksi', value: int(n.invoices) }, { label: 'SKU Masuk', value: int(n.skus) }, { label: 'PPN', value: rp(n.ppn) }, { label: 'Ongkos Kirim', value: rp(n.freight) }]
+            : S.tab === 'out' ? [{ label: 'HPP Keluar (FIFO)', value: rp(n.hpp) }, { label: 'Nilai Jual', value: rp(n.sell) }, { label: 'Margin', value: rp(n.margin) }, { label: 'Transaksi', value: int(n.documents) }, { label: 'Ongkos Kirim', value: rp(n.shipping) }]
+                : [{ label: 'Total Transfer', value: int(n.transfers) }, { label: 'Pending', value: int(n.pending) }, { label: 'Diterima', value: int(n.received) }, { label: 'Nilai Cost Transfer', value: rp(n.value) }];
+        const table = (r) => cols.map((c) => { const v = r[c.key]; return c.type === 'status' && !nil(v) ? (STATUS_TEXT[v] || v) : (nil(v) ? null : v); });
+        ReportTools.printDocument({
+            title: `Laporan IN / OUT — ${TAB_TITLE[S.tab]}`, subtitle: `${S.view === 'lines' ? 'Rincian per baris barang' : 'Daftar transaksi'} · ${fmtDate(S.start)} s/d ${fmtDate(S.end)}`, meta, kpis, orientation: 'landscape',
+            sections: [{ title: S.view === 'lines' ? 'Rincian per Baris Barang' : TITLES[S.tab][0], note: first.pagination.total_pages > 40 ? 'Dibatasi 4.000 baris pertama — daftar lengkap ada di Download Excel.' : (S.tab === 'transfer' ? 'GRAND TOTAL hanya menjumlahkan transfer aktif (Pending + Diterima).' : 'Baris VOID / dibatalkan ditampilkan tetapi tidak dihitung pada total.'),
+                columns: cols.map((c) => ({ label: c.label, type: PRINT_TYPE[c.type] || 'text' })), rows: rows.map(table), totalRow }],
+        });
     }
 
     return { render };

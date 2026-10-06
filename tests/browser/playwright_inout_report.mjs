@@ -7,6 +7,7 @@ import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
 import { execSync, spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -314,26 +315,55 @@ try {
     await page.waitForSelector('#tab-laporan-inout.active .io-title'); await idle(page);
 
     // ================================================================ S. export
-    await page.evaluate(() => { window.__opened = []; window.open = (u) => { window.__opened.push(u); return null; }; });
-    const getXlsx = (u, name) => page.evaluate(async (url) => { const r = await fetch(url, { credentials: 'include' }); return { status: r.status, type: r.headers.get('content-type'), bytes: Array.from(new Uint8Array(await r.arrayBuffer())) }; }, u).then((wb) => { fs.writeFileSync(path.join(shotDir, name), Buffer.from(wb.bytes)); return wb; });
-    for (const [tab, sheets, needle] of [['in', ['Ringkasan IN', 'Transaksi IN', 'Rincian Item IN'], '146025.5'], ['out', ['Ringkasan OUT', 'Transaksi OUT', 'Rincian Item OUT', 'FIFO Allocation'], null], ['transfer', ['Ringkasan Transfer', 'Daftar Transfer', 'Rincian Item Transfer'], null]]) {
+    const dlDir = fs.mkdtempSync(path.join(os.tmpdir(), 'iodl_'));
+    const download = async (btn, viaMenu) => {
+        if (viaMenu) await page.click(tid('io-more'));
+        const [d] = await Promise.all([page.waitForEvent('download', { timeout: 30000 }), page.click(tid(btn))]);
+        const f = path.join(shotDir, `inout-sample-${d.suggestedFilename()}`);
+        await d.saveAs(f);
+        return { name: d.suggestedFilename(), file: f };
+    };
+    const printHtml = async (page2) => page2.evaluate(async () => { const b = ReportTools.lastPrintHtml; document.querySelector('[data-testid="io-print"]').click(); for (let i = 0; i < 100; i++) { await new Promise((r) => setTimeout(r, 100)); if (ReportTools.lastPrintHtml && ReportTools.lastPrintHtml !== b) break; } return ReportTools.lastPrintHtml || ''; });
+    const dump = (f) => JSON.parse(sh(`php tests/lib/xlsx_dump.php ${JSON.stringify(f)}`));
+    for (const [tab, sheets, needle, base] of [['in', ['Ringkasan IN', 'Transaksi IN', 'Rincian Item IN'], '146025.5', 'Laporan_IN_OUT_Barang_Masuk'], ['out', ['Ringkasan OUT', 'Transaksi OUT', 'Rincian Item OUT', 'FIFO Allocation'], null, 'Laporan_IN_OUT_Barang_Keluar'], ['transfer', ['Ringkasan Transfer', 'Daftar Transfer', 'Rincian Item Transfer'], null, 'Laporan_IN_OUT_Transfer']]) {
         await page.click(tid(`io-tab-${tab}`)); await page.waitForTimeout(300); await idle(page);
         await setFilters(page, period);
-        await page.click(tid('io-export'));
-        const url = (await page.evaluate(() => window.__opened)).pop();
-        check(`S export ${tab}: the URL carries the tab and the same filters`, url.includes(`tab=${tab}`) && url.includes(`start_date=${R0.from}`) && url.includes(`end_date=${R0.to}`));
-        const wb = await getXlsx(url, `inout-sample-export-${tab}.xlsx`);
-        const f = path.join(shotDir, `inout-sample-export-${tab}.xlsx`);
+        const x = await download('io-excel', false);
+        check(`S Download Excel ${tab}: file name starts with ${base}_ and ends .xlsx`, x.name.startsWith(`${base}_`) && x.name.endsWith('.xlsx'), x.name);
+        const f = x.file;
         const wbx = sh(`unzip -p ${JSON.stringify(f)} xl/workbook.xml`);
-        check(`S export ${tab} workbook: valid xlsx with sheets ${sheets.join(', ')}`, wb.status === 200 && /spreadsheetml/.test(wb.type) && sheets.every((s) => wbx.includes(s)));
+        check(`S export ${tab} workbook: valid xlsx with sheets ${sheets.join(', ')}`, sheets.every((s) => wbx.includes(s)));
+        const dm = dump(f);
+        const main = dm.sheets[1];
+        check(`S export ${tab}: header row frozen + autofilter on the transaction sheet; numeric cells are numbers, dates are dates`, main.frozen && main.autofilter !== '' && main.rows.slice(1, 4).some((r) => r.some((c) => c.t === 'd')) && main.rows.slice(1, 4).some((r) => r.some((c) => c.t === 'n' && c.fmt.includes('Rp'))));
         if (needle) check('S export IN total row equals the screen (Grand Total 146.025,5)', sh(`unzip -p ${JSON.stringify(f)} xl/worksheets/sheet2.xml`).includes(needle));
         if (tab === 'out') {
             const s2 = sh(`unzip -p ${JSON.stringify(f)} xl/worksheets/sheet2.xml`);
             check('S export OUT: HPP total of the sheet = the KPI shown on screen; unknown legacy prices exported as "—"', s2.includes(String(nOut.hpp).slice(0, 8)) && sh(`unzip -p ${JSON.stringify(f)} xl/worksheets/sheet3.xml`).includes('—'));
         }
         if (tab === 'transfer') check('S export Transfer: summary carries "Rata-rata Lead Time (jam)" 28', sh(`unzip -p ${JSON.stringify(f)} xl/worksheets/sheet1.xml`).includes('Rata-rata Lead Time') && sh(`unzip -p ${JSON.stringify(f)} xl/worksheets/sheet1.xml`).includes('28'));
+        // Cetak follows the active tab
+        const html = await printHtml(page);
+        const tabName = { in: 'Barang Masuk (IN)', out: 'Barang Keluar (OUT)', transfer: 'Transfer Antar Gudang' }[tab];
+        check(`S Cetak ${tab}: titled "Laporan IN / OUT — ${tabName}" with the period, a print date, white background, repeating header, no controls`, html.includes(`<h1>Laporan IN / OUT — ${tabName}</h1>`) && html.includes('Periode:') && html.includes('Tanggal cetak:') && /background:\s*#fff\s*!important/.test(html) && html.includes('display: table-header-group') && !/<(button|select|input)\b/i.test(html) && html.includes('size: A4 landscape'));
+        check(`S Cetak ${tab}: lists the transaction rows (${tab === 'in' ? 'invoice' : tab === 'out' ? 'DO' : 'TRF'} numbers) and right-aligned money columns`, (html.match(/<tr><td/g) || []).length >= 1 && /<td class="r">Rp /.test(html) && !html.includes('Rp NaN'));
     }
-
+    // line view + "Download Semua Tab"
+    await page.click(tid('io-tab-in')); await page.waitForTimeout(300); await idle(page);
+    await setFilters(page, period);
+    const txRows = await rowCount(page);
+    await page.click(tid('io-view-lines')); await page.waitForTimeout(500); await idle(page);
+    const lineRows = await rowCount(page);
+    check('S view toggle "Per Baris Barang": one row per invoice LINE (more rows than invoices), SKU / Barang / Qty columns present', lineRows > txRows && (await page.locator(`${tid('io-table')} thead th`).allInnerTexts()).join('|').includes('SKU'));
+    const lhtml = await printHtml(page);
+    check('S Cetak follows the view: the line table is printed ("Rincian per Baris Barang", SKU column)', lhtml.includes('Rincian per Baris Barang') && /<th class="[^"]*">SKU<\/th>/.test(lhtml) && lhtml.includes('Tampilan:</b> Per Baris Barang'));
+    await page.locator(tid('io-row')).first().click();
+    await page.waitForSelector(tid('io-detail-line'));
+    check('S a line row still opens its invoice detail', await page.locator(tid('io-detail-line')).count() >= 1);
+    await page.click(tid('io-view-tx')); await page.waitForTimeout(400); await idle(page);
+    const all = await download('io-excel-all', true);
+    const allWb = dump(all.file);
+    check('S "Download Semua Tab": one workbook with the Ringkasan + all 3 tabs (9 sheets) named Laporan_IN_OUT_Semua_Tab_…', all.name.startsWith('Laporan_IN_OUT_Semua_Tab_') && allWb.sheets.map((s) => s.name).join('|') === 'Ringkasan|Barang Masuk|Barang Keluar|Transfer|Rincian Barang Masuk|Rincian Barang Keluar|FIFO Allocation|Rincian Transfer|Layer Cost Transfer', allWb.sheets.map((s) => s.name).join('|'));
     // ---- reconciliation CLI
     const rec = sh(`php scripts/inout_reconcile_check.php --app-root=. --start=${R0.from} --end=${R0.to}`);
     check('P read-only reconciliation CLI: every check PASSes (exit 0)', /\d+ \/ \d+ checks passed — all reconcile/.test(rec), rec.split('\n').slice(-3).join(' | '));
