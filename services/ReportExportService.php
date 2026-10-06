@@ -130,6 +130,17 @@ final class ReportExportService
         return "{$start}_{$end}";
     }
 
+    /** "start_end" exactly as selected (Laporan_Pergerakan_Stok_2026-10-01_2026-10-31.xlsx); a single day stays one date. */
+    public static function rangeLabel(?string $start, ?string $end): string
+    {
+        $start = $start !== null ? substr($start, 0, 10) : '';
+        $end = $end !== null ? substr($end, 0, 10) : '';
+        if ($start === '' || $end === '' || $start === $end) {
+            return $start !== '' ? $start : ($end !== '' ? $end : date('Y-m-d'));
+        }
+        return "{$start}_{$end}";
+    }
+
     public static function fileName(string $report, string $period, string $ext = 'xlsx'): string
     {
         $slug = static fn (string $s): string => trim((string) preg_replace('/[^A-Za-z0-9._-]+/', '_', $s), '_');

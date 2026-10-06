@@ -74,6 +74,7 @@ require_once __DIR__ . '/../services/InventorySummaryReportService.php';
 require_once __DIR__ . '/../services/TransferReportService.php';
 require_once __DIR__ . '/../services/InOutReportService.php';
 require_once __DIR__ . '/../services/ReportExportService.php';
+require_once __DIR__ . '/../services/MovementReportV3Service.php';
 require_once __DIR__ . '/../services/StockOpnameReportService.php';
 require_once __DIR__ . '/../services/StockOpnameJejakService.php';
 require_once __DIR__ . '/../services/StockOpnameAuditReportService.php';
@@ -1840,6 +1841,39 @@ $routes = [
     // PERGERAKAN STOK HARIAN (redesign) — item-level qty + value straight from the ledger (MovementDailyReportService).
     // Strictly read-only (GET), INVENTORY_VIEW, warehouse scope enforced server-side like every other report here
     // (a STOCK user is forced to their own warehouse whatever the query says).
+    // LAPORAN PERGERAKAN STOK (reports v3) — READ-ONLY (GET), INVENTORY_VIEW, warehouse scope via inv_movement_params. v3/overview = the approved daily overview + Transfer IN / OUT as their own
+    // columns (identity: Stok Awal + IN − OUT + Transfer IN − Transfer OUT + Adjustment = Stok Akhir); v3/export = Excel (or, with format=json, the print tables) of the same filters.
+    'GET /reports/movement/v3/overview' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        [$start, $end, $wh, $cat, $q, $item] = inv_movement_params($user, $query);
+        try {
+            inv_ok(\App\Services\MovementReportV3Service::overview($pdo, $start, $end, $wh, $cat, $q, $item), 'OK');
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        }
+    },
+
+    'GET /reports/movement/v3/export' => function () use ($pdo, $query) {
+        $user = inv_require_auth();
+        inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
+        [$start, $end, $wh, $cat, $q, $item] = inv_movement_params($user, $query);
+        $whLabel = $wh !== null ? (string) ($pdo->query('SELECT name FROM warehouses WHERE id = ' . (int) $wh)->fetchColumn() ?: $wh) : 'Semua Gudang';
+        $catLabel = $cat !== null ? (string) ($pdo->query('SELECT name FROM categories WHERE id = ' . (int) $cat)->fetchColumn() ?: $cat) : 'Semua Kategori';
+        $meta = [
+            'Laporan' => 'Laporan Pergerakan Stok', 'Periode' => $start . ' s/d ' . $end, 'Gudang' => $whLabel, 'Kategori' => $catLabel, 'Pencarian barang' => (string) ($q ?? ''),
+            'Tampilan' => ($query['mode'] ?? 'nominal') === 'qty' ? 'Kuantitas (Qty) — per satuan, tidak dijumlahkan lintas satuan' : 'Nominal (Rp)',
+            'Dibuat' => date('Y-m-d H:i:s'), 'Dibuat oleh' => (string) $user['username'],
+            'Catatan' => 'Nilai memakai biaya yang tercatat di ledger (FIFO). Transfer antar gudang: per gudang tampil IN / OUT; company-wide net nol (selisih = barang dalam perjalanan).',
+        ];
+        try {
+            $sheets = \App\Services\MovementReportV3Service::workbook($pdo, $start, $end, $wh, $cat, $q, $item, $meta);
+        } catch (\App\Services\ValidationException $e) {
+            inv_error(422, 'VALIDATION_ERROR', implode('; ', $e->errors));
+        }
+        inv_rv3_deliver($query, 'Laporan Pergerakan Stok', 'Laporan_Pergerakan_Stok', \App\Services\ReportExportService::rangeLabel($start, $end), $meta, $sheets);
+    },
+
     'GET /reports/movement/overview' => function () use ($pdo, $query) {
         $user = inv_require_auth();
         inv_require_permission($pdo, $user, 'INVENTORY_VIEW');
