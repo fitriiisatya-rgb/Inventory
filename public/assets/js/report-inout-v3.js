@@ -8,7 +8,7 @@
  * READ-ONLY: only GET requests are issued. Quantities of different units are never added. Unknown values show "—", never a fabricated 0.
  * Self-contained: the page issues its own same-origin GETs (session cookie) instead of going through InvApi, so it works with whichever api-client file a deployment executes.
  */
-const ReportIO = (() => {
+const ReportInOutV3 = (() => {
     let S = null;
 
     // ------------------------------------------------------------------ API (read-only GET)

@@ -1617,7 +1617,7 @@ $routes = [
         try {
             $name = static fn (string $t, string $c, ?int $id) => $id === null ? 'Semua' : (string) ($GLOBALS['pdo']->query("SELECT {$c} FROM {$t} WHERE id = " . (int) $id)->fetchColumn() ?: $id);
             $meta = [
-                'Laporan' => 'Laporan Nilai HPP', 'Metode Penilaian' => $f['method'] === 'average' ? 'AVERAGE' : 'FIFO', 'Tampilan' => $f['view'] === 'day' ? 'Per Hari' : 'Per Barang',
+                'Laporan' => 'Laporan Nilai HPP', 'Metode Penilaian' => $f['method'] === 'average' ? 'Average' : 'FIFO', 'Tampilan' => $f['view'] === 'day' ? 'Per Hari' : 'Per Barang',
                 'Periode' => $f['start_date'] . ' s/d ' . $f['end_date'], 'Gudang' => $name('warehouses', 'name', $f['warehouse_id']),
                 'Kategori' => $name('categories', 'name', $f['category_id']), 'Pencarian barang' => (string) ($f['q'] ?? ''), 'Dibuat' => date('Y-m-d H:i:s'), 'Dibuat oleh' => (string) $user['username'],
                 'Catatan' => $f['method'] === 'average' ? 'Analytical Average — tidak mengubah FIFO operasional (moving weighted average, read-only).' : 'Metode operasional sistem: FIFO (layer stok nyata). Average hanya pembanding analitis.',

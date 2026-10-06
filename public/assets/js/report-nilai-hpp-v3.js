@@ -8,7 +8,7 @@
  * The method toggle keeps period / warehouse / category / search / selected item and refetches the report with the explicit `method` parameter.
  * READ-ONLY: only GET requests are issued. Quantities of different items/units are never added (quantity cells of the totals row are "—").
  */
-const ReportValuation = (() => {
+const ReportNilaiHppV3 = (() => {
     let S = null;
     const $ = (id) => document.getElementById(id);
 
@@ -76,8 +76,7 @@ const ReportValuation = (() => {
         S = freshState();
         container.innerHTML = '';
         container.classList.add('val');
-        const exportBtn = UI.el('button', { class: 'btn btn-success val-export-btn', 'data-testid': 'val-export', type: 'button' }, '⬇ Export Excel');
-        exportBtn.addEventListener('click', () => window.open(ValApi.exportUrl(params({ view: undefined })), '_blank'));
+        const exportBtn = ReportTools.actions({ id: 'val', print: doPrint, excel: doExcel });
         container.appendChild(UI.el('div', { class: 'val-head' }, [
             UI.el('div', {}, [
                 UI.el('h2', { class: 'val-title', 'data-testid': 'val-title', id: 'val-title' }, ''),
@@ -100,11 +99,11 @@ const ReportValuation = (() => {
 
     function paintHeader() {
         const m = S.method;
-        $('val-title').textContent = `Laporan Nilai Stok & HPP — ${METHOD_LABEL[m]}`;
+        $('val-title').textContent = 'Laporan Nilai HPP';
         $('val-desc').textContent = m === 'fifo'
             ? 'Analisis nilai persediaan dan perhitungan HPP menggunakan metode FIFO (First In First Out) — layer stok nyata dan alokasi FIFO yang benar-benar dipakai sistem.'
             : 'Inventory Value & HPP dengan metode Average Cost (moving weighted average) — pembanding analitis, read-only; tidak mengubah posting atau HPP tersimpan.';
-        $('val-method-badge').textContent = m === 'fifo' ? 'Dilihat: FIFO' : 'Dilihat: Average (analitis)';
+        $('val-method-badge').textContent = m === 'fifo' ? 'Dilihat: FIFO' : 'Analytical Average — tidak mengubah FIFO operasional';
         document.querySelectorAll('.val-seg-btn[data-method]').forEach((b) => { const on = b.dataset.method === m; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
         document.querySelectorAll('.val-seg-btn[data-view]').forEach((b) => { const on = b.dataset.view === S.view; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
         document.querySelectorAll('.val-seg-btn[data-bucket]').forEach((b) => { const on = b.dataset.bucket === S.bucket; b.classList.toggle('on', on); });
@@ -133,7 +132,7 @@ const ReportValuation = (() => {
             UI.el('div', { class: 'val-filter-row2' }, [
                 UI.el('div', { class: 'val-toggle-wrap' }, [
                     UI.el('span', { class: 'val-toggle-label' }, 'Metode Penilaian'), methodSeg,
-                    UI.el('span', { class: 'val-toggle-label' }, 'Mode Lihat'), viewSeg,
+                    UI.el('span', { class: 'val-toggle-label' }, 'Tampilan'), viewSeg,
                     UI.el('span', { id: 'val-bucket-wrap', class: 'val-toggle-wrap' }, [UI.el('span', { class: 'val-toggle-label' }, 'Periode'), bucketSeg]),
                 ]),
                 UI.el('div', { class: 'val-filter-actions' }, [
@@ -158,6 +157,30 @@ const ReportValuation = (() => {
             paintHeader();
         }, 0);
         return card;
+    }
+
+    // ------------------------------------------------------------------ Cetak + Download Excel (follow the filters, the method AND the view)
+    async function doExcel() {
+        await ReportTools.download(ValApi.exportUrl(params({ view: S.view })), 'Laporan_Nilai_HPP.xlsx');
+    }
+    const selText = (id, all) => { const e = $(id); return e && e.value ? e.selectedOptions[0].textContent.trim() : all; };
+    async function doPrint() {
+        const payload = await apiGet('/reports/inventory-valuation/export', params({ view: S.view, format: 'json' }));
+        const ov = S.overview;
+        const k = ov.kpi || {};
+        const f = k[S.method] || {};
+        const main = payload.sheets[1];
+        const kpis = S.method === 'fifo'
+            ? [{ label: 'Nilai Stok Awal FIFO', value: rp(f.opening) }, { label: 'Inventory Cost Masuk', value: rp(f.cost_in) }, { label: 'HPP Keluar FIFO', value: rp(f.hpp) }, { label: 'Nilai Stok Akhir FIFO', value: rp(f.closing) }, { label: 'Nilai Layer Aktif', value: rp(f.layer_value) }]
+            : [{ label: 'Nilai Stok Awal Average', value: rp(f.opening) }, { label: 'Pembelian / Cost In', value: rp(f.cost_in) }, { label: 'HPP Average', value: rp(f.hpp) }, { label: 'Nilai Stok Akhir Average', value: rp(f.closing) }];
+        const meta = [['Periode', `${fmtDate(S.start)} s/d ${fmtDate(S.end)}`], ['Gudang', selText('val-wh', 'Semua Gudang')], ['Kategori', selText('val-cat', 'Semua Kategori')], ['Barang / SKU', S.q || ''],
+            ['Metode Penilaian', METHOD_LABEL[S.method]], ['Tampilan', S.view === 'day' ? 'Per Hari' : 'Per Barang'], ['Metode operasional sistem', 'FIFO']];
+        if (S.method === 'average') meta.push(['Catatan metode', 'Analytical Average — tidak mengubah FIFO operasional']);
+        const spec = ReportTools.specFromPayload(payload, [{ sheet: main.name, title: `${main.name} — ${METHOD_LABEL[S.method]} · ${S.view === 'day' ? 'Per Hari' : 'Per Barang'}`, maxRows: 3000 }], {
+            subtitle: `Metode Penilaian: ${METHOD_LABEL[S.method]} · Tampilan: ${S.view === 'day' ? 'Per Hari' : 'Per Barang'} · ${fmtDate(S.start)} s/d ${fmtDate(S.end)}`, orientation: 'landscape', meta, kpis,
+            footnote: S.method === 'average' ? 'Analytical Average — tidak mengubah FIFO operasional. Nilai FIFO tetap sumber kebenaran operasional. "—" = tidak tersedia (bukan nol).' : undefined,
+        });
+        ReportTools.printDocument(spec);
     }
 
     function applyFilters() {

@@ -109,10 +109,10 @@ try {
     browser = await chromium.launch();
     const { context, page } = await newSession(browser, { viewport: { width: 1536, height: 864 }, __name: 'admin', acceptDownloads: true }, seed.admin);
     await openReport(page);
-    check('A the page opens from the sidebar "Laporan Nilai HPP"; default method FIFO ("Laporan Nilai Stok & HPP — FIFO"); the operational-method badge "Metode operasional sistem: FIFO" is always visible', (await page.locator(tid('val-title')).innerText()) === 'Laporan Nilai Stok & HPP — FIFO' && (await page.locator(tid('val-system-badge')).innerText()).includes('Metode operasional sistem: FIFO') && (await page.locator(tid('val-method-fifo')).getAttribute('aria-pressed')) === 'true');
-    check('A the filters: Periode, Gudang, Kategori, Cari Barang / SKU, Metode Penilaian [FIFO | Average], Mode Lihat [Per Barang | Per Hari]; default period = current month', await page.locator(tid('val-method-average')).count() === 1 && await page.locator(tid('val-view-item')).count() === 1 && await page.locator(tid('val-view-day')).count() === 1 && (await page.inputValue(tid('val-start'))).endsWith('-01'));
+    check('A the page opens from the sidebar "Laporan Nilai HPP"; default method FIFO (title "Laporan Nilai HPP"); the operational-method badge "Metode operasional sistem: FIFO" is always visible', (await page.locator(tid('val-title')).innerText()) === 'Laporan Nilai HPP' && (await page.locator(tid('val-system-badge')).innerText()).includes('Metode operasional sistem: FIFO') && (await page.locator(tid('val-method-fifo')).getAttribute('aria-pressed')) === 'true');
+    check('A the filters: Periode, Gudang, Kategori, Cari Barang / SKU, Metode Penilaian [FIFO | Average], Tampilan [Per Barang | Per Hari]; default period = current month', await page.locator(tid('val-method-average')).count() === 1 && await page.locator(tid('val-view-item')).count() === 1 && await page.locator(tid('val-view-day')).count() === 1 && (await page.inputValue(tid('val-start'))).endsWith('-01'));
     await setFilters(page, { from: R0.from, to: R0.to, q: 'VLZ' });
-    check('B FIFO KPI labels: Nilai Stok Akhir FIFO, HPP Keluar FIFO, Jumlah Layer Aktif, SKU Memiliki Stok, Variance / Rekonsiliasi FIFO (no Average-only cards)', await page.locator('.val-kpi').count() === 5 && (await page.locator('#val-kpis').innerText()).includes('Nilai Stok Akhir FIFO') && (await page.locator('#val-kpis').innerText()).includes('Jumlah Layer Aktif') && !(await page.locator('#val-kpis').innerText()).includes('Pemakaian'));
+    check('B FIFO KPI labels: Nilai Stok Akhir FIFO, HPP Keluar FIFO, Jumlah Layer Aktif, SKU Memiliki Stok, Variance / Rekonsiliasi FIFO (no Average-only cards)', await page.locator('.val-kpi').count() === 5 && ((await page.locator('#val-kpis').innerText()).toLowerCase()).includes('nilai stok akhir fifo') && ((await page.locator('#val-kpis').innerText()).toLowerCase()).includes('jumlah layer aktif') && !((await page.locator('#val-kpis').innerText()).toLowerCase()).includes('pemakaian'));
     check('B FIFO KPI values == hand-computed: closing Rp 326.500, HPP Rp 278.500, 11 layers, 6 SKUs, variance Rp 0 ("Sesuai dengan metode FIFO")', near(await raw(page, 'closing'), E.fifo.closing) && near(await raw(page, 'hpp'), E.fifo.hpp) && (await kv(page, 'layers')) === '11' && (await kv(page, 'skus')) === '6' && near(await raw(page, 'variance'), 0) && (await page.locator(tid('val-kpi-variance')).innerText()).includes('Sesuai dengan metode FIFO'));
     check('B the title, KPI labels and table headings all name the method (FIFO)', (await page.locator('#val-items-card').innerText()).includes('FIFO') && (await page.locator(tid('val-method-badge')).innerText()).includes('FIFO'));
     const cmp = await text(page.locator(tid('val-compare')));
@@ -147,8 +147,8 @@ try {
     // ---- method switch keeps filters + selected item
     await pRow.click(); await page.waitForTimeout(300); await waitIdle(page);
     await pickMethod(page, 'average');
-    check('G switching to Average: NO page reload, the period / search / selected item are kept; title "— Average"; badge "Dilihat: Average"', (await page.locator(tid('val-title')).innerText()) === 'Laporan Nilai Stok & HPP — Average' && (await page.inputValue(tid('val-start'))) === R0.from && (await page.inputValue(tid('val-q'))) === 'VLZ' && (await page.inputValue(tid('val-item-select'))) === String(IT.P.id) && (await page.locator(tid('val-method-badge')).innerText()).includes('Average'));
-    check('G Average KPI cards: Nilai Stok Awal, Pembelian / Cost In, Pemakaian / Barang Keluar, Nilai Stok Akhir Average, HPP Average, Selisih / Rekonsiliasi — and NO "Jumlah Layer Aktif"', await page.locator('.val-kpi').count() === 6 && (await page.locator('#val-kpis').innerText()).includes('Pemakaian / Barang Keluar') && !(await page.locator('#val-kpis').innerText()).includes('Layer Aktif'));
+    check('G switching to Average: NO page reload, the period / search / selected item are kept; title stays "Laporan Nilai HPP"; badge "Analytical Average — tidak mengubah FIFO operasional"', (await page.locator(tid('val-title')).innerText()) === 'Laporan Nilai HPP' && (await page.inputValue(tid('val-start'))) === R0.from && (await page.inputValue(tid('val-q'))) === 'VLZ' && (await page.inputValue(tid('val-item-select'))) === String(IT.P.id) && (await page.locator(tid('val-method-badge')).innerText()) === 'Analytical Average — tidak mengubah FIFO operasional');
+    check('G Average KPI cards: Nilai Stok Awal, Pembelian / Cost In, Pemakaian / Barang Keluar, Nilai Stok Akhir Average, HPP Average, Selisih / Rekonsiliasi — and NO "Jumlah Layer Aktif"', await page.locator('.val-kpi').count() === 6 && (await page.locator('#val-kpis').innerText()).toLowerCase().includes('pemakaian / barang keluar') && !(await page.locator('#val-kpis').innerText()).toLowerCase().includes('layer aktif'));
     check('G Average KPI values == hand-computed (6 reconstructable items): opening 124.000, cost in 491.000, closing 309.500, HPP 292.000, selisih Rp 0', near(await raw(page, 'opening'), E.average.opening) && near(await raw(page, 'cost-in'), E.average.cost_in) && near(await raw(page, 'closing'), E.average.closing) && near(await raw(page, 'hpp'), E.average.hpp) && near(await raw(page, 'variance'), 0));
     check('G the unreconstructable item is announced ("1 barang: Average tidak dapat direkonstruksi") and listed as "—" in the table, never summed', (await text(page.locator(tid('val-unknown-banner')))).includes('Average tidak dapat direkonstruksi') && (await page.locator(`tr[data-item-id="${IT.U.id}"]`).getAttribute('title')).includes('Average tidak dapat direkonstruksi') && (await cellOf(page, 'val-items-table', `tr[data-item-id="${IT.U.id}"]`, 'Nilai Akhir Average')) === '—');
     check('G Average table: headings "Nilai Awal Average", "Pembelian / Cost In", "Pemakaian / Barang Keluar", "HPP Average", "Nilai Akhir Average", "Average Cost Akhir"; P row: average cost 1.050, closing Rp 126.000, HPP Rp 84.000', (await colIndex(page, 'val-items-table', 'Average Cost Akhir')) > 0 && hasMoney(await cellOf(page, 'val-items-table', rowP(page), 'Average Cost Akhir'), 1050) && hasMoney(await cellOf(page, 'val-items-table', rowP(page), 'Nilai Akhir Average'), 126000) && hasMoney(await cellOf(page, 'val-items-table', rowP(page), 'HPP Average'), 84000));
@@ -210,26 +210,43 @@ try {
     check('N W2 FIFO closing Rp 17.000 (the 2 received layers keep their cost: 20 @ 500 + 10 @ 700)', near(await raw(page, 'closing'), 17000) && (await page.locator(tid('val-layer-active-row')).count()) === 2);
     await setFilters(page, { wh: '' });
 
-    // ---- export == screen
-    await page.evaluate(() => { window.__opened = []; window.open = (u) => { window.__opened.push(u); return null; }; });
-    await page.click(tid('val-export'));
-    const fUrl = (await page.evaluate(() => window.__opened)).pop();
-    check('O export URL carries the selected method and the same filters', fUrl.includes('method=fifo') && fUrl.includes(`start_date=${R0.from}`) && fUrl.includes('q=VLZ'));
-    const getXlsx = (u, name) => page.evaluate(async (url) => { const r = await fetch(url, { credentials: 'include' }); return { status: r.status, type: r.headers.get('content-type'), bytes: Array.from(new Uint8Array(await r.arrayBuffer())) }; }, u).then((wb) => { fs.writeFileSync(path.join(shotDir, name), Buffer.from(wb.bytes)); return wb; });
-    const wbF = await getXlsx(fUrl, 'valuation-sample-export-fifo.xlsx');
-    const zl = sh(`unzip -p ${JSON.stringify(path.join(shotDir, 'valuation-sample-export-fifo.xlsx'))} xl/workbook.xml`);
-    check('O FIFO workbook (xlsx): Ringkasan FIFO, Nilai Stok per Barang, Riwayat FIFO, Layer Aktif, Layer Terpakai, Rekonsiliasi, FIFO vs Average', wbF.status === 200 && /spreadsheetml/.test(wbF.type) && ['Ringkasan FIFO', 'Nilai Stok per Barang', 'Riwayat FIFO', 'Layer Aktif', 'Layer Terpakai', 'Rekonsiliasi', 'FIFO vs Average'].every((n) => zl.includes(n)));
-    const sheet1 = sh(`unzip -p ${JSON.stringify(path.join(shotDir, 'valuation-sample-export-fifo.xlsx'))} xl/worksheets/sheet1.xml`);
-    check('O export metadata states "Metode" FIFO and the operational note; the Ringkasan carries the same Nilai Stok Akhir as the card', sheet1.includes('FIFO') && sheet1.includes('Metode operasional sistem') && sheet1.includes('326500'));
-    await pickMethod(page, 'average');
-    await page.click(tid('val-export'));
-    const aUrl = (await page.evaluate(() => window.__opened)).pop();
-    const wbA = await getXlsx(aUrl, 'valuation-sample-export-average.xlsx');
-    const zlA = sh(`unzip -p ${JSON.stringify(path.join(shotDir, 'valuation-sample-export-average.xlsx'))} xl/workbook.xml`);
-    check('O Average workbook: Ringkasan Average, Average per Barang, Riwayat Average, Per Hari, Rekonsiliasi, FIFO vs Average (metode AVERAGE in the metadata)', aUrl.includes('method=average') && ['Ringkasan Average', 'Average per Barang', 'Riwayat Average', 'Per Hari', 'Rekonsiliasi', 'FIFO vs Average'].every((n) => zlA.includes(n)) && sh(`unzip -p ${JSON.stringify(path.join(shotDir, 'valuation-sample-export-average.xlsx'))} xl/worksheets/sheet1.xml`).includes('AVERAGE'));
-    check('O the Average export marks the unreconstructable item instead of a number', sh(`unzip -p ${JSON.stringify(path.join(shotDir, 'valuation-sample-export-average.xlsx'))} xl/worksheets/sheet2.xml`).includes('Average tidak dapat direkonstruksi'));
+    // ---- export == screen: the 4 combinations Metode (FIFO | Average) x Tampilan (Per Barang | Per Hari), through the real Download Excel / Cetak buttons
+    const grab = async (btn) => {
+        const [d] = await Promise.all([page.waitForEvent('download', { timeout: 30000 }), page.click(tid(btn))]);
+        const f = path.join(shotDir, `valuation-sample-${d.suggestedFilename()}`);
+        await d.saveAs(f);
+        return { name: d.suggestedFilename(), file: f };
+    };
+    const printOf = () => page.evaluate(async () => { const b = ReportTools.lastPrintHtml; document.querySelector('[data-testid="val-print"]').click(); for (let i = 0; i < 100; i++) { await new Promise((r) => setTimeout(r, 100)); if (ReportTools.lastPrintHtml && ReportTools.lastPrintHtml !== b) break; } return ReportTools.lastPrintHtml || ''; });
+    const dump = (f) => JSON.parse(sh(`php tests/lib/xlsx_dump.php ${JSON.stringify(f)}`));
+    check('O the header has Cetak + Download Excel', await page.locator(tid('val-print')).isVisible() && await page.locator(tid('val-excel')).isVisible());
+    for (const [method, view] of [['fifo', 'item'], ['fifo', 'day'], ['average', 'item'], ['average', 'day']]) {
+        await pickMethod(page, method);
+        await pickView(page, view);
+        const M = method === 'fifo' ? 'FIFO' : 'Average'; const V = view === 'day' ? 'Per Hari' : 'Per Barang';
+        const x = await grab('val-excel');
+        check(`O ${M} / ${V}: file name Laporan_Nilai_HPP_${M}_${V.replace(' ', '_')}_<period>.xlsx`, x.name.startsWith(`Laporan_Nilai_HPP_${M}_${V.replace(' ', '_')}_`) && x.name.endsWith('.xlsx'), x.name);
+        const wbd = dump(x.file);
+        const names = wbd.sheets.map((z) => z.name);
+        const ring = JSON.stringify(wbd.sheets[0].rows);
+        check(`O ${M} / ${V}: Ringkasan states "Metode Penilaian: ${M}", "Tampilan: ${V}"${method === 'average' ? ' and the Analytical Average label' : ''}`, ring.includes('Metode Penilaian') && ring.includes(`"v":"${M}"`) && ring.includes(`"v":"${V}"`) && (method === 'fifo' || ring.includes('Analytical Average — tidak mengubah FIFO operasional')));
+        const mainName = method === 'fifo' ? (view === 'day' ? 'Nilai Stok Per Hari FIFO' : 'Nilai Stok per Barang') : (view === 'day' ? 'Average Per Hari' : 'Average per Barang');
+        check(`O ${M} / ${V}: the active view's sheet "${mainName}" comes right after the Ringkasan`, names[1] === mainName, names.join('|'));
+        const main = wbd.sheets[1];
+        check(`O ${M} / ${V}: header frozen + autofilter; Rupiah cells numeric with a Rp format; dates (per hari) are real dates`, main.frozen && main.autofilter !== '' && main.rows.slice(1).some((r) => r.some((c) => c.t === 'n' && c.fmt.includes('Rp'))) && (view !== 'day' || main.rows[1][0].t === 'd'));
+        if (method === 'fifo' && view === 'item') {
+            check('O FIFO workbook: Ringkasan FIFO, Nilai Stok per Barang, Riwayat FIFO, Layer Aktif, Layer Terpakai, Rekonsiliasi, FIFO vs Average; the Ringkasan carries Nilai Stok Akhir 326.500', ['Ringkasan FIFO', 'Nilai Stok per Barang', 'Riwayat FIFO', 'Layer Aktif', 'Layer Terpakai', 'Rekonsiliasi', 'FIFO vs Average'].every((n) => names.includes(n)) && ring.includes('326500'));
+        }
+        if (method === 'average' && view === 'item') {
+            check('O Average workbook: Ringkasan Average, Average per Barang, Average Per Hari, Riwayat Average, Rekonsiliasi, FIFO vs Average; unreconstructable item marked instead of a number', ['Ringkasan Average', 'Average per Barang', 'Average Per Hari', 'Riwayat Average', 'Rekonsiliasi', 'FIFO vs Average'].every((n) => names.includes(n)) && JSON.stringify(wbd.sheets[1].rows).includes('Average tidak dapat direkonstruksi'));
+        }
+        const html = await printOf();
+        check(`O Cetak ${M} / ${V}: states "Metode Penilaian: ${M}" and "Tampilan: ${V}"${method === 'average' ? ', carries the Analytical Average label' : ''}; white background, repeating header, landscape, no controls`,
+            html.includes('<h1>Laporan Nilai HPP</h1>') && html.includes(`Metode Penilaian:</b> ${M}`) && html.includes(`Tampilan:</b> ${V}`) && (method === 'fifo' || html.includes('Analytical Average — tidak mengubah FIFO operasional')) && /background:\s*#fff\s*!important/.test(html)
+            && html.includes('display: table-header-group') && html.includes('size: A4 landscape') && !/<(button|select|input)\b/i.test(html) && /<td class="r">Rp /.test(html));
+    }
+    await pickView(page, 'item');
     await pickMethod(page, 'fifo');
-
     // ---- reconciliation CLI
     const rec = sh(`php scripts/valuation_reconcile_check.php --app-root=. --start=${R0.from} --end=${R0.to} --q=VLZ`);
     check('P read-only reconciliation CLI: every check PASSes (exit 0)', /\d+ \/ \d+ checks passed — all reconcile/.test(rec), rec.split('\n').slice(-3).join(' | '));

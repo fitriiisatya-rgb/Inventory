@@ -7,6 +7,7 @@ import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
 import { execSync, spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -214,26 +215,40 @@ try {
     check('Reset restores the default period (current month) and clears the filters', (await page.inputValue(tid('pur-start'))).endsWith('-01') && (await page.inputValue(tid('pur-q'))) === '');
     await setFilters(page, { from: R0.from, to: R0.to });
 
-    // ---- export == screen
-    await page.evaluate(() => { window.__opened = []; window.open = (u) => { window.__opened.push(u); return null; }; });
-    await page.click(tid('pur-export'));
-    check('X export menu: Excel workbook + 3 CSVs', await page.locator('.pur-export-item').count() === 4);
-    const fetchText = (u) => page.evaluate(async (url) => { const r = await fetch(url, { credentials: 'include' }); return { status: r.status, type: r.headers.get('content-type'), text: await r.text() }; }, u);
-    await page.click(tid('pur-export-invoices'));
-    const csv = await fetchText((await page.evaluate(() => window.__opened)).pop());
-    const lines = csv.text.replace(/^﻿/, '').trim().split('\n').filter(Boolean);
+    // ---- export == screen (real downloads through the header buttons) + Cetak
+    const dlDir = fs.mkdtempSync(path.join(os.tmpdir(), 'purdl_'));
+    const grab = async (btn, viaMenu) => {
+        if (viaMenu) await page.click(tid('pur-more'));
+        const [d] = await Promise.all([page.waitForEvent('download', { timeout: 30000 }), page.click(tid(btn))]);
+        const f = path.join(dlDir, d.suggestedFilename());
+        await d.saveAs(f);
+        return { name: d.suggestedFilename(), file: f };
+    };
+    await page.click(tid('pur-more'));
+    check('X the header has Cetak, Download Excel and a menu with 3 CSV downloads', await page.locator(tid('pur-print')).isVisible() && await page.locator(tid('pur-excel')).isVisible() && await page.locator('.rp-menu-item').count() === 3);
+    await page.click(tid('pur-more'));
     const apiCols = (await api(page, '/reports/purchase-v2/invoices', { ...qs, per_page: '10' })).columns.map((c) => c.label);
-    check('X export Detail Invoice (CSV): every column of the screen catalogue in the header; rows + a TOTAL row; the TOTAL equals the screen GRAND TOTAL (146025.5)', csv.status === 200 && apiCols.every((l) => lines[0].includes(l)) && lines.length === 1 + 5 + 1 && lines[lines.length - 1].startsWith('TOTAL') && lines[lines.length - 1].includes('146025.5'), lines[lines.length - 1].slice(0, 120));
-    await page.click(tid('pur-export')); await page.click(tid('pur-export-items'));
-    const csvI = await fetchText((await page.evaluate(() => window.__opened)).pop());
-    check('X export Detail Barang (CSV): header + one row per item/unit + TOTAL with Total Pembelian == 146025.5', csvI.status === 200 && csvI.text.includes('Harga Beli Rata-rata') && csvI.text.trim().split('\n').pop().includes('146025.5'));
-    await page.click(tid('pur-export')); await page.click(tid('pur-export-workbook'));
-    const wbUrl = (await page.evaluate(() => window.__opened)).pop();
-    const wb = await page.evaluate(async (u) => { const r = await fetch(u, { credentials: 'include' }); const b = new Uint8Array(await r.arrayBuffer()); return { status: r.status, type: r.headers.get('content-type'), bytes: Array.from(b) }; }, wbUrl);
-    fs.writeFileSync(path.join(shotDir, 'purchase-sample-export.xlsx'), Buffer.from(wb.bytes));
-    const zl = sh(`unzip -l ${JSON.stringify(path.join(shotDir, 'purchase-sample-export.xlsx'))}`);
-    check('X workbook: real .xlsx with 4 worksheets (Ringkasan, Detail Invoice, Detail Barang, Baris Invoice-Barang)', wb.status === 200 && /spreadsheetml/.test(wb.type) && (zl.match(/xl\/worksheets\/sheet\d+\.xml/g) || []).length === 4);
-
+    const gi = await grab('pur-export-invoices', true);
+    const csv = fs.readFileSync(gi.file, 'utf8');
+    const lines = csv.replace(/^﻿/, '').trim().split('\n').filter(Boolean);
+    check('X export Detail Invoice (CSV): every column of the screen catalogue in the header; rows + a TOTAL row; the TOTAL equals the screen GRAND TOTAL (146025.5)', apiCols.every((l) => lines[0].includes(l)) && lines.length === 1 + 5 + 1 && lines[lines.length - 1].startsWith('TOTAL') && lines[lines.length - 1].includes('146025.5'), lines[lines.length - 1].slice(0, 120));
+    const gI = await grab('pur-export-items', true);
+    const csvI = fs.readFileSync(gI.file, 'utf8');
+    check('X export Detail Barang (CSV): header + one row per item/unit + TOTAL with Total Pembelian == 146025.5', csvI.includes('Harga Beli Rata-rata') && csvI.trim().split('\n').pop().includes('146025.5'));
+    const gx = await grab('pur-excel', false);
+    check('X Download Excel: named Laporan_Pembelian_<period>.xlsx', /^Laporan_Pembelian_\d{4}-\d{2}.*\.xlsx$/.test(gx.name), gx.name);
+    const wbd = JSON.parse(sh(`php tests/lib/xlsx_dump.php ${JSON.stringify(gx.file)}`));
+    check('X workbook: real .xlsx with 4 worksheets (Ringkasan, Detail Invoice, Detail Barang, Baris Invoice-Barang)', wbd.sheets.map((x) => x.name).join('|') === 'Ringkasan|Detail Invoice|Detail Barang|Baris Invoice-Barang', wbd.sheets.map((x) => x.name).join('|'));
+    const di = wbd.sheets[1];
+    check('X workbook Detail Invoice: header frozen + autofilter, dates are Excel dates, Rupiah cells numeric with a Rp number format, TOTAL row = 146025.5', di.frozen && di.autofilter !== '' && di.rows[1].some((c) => c.t === 'd') && di.rows[1].some((c) => c.t === 'n' && c.fmt.includes('Rp')) && JSON.stringify(di.rows[di.rows.length - 1]).includes('146025.5'));
+    const phtml = await page.evaluate(async () => { const b = ReportTools.lastPrintHtml; document.querySelector('[data-testid="pur-print"]').click(); for (let i = 0; i < 100; i++) { await new Promise((r) => setTimeout(r, 100)); if (ReportTools.lastPrintHtml && ReportTools.lastPrintHtml !== b) break; } return ReportTools.lastPrintHtml || ''; });
+    check('X Cetak: "Laporan Pembelian" with the period + filters + print date, white background, repeating header, both tables (Detail Pembelian, Rincian per Barang), KPI Total Rp 146.025,5, no controls',
+        phtml.includes('<h1>Laporan Pembelian</h1>') && phtml.includes('Periode:') && phtml.includes('Tanggal cetak:') && /background:\s*#fff\s*!important/.test(phtml) && phtml.includes('display: table-header-group') && phtml.includes('Detail Pembelian (per Invoice)')
+        && phtml.includes('Rincian per Barang') && phtml.includes('Rp 146.025,5') && !/<(button|select|input)\b/i.test(phtml) && /<td class="r">Rp /.test(phtml));
+    await page.click(tid('pur-mode-qty')); await page.waitForTimeout(400);
+    const qhtml = await page.evaluate(async () => { const b = ReportTools.lastPrintHtml; document.querySelector('[data-testid="pur-print"]').click(); for (let i = 0; i < 100; i++) { await new Promise((r) => setTimeout(r, 100)); if (ReportTools.lastPrintHtml && ReportTools.lastPrintHtml !== b) break; } return ReportTools.lastPrintHtml || ''; });
+    check('X Cetak in Kuantitas mode: quantity columns only (no Rupiah column), units listed — never summed across units', qhtml.includes('Kuantitas (Qty)') && !/<td class="r">Rp /.test(((qhtml.split('<h2>Detail Pembelian')[1] || '').split('Rincian per Barang')[0])) && /Qty/.test(qhtml));
+    await page.click(tid('pur-mode-nominal')); await page.waitForTimeout(300);
     // ---- reconciliation CLI
     const rec = sh(`php scripts/purchase_reconcile_check.php --app-root=. --start=${R0.from} --end=${R0.to}`);
     check('read-only reconciliation CLI: every check PASSes (exit 0)', /7 \/ 7 checks passed — all reconcile/.test(rec), rec.split('\n').slice(-3).join(' | '));

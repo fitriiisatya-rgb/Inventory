@@ -178,7 +178,7 @@
         } else if (name === 'closing') {
             Closing.render(document.getElementById('tab-closing'));
         } else if (name === 'laporan-hpp') {
-            ReportValuation.render(document.getElementById('tab-laporan-hpp'));
+            ReportNilaiHppV3.render(document.getElementById('tab-laporan-hpp'));
         } else if (name === 'laporan-ringkasan') {
             ReportSummary.render(document.getElementById('tab-laporan-ringkasan'));
         } else if (name === 'laporan-pergerakan') {
@@ -188,11 +188,11 @@
         } else if (name === 'laporan-stok') {
             ReportStock.render(document.getElementById('tab-laporan-stok'));
         } else if (name === 'laporan-pembelian') {
-            ReportPurchase.render(document.getElementById('tab-laporan-pembelian'));
+            ReportPembelianV3.render(document.getElementById('tab-laporan-pembelian'));
         } else if (name === 'laporan-inout') {
-            ReportIO.render(document.getElementById('tab-laporan-inout'), { tab: 'in' });
+            ReportInOutV3.render(document.getElementById('tab-laporan-inout'), { tab: 'in' });
         } else if (name === 'laporan-transfer') {
-            ReportIO.render(document.getElementById('tab-laporan-transfer'), { tab: 'transfer' });
+            ReportInOutV3.render(document.getElementById('tab-laporan-transfer'), { tab: 'transfer' });
         } else if (name === 'laporan-opname') {
             ReportOpnameAudit.render(document.getElementById('tab-laporan-opname'));
         } else if (name === 'laporan-adjustment') {

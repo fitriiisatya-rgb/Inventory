@@ -125,7 +125,7 @@ final class InventoryValuationService
     {
         $c = self::build($pdo, $f);
         $m = $c['f']['method'];
-        $label = $m === 'fifo' ? 'FIFO' : 'AVERAGE';
+        $label = $m === 'fifo' ? 'FIFO' : 'Average';
         $rows = self::itemRows($c);
         $cmp = self::comparison($c);
         $kpi = self::kpis($c);

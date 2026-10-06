@@ -534,7 +534,7 @@ const ReportOpnameAudit = (() => {
             let prev = 0;
             [...shown].sort((a, b) => a - b).forEach((n) => { if (n - prev > 1) nav.appendChild(h('span', { class: 'rp-dim' }, '…')); nav.appendChild(btn(String(n), n, false, n === p.page)); prev = n; });
             nav.appendChild(btn('›', p.page + 1, p.page >= p.total_pages));
-            const left = [h('span', { 'data-testid': `${testid}-total` }, `Total ${num(p.total, 0)} ${label} · halaman ${p.page} / ${p.total_pages}`)];
+            const left = [h('span', { 'data-testid': `${testid}-count` }, `Total ${num(p.total, 0)} ${label} · halaman ${p.page} / ${p.total_pages}`)];
             if (sizes && onSize) {
                 const sel = h('select', { class: 'rp-input soa3-pp', 'data-testid': `${testid}-pp`, 'aria-label': 'Baris per halaman' }, sizes.map((n) => h('option', { value: String(n) }, `${n} / halaman`)));
                 sel.value = String(size);

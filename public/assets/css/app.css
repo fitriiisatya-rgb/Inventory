@@ -2168,6 +2168,27 @@ td.soa-aksi-col { background: #161e33; }
 @media (max-width: 1100px) { .io-f, .io-f.s2, .io-f.s3, .io-f.s4 { grid-column: span 6; } .io-f-period { grid-column: span 12; } }
 @media (max-width: 760px) { .io-tabs { display: flex; align-self: stretch; } .io-tab { flex: 1 1 0; min-width: 0; padding: 7px 4px; justify-content: center; text-align: center; font-size: 0.74rem; } .io-tab-ic { display: none; } .io-tab-tx { white-space: normal; } }
 @media (max-width: 640px) { .io-f, .io-f.s2, .io-f.s3, .io-f.s4 { grid-column: span 12; } .io-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* --- Laporan Pembelian + Nilai HPP: same compact family look (flat KPI cards with a tone edge, one-row filter grid, tighter tables) --- */
+.pur-title, .val-title { font-size: 1.3rem; } .pur-desc, .val-desc { font-size: 0.8rem; }
+.pur-card, .val-card { padding: 10px 12px; } .pur-card-title, .val-card-title { font-size: 0.88rem; } .pur-card-sub, .val-card-sub { font-size: 0.72rem; color: var(--text3); }
+.pur-filter-grid { grid-template-columns: minmax(250px, 1.7fr) repeat(5, minmax(0, 1fr)); gap: 6px 10px; } .val-filter-grid { gap: 6px 10px; }
+.pur-f label, .val-f label { font-size: 0.66rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; color: var(--text3); margin-bottom: 3px; }
+.pur-f input, .pur-f select, .val-f input, .val-f select { min-height: 32px; height: 32px; padding: 0 9px; font-size: 0.8rem; border-radius: 7px; }
+.pur-filter-actions .btn, .val-filter-actions .btn { height: 32px; padding: 0 16px; font-size: 0.78rem; }
+.pur-filters, .val-filters { gap: 8px; }
+.pur-kpi, .val-kpi { padding: 7px 12px; border: 1px solid var(--border); border-left-width: 3px; border-radius: 10px; background: var(--card) !important; }
+.pur-kpi-label, .val-kpi-label { font-size: 0.66rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; color: var(--text3) !important; }
+.pur-kpi-value, .val-kpi-value { font-size: 1.1rem; margin: 0; }
+.pur-kpi-sub, .val-kpi-sub { font-size: 0.68rem; color: var(--text3); }
+.pur-kpi.tone-blue, .val-kpi.tone-blue { border-left-color: #3b82f6; } .pur-kpi.tone-green, .val-kpi.tone-green { border-left-color: #22c55e; } .pur-kpi.tone-red, .val-kpi.tone-red { border-left-color: #ef4444; }
+.pur-kpi.tone-amber, .val-kpi.tone-amber { border-left-color: #f59e0b; } .pur-kpi.tone-purple, .val-kpi.tone-purple { border-left-color: #8b5cf6; } .pur-kpi.tone-teal, .val-kpi.tone-teal { border-left-color: #14b8a6; } .pur-kpi.tone-indigo, .val-kpi.tone-indigo { border-left-color: #6366f1; }
+.pur-kpi.blue, .val-kpi.blue { border-left-color: #3b82f6; } .pur-kpi.green, .val-kpi.green { border-left-color: #22c55e; } .pur-kpi.amber, .val-kpi.amber { border-left-color: #f59e0b; } .pur-kpi.purple, .val-kpi.purple { border-left-color: #8b5cf6; }
+.pur-kpi.teal, .val-kpi.teal { border-left-color: #14b8a6; } .pur-kpi.indigo, .val-kpi.indigo { border-left-color: #6366f1; } .pur-kpi.red, .val-kpi.red { border-left-color: #ef4444; }
+.pur-svg, .val-svg { max-height: 240px; }
+.pur-table th, .pur-table td, .val-table th, .val-table td { padding: 6px 8px; } .pur-table, .val-table { font-size: 0.77rem; }
+.pur-note { padding: 6px 11px; font-size: 0.76rem; }
+@media (max-width: 1100px) { .pur-filter-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .pur-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 /* ===== RV3 REPORT FAMILY 20261008 END ===== */
 
 /* ===== SOA3 AUDIT UI 20261008 BEGIN =====
@@ -2221,8 +2242,9 @@ td.soa-aksi-col { background: #161e33; }
 .soa3 .rp-table tbody tr.click:hover td.sticky1 { background: #1b2840; } .soa3 .rp-table tbody tr.sel td.sticky1 { background: #1a2a49; }
 .soa3 .rp-table tbody tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .soa3-nowrap { white-space: nowrap; }
-.soa3-ppl { display: inline-block; max-width: 170px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
-.soa3 .rp-table td.soa3-name, .soa3 .rp-table th.soa3-name { min-width: 170px; max-width: 300px; }
+.soa3 .rp-table th, .soa3 .rp-table td { padding-left: 7px; padding-right: 7px; }
+.soa3-ppl { display: inline-block; max-width: 140px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.soa3 .rp-table td.soa3-name, .soa3 .rp-table th.soa3-name { min-width: 150px; max-width: 280px; }
 .soa3-thumbs { display: inline-flex; align-items: center; gap: 4px; }
 .soa3-thumb { width: 26px; height: 26px; object-fit: cover; border-radius: 5px; border: 1px solid var(--border); cursor: zoom-in; background: #0b1020; display: block; } .soa3-thumb.broken { outline: 2px solid #ef4444; }
 .soa3-more { background: var(--bg2); border: 1px solid var(--border); color: var(--text2); border-radius: 5px; font-size: 0.68rem; padding: 3px 6px; cursor: pointer; font-family: inherit; }

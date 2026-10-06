@@ -233,7 +233,7 @@ check('Average workbook sheets (view=item): Ringkasan Average, Average per Baran
 $metaCells = array_column($sf['Ringkasan FIFO']['rows'], 1, 0);
 $avgCells = array_column($sa['Ringkasan Average']['rows'], 1, 0);
 check('export metadata states Metode Penilaian (FIFO / AVERAGE), Tampilan, "Metode operasional sistem: FIFO" and the Analytical Average label', ($metaCells['Metode Penilaian'] ?? '') === 'FIFO' && ($metaCells['Tampilan'] ?? '') === 'Per Barang' && ($metaCells['Metode operasional sistem'] ?? '') === 'FIFO'
-    && ($avgCells['Metode Penilaian'] ?? '') === 'AVERAGE' && ($avgCells['Catatan metode'] ?? '') === 'Analytical Average — tidak mengubah FIFO operasional' && !isset($metaCells['Catatan metode']));
+    && ($avgCells['Metode Penilaian'] ?? '') === 'Average' && ($avgCells['Catatan metode'] ?? '') === 'Analytical Average — tidak mengubah FIFO operasional' && !isset($metaCells['Catatan metode']));
 $sdFifo = V::exportWorkbook($pdo, $base + ['method' => 'fifo', 'view' => 'day'], $meta);
 $sdAvg = V::exportWorkbook($pdo, $base + ['method' => 'average', 'view' => 'day'], $meta);
 check('view=day puts the per-day sheet FIRST for BOTH methods and says "Tampilan: Per Hari" (4 combinations method x view are all exportable)', array_keys($sdFifo)[1] === 'Nilai Stok Per Hari FIFO' && array_keys($sdAvg)[1] === 'Average Per Hari'

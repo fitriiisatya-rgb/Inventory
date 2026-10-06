@@ -16,6 +16,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/lib/jejak_real_fixture.php';
 require_once __DIR__ . '/../services/StockOpnameAuditReportService.php';
+require_once __DIR__ . '/../services/ReportExportService.php';
 
 use App\Services\Database;
 use App\Services\StockOpnameAuditReportService as R;
@@ -284,6 +285,20 @@ check('workbook: sheets Ringkasan Sesi / Rincian Item / Evidence / Riwayat Hitun
 $xl = sys_get_temp_dir() . '/soa_test_' . bin2hex(random_bytes(3)) . '.xlsx';
 \App\Services\ExcelWriterService::write($xl, $wb);
 check('workbook writes a real .xlsx (zip with 7 worksheets)', (function () use ($xl) { $z = new ZipArchive(); $ok = $z->open($xl) === true && $z->locateName('xl/worksheets/sheet7.xml') !== false && $z->locateName('xl/worksheets/sheet8.xml') === false; $z->close(); @unlink($xl); return $ok; })());
+// ---- v3 presentation support (additive fields + typed workbook); none of it touches the reconciliation numbers
+$v3 = R::sessions($pdo, $f2);
+$rowL = array_values(array_filter($v3['rows'], static fn ($r) => $r['id'] === $L['session_id']))[0];
+$rowV = array_values(array_filter($v3['rows'], static fn ($r) => $r['id'] === $V['session_id']))[0];
+check('v3 session rows: Adjustment +/− split (legacy: positive + negative == the net 3.500, from the real adjustments); V1 without adjustments → null (unknown, not 0)', $rowL['adj_pos'] !== null && $rowL['adj_neg'] !== null && near($rowL['adj_pos'] + $rowL['adj_neg'], $rowL['adj_value'], 0.001) && $rowL['adj_neg'] < 0 && $rowV['adj_pos'] === null && $rowV['adj_neg'] === null);
+check('v3 session rows: evidence_count = 12 photos on the V1 session, null (legacy keeps no evidence) on the legacy session', $rowV['evidence_count'] === 12 && $rowL['evidence_count'] === null);
+check('v3 sessions options: ALL matching sessions (not only the page) as {id, session_number, session_date, warehouse, status, total_items}', array_column($v3['options'], 'id') === $v3['session_ids'] && count($v3['options']) === 2 && array_keys($v3['options'][0]) === ['id', 'session_number', 'session_date', 'warehouse', 'status', 'total_items'] && count(R::sessions($pdo, ['per_page' => 10, 'page' => 2])['options']) === count(R::sessions($pdo, ['per_page' => 10, 'page' => 1])['options']));
+$v3i = R::items($pdo, [$V['session_id']], ['per_page' => 25]);
+check('v3 items payload carries the summary row of the covered session(s) (context header / print), identical to the sessions row', count($v3i['sessions']) === 1 && $v3i['sessions'][0] === $rowV);
+check('v3 KPI: per-condition "unknown" = item rows whose condition was never recorded (null) — the screen shows "—" instead of 0', isset($v3['kpi']['conditions']['good']['unknown']) && $v3['kpi']['conditions']['good']['unknown'] === count(array_filter($items['rows'], static fn ($r) => $r['good_qty'] === null)));
+check('v3 workbook sheets carry explicit cell types (numbers stay numbers: qty / money formats, real dates / datetimes)', count($wb['Rincian Item']['types']) === count(R::ITEM_COLUMNS) && in_array('money', $wb['Rincian Item']['types'], true) && in_array('qty', $wb['Rincian Item']['types'], true) && in_array('ts', $wb['Rincian Item']['types'], true) && in_array('date', $wb['Rincian Item']['types'], true) && $wb['Ringkasan Sesi']['types'][array_search('Total Item', $wb['Ringkasan Sesi']['headers'], true)] === 'int');
+$xl3 = sys_get_temp_dir() . '/soa_test3_' . bin2hex(random_bytes(3)) . '.xlsx';
+\App\Services\ReportExportService::write($xl3, $wb);
+check('v3 workbook through ReportExportService: a valid zip with 7 worksheets', (function () use ($xl3) { $z = new ZipArchive(); $ok = $z->open($xl3) === true && $z->locateName('xl/worksheets/sheet7.xml') !== false && $z->locateName('xl/worksheets/sheet8.xml') === false; $z->close(); @unlink($xl3); return $ok; })());
 check('export honours the line filters (condition=rusak → 4 rows)', count(R::exportTable($pdo, 'items', $both, ['condition' => 'rusak'])['rows']) === 4);
 check('export cell formatting: unknown → "—"; formula-looking text is neutralised', R::cell('text', null) === '—' && R::cell('text', '=SUM(A1)') === "'=SUM(A1)" && R::cell('qty', 3.5) === 3.5);
 
@@ -369,6 +384,19 @@ try {
     check('CSV sessions over HTTP: header == session column labels, 2 rows', $x['status'] === 200 && str_getcsv(explode("\n", ltrim($x['raw'], "\xEF\xBB\xBF"))[0], ',', '"', '\\') === $lbl(R::SESSION_COLUMNS) && count(array_filter(explode("\n", trim($x['raw'])))) === 3);
     $x = http('GET', "{$base}/reports/opname-audit/export?kind=workbook&{$q}", null, $viewer['jar'], null, true);
     check('workbook over HTTP: 200, xlsx content-type, valid zip with 7 sheets', $x['status'] === 200 && stripos($x['headers'], 'spreadsheetml') !== false && (function () use ($x) { $f = tempnam(sys_get_temp_dir(), 'x') . '.xlsx'; file_put_contents($f, $x['raw']); $z = new ZipArchive(); $ok = $z->open($f) === true && $z->locateName('xl/worksheets/sheet7.xml') !== false; $z->close(); @unlink($f); return $ok; })());
+    // v3 workbook delivery: file name = Laporan_Stock_Opname_<SO number | period>.xlsx; ?format=json = the print tables
+    $vNo = (string) R::build($pdo, $V['session_id'])['session_row']['session_number'];
+    $fn = static fn (array $x): string => preg_match('/filename="([^"]+)"/', $x['headers'], $m) ? $m[1] : '';
+    $x = http('GET', "{$base}/reports/opname-audit/export?kind=workbook&session_ids={$V['session_id']}&{$q}", null, $viewer['jar'], null, true);
+    check('v3 workbook of ONE selected session is named Laporan_Stock_Opname_<SO number>.xlsx', $x['status'] === 200 && $fn($x) === "Laporan_Stock_Opname_{$vNo}.xlsx", $fn($x));
+    $x = http('GET', "{$base}/reports/opname-audit/export?kind=workbook&date_from=2026-09-01&date_to=2026-09-30", null, $viewer['jar'], null, true);
+    check('v3 workbook without a selected session is named Laporan_Stock_Opname_<from>_<to>.xlsx', $fn($x) === 'Laporan_Stock_Opname_2026-09-01_2026-09-30.xlsx', $fn($x));
+    $x = http('GET', "{$base}/reports/opname-audit/export?kind=workbook&{$q}", null, $viewer['jar'], null, true);
+    check('v3 workbook for a single day is named Laporan_Stock_Opname_<date>.xlsx', $fn($x) === 'Laporan_Stock_Opname_2026-09-30.xlsx', $fn($x));
+    $j = http('GET', "{$base}/reports/opname-audit/export?kind=workbook&format=json&session_ids={$V['session_id']}", null, $viewer['jar']);
+    $jd = $j['body']['data'] ?? [];
+    check('v3 workbook ?format=json → print tables: 7 sheets with types, 9 item rows for the V1 session, file name echoed, meta lists the selected session', $j['status'] === 200 && count($jd['sheets'] ?? []) === 7 && ($jd['file_name'] ?? '') === "Laporan_Stock_Opname_{$vNo}.xlsx" && count($jd['sheets'][1]['rows']) === 9 && in_array('money', $jd['sheets'][1]['types'], true) && str_contains(json_encode($jd['meta']), $vNo));
+    check('v3 workbook of a session of another warehouse → 403 (scope enforced before any file is built)', http('GET', "{$base}/reports/opname-audit/export?kind=workbook&session_ids={$V['session_id']}", null, $outsider['jar'], null, true)['status'] === 403);
     check('export with an unknown kind → 422', http('GET', "{$base}/reports/opname-audit/export?kind=nope&{$q}", null, $viewer['jar'], null, true)['status'] === 422);
     check('existing routes unaffected: GET /reports/opname 200, GET /reports/opname/{id}/jejak 200', http('GET', "{$base}/reports/opname", null, $admin['jar'])['status'] === 200 && http('GET', "{$base}/reports/opname/{$V['session_id']}/jejak", null, $admin['jar'])['status'] === 200);
 

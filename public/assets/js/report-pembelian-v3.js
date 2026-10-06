@@ -9,10 +9,19 @@
  * Unknown stays unknown: legacy / historical purchases have no PPN / discount / freight breakdown and show "—" (never 0). Quantities of different
  * units are never added (cards and footers list them BY UNIT; the quantity chart plots one item only). READ-ONLY: only GET requests are issued.
  */
-const ReportPurchase = (() => {
+const ReportPembelianV3 = (() => {
     let S = null;
     const $ = (id) => document.getElementById(id);
     const COL_KEY = 'pur_hidden_cols_v1';
+
+    // own read-only GETs (same-origin, session cookie) — independent of whichever api-client file a deployment executes
+    const PurApi = {
+        overview: (p) => ReportTools.apiGet('/reports/purchase-v2/overview', p),
+        invoices: (p) => ReportTools.apiGet('/reports/purchase-v2/invoices', p),
+        items: (p) => ReportTools.apiGet('/reports/purchase-v2/items', p),
+        invoiceDetail: (p) => ReportTools.apiGet('/reports/purchase-v2/invoice-detail', p),
+        exportUrl: (p) => `/api/reports/purchase-v2/export${ReportTools.qsOf(p)}`,
+    };
 
     // ------------------------------------------------------------------ formatting
     const esc = (v) => String(v === null || v === undefined ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -58,25 +67,17 @@ const ReportPurchase = (() => {
         S = freshState();
         container.innerHTML = '';
         container.classList.add('pur');
-        const exportWrap = UI.el('div', { class: 'pur-export' });
-        const exportBtn = UI.el('button', { class: 'btn btn-success pur-export-btn', 'data-testid': 'pur-export', type: 'button', 'aria-haspopup': 'true' }, '⬇ Export Excel ▾');
-        const menu = UI.el('div', { class: 'pur-export-menu', hidden: 'hidden' }, [
-            ['workbook', 'Excel — Ringkasan, Detail Invoice, Detail Barang, Baris Invoice-Barang'], ['invoices', 'CSV — Detail Invoice'], ['items', 'CSV — Detail Barang'], ['lines', 'CSV — Baris Invoice-Barang'],
-        ].map(([kind, label]) => {
-            const b = UI.el('button', { type: 'button', class: 'pur-export-item', 'data-testid': `pur-export-${kind}` }, label);
-            b.addEventListener('click', () => { menu.hidden = true; window.open(exportUrl(kind), '_blank'); });
-            return b;
-        }));
-        exportBtn.addEventListener('click', (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; });
-        document.addEventListener('click', () => { menu.hidden = true; });
-        exportWrap.appendChild(exportBtn);
-        exportWrap.appendChild(menu);
+        const actions = ReportTools.actions({ id: 'pur', print: doPrint, excel: () => doExcel('workbook'), extras: [
+            { label: 'CSV — Detail Invoice', testid: 'pur-export-invoices', run: () => doExcel('invoices') },
+            { label: 'CSV — Detail Barang', testid: 'pur-export-items', run: () => doExcel('items') },
+            { label: 'CSV — Baris Invoice-Barang', testid: 'pur-export-lines', run: () => doExcel('lines') },
+        ] });
         container.appendChild(UI.el('div', { class: 'pur-head' }, [
             UI.el('div', {}, [
                 UI.el('h2', { class: 'pur-title' }, 'Laporan Pembelian'),
                 UI.el('p', { class: 'pur-desc' }, 'Analisis pembelian eksternal (Stock IN) dari invoice nyata: nilai barang, diskon, PPN, ongkos kirim, supplier, dan harga beli aktual.'),
             ]),
-            exportWrap,
+            actions,
         ]));
         container.appendChild(buildFilterCard());
         container.appendChild(UI.el('div', { id: 'pur-banner' }));
@@ -93,7 +94,32 @@ const ReportPurchase = (() => {
     }
 
     function exportUrl(kind) {
-        return InvApi.purchaseV2ExportUrl(params({ kind, inv_q: S.invQ || undefined }));
+        return PurApi.exportUrl(params({ kind, inv_q: S.invQ || undefined }));
+    }
+    async function doExcel(kind) {
+        await ReportTools.download(exportUrl(kind), kind === 'workbook' ? 'Laporan_Pembelian.xlsx' : `Laporan_Pembelian_${kind}.csv`);
+    }
+    const selText = (id, all) => { const e = $(id); return e && e.value ? e.selectedOptions[0].textContent.trim() : all; };
+    /** Cetak: the SAME workbook tables the Excel file is made of (?format=json), narrowed to the columns currently visible on screen. */
+    async function doPrint() {
+        const payload = await ReportTools.apiGet('/reports/purchase-v2/export', params({ kind: 'workbook', format: 'json', inv_q: S.invQ || undefined }));
+        const labelsOf = (res, table) => (res ? res.columns.filter((c) => visible(table, c)).map((c) => c.label) : undefined);
+        const n = S.overview.kpi.nominal;
+        const k = S.overview.kpi;
+        const qty = S.mode === 'qty';
+        const meta = [['Periode', `${fmtDate(S.start)} s/d ${fmtDate(S.end)}`], ['Gudang', selText('pur-wh', 'Semua Gudang')], ['Supplier', selText('pur-sup', 'Semua Supplier')], ['Kategori', selText('pur-cat', 'Semua Kategori')],
+            ['Barang', S.q || ''], ['Data', selText('pur-hist', 'Live saja')], ['Tampilan', qty ? 'Kuantitas (Qty) — per satuan, tidak dijumlahkan lintas satuan' : 'Nominal (Rp)']];
+        const spec = ReportTools.specFromPayload(payload, [
+            { sheet: 'Detail Invoice', title: 'Detail Pembelian (per Invoice)', columns: labelsOf(S.invoices, 'invoices'), maxRows: 2500 },
+            { sheet: 'Detail Barang', title: 'Rincian per Barang', columns: labelsOf(S.items, 'items'), maxRows: 2500 },
+        ], {
+            subtitle: `Periode ${fmtDate(S.start)} s/d ${fmtDate(S.end)}`, orientation: 'landscape',
+            meta,
+            kpis: qty ? [{ label: 'Transaksi', value: UI.formatNumber(n.invoices, 0) }, { label: 'SKU Dibeli', value: UI.formatNumber(n.skus, 0) }, { label: 'Supplier', value: UI.formatNumber(n.suppliers, 0) }, { label: 'Qty per Satuan', value: unitsText(k.qty_by_unit) }]
+                : [{ label: 'Total Nilai Pembelian', value: rp(n.total), sub: `${UI.formatNumber(n.invoices, 0)} invoice` }, { label: 'Subtotal Barang (DPP)', value: rp(n.subtotal) }, { label: 'Diskon', value: rp(n.discount) },
+                    { label: 'PPN', value: rp(n.ppn) }, { label: 'Ongkos Kirim', value: rp(n.freight) }, { label: 'Supplier', value: UI.formatNumber(n.suppliers, 0) }],
+        });
+        ReportTools.printDocument(spec);
     }
 
     function buildFilterCard() {
@@ -161,9 +187,9 @@ const ReportPurchase = (() => {
         $('pur-banner').innerHTML = '';
         try {
             const [ov, inv, it] = await Promise.all([
-                InvApi.purchaseV2Overview(params({ bucket: S.bucket })),
-                InvApi.purchaseV2Invoices(params({ page: S.page, per_page: S.perPage, inv_q: S.invQ || undefined })),
-                InvApi.purchaseV2Items(params({ page: S.itemPage, per_page: S.itemPerPage })),
+                PurApi.overview(params({ bucket: S.bucket })),
+                PurApi.invoices(params({ page: S.page, per_page: S.perPage, inv_q: S.invQ || undefined })),
+                PurApi.items(params({ page: S.itemPage, per_page: S.itemPerPage })),
             ]);
             S.overview = ov; S.invoices = inv; S.items = it;
         } catch (err) {
@@ -174,15 +200,15 @@ const ReportPurchase = (() => {
         renderBanner(); renderKpis(); renderChart(); renderInvoices(); renderItems();
     }
     async function reloadInvoices() {
-        try { S.invoices = await InvApi.purchaseV2Invoices(params({ page: S.page, per_page: S.perPage, inv_q: S.invQ || undefined })); } catch (err) { UI.handleApiError(err); return; }
+        try { S.invoices = await PurApi.invoices(params({ page: S.page, per_page: S.perPage, inv_q: S.invQ || undefined })); } catch (err) { UI.handleApiError(err); return; }
         renderInvoices();
     }
     async function reloadItems() {
-        try { S.items = await InvApi.purchaseV2Items(params({ page: S.itemPage, per_page: S.itemPerPage })); } catch (err) { UI.handleApiError(err); return; }
+        try { S.items = await PurApi.items(params({ page: S.itemPage, per_page: S.itemPerPage })); } catch (err) { UI.handleApiError(err); return; }
         renderItems();
     }
     async function reloadChart() {
-        try { S.overview = await InvApi.purchaseV2Overview(params({ bucket: S.bucket })); } catch (err) { UI.handleApiError(err); return; }
+        try { S.overview = await PurApi.overview(params({ bucket: S.bucket })); } catch (err) { UI.handleApiError(err); return; }
         renderChart();
     }
 
@@ -445,7 +471,7 @@ const ReportPurchase = (() => {
         wideDrawer(`${row.reference} — ${row.supplier}`, async (body) => {
             body.innerHTML = '<div class="alert alert-info" data-testid="pur-drawer-loading">Memuat rincian invoice…</div>';
             let d;
-            try { d = await InvApi.purchaseV2InvoiceDetail({ tx_ids: row.tx_ids.join(',') }); } catch (err) { body.innerHTML = ''; body.appendChild(UI.el('div', { class: 'alert alert-error', 'data-testid': 'pur-drawer-error' }, `Gagal memuat: ${err.message}`)); return; }
+            try { d = await PurApi.invoiceDetail({ tx_ids: row.tx_ids.join(',') }); } catch (err) { body.innerHTML = ''; body.appendChild(UI.el('div', { class: 'alert alert-error', 'data-testid': 'pur-drawer-error' }, `Gagal memuat: ${err.message}`)); return; }
             body.innerHTML = '';
             const inv = d.invoice;
             const kv = (rows) => UI.el('div', { class: 'pur-kv' }, rows.map(([k, v]) => UI.el('div', { class: 'pur-kv-row' }, [UI.el('span', { class: 'pur-kv-k' }, k), UI.el('span', { class: 'pur-kv-v' }, [nil(v) ? '—' : v])])));
