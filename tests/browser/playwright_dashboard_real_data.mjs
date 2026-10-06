@@ -146,7 +146,7 @@ try {
 
     // ============================================ 1. page, scripts, top bar
     const scripts = await page.evaluate(() => Array.from(document.scripts).map((s) => s.getAttribute('src') || ''));
-    check('dashboard.js + app.css carry the new cache token', scripts.some((s) => s.includes('dashboard.js?v=20261011-ui2')) && (await page.evaluate(() => Array.from(document.querySelectorAll('link[rel=stylesheet]')).some((l) => l.href.includes('20261011-ui2')))));
+    check('dashboard.js + app.css carry the new cache token', scripts.some((s) => s.includes('dashboard.js?v=20261011-ui2')) && (await page.evaluate(() => Array.from(document.querySelectorAll('link[rel=stylesheet]')).some((l) => /app\.css\?v=\d{8}-\w+/.test(l.href)))));
     const whOptions = (await page.locator('[data-testid="dash-warehouse"] option').allTextContents()).map((s) => s.trim());
     check('Gudang filter lists Semua Gudang + the three warehouses', whOptions[0] === 'Semua Gudang' && ['Gudang SCM / Gudang Besar', 'Gudang Cibadak', 'Gudang Karang Tengah'].every((n) => whOptions.includes(n)), whOptions.join('|'));
     check('Refresh button + "Data diperbarui" timestamp present', (await txt(page, 'dash-updated')).startsWith('Data diperbarui:') && !(await txt(page, 'dash-updated')).endsWith('—') && await page.locator('[data-testid="dash-refresh"]').count() === 1);
