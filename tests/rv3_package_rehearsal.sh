@@ -21,7 +21,7 @@ unpack() { rm -rf "${1:?}"; mkdir -p "$1"; tar -xzf "$PKG" -C "$1"; echo "$1/rep
 echo "package: $PKG"; sha256sum "$PKG" | cut -d' ' -f1
 
 # production-like trees: the project history at the commits where each earlier package was delivered, + the current tree (everything already applied)
-TREES="${RV3_TREES:-55fc7f8 af5ead4 f59e816 3bb9a91 HEAD}"
+TREES="${RV3_TREES:-39fc986 55fc7f8 af5ead4 f59e816 3bb9a91 HEAD}"
 for rev in $TREES; do
   echo; echo "=================== tree @ $rev ==================="
   T="$W/tree_$rev"; mkdir -p "$T"; git archive "$rev" | tar -x -C "$T"

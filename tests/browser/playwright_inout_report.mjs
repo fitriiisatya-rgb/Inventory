@@ -31,7 +31,7 @@ let phpServer; let proxy; let base;
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.jpg': 'image/jpeg' };
 async function startServer() {
     const phpPort = 9000 + Math.floor(Math.random() * 400);
-    phpServer = spawn('php', ['-S', `127.0.0.1:${phpPort}`, '-t', 'public', 'public/router.php'], { cwd: repoRoot, env: { ...process.env, PHP_CLI_SERVER_WORKERS: '4' } });
+    phpServer = spawn('php', ['-S', `127.0.0.1:${phpPort}`, '-t', 'public', 'public/router.php'], { cwd: process.env.RV3_APP_ROOT || repoRoot, env: { ...process.env, PHP_CLI_SERVER_WORKERS: '4' } });
     let ready = false;
     for (let i = 0; i < 60 && !ready; i++) { await new Promise((r) => setTimeout(r, 200)); try { if ((await fetch(`http://127.0.0.1:${phpPort}/api/auth/me`)).status) ready = true; } catch (e) { /* retry */ } }
     if (!ready) { console.error('php server not ready'); process.exit(1); }
@@ -43,7 +43,7 @@ async function startServer() {
             req.pipe(up);
             return;
         }
-        const staticRoot = process.env.IO_STATIC_ROOT || path.join(repoRoot, 'public');
+        const staticRoot = process.env.IO_STATIC_ROOT || path.join(process.env.RV3_APP_ROOT || repoRoot, 'public');
         const file = path.join(staticRoot, urlPath === '/' ? 'index.html' : urlPath);
         if (!file.startsWith(staticRoot) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end('nf'); return; }
         res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
