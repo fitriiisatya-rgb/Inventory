@@ -5636,8 +5636,11 @@ $routes = [
     },
 ];
 
-// ---- Reports v3 (read-only GET routes of the five reports; keys here replace older routes of the same key) ----
-$routes = array_merge($routes, require __DIR__ . '/../services/ReportsV3Routes.php');
+// >>> RV3 reports_v3 BEGIN — read-only report routes (keys defined there replace older routes of the same key). Remove this block to disable.
+if (is_file(__DIR__ . '/../services/ReportsV3Routes.php')) {
+    $routes = array_merge($routes, require __DIR__ . '/../services/ReportsV3Routes.php');
+}
+// <<< RV3 reports_v3 END
 
 // ---- dispatch: exact match first, then {param} patterns ----
 $key = "{$method} {$path}";

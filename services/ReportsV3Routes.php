@@ -12,6 +12,12 @@ declare(strict_types=1);
  * inv_hpp_resolve_warehouse_scope are the core helpers.
  */
 
+// Included from anywhere other than the front controller (a CLI script that loads every service file) this file is inert: it returns no routes and defines nothing it needs
+// the front controller's variables for.
+if (!isset($routes, $pdo, $query) || !is_array($routes)) {
+    return [];
+}
+
 use App\Services\AuthService;
 use App\Services\ValidationException;
 
