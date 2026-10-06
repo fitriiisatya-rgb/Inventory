@@ -75,11 +75,11 @@ const FINAL = [
     ['laporan-inout', 'Laporan IN / OUT'],
     ['laporan-pembelian', 'Laporan Pembelian'],
     ['laporan-hpp', 'Laporan Nilai HPP'],
-    ['opname-laporan', 'Laporan Stock Opname'],
+    ['laporan-opname', 'Laporan Stock Opname'],
 ];
 const REMOVED = ['Ringkasan Inventory', 'Laporan Stok', 'Adjustment / Selisih', 'Expired / Near Expired', 'Pembelian per Supplier', 'Distribusi per Bakery',
     'Slow / No Movement', 'Rekonsiliasi Arus Stok', 'Audit Transaksi', 'Laporan Transfer', 'Laporan P1/P2 Stock Opname', 'Pergerakan Stok Harian', 'Nilai Stok & HPP'];
-const LEGACY = ['laporan-ringkasan', 'laporan-stok', 'laporan-transfer', 'laporan-opname', 'laporan-adjustment', 'laporan-expiry', 'laporan-supplier', 'laporan-bakery', 'laporan-slow-movement', 'laporan-rekonsiliasi', 'laporan-audit'];
+const LEGACY = ['laporan-ringkasan', 'laporan-stok', 'laporan-transfer', 'opname-laporan', 'laporan-adjustment', 'laporan-expiry', 'laporan-supplier', 'laporan-bakery', 'laporan-slow-movement', 'laporan-rekonsiliasi', 'laporan-audit'];
 const shot = (page, name) => page.screenshot({ path: path.join(shotDir, `sidebar-${name}.png`) });
 const clean = (s) => s.replace(/\s+/g, ' ').trim().replace(/^[^A-Za-z]+/, '');
 const laporanLinks = (page, scope = '[data-group="laporan"] .sidebar-submenu') => page.locator(`${scope} .sidebar-link:visible`);
