@@ -53,7 +53,7 @@ for rev in $TREES; do
   "$PHP" $PHPA "$P/scripts/rv3_engine.php" verify --app-root="$T" >"$W/verify_$rev.txt" 2>&1; rc=$?
   chk "[$rev] verify passes (all operations done, php -l, one tag each, one render per tab, recorded hashes)" $rc; [ $rc -ne 0 ] && grep -E "FAIL|todo|conflict" "$W/verify_$rev.txt" | head
   # the result must be the SAME tree no matter where we started: compare the files the package owns with the final (HEAD) ones
-  mism=0; for f in public/assets/js/report-tools.js public/assets/js/report-pergerakan.js public/assets/js/report-pembelian-v3.js public/assets/js/report-nilai-hpp-v3.js public/assets/js/report-inout-v3.js public/assets/js/report-opname-audit.js services/ReportsV3Routes.php services/ReportExportService.php services/MovementReportV3Service.php services/PurchaseReportService.php services/InOutReportService.php services/InventoryValuationService.php services/StockOpnameAuditReportService.php; do
+  mism=0; for f in public/assets/js/report-tools.js public/assets/js/report-pergerakan.js public/assets/js/report-pembelian-v3.js public/assets/js/report-nilai-hpp-v3.js public/assets/js/report-inout-v3.js public/assets/js/report-opname-audit.js services/ReportsV3Routes.php services/ReportExportService.php services/MovementReportV3Service.php services/PurchaseReportService.php services/InOutReportService.php services/InventoryValuationService.php services/StockOpnameAuditReportService.php services/MovementDailyReportService.php; do
     cmp -s "$T/$f" <(git show HEAD:"$f") || { mism=1; echo "   differs from HEAD: $f"; }
   done
   chk "[$rev] every shipped file equals the committed one" $mism
@@ -120,6 +120,30 @@ T="$W/neg_tree"; rm -rf "${T:?}"; mkdir -p "$T"; git archive "$REV" | tar -x -C 
 echo "/* edited after apply */" >> "$T/public/assets/css/app.css"; b="$(tree_sum "$T")"
 "$PHP" $PHPA "$P/scripts/rv3_engine.php" rollback --app-root="$T" >"$W/neg_rb.txt" 2>&1; rc=$?
 [ $rc -ne 0 ] && grep -q "no longer byte-identical" "$W/neg_rb.txt" && [ "$(tree_sum "$T")" = "$b" ]; chk "[neg] rollback phase 1 refuses when a file was edited after the apply (nothing restored)" $?
+
+# ---------------------------------------------------------------- read-only validator on an UNPATCHED tree (needs the test database: RV3_VALIDATE=1)
+if [ "${RV3_VALIDATE:-0}" = 1 ]; then
+  echo; echo "=================== validator on an unpatched tree (numeric unit codes in the data) ==================="
+  T="$W/val_tree"; rm -rf "${T:?}"; mkdir -p "$T"; git archive 3bb9a91 | tar -x -C "$T"
+  P="$(unpack "$W/val_pkg")"
+  mysql -uroot -e "DROP DATABASE IF EXISTS ${DB_DATABASE:-inventory_test}; CREATE DATABASE ${DB_DATABASE:-inventory_test} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" && mysql -uroot "${DB_DATABASE:-inventory_test}" < database/schema.sql && php tests/browser/seed_so_audit_v3.php >/dev/null 2>&1
+  php -r 'require "services/Database.php"; $p = App\Services\Database::connection(); $p->exec("INSERT INTO units (code,name) VALUES (\"12\",\"n12\"),(\"500\",\"n500\")");
+    $a=(int)$p->query("SELECT id FROM units WHERE code=\"12\"")->fetchColumn(); $b=(int)$p->query("SELECT id FROM units WHERE code=\"500\"")->fetchColumn();
+    foreach ($p->query("SELECT DISTINCT item_id FROM inventory_transaction_lines ORDER BY 1 LIMIT 6")->fetchAll(PDO::FETCH_COLUMN) as $k => $id) { if ($k % 3 == 0) $p->exec("UPDATE items SET base_unit_id=$a WHERE id=$id"); elseif ($k % 3 == 1) $p->exec("UPDATE items SET base_unit_id=$b WHERE id=$id"); }'
+  mkdir -p "$T/storage"; cp -r storage/stock_opname_photos "$T/storage/" 2>/dev/null
+  before="$(tree_sum "$T")"
+  ! [ -f "$T/services/MovementReportV3Service.php" ]; chk "[validator] the tree is unpatched: MovementReportV3Service is NOT installed" $?
+  "$PHP" $PHPA "$P/scripts/movement_reconcile_check.php" --app-root="$T" --start=2026-09-01 --end=2026-09-30 >"$W/val_daily_old.txt" 2>&1; rc=$?
+  [ $rc -ne 0 ] && grep -q "strcmp" "$W/val_daily_old.txt"; chk "[validator] the INSTALLED (old) daily service really fails on this data with the production TypeError (the regression is reproduced)" $?
+  "$PHP" $PHPA "$P/scripts/movement_v3_reconcile_check.php" --app-root="$T" >"$W/val_v3_nopkg.txt" 2>&1; rc=$?
+  [ $rc -eq 2 ] && grep -q "package-dir" "$W/val_v3_nopkg.txt"; chk "[validator] movement_v3 run alone WITHOUT the package: a clear ABORT (exit 2) telling to pass --package-dir, not a fatal error" $?
+  "$PHP" $PHPA "$P/scripts/movement_v3_reconcile_check.php" --app-root="$T" --package-dir="$P" --start=2026-09-01 --end=2026-09-30 >"$W/val_v3.txt" 2>&1; rc=$?
+  chk "[validator] movement_v3 run alone WITH --package-dir works before apply: exit 0" $rc
+  "$PHP" $PHPA "$P/scripts/rv3_readonly_check.php" --app-root="$T" --package-dir="$P" --session=1,2 --start=2026-09-01 --end=2026-09-30 >"$W/val_all.txt" 2>&1; rc=$?
+  chk "[validator] readonly_validate on the unpatched tree: exit 0 — Stock Opname, Movement V3, Movement Daily, IN/OUT/Transfer, Pembelian, Nilai HPP" $rc
+  [ "$(grep -c '^PASS ' "$W/val_all.txt")" = 6 ]; chk "[validator] all six reports PASS" $?
+  [ "$(tree_sum "$T")" = "$before" ]; chk "[validator] the application tree is byte-identical after the validator (nothing written)" $?
+fi
 
 echo; echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]
