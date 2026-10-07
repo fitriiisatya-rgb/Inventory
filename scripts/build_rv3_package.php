@@ -126,24 +126,8 @@ foreach (['report-tools.js', 'report-pergerakan.js', 'report-pembelian-v3.js', '
 }
 $ops[] = ['id' => 'index.html:scripts', 'type' => 'html_scripts', 'target' => 'public/index.html', 'tags' => $tags];
 $ops[] = ['id' => 'index.html:tokens', 'type' => 'html_tokens', 'target' => 'public/index.html', 'assets' => [['path' => 'assets/js/app.js', 'token' => $token], ['path' => 'assets/css/app.css', 'token' => $token]]];
-// sidebar: parse the approved + hidden markup out of the committed dev index.html
-preg_match('#<div class="sidebar-group[^"]*"\s+data-group="laporan">#', $html, $gm, PREG_OFFSET_CAPTURE);
-$gSpan = rv3_div_span($html, $gm[0][1]);
-preg_match('#<div class="sidebar-submenu"[^>]*>#', substr($html, $gm[0][1], $gSpan[1] - $gm[0][1]), $sm, PREG_OFFSET_CAPTURE);
-$sStart = $gm[0][1] + $sm[0][1];
-$sSpan = rv3_div_span($html, $sStart);
-$approved = rv3_anchors(substr($html, $sStart, $sSpan[1] - $sStart));
-$cPos = strpos($html, '<div class="sidebar-legacy-routes"');
-$cSpan = rv3_div_span($html, $cPos);
-$legacy = rv3_anchors(substr($html, $cPos, $cSpan[1] - $cPos));
-if (array_column($approved, 'tab') !== ['laporan-pergerakan', 'laporan-inout', 'laporan-pembelian', 'laporan-hpp', 'laporan-opname']) {
-    rv3_die('dev index.html: the Laporan submenu is not the five approved reports in order: ' . implode(',', array_column($approved, 'tab')));
-}
-$cm0 = strrpos(substr($html, 0, $cPos), '<!-- Sidebar cleanup');
-$legacyComment = $cm0 === false ? '' : trim(substr($html, $cm0, $cPos - $cm0));
-preg_match('#<!-- "Laporan Stock Opname" \(data-tab opname-laporan\).*?-->#s', $html, $oc);
-$ops[] = ['id' => 'index.html:sidebar', 'type' => 'html_sidebar', 'target' => 'public/index.html', 'approved' => $approved, 'legacy' => $legacy, 'legacy_comment_block' => $legacyComment,
-    'opname_comment' => $oc[0] ?? '<!-- "Laporan Stock Opname" now lives in the Laporan menu. -->'];
+// sidebar: the approved + hidden markup is parsed out of the committed dev index.html (rv3_sidebar_op_from_html — the same function the sidebar unit test uses)
+$ops[] = ['id' => 'index.html:sidebar', 'type' => 'html_sidebar', 'target' => 'public/index.html'] + rv3_sidebar_op_from_html($html);
 
 // ---------------------------------------------------------------- requirements the payload needs from files this package does NOT ship
 $requirements = [

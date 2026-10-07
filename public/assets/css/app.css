@@ -2047,6 +2047,12 @@ td.soa-aksi-col { background: #161e33; }
    Shared look of the five reports (Pergerakan, IN / OUT, Pembelian, Nilai HPP, Stock Opname): one compact filter card, one KPI grid (no card-in-card),
    segmented toggles / tabs, sticky-header tables, a wide drawer, and the Cetak / Download Excel buttons (report-tools.js). Tokens come from :root above. */
 .rp-page { display: flex; flex-direction: column; gap: 12px; }
+/* The five report pages put display:flex on the .tab-content container itself (.rp-page / .io / .pur / .val / .mvr / .soa3). Without this rule that display beats
+   .tab-content{display:none}: a report opened earlier stayed rendered ABOVE every page opened afterwards. An inactive tab is never shown. */
+.tab-content:not(.active) { display: none !important; }
+/* Sidebar safety net: the old report links are never shown (index.html keeps them only inside .sidebar-legacy-routes; report-tools.js marks any stray one with data-rv3-hide). */
+.sidebar-legacy-routes, .sidebar-legacy-routes * { display: none !important; }
+.sidebar-link[data-rv3-hide] { display: none !important; }
 .rp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .rp-title { font-size: 1.3rem; font-weight: 800; line-height: 1.2; margin: 0; }
 .rp-desc { margin: 3px 0 0; font-size: 0.8rem; color: var(--text2); max-width: 760px; }

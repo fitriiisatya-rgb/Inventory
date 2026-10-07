@@ -216,9 +216,16 @@ function rv3_op_html_tokens(?string $cur, array $op, string $dir): array
     return [$cur, $changed ? 'todo' : 'done', $changed ? 'cache-bust tokens bumped' : 'tokens already current'];
 }
 
-/** @return array{0:int,1:int}|null start/end (exclusive) of the balanced element that starts at $open (position of "<div") */
+/** the same HTML with every <!-- comment --> blanked to spaces (identical length, so offsets stay valid): a "</div>" or "<a" quoted inside a comment must never count */
+function rv3_mask_comments(string $html): string
+{
+    return preg_replace_callback('#<!--.*?(?:-->|$)#s', static fn (array $m): string => str_repeat(' ', strlen($m[0])), $html) ?? $html;
+}
+
+/** @return array{0:int,1:int}|null start/end (exclusive) of the balanced element that starts at $open (position of "<div"); comments are ignored */
 function rv3_div_span(string $html, int $open): ?array
 {
+    $html = rv3_mask_comments($html);
     $depth = 0;
     $pos = $open;
     while (preg_match('#<(/?)div\b[^>]*>#', $html, $m, PREG_OFFSET_CAPTURE, $pos)) {
@@ -231,11 +238,29 @@ function rv3_div_span(string $html, int $open): ?array
     return null;
 }
 
-/** @return list<array{tab:string,markup:string}> */
+/** @return list<array{tab:string,markup:string}> anchors that carry a data-tab (anchors inside comments are not anchors) */
 function rv3_anchors(string $html): array
 {
-    preg_match_all('#<a\b[^>]*\bdata-tab="([^"]+)"[^>]*>.*?</a>#s', $html, $m, PREG_SET_ORDER);
-    return array_map(static fn (array $x) => ['tab' => $x[1], 'markup' => $x[0]], $m);
+    return array_map(static fn (array $x) => ['tab' => $x['tab'], 'markup' => $x['markup']], rv3_anchor_spans($html));
+}
+
+/** @return list<array{tab:string,markup:string,start:int,end:int}> */
+function rv3_anchor_spans(string $html): array
+{
+    preg_match_all('#<a\b[^>]*\bdata-tab="([^"]+)"[^>]*>.*?</a>#s', rv3_mask_comments($html), $m, PREG_SET_ORDER | PREG_OFFSET_CAPTURE);
+    $out = [];
+    foreach ($m as $x) {
+        $out[] = ['tab' => $x[1][0], 'markup' => substr($html, $x[0][1], strlen($x[0][0])), 'start' => $x[0][1], 'end' => $x[0][1] + strlen($x[0][0])];
+    }
+    return $out;
+}
+
+/** visible label of an anchor: icon span and tags removed, entities decoded, whitespace collapsed */
+function rv3_anchor_label(string $markup): string
+{
+    $t = preg_replace('#<span\b[^>]*class="[^"]*\bicon\b[^"]*"[^>]*>.*?</span>#s', '', $markup) ?? $markup;
+    $t = html_entity_decode(strip_tags($t), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    return trim(preg_replace('#\s+#u', ' ', $t) ?? $t);
 }
 
 function rv3_op_html_sidebar(?string $cur, array $op, string $dir): array
@@ -250,7 +275,7 @@ function rv3_op_html_sidebar(?string $cur, array $op, string $dir): array
         $legacyKnown[$a['tab']] = $a['markup'];
     }
     $approvedTabs = array_column($approved, 'tab');
-    if (!preg_match('#<div class="sidebar-group[^"]*"\s+data-group="laporan">#', $cur, $gm, PREG_OFFSET_CAPTURE)) {
+    if (!preg_match('#<div class="sidebar-group[^"]*"\s+data-group="laporan">#', rv3_mask_comments($cur), $gm, PREG_OFFSET_CAPTURE)) {
         return [$cur, 'conflict', 'the Laporan sidebar group (data-group="laporan") was not found'];
     }
     $gStart = $gm[0][1];
@@ -276,7 +301,7 @@ function rv3_op_html_sidebar(?string $cur, array $op, string $dir): array
     $out = substr($cur, 0, $innerStart) . $newInner . '                ' . substr($cur, $innerEnd);
 
     $legacyOpen = '<div class="sidebar-legacy-routes"';
-    $cPos = strpos($out, $legacyOpen);
+    $cPos = strpos(rv3_mask_comments($out), $legacyOpen);
     $note = '';
     if ($cPos !== false) {
         $cSpan = rv3_div_span($out, $cPos);
@@ -292,7 +317,7 @@ function rv3_op_html_sidebar(?string $cur, array $op, string $dir): array
         $note = ' (hidden container created)';
     }
     // an "opname-laporan" link left OUTSIDE the hidden container (the old Stock Opname group) becomes a comment: the same data-tab lives in the hidden container
-    $cPos = strpos($out, $legacyOpen);
+    $cPos = strpos(rv3_mask_comments($out), $legacyOpen);
     $cSpan = rv3_div_span($out, $cPos);
     $stray = 0;
     $strayRe = '#[ \t]*<a\b[^>]*\bdata-tab="opname-laporan"[^>]*>.*?</a>[ \t]*\n?#s';
@@ -301,10 +326,119 @@ function rv3_op_html_sidebar(?string $cur, array $op, string $dir): array
         return '                    ' . $op['opname_comment'] . "\n";
     };
     $out = preg_replace_callback($strayRe, $repl, substr($out, 0, $cPos)) . substr($out, $cPos, $cSpan[1] - $cPos) . preg_replace_callback($strayRe, $repl, substr($out, $cSpan[1]));
+    [$out, $swept] = rv3_sidebar_sweep($out, $op, $approvedTabs, $legacyKnown, $hide);
     if ($out === $cur) {
         return [$cur, 'done', 'Laporan menu already = the five approved reports'];
     }
-    return [$out, 'todo', 'Laporan menu -> the five approved reports, every other report link kept hidden' . $note . ($stray ? "; {$stray} stray opname-laporan link replaced by a comment" : '')];
+    return [$out, 'todo', 'Laporan menu -> the five approved reports, every other report link kept hidden' . $note . ($stray ? "; {$stray} stray opname-laporan link replaced by a comment" : '')
+        . ($swept['moved'] || $swept['dupes'] ? "; sweep: {$swept['moved']} old report link(s) moved into the hidden container, {$swept['dupes']} duplicate approved link(s) removed" : '')];
+}
+
+/**
+ * Last pass over the whole sidebar (<nav id="sidebar">): whatever the production markup looked like, no old report link stays VISIBLE and no approved report appears twice.
+ *   - an anchor of an old report (by data-tab OR by its visible label) outside the hidden container / the approved Laporan submenu  -> moved into the hidden container (route compatibility)
+ *   - an approved report that appears a second time (a duplicate row, or a copy outside the Laporan submenu)                        -> removed
+ * Pure function of its input: running it on its own output changes nothing.
+ * @return array{0:string,1:array{moved:int,dupes:int}}
+ */
+function rv3_sidebar_sweep(string $out, array $op, array $approvedTabs, array $legacyKnown, callable $hide): array
+{
+    $stats = ['moved' => 0, 'dupes' => 0];
+    $oldTabs = array_map('strval', $op['old_report_tabs'] ?? []);
+    $oldLabels = array_map(static fn ($l) => mb_strtolower((string) $l), $op['old_report_labels'] ?? []);
+    if (!$oldTabs && !$oldLabels) {
+        return [$out, $stats];
+    }
+    $masked = rv3_mask_comments($out);
+    $nStart = 0;
+    $nEnd = strlen($out);
+    if (preg_match('#<nav\b[^>]*\bid="sidebar"[^>]*>#', $masked, $nm, PREG_OFFSET_CAPTURE)) {
+        $nStart = $nm[0][1];
+        $nEnd = ($e = strpos($masked, '</nav>', $nStart)) === false ? $nEnd : $e;
+    }
+    $legacyOpen = strpos($masked, '<div class="sidebar-legacy-routes"');
+    $legacy = $legacyOpen === false ? null : rv3_div_span($out, $legacyOpen);
+    $gPos = preg_match('#<div class="sidebar-group[^"]*"\s+data-group="laporan">#', $masked, $gm, PREG_OFFSET_CAPTURE) ? $gm[0][1] : null;
+    $group = $gPos === null ? null : rv3_div_span($out, $gPos);
+    $seen = [];
+    $remove = [];
+    $moved = [];
+    foreach (rv3_anchor_spans($out) as $a) {
+        if ($a['start'] < $nStart || $a['end'] > $nEnd) {
+            continue;
+        }
+        if ($legacy !== null && $a['start'] >= $legacy[0] && $a['end'] <= $legacy[1]) {
+            continue;
+        }
+        $inGroup = $group !== null && $a['start'] >= $group[0] && $a['end'] <= $group[1];
+        if (in_array($a['tab'], $approvedTabs, true)) {
+            if ($inGroup && !isset($seen[$a['tab']])) {
+                $seen[$a['tab']] = true;
+                continue;
+            }
+            $remove[] = $a;
+            $stats['dupes']++;
+            continue;
+        }
+        $label = mb_strtolower(rv3_anchor_label($a['markup']));
+        if (in_array($a['tab'], $oldTabs, true) || in_array($label, $oldLabels, true)) {
+            $remove[] = $a;
+            $moved[$a['tab']] = $legacyKnown[$a['tab']] ?? $hide($a['markup']);
+            $stats['moved']++;
+        }
+    }
+    if (!$remove) {
+        return [$out, $stats];
+    }
+    foreach (array_reverse($remove) as $a) {                       // from the end: earlier offsets stay valid
+        $ls = strrpos(substr($out, 0, $a['start']), "\n");
+        $lead = $ls === false ? 0 : $ls + 1;
+        $pre = substr($out, $lead, $a['start'] - $lead);
+        $nl = strpos($out, "\n", $a['end']);
+        $post = $nl === false ? substr($out, $a['end']) : substr($out, $a['end'], $nl - $a['end']);
+        $wholeLine = trim($pre) === '' && trim($post) === '' && $nl !== false;
+        $out = $wholeLine ? substr($out, 0, $lead) . substr($out, $nl + 1) : substr($out, 0, $a['start']) . substr($out, $a['end']);
+    }
+    if ($moved) {
+        $cPos = strpos(rv3_mask_comments($out), '<div class="sidebar-legacy-routes"');
+        if ($cPos === false) {
+            return [$out, $stats];                                  // no hidden container (cannot happen after the container pass); nothing to add the moved links to
+        }
+        $cSpan = rv3_div_span($out, $cPos);
+        $inner = [];
+        foreach (rv3_anchors(substr($out, $cPos, $cSpan[1] - $cPos)) as $a) {
+            $inner[$a['tab']] = $a['markup'];
+        }
+        $out = substr($out, 0, $cPos) . rv3_legacy_container($inner + $moved, '                ') . substr($out, $cSpan[1]);
+    }
+    return [$out, $stats];
+}
+
+/** the html_sidebar op payload (approved five, hidden legacy links, comments, old-report tabs / labels) parsed out of the committed dev index.html */
+function rv3_sidebar_op_from_html(string $html): array
+{
+    preg_match('#<div class="sidebar-group[^"]*"\s+data-group="laporan">#', rv3_mask_comments($html), $gm, PREG_OFFSET_CAPTURE);
+    $gSpan = rv3_div_span($html, $gm[0][1]);
+    preg_match('#<div class="sidebar-submenu"[^>]*>#', substr($html, $gm[0][1], $gSpan[1] - $gm[0][1]), $sm, PREG_OFFSET_CAPTURE);
+    $sStart = $gm[0][1] + $sm[0][1];
+    $sSpan = rv3_div_span($html, $sStart);
+    $approved = rv3_anchors(substr($html, $sStart, $sSpan[1] - $sStart));
+    $cPos = strpos(rv3_mask_comments($html), '<div class="sidebar-legacy-routes"');
+    $cSpan = rv3_div_span($html, $cPos);
+    $legacy = rv3_anchors(substr($html, $cPos, $cSpan[1] - $cPos));
+    if (array_column($approved, 'tab') !== ['laporan-pergerakan', 'laporan-inout', 'laporan-pembelian', 'laporan-hpp', 'laporan-opname']) {
+        rv3_die('dev index.html: the Laporan submenu is not the five approved reports in order: ' . implode(',', array_column($approved, 'tab')));
+    }
+    $cm0 = strrpos(substr($html, 0, $cPos), '<!-- Sidebar cleanup');
+    $legacyComment = $cm0 === false ? '' : trim(substr($html, $cm0, $cPos - $cm0));
+    preg_match('#<!-- "Laporan Stock Opname" \(data-tab opname-laporan\).*?-->#s', $html, $oc);
+    // every old report entry the sidebar may still carry (by route AND by visible label); the sweep moves them into the hidden container wherever they sit
+    $oldReportTabs = ['laporan-ringkasan', 'laporan-stok', 'laporan-transfer', 'opname-laporan', 'laporan-adjustment', 'laporan-expiry', 'laporan-supplier', 'laporan-bakery', 'laporan-slow-movement', 'laporan-rekonsiliasi', 'laporan-audit',
+        'laporan-movement', 'laporan-pergerakan-harian', 'laporan-nilai-stok', 'laporan-stock-opname', 'laporan-jejak'];
+    $oldReportLabels = ['Ringkasan Inventory', 'Pergerakan Stok Harian', 'Laporan Stok', 'Laporan Transfer', 'Adjustment / Selisih', 'Expired / Near Expired', 'Pembelian per Supplier', 'Distribusi per Bakery', 'Slow / No Movement',
+        'Rekonsiliasi Arus Stok', 'Audit Transaksi', 'Nilai Stok & HPP', 'Laporan Nilai Stok & HPP', 'Laporan P1/P2 Stock Opname', 'Laporan P1/P2 Stock Opname (lama)', 'Laporan Jejak Stock Opname'];
+    return ['approved' => $approved, 'legacy' => $legacy, 'legacy_comment_block' => $legacyComment, 'old_report_tabs' => $oldReportTabs, 'old_report_labels' => $oldReportLabels,
+        'opname_comment' => $oc[0] ?? '<!-- "Laporan Stock Opname" now lives in the Laporan menu. -->'];
 }
 
 /** @param array<string,string> $anchors tab => markup */

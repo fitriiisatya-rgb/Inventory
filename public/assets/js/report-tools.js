@@ -239,5 +239,51 @@ table.dense1 th, table.dense1 td { font-size: 7.5pt; padding: 2px 3px; } table.d
         return wrap;
     }
 
-    return { apiGet, qsOf, download, printDocument, buildPrintHtml, specFromPayload, metaPairs, fmtCell, actions, get lastPrintHtml() { return lastPrintHtml; } };
+
+    // ------------------------------------------------------------------ sidebar guard
+    // The Laporan menu shows ONLY the five approved reports. The old report routes stay in the application (drill-downs, tab restore, bookmarks) but their links are never visible.
+    // index.html already ships exactly that; this guard is the second line of defence for a cached / hand-edited / older index.html: it hides every old report link (by route OR by its
+    // label), removes a duplicate of an approved link and writes the approved labels. It never creates a link and never deletes a route, so it is idempotent and safe to run repeatedly.
+    const SIDEBAR_APPROVED = [['laporan-pergerakan', 'Laporan Pergerakan Stok'], ['laporan-inout', 'Laporan IN / OUT'], ['laporan-pembelian', 'Laporan Pembelian'], ['laporan-hpp', 'Laporan Nilai HPP'], ['laporan-opname', 'Laporan Stock Opname']];
+    const SIDEBAR_OLD_TABS = ['laporan-ringkasan', 'laporan-stok', 'laporan-transfer', 'opname-laporan', 'laporan-adjustment', 'laporan-expiry', 'laporan-supplier', 'laporan-bakery', 'laporan-slow-movement', 'laporan-rekonsiliasi', 'laporan-audit', 'laporan-movement', 'laporan-pergerakan-harian', 'laporan-nilai-stok', 'laporan-stock-opname', 'laporan-jejak'];
+    const SIDEBAR_OLD_LABELS = ['ringkasan inventory', 'pergerakan stok harian', 'laporan stok', 'laporan transfer', 'adjustment / selisih', 'expired / near expired', 'pembelian per supplier', 'distribusi per bakery', 'slow / no movement', 'rekonsiliasi arus stok', 'audit transaksi', 'nilai stok & hpp', 'laporan nilai stok & hpp', 'laporan p1/p2 stock opname', 'laporan p1/p2 stock opname (lama)', 'laporan jejak stock opname'];
+    function linkLabel(a) { const c = a.cloneNode(true); c.querySelectorAll('.icon').forEach((n) => n.remove()); return c.textContent.replace(/\s+/g, ' ').trim(); }
+    function sanitizeSidebar() {
+        const nav = document.getElementById('sidebar');
+        if (!nav) return { visible: [] };
+        const approvedTabs = SIDEBAR_APPROVED.map((x) => x[0]);
+        const seen = {};
+        nav.querySelectorAll('a.sidebar-link').forEach((a) => {
+            if (a.closest('.sidebar-legacy-routes')) return;
+            const tab = a.dataset.tab || '';
+            const hide = (on) => { if (on) { if (!a.hasAttribute('data-rv3-hide')) { a.setAttribute('data-rv3-hide', '1'); a.setAttribute('aria-hidden', 'true'); a.setAttribute('tabindex', '-1'); } } else if (a.hasAttribute('data-rv3-hide')) { a.removeAttribute('data-rv3-hide'); a.removeAttribute('aria-hidden'); a.removeAttribute('tabindex'); } };
+            if (approvedTabs.includes(tab)) {
+                if (seen[tab]) { hide(true); return; }          // a duplicate of an approved report: the first one is the only visible one
+                seen[tab] = true; hide(false);
+                const want = SIDEBAR_APPROVED[approvedTabs.indexOf(tab)][1];
+                if (linkLabel(a) !== want) {
+                    const nodes = Array.from(a.childNodes).filter((n) => n.nodeType === 3);
+                    if (nodes.length) { nodes[nodes.length - 1].nodeValue = ` ${want}`; nodes.slice(0, -1).forEach((n) => n.remove()); } else { a.appendChild(document.createTextNode(` ${want}`)); }
+                }
+                return;
+            }
+            hide(SIDEBAR_OLD_TABS.includes(tab) || SIDEBAR_OLD_LABELS.includes(linkLabel(a).toLowerCase()));
+        });
+        const visible = Array.from(nav.querySelectorAll('a.sidebar-link')).filter((a) => !a.closest('.sidebar-legacy-routes') && !a.hasAttribute('data-rv3-hide') && (approvedTabs.includes(a.dataset.tab) || SIDEBAR_OLD_TABS.includes(a.dataset.tab))).map((a) => linkLabel(a));
+        return { visible };
+    }
+    function watchSidebar() {
+        const nav = document.getElementById('sidebar');
+        if (!nav || nav.dataset.rv3Watch) return;
+        nav.dataset.rv3Watch = '1';
+        sanitizeSidebar();
+        let queued = false;
+        // role visibility (Auth.applyRoleVisibility) and the accordion re-touch the links after login: re-apply once per frame, only when something is out of place (idempotent: no endless loop)
+        new MutationObserver(() => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; sanitizeSidebar(); }); }).observe(nav, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class', 'hidden', 'data-tab'] });
+    }
+    if (typeof document !== 'undefined') {
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', watchSidebar); else watchSidebar();
+    }
+
+    return { sanitizeSidebar, apiGet, qsOf, download, printDocument, buildPrintHtml, specFromPayload, metaPairs, fmtCell, actions, get lastPrintHtml() { return lastPrintHtml; } };
 })();
