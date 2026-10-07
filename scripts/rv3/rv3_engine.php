@@ -112,20 +112,26 @@ function rv3_selfcheck(string $app, string $pkg, array $manifest): array
         return [false, ['missing' => [$err]], $err];
     }
     $routesFile = "{$pkg}/payload/services/ReportsV3Routes.php";
-    if (!is_file($routesFile)) {
-        $routesFile = "{$app}/services/ReportsV3Routes.php";             // frontend-only package: the installed (gated) backend is what is checked
-    }
-    $dup = array_filter(['rv3_pur_filters', 'rv3_val_filters', 'rv3_io_filters', 'rv3_deliver', 'rv3_movement_params', 'rv3_soa_filters', 'rv3_soa_line_filters', 'rv3_require_warehouse_scope', 'rv3_so_resolve_warehouse_scope', 'rv3_soa_session_ids', 'rv3_require_so_warehouse_scope'], 'function_exists');
-    if ($dup) {
-        return [false, ['missing' => ['function(s) already defined: ' . implode(', ', $dup)]], ''];
-    }
-    $pdo = new stdClass();                 // the routes file only builds closures: no database is ever touched here
-    $query = [];
     $routes = [];
-    try {
-        $routes = require $routesFile;
-    } catch (Throwable $e) {
-        return [false, ['missing' => [get_class($e) . ': ' . $e->getMessage()]], ''];
+    if (is_file($routesFile)) {
+        $dup = array_filter(['rv3_pur_filters', 'rv3_val_filters', 'rv3_io_filters', 'rv3_deliver', 'rv3_movement_params', 'rv3_soa_filters', 'rv3_soa_line_filters', 'rv3_require_warehouse_scope', 'rv3_so_resolve_warehouse_scope', 'rv3_soa_session_ids', 'rv3_require_so_warehouse_scope'], 'function_exists');
+        if ($dup) {
+            return [false, ['missing' => ['function(s) already defined: ' . implode(', ', $dup)]], ''];
+        }
+        $pdo = new stdClass();                 // the routes file only builds closures: no database is ever touched here
+        $query = [];
+        $routes = [];
+        try {
+            $routes = require $routesFile;
+        } catch (Throwable $e) {
+            return [false, ['missing' => [get_class($e) . ': ' . $e->getMessage()]], ''];
+        }
+    } else {
+        // the package does not ship the routes file: the installed (gated) one is READ AS TEXT. Requiring it would load the INSTALLED copies of the report services it includes
+        // (require_once __DIR__ …) next to the payload copies of the ones this package replaces — a redeclared class. Its route keys are what the check needs.
+        $text = (string) @file_get_contents("{$app}/services/ReportsV3Routes.php");
+        preg_match_all("/^\\s*'((?:GET|POST|PUT|PATCH|DELETE) [^']+)'\\s*=>/m", $text, $km);
+        $routes = array_fill_keys($km[1], true);
     }
     $missing = [];
     foreach ($manifest['requirements'] ?? [] as $r) {
