@@ -21,15 +21,11 @@ if (!isset($routes, $pdo, $query) || !is_array($routes)) {
 use App\Services\AuthService;
 use App\Services\ValidationException;
 
-require_once __DIR__ . '/InventoryHppReportService.php';
-require_once __DIR__ . '/InventoryValuationService.php';
-require_once __DIR__ . '/MovementDailyReportService.php';
-require_once __DIR__ . '/InOutReportService.php';
-require_once __DIR__ . '/PurchaseReportService.php';
-require_once __DIR__ . '/StockOpnameAuditReportService.php';
-require_once __DIR__ . '/ExcelWriterService.php';
-require_once __DIR__ . '/ReportExportService.php';
-require_once __DIR__ . '/MovementReportV3Service.php';
+foreach (['InventoryHppReportService', 'InventoryValuationService', 'MovementDailyReportService', 'InOutReportService', 'PurchaseReportService', 'StockOpnameAuditReportService', 'ExcelWriterService', 'ReportExportService', 'MovementReportV3Service'] as $__svc) {
+    if (is_file(__DIR__ . "/{$__svc}.php")) {
+        require_once __DIR__ . "/{$__svc}.php";
+    }
+}
 
 /**
  * Laporan Pembelian (redesign): request parsing for GET /reports/purchase-v2/*. The warehouse is resolved through inv_hpp_resolve_warehouse_scope(), so a

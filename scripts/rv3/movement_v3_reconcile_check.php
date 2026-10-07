@@ -26,9 +26,10 @@ if ($appRoot === null || !is_dir("{$appRoot}/services") || strtotime($start) ===
     fwrite(STDERR, "usage: php movement_v3_reconcile_check.php --app-root=<dir> [--start=YYYY-MM-DD --end=YYYY-MM-DD] [--warehouse=<code|id|all>]\n");
     exit(2);
 }
-foreach (glob("{$appRoot}/services/*.php") ?: [] as $f) {
-    if (basename($f) !== 'ReportsV3Routes.php') { require_once $f; }
-}
+// RV3_PAYLOAD_SERVICES (optional, set by the package validator): load the package's service files instead of the installed ones of the same name — no copy, no symlink, nothing written
+$__pl = []; foreach ((getenv('RV3_PAYLOAD_SERVICES') ? glob(rtrim((string) getenv('RV3_PAYLOAD_SERVICES'), '/') . '/*.php') : []) ?: [] as $__f) { if (basename($__f) !== 'ReportsV3Routes.php') { $__pl[basename($__f)] = $__f; } }
+foreach (glob("{$appRoot}/services/*.php") ?: [] as $f) { if (basename($f) === 'ReportsV3Routes.php') { continue; } require_once $__pl[basename($f)] ?? $f; unset($__pl[basename($f)]); }
+foreach ($__pl as $f) { require_once $f; }
 
 use App\Services\Database;
 use App\Services\MovementReportV3Service as M;

@@ -86,10 +86,8 @@ function rv3_status(array $eval): string
 
 function rv3_php_lint(string $file): ?string
 {
-    $o = [];
-    $rc = 0;
-    exec(escapeshellarg(PHP_BINARY) . ' -l ' . escapeshellarg($file) . ' 2>&1', $o, $rc);
-    return $rc === 0 ? null : implode(' ', $o);
+    [$rc, $out] = rv3_run(rv3_php_cmd() . ' -l ' . escapeshellarg($file));
+    return $rc === 0 ? null : trim(str_replace("\n", ' ', $out));
 }
 
 function rv3_write_atomic(string $path, string $data, ?int $mode): void
@@ -107,44 +105,35 @@ function rv3_write_atomic(string $path, string $data, ?int $mode): void
     }
 }
 
-/** production services + the payload's, loaded together in a CHILD process (never touches the database): proves syntax, no missing dependency file, no redeclared symbol. */
+/** production services + the payload's, loaded together in a CHILD process (php -r: no temp file, no copy, no link, no database access): proves syntax, no missing dependency file, no redeclared symbol. */
 function rv3_selfcheck(string $app, string $pkg, array $manifest): array
 {
-    $tmp = sys_get_temp_dir() . '/rv3_overlay_' . bin2hex(random_bytes(4));
-    rv3_overlay($app, "{$pkg}/payload", $tmp);
-    $script = $tmp . '/selfcheck.php';
-    file_put_contents($script, <<<'PHP'
-<?php
+    $args = json_encode(['files' => rv3_service_files($app, "{$pkg}/payload/services"), 'routes' => "{$pkg}/payload/services/ReportsV3Routes.php", 'req' => $manifest['requirements'] ?? []]);
+    $code = <<<'CHILD'
 error_reporting(E_ALL);
 ini_set('display_errors', '1');
-$req = json_decode($argv[1], true);
-foreach (glob(__DIR__ . '/services/*.php') as $f) {
-    if (basename($f) !== 'ReportsV3Routes.php') {
-        require_once $f;
-    }
+$a = json_decode((string) end($argv), true);
+foreach ($a['files'] as $f) {
+    require_once $f;
 }
 $pdo = new stdClass();
 $query = [];
 $routes = [];
-$routes = require __DIR__ . '/services/ReportsV3Routes.php';
+$routes = require $a['routes'];
 $missing = [];
-foreach ($req as $r) {
+foreach ($a['req'] as $r) {
     $c = $r['class'];
     if (!class_exists($c) && !interface_exists($c)) { $missing[] = "class {$c}"; continue; }
     if (isset($r['method']) && !method_exists($c, $r['method'])) { $missing[] = "{$c}::{$r['method']}()"; }
     if (isset($r['const']) && !defined("{$c}::{$r['const']}")) { $missing[] = "{$c}::{$r['const']}"; }
 }
 echo json_encode(['routes' => count($routes), 'missing' => $missing]);
-PHP);
-    $o = [];
-    $rc = 0;
-    exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($script) . ' ' . escapeshellarg(json_encode($manifest['requirements'] ?? [])) . ' 2>&1', $o, $rc);
-    rv3_rmtree($tmp);
-    $text = trim(implode("\n", $o));
-    $j = json_decode((string) end($o), true);
-    return [$rc === 0 && is_array($j) && $j['missing'] === [] && $j['routes'] > 0, is_array($j) ? $j : [], $text];
+CHILD;
+    [$rc, $text] = rv3_run(rv3_php_cmd() . ' -r ' . escapeshellarg($code) . ' -- ' . escapeshellarg((string) $args));
+    $lines = explode("\n", trim($text));
+    $j = json_decode((string) end($lines), true);
+    return [$rc === 0 && is_array($j) && $j['missing'] === [] && $j['routes'] > 0, is_array($j) ? $j : [], trim($text)];
 }
-
 function rv3_print_eval(callable $say, array $eval): void
 {
     foreach ($eval as $target => $e) {

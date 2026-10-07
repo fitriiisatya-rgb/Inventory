@@ -5,7 +5,7 @@
 set -u
 cd "$(git rev-parse --show-toplevel)"
 W="$(mktemp -d /tmp/rv3_rehearsal_XXXXXX)"; trap 'rm -rf "${W:?}"' EXIT
-PHP="${PHP_BIN:-php}"
+PHP="${PHP_BIN:-php}"; PHPA="${PHP_ARGS:-}"; export PHP_ARGS="${PHP_ARGS:-}"   # PHP_ARGS e.g. "-d disable_functions=symlink,link,readlink": the shared-hosting case
 pass=0; fail=0
 ok() { pass=$((pass+1)); echo "PASS - $1"; }
 bad() { fail=$((fail+1)); echo "FAIL - $1"; }
@@ -28,29 +28,29 @@ for rev in $TREES; do
   P="$(unpack "$W/pkg_$rev")"
   before="$(tree_sum "$T")"
   if [ "$rev" = HEAD ]; then
-    "$PHP" "$P/scripts/rv3_engine.php" plan --app-root="$T" >"$W/plan_$rev.txt" 2>&1; rc=$?
+    "$PHP" $PHPA "$P/scripts/rv3_engine.php" plan --app-root="$T" >"$W/plan_$rev.txt" 2>&1; rc=$?
     grep -q "PLAN: NOTHING_TO_DO" "$W/plan_$rev.txt"; chk "[$rev] the already-final tree: dry-run reports NOTHING_TO_DO (idempotent) and exits 0" $((rc + $?))
     chk "[$rev] dry-run changed no application file" $([ "$(tree_sum "$T")" = "$before" ] && echo 0 || echo 1)
-    "$PHP" "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/apply_$rev.txt" 2>&1; rc=$?
+    "$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/apply_$rev.txt" 2>&1; rc=$?
     grep -q "Nothing to do" "$W/apply_$rev.txt"; chk "[$rev] apply on the final tree = nothing to do, no file touched" $((rc + $?))
-    "$PHP" "$P/scripts/rv3_engine.php" verify --app-root="$T" >"$W/verify_$rev.txt" 2>&1; chk "[$rev] verify passes on the final tree" $?
+    "$PHP" $PHPA "$P/scripts/rv3_engine.php" verify --app-root="$T" >"$W/verify_$rev.txt" 2>&1; chk "[$rev] verify passes on the final tree" $?
     continue
   fi
-  "$PHP" "$P/scripts/rv3_engine.php" preflight --app-root="$T" >"$W/pre_$rev.txt" 2>&1; rc=$?
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" preflight --app-root="$T" >"$W/pre_$rev.txt" 2>&1; rc=$?
   chk "[$rev] pre-flight exits 0 (environment + integrity + dependency self-check)" $rc
   [ $rc -ne 0 ] && grep -E "^FAIL|BLOCKED|conflict" "$W/pre_$rev.txt" | head -8
   chk "[$rev] pre-flight changed no application file" $([ "$(tree_sum "$T")" = "$before" ] && echo 0 || echo 1)
-  "$PHP" "$P/scripts/rv3_engine.php" plan --app-root="$T" >"$W/plan_$rev.txt" 2>&1; rc=$?
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" plan --app-root="$T" >"$W/plan_$rev.txt" 2>&1; rc=$?
   chk "[$rev] dry-run: PLAN OK (exit 0)" $rc
   grep -q "PLAN: OK" "$W/plan_$rev.txt"; chk "[$rev] dry-run prints 'PLAN: OK'" $?
   chk "[$rev] dry-run changed no application file (plan + report live in the package folder)" $([ "$(tree_sum "$T")" = "$before" ] && echo 0 || echo 1)
   [ -f "$P/state/plan.json" ] && [ -f "$P/state/dryrun_report.txt" ]; chk "[$rev] state/plan.json and state/dryrun_report.txt written" $?
-  "$PHP" "$P/scripts/rv3_engine.php" apply --app-root="$T" >"$W/applyno_$rev.txt" 2>&1; chk "[$rev] apply WITHOUT --yes writes nothing" $([ "$(tree_sum "$T")" = "$before" ] && echo 0 || echo 1)
-  "$PHP" "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/apply_$rev.txt" 2>&1; rc=$?
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" >"$W/applyno_$rev.txt" 2>&1; chk "[$rev] apply WITHOUT --yes writes nothing" $([ "$(tree_sum "$T")" = "$before" ] && echo 0 || echo 1)
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/apply_$rev.txt" 2>&1; rc=$?
   chk "[$rev] apply --yes succeeds" $rc; [ $rc -ne 0 ] && tail -8 "$W/apply_$rev.txt"
   after="$(tree_sum "$T")"
   [ "$after" != "$before" ]; chk "[$rev] the tree changed" $?
-  "$PHP" "$P/scripts/rv3_engine.php" verify --app-root="$T" >"$W/verify_$rev.txt" 2>&1; rc=$?
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" verify --app-root="$T" >"$W/verify_$rev.txt" 2>&1; rc=$?
   chk "[$rev] verify passes (all operations done, php -l, one tag each, one render per tab, recorded hashes)" $rc; [ $rc -ne 0 ] && grep -E "FAIL|todo|conflict" "$W/verify_$rev.txt" | head
   # the result must be the SAME tree no matter where we started: compare the files the package owns with the final (HEAD) ones
   mism=0; for f in public/assets/js/report-tools.js public/assets/js/report-pergerakan.js public/assets/js/report-pembelian-v3.js public/assets/js/report-nilai-hpp-v3.js public/assets/js/report-inout-v3.js public/assets/js/report-opname-audit.js services/ReportsV3Routes.php services/ReportExportService.php services/MovementReportV3Service.php services/PurchaseReportService.php services/InOutReportService.php services/InventoryValuationService.php services/StockOpnameAuditReportService.php; do
@@ -65,13 +65,13 @@ for rev in $TREES; do
     echo implode("|", $t[1]);' "$T/public/index.html" >"$W/menu_$rev.txt"
   [ "$(cat "$W/menu_$rev.txt")" = "laporan-pergerakan|laporan-inout|laporan-pembelian|laporan-hpp|laporan-opname" ]; chk "[$rev] the Laporan menu lists exactly the 5 approved reports (laporan-opname, not opname-laporan)" $?
   [ "$(grep -c 'data-tab="laporan-opname"' "$T/public/index.html")" = 1 ] && [ "$(grep -c 'data-tab="opname-laporan"' "$T/public/index.html")" -le 1 ]; chk "[$rev] no duplicated data-tab for the Stock Opname report" $?
-  "$PHP" "$P/scripts/rv3_engine.php" plan --app-root="$T" >"$W/plan2_$rev.txt" 2>&1; grep -q "NOTHING_TO_DO" "$W/plan2_$rev.txt"; chk "[$rev] a second dry-run reports NOTHING_TO_DO (idempotent)" $?
-  "$PHP" "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/apply2_$rev.txt" 2>&1; rc=$?; [ "$(tree_sum "$T")" = "$after" ]; chk "[$rev] a second apply is a no-op (double-run safe)" $((rc + $?))
-  "$PHP" "$P/scripts/rv3_engine.php" rollback --app-root="$T" >"$W/rb_$rev.txt" 2>&1; rc=$?
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" plan --app-root="$T" >"$W/plan2_$rev.txt" 2>&1; grep -q "NOTHING_TO_DO" "$W/plan2_$rev.txt"; chk "[$rev] a second dry-run reports NOTHING_TO_DO (idempotent)" $?
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/apply2_$rev.txt" 2>&1; rc=$?; [ "$(tree_sum "$T")" = "$after" ]; chk "[$rev] a second apply is a no-op (double-run safe)" $((rc + $?))
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" rollback --app-root="$T" >"$W/rb_$rev.txt" 2>&1; rc=$?
   chk "[$rev] rollback succeeds" $rc
   [ "$(tree_sum "$T")" = "$before" ]; chk "[$rev] after rollback the tree is BYTE-IDENTICAL to the one before the apply" $?
-  "$PHP" "$P/scripts/rv3_engine.php" rollback --app-root="$T" >"$W/rb2_$rev.txt" 2>&1; grep -q "Nothing to roll back" "$W/rb2_$rev.txt"; chk "[$rev] a second rollback is refused politely (nothing to roll back)" $?
-  "$PHP" "$P/scripts/rv3_engine.php" plan --app-root="$T" >/dev/null 2>&1; "$PHP" "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/apply3_$rev.txt" 2>&1; chk "[$rev] re-apply after rollback works" $?
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" rollback --app-root="$T" >"$W/rb2_$rev.txt" 2>&1; grep -q "Nothing to roll back" "$W/rb2_$rev.txt"; chk "[$rev] a second rollback is refused politely (nothing to roll back)" $?
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" plan --app-root="$T" >/dev/null 2>&1; "$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/apply3_$rev.txt" 2>&1; chk "[$rev] re-apply after rollback works" $?
   [ "$(tree_sum "$T")" = "$after" ]; chk "[$rev] ... and gives exactly the same tree as the first apply (deterministic)" $?
 done
 
@@ -84,9 +84,9 @@ neg() { # name, mutate-cmd (cwd = tree), expect text in plan/apply output
   local P; P="$(unpack "$W/neg_pkg")"
   ( cd "$T" && eval "$mut" )
   local b; b="$(tree_sum "$T")"
-  "$PHP" "$P/scripts/rv3_engine.php" plan --app-root="$T" >"$W/neg_plan.txt" 2>&1; local rc=$?
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" plan --app-root="$T" >"$W/neg_plan.txt" 2>&1; local rc=$?
   [ $rc -ne 0 ] && grep -q -E "$expect" "$W/neg_plan.txt"; chk "[neg] $name: dry-run refuses ($expect)" $?
-  "$PHP" "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/neg_apply.txt" 2>&1; rc=$?
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/neg_apply.txt" 2>&1; rc=$?
   [ $rc -ne 0 ] && [ "$(tree_sum "$T")" = "$b" ]; chk "[neg] $name: apply refuses and writes NOTHING" $?
 }
 neg "an unknown version of a shipped service" 'echo "// local hotfix" >> services/PurchaseReportService.php' "UNKNOWN version"
@@ -100,25 +100,25 @@ neg "a missing dependency service the payload needs" 'rm services/MovementDailyR
 echo
 T="$W/neg_tree"; rm -rf "${T:?}"; mkdir -p "$T"; git archive "$REV" | tar -x -C "$T"
 P="$(unpack "$W/neg_pkg")"; echo "// tampered" >> "$P/payload/public/assets/js/report-tools.js"; b="$(tree_sum "$T")"
-"$PHP" "$P/scripts/rv3_engine.php" plan --app-root="$T" >"$W/neg_plan.txt" 2>&1; rc=$?
+"$PHP" $PHPA "$P/scripts/rv3_engine.php" plan --app-root="$T" >"$W/neg_plan.txt" 2>&1; rc=$?
 [ $rc -ne 0 ] && grep -q -E "does not match|SHA256SUMS" "$W/neg_plan.txt"; chk "[neg] a tampered payload file: dry-run refuses (SHA256SUMS / manifest mismatch)" $?
-"$PHP" "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >/dev/null 2>&1; [ "$(tree_sum "$T")" = "$b" ]; chk "[neg] a tampered payload: nothing written" $?
+"$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >/dev/null 2>&1; [ "$(tree_sum "$T")" = "$b" ]; chk "[neg] a tampered payload: nothing written" $?
 
 # a file changed between the dry-run and the apply
 T="$W/neg_tree"; rm -rf "${T:?}"; mkdir -p "$T"; git archive "$REV" | tar -x -C "$T"
 P="$(unpack "$W/neg_pkg")"
-"$PHP" "$P/scripts/rv3_engine.php" plan --app-root="$T" >/dev/null 2>&1
+"$PHP" $PHPA "$P/scripts/rv3_engine.php" plan --app-root="$T" >/dev/null 2>&1
 echo "<!-- touched after the dry-run -->" >> "$T/public/index.html"; b="$(tree_sum "$T")"
-"$PHP" "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/neg_apply.txt" 2>&1; rc=$?
+"$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/neg_apply.txt" 2>&1; rc=$?
 [ $rc -ne 0 ] && grep -q "changed since the dry-run" "$W/neg_apply.txt" && [ "$(tree_sum "$T")" = "$b" ]; chk "[neg] a file changed between dry-run and apply: apply refuses, nothing written" $?
 # apply without any dry-run
-rm -f "$P/state/plan.json"; "$PHP" "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/neg_apply.txt" 2>&1; rc=$?
+rm -f "$P/state/plan.json"; "$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/neg_apply.txt" 2>&1; rc=$?
 [ $rc -ne 0 ] && grep -q "no dry-run plan" "$W/neg_apply.txt"; chk "[neg] apply without a dry-run plan is refused" $?
 # rollback refuses when a file was edited after the apply
 T="$W/neg_tree"; rm -rf "${T:?}"; mkdir -p "$T"; git archive "$REV" | tar -x -C "$T"; P="$(unpack "$W/neg_pkg")"
-"$PHP" "$P/scripts/rv3_engine.php" plan --app-root="$T" >/dev/null 2>&1; "$PHP" "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >/dev/null 2>&1
+"$PHP" $PHPA "$P/scripts/rv3_engine.php" plan --app-root="$T" >/dev/null 2>&1; "$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >/dev/null 2>&1
 echo "/* edited after apply */" >> "$T/public/assets/css/app.css"; b="$(tree_sum "$T")"
-"$PHP" "$P/scripts/rv3_engine.php" rollback --app-root="$T" >"$W/neg_rb.txt" 2>&1; rc=$?
+"$PHP" $PHPA "$P/scripts/rv3_engine.php" rollback --app-root="$T" >"$W/neg_rb.txt" 2>&1; rc=$?
 [ $rc -ne 0 ] && grep -q "no longer byte-identical" "$W/neg_rb.txt" && [ "$(tree_sum "$T")" = "$b" ]; chk "[neg] rollback phase 1 refuses when a file was edited after the apply (nothing restored)" $?
 
 echo; echo "$pass passed, $fail failed"

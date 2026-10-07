@@ -324,37 +324,78 @@ function rv3_mkdir(string $d): void
     }
 }
 
-function rv3_overlay(string $app, string $payloadDir, string $dest): void
+/**
+ * Load order of the services for code under test: every production services/*.php EXCEPT those the package replaces (the payload copy is loaded instead), then the payload-only files.
+ * Absolute paths, nothing is copied or linked — works on shared hosting where symlink() / link() are disabled, and never writes anywhere. Database.php (hence config/, storage/) always
+ * comes from the production tree, so paths resolved relative to it are the real ones.
+ * @return list<string>
+ */
+function rv3_service_files(string $app, ?string $payloadServices): array
 {
-    $app = realpath($app) ?: $app;                  // symlinks into the application must be absolute
-    rv3_mkdir("{$dest}/services");
-    foreach (glob("{$app}/services/*.php") ?: [] as $f) {
-        copy($f, "{$dest}/services/" . basename($f));
+    $files = [];
+    $payload = [];
+    foreach ($payloadServices !== null ? (glob(rtrim($payloadServices, '/') . '/*.php') ?: []) : [] as $f) {
+        $payload[basename($f)] = $f;
     }
-    foreach (glob("{$payloadDir}/services/*.php") ?: [] as $f) {
-        copy($f, "{$dest}/services/" . basename($f));
+    foreach (glob(rtrim($app, '/') . '/services/*.php') ?: [] as $f) {
+        $b = basename($f);
+        if ($b === 'ReportsV3Routes.php') {
+            continue;
+        }
+        $files[] = $payload[$b] ?? $f;
+        unset($payload[$b]);
     }
-    // every other top-level directory of the application (config, storage with the evidence photos, vendor, …) is linked in, so code that resolves paths relative to services/ sees the real ones
-    foreach (scandir($app) ?: [] as $d) {
-        if ($d !== '.' && $d !== '..' && $d !== 'services' && is_dir("{$app}/{$d}") && !is_link("{$app}/{$d}") || ($d !== 'services' && is_link("{$app}/{$d}"))) {
-            @symlink("{$app}/{$d}", "{$dest}/{$d}");
+    foreach ($payload as $b => $f) {
+        if ($b !== 'ReportsV3Routes.php') {
+            $files[] = $f;
         }
     }
+    return $files;
 }
 
-function rv3_rmtree(string $d): void
+/** the php binary for child processes: PHP_BIN, else the running binary (unless it is a cgi / fpm one), else "php"; PHP_ARGS (extra ini flags) is passed through. */
+function rv3_php_cmd(): string
 {
-    if ($d === '' || $d === '/' || !str_contains($d, 'rv3_')) {
-        return;                       // only ever our own temp dirs
+    $b = getenv('PHP_BIN') ?: PHP_BINARY;
+    if ($b === '' || str_contains(basename($b), 'cgi') || str_contains(basename($b), 'fpm')) {
+        $b = 'php';
     }
-    if (is_link($d) || is_file($d)) {
-        @unlink($d);
-        return;
+    return escapeshellarg($b) . (getenv('PHP_ARGS') ? ' ' . getenv('PHP_ARGS') : '');
+}
+
+/** runs a shell command; tries exec, shell_exec, proc_open, popen in turn (hosts disable different ones). @return array{0:int,1:string} exit code, combined output */
+function rv3_run(string $cmd): array
+{
+    $dis = array_map('trim', explode(',', (string) ini_get('disable_functions')));
+    $ok = static fn (string $f): bool => function_exists($f) && !in_array($f, $dis, true);
+    if ($ok('exec')) {
+        $o = [];
+        $rc = 0;
+        exec($cmd . ' 2>&1', $o, $rc);
+        return [$rc, implode("\n", $o)];
     }
-    foreach (scandir($d) ?: [] as $x) {
-        if ($x !== '.' && $x !== '..') {
-            rv3_rmtree("{$d}/{$x}");
+    if ($ok('proc_open')) {
+        $h = proc_open($cmd . ' 2>&1', [1 => ['pipe', 'w']], $pipes);
+        if (is_resource($h)) {
+            $out = (string) stream_get_contents($pipes[1]);
+            fclose($pipes[1]);
+            return [proc_close($h), $out];
         }
     }
-    @rmdir($d);
+    if ($ok('popen')) {
+        $h = popen($cmd . ' 2>&1', 'r');
+        if (is_resource($h)) {
+            $out = '';
+            while (!feof($h)) {
+                $out .= (string) fread($h, 8192);
+            }
+            return [pclose($h), $out];
+        }
+    }
+    if ($ok('shell_exec')) {
+        $out = (string) shell_exec('(' . $cmd . ') 2>&1; echo "__RC=$?"');
+        $rc = preg_match('/__RC=(\d+)\s*$/', $out, $m) ? (int) $m[1] : 1;
+        return [$rc, (string) preg_replace('/__RC=\d+\s*$/', '', $out)];
+    }
+    return [127, 'no way to start a child process on this host (exec, proc_open, popen and shell_exec are all disabled)'];
 }

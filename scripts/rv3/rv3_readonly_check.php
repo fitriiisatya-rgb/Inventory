@@ -37,10 +37,10 @@ $find = static function (string $n) use ($here): string {
     rv3_die("validator script missing: {$n}");
 };
 
-$overlay = sys_get_temp_dir() . '/rv3_validate_' . bin2hex(random_bytes(4));
-rv3_overlay($app, $payload ?? '/nonexistent', $overlay);
+$app = realpath($app) ?: $app;
+$env = $payload !== null ? 'RV3_PAYLOAD_SERVICES=' . escapeshellarg("{$payload}/services") . ' ' : '';
 echo "== Reports v3 — production READ-ONLY validator ==\n";
-echo "application: {$app}\n" . ($payload ? "code under test: production services + package payload (overlay {$overlay})\n" : "code under test: the services installed in the application\n");
+echo "application: {$app} (read-only: nothing is written, copied or linked)\n" . ($payload ? "code under test: the installed services, with the package's service files substituted in memory\n" : "code under test: the services installed in the application\n");
 echo "period: {$start} .. {$end}   Stock Opname sessions: {$sess}\n";
 $runs = [
     ['Stock Opname reconciliation (sessions ' . $sess . ')', 'opname_audit_reconcile_check.php', ["--session={$sess}"]],
@@ -54,16 +54,13 @@ $rows = [];
 $bad = 0;
 foreach ($runs as [$label, $script, $args]) {
     echo "\n######## {$label} ########\n";
-    $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($find($script)) . ' --app-root=' . escapeshellarg($overlay) . ' ' . implode(' ', array_map('escapeshellarg', $args)) . ' 2>&1';
-    $o = [];
-    exec($cmd, $o, $rc);
-    $text = implode("\n", $o);
+    $cmd = $env . rv3_php_cmd() . ' ' . escapeshellarg($find($script)) . ' --app-root=' . escapeshellarg($app) . ' ' . implode(' ', array_map('escapeshellarg', $args));
+    [$rc, $text] = rv3_run($cmd);
     echo $text . "\n";
     preg_match('#(\d+) / (\d+) checks passed#', $text, $m);
     $rows[] = [$label, $m ? "{$m[1]} / {$m[2]}" : 'n/a', $rc === 0 ? 'PASS' : 'FAIL', $rc];
     if ($rc !== 0) { $bad++; }
 }
-rv3_rmtree($overlay);
 echo "\n================ SUMMARY ================\n";
 foreach ($rows as [$label, $n, $st, $rc]) {
     echo sprintf("%-4s %-9s exit=%d  %s\n", $st, $n, $rc, $label);

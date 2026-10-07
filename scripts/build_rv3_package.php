@@ -168,14 +168,14 @@ foreach (['opname_audit_reconcile_check.php', 'movement_reconcile_check.php', 'i
     $put('scripts/' . basename($f), $show("scripts/{$f}"));
 }
 $wrap = static function (string $title, string $body): string {
-    return "#!/usr/bin/env bash\n# {$title}\nset -eu\nHERE=\"\$(cd \"\$(dirname \"\$0\")\" && pwd)\"\nPHP=\"\${PHP_BIN:-php}\"\n" . $body;
+    return "#!/usr/bin/env bash\n# {$title}\nset -eu\nHERE=\"\$(cd \"\$(dirname \"\$0\")\" && pwd)\"\nPHP=\"\${PHP_BIN:-php}\"\nexport PHP_BIN=\"\$PHP\"\n" . $body;
 };
-$put('scripts/preflight.sh', $wrap('PRE-FLIGHT (read-only): environment, package integrity, dependency self-check, state of every file.', "APP=\"\${1:?usage: preflight.sh <APP ROOT>}\"\n\"\$PHP\" \"\$HERE/rv3_engine.php\" preflight --app-root=\"\$APP\"\n"));
-$put('scripts/dryrun.sh', $wrap('DRY-RUN (read-only for the application): writes state/plan.json + state/dryrun_report.txt inside the package folder.', "APP=\"\${1:?usage: dryrun.sh <APP ROOT>}\"\n\"\$PHP\" \"\$HERE/rv3_engine.php\" plan --app-root=\"\$APP\"\n"));
-$put('scripts/apply.sh', $wrap('APPLY (writes). Needs a fresh dry-run plan; add --yes to really apply.', "APP=\"\${1:?usage: apply.sh <APP ROOT> [--yes]}\"; shift\n\"\$PHP\" \"\$HERE/rv3_engine.php\" apply --app-root=\"\$APP\" \"\$@\"\n"));
-$put('scripts/verify.sh', $wrap('POST-APPLY VERIFY (read-only).', "APP=\"\${1:?usage: verify.sh <APP ROOT> [--base-url=https://host]}\"; shift\n\"\$PHP\" \"\$HERE/rv3_engine.php\" verify --app-root=\"\$APP\" \"\$@\"\n"));
-$put('scripts/rollback.sh', $wrap('ROLLBACK (writes): two-phase, restores the exact pre-apply files.', "APP=\"\${1:?usage: rollback.sh <APP ROOT>}\"\n\"\$PHP\" \"\$HERE/rv3_engine.php\" rollback --app-root=\"\$APP\"\n"));
-$put('scripts/readonly_validate.sh', $wrap('PRODUCTION READ-ONLY VALIDATOR: SO sessions 11/12 reconciliation (16/16) + the five reports against the REAL data, with the NEW code. SELECT only.', "APP=\"\${1:?usage: readonly_validate.sh <APP ROOT> [--session=11,12] [--start=YYYY-MM-DD --end=YYYY-MM-DD]}\"; shift\n\"\$PHP\" \"\$HERE/rv3_readonly_check.php\" --app-root=\"\$APP\" --package-dir=\"\$HERE/..\" \"\$@\"\n"));
+$put('scripts/preflight.sh', $wrap('PRE-FLIGHT (read-only): environment, package integrity, dependency self-check, state of every file.', "APP=\"\${1:?usage: preflight.sh <APP ROOT>}\"\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" preflight --app-root=\"\$APP\"\n"));
+$put('scripts/dryrun.sh', $wrap('DRY-RUN (read-only for the application): writes state/plan.json + state/dryrun_report.txt inside the package folder.', "APP=\"\${1:?usage: dryrun.sh <APP ROOT>}\"\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" plan --app-root=\"\$APP\"\n"));
+$put('scripts/apply.sh', $wrap('APPLY (writes). Needs a fresh dry-run plan; add --yes to really apply.', "APP=\"\${1:?usage: apply.sh <APP ROOT> [--yes]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" apply --app-root=\"\$APP\" \"\$@\"\n"));
+$put('scripts/verify.sh', $wrap('POST-APPLY VERIFY (read-only).', "APP=\"\${1:?usage: verify.sh <APP ROOT> [--base-url=https://host]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" verify --app-root=\"\$APP\" \"\$@\"\n"));
+$put('scripts/rollback.sh', $wrap('ROLLBACK (writes): two-phase, restores the exact pre-apply files.', "APP=\"\${1:?usage: rollback.sh <APP ROOT>}\"\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" rollback --app-root=\"\$APP\"\n"));
+$put('scripts/readonly_validate.sh', $wrap('PRODUCTION READ-ONLY VALIDATOR: SO sessions 11/12 reconciliation (16/16) + the five reports against the REAL data, with the NEW code. SELECT only.', "APP=\"\${1:?usage: readonly_validate.sh <APP ROOT> [--session=11,12] [--start=YYYY-MM-DD --end=YYYY-MM-DD]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_readonly_check.php\" --app-root=\"\$APP\" --package-dir=\"\$HERE/..\" \"\$@\"\n"));
 foreach (['movement_report_v3_test.php', 'inout_report_test.php', 'inventory_valuation_test.php', 'purchase_report_test.php', 'stock_opname_audit_report_test.php', 'report_export_test.php', 'rv3_package_rehearsal.sh'] as $t) {
     $put("tests/{$t}", $show("tests/{$t}"));
 }
@@ -199,6 +199,15 @@ foreach ($ops as $o) {
 }
 $put('README_DEPLOY.md', strtr($tpl, ['@@NAME@@' => $name, '@@COMMIT@@' => $revFull, '@@FILES@@' => $rows, '@@TOKEN@@' => $token]));
 
+// ---------------------------------------------------------------- shared hosting: symlink() / link() / readlink() are often disabled — nothing that ships may call them
+foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($R, FilesystemIterator::SKIP_DOTS)) as $f) {
+    if ($f->isFile() && preg_match('/\.(php|sh)$/', $f->getFilename()) && !str_contains($f->getPathname(), '/tests/')) {
+        $src = preg_replace(['#/\*.*?\*/#s', '#^\s*(//|\#).*$#m'], '', (string) file_get_contents($f->getPathname()));
+        if (preg_match('/(?<![A-Za-z_>:])(symlink|link|readlink|linkinfo)\s*\(|\bln\s+-s/', $src, $m)) {
+            rv3_die("forbidden call '{$m[0]}' in " . substr($f->getPathname(), strlen($R) + 1));
+        }
+    }
+}
 // ---------------------------------------------------------------- SHA256SUMS + tarball
 $lines = [];
 $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($R, FilesystemIterator::SKIP_DOTS));
