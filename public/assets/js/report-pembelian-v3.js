@@ -67,6 +67,7 @@ const ReportPembelianV3 = (() => {
         S = freshState();
         container.innerHTML = '';
         container.classList.add('pur');
+        ReportTools.onResize('pur-chart', () => { if (S.overview && $('pur-chart-card') && $('pur-chart-card').offsetParent) renderChart(); });
         const actions = ReportTools.actions({ id: 'pur', print: doPrint, excel: () => doExcel('workbook'), extras: [
             { label: 'CSV — Detail Invoice', testid: 'pur-export-invoices', run: () => doExcel('invoices') },
             { label: 'CSV — Detail Barang', testid: 'pur-export-items', run: () => doExcel('items') },
@@ -242,18 +243,19 @@ const ReportPembelianV3 = (() => {
                 card('qty', 'green', 'Qty per Satuan', k.qty_by_unit.length ? `${k.qty_by_unit.length} satuan` : '—', unitsText(k.qty_by_unit)),
             ].forEach((c) => host.appendChild(c));
             host.classList.add('four');
+            ReportTools.decorateKpis(host);
             return;
         }
         host.classList.remove('four');
         const rates = n.ppn_rates.length ? n.ppn_rates.join(' / ') : '—';
         [
             card('total', 'blue', 'Total Nilai Pembelian', rp(n.total), `${UI.formatNumber(n.invoices, 0)} invoice · ${UI.formatNumber(n.skus, 0)} SKU`),
-            card('subtotal', 'teal', 'Subtotal Barang', rp(n.subtotal), 'Gross − diskon barang (DPP)'),
-            card('discount', 'amber', 'Diskon', rp(n.discount), `Barang ${rp(n.item_discount)} · Invoice ${rp(n.invoice_discount)}`),
+            card('subtotal', 'teal', 'Subtotal Barang', rp(n.subtotal), `DPP · diskon barang ${rp(n.item_discount)} · invoice ${rp(n.invoice_discount)}`),
             card('ppn', 'purple', 'PPN', rp(n.ppn), `Tarif transaksi: ${rates}`),
             card('freight', 'green', 'Ongkos Kirim', rp(n.freight), 'Ongkir pada invoice'),
-            card('suppliers', 'indigo', 'Jumlah Supplier', UI.formatNumber(n.suppliers, 0), `${UI.formatNumber(n.invoices, 0)} transaksi`),
+            card('suppliers', 'indigo', 'Supplier', UI.formatNumber(n.suppliers, 0), `${UI.formatNumber(n.invoices, 0)} transaksi`),
         ].forEach((c) => host.appendChild(c));
+        ReportTools.decorateKpis(host);
     }
 
     // ------------------------------------------------------------------ chart
@@ -297,7 +299,7 @@ const ReportPembelianV3 = (() => {
     }
     function buildSvg(rows, mode, unit) {
         const NS = 'http://www.w3.org/2000/svg';
-        const W = 900; const H = 250; const L = 66; const R = 40; const T = 14; const B = 34;
+        const W = ReportTools.chartWidth($('pur-chart-card'), 900); const H = 210; const L = 66; const R = 40; const T = 14; const B = 32;
         const svg = document.createElementNS(NS, 'svg');
         svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('class', 'pur-svg'); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', 'Grafik pembelian'); svg.setAttribute('data-testid', 'pur-chart');
         const bar = (r) => (mode === 'nominal' ? r.total : mode === 'qty' ? (r.qty || 0) : r.invoices);

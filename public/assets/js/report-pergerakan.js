@@ -21,7 +21,7 @@ const ReportPergerakan = (() => {
     function lastDays(n) { const e = new Date(); const s = new Date(); s.setDate(s.getDate() - (n - 1)); return { start: iso(s), end: iso(e) }; }
     function fresh() {
         const r = monthRange();
-        return { start: r.start, end: r.end, warehouse: '', category: '', q: '', mode: 'nominal', view: 'harian', overview: null, dailyPage: 1, dailyPer: 31,
+        return { start: r.start, end: r.end, warehouse: '', category: '', q: '', mode: 'nominal', view: 'harian', chartView: 'grafik', dayQ: '', overview: null, dailyPage: 1, dailyPer: 31,
             itemQ: '', itemMove: '', sort: 'sku', dir: 'asc', itemPage: 1, itemPer: 25, items: null, ticket: 0, itemTicket: 0 };
     }
 
@@ -49,6 +49,7 @@ const ReportPergerakan = (() => {
         S = fresh();
         container.innerHTML = '';
         container.classList.add('rp-page');
+        ReportTools.onResize('mv-chart', () => { if (S.overview && $('mv-chart') && $('mv-chart').offsetParent) renderChart(); });
         const actions = ReportTools.actions({ id: 'mv', print: doPrint, excel: doExcel });
         container.appendChild(UI.el('div', { class: 'rp-head' }, [
             UI.el('div', {}, [
@@ -176,17 +177,18 @@ const ReportPergerakan = (() => {
         host.innerHTML = '';
         const ov = S.overview; const t = ov.totals; const sp = ov.split_totals; const u = ov.qty_units || [];
         const trx = (n, s) => `${UI.formatNumber(n, 0)} transaksi · ${UI.formatNumber(s, 0)} SKU`;
-        if (S.mode === 'nominal') {
-            host.appendChild(kpi('opening', 'blue', 'Stok Awal', rp(sp.opening), `${UI.formatNumber(t.sku_opening, 0)} SKU memiliki stok`));
-            host.appendChild(kpi('masuk', 'green', 'Barang Masuk', rp(sp.in), trx(t.tx_in, t.sku_in), () => openPeriod('masuk', 'Barang Masuk')));
-            host.appendChild(kpi('keluar', 'red', 'Barang Keluar', rp(sp.out), trx(t.tx_out, t.sku_out), () => openPeriod('keluar', 'Barang Keluar')));
-            host.appendChild(kpi('closing', 'purple', 'Stok Akhir', rp(sp.closing), `${UI.formatNumber(t.sku_closing, 0)} SKU memiliki stok`));
-        } else {
-            host.appendChild(kpi('opening', 'blue', 'Stok Awal', unitsText(u, 'opening'), `${UI.formatNumber(t.sku_opening, 0)} SKU memiliki stok`));
-            host.appendChild(kpi('masuk', 'green', 'Barang Masuk', unitsText(u, 'in'), trx(t.tx_in, t.sku_in), () => openPeriod('masuk', 'Barang Masuk')));
-            host.appendChild(kpi('keluar', 'red', 'Barang Keluar', unitsText(u, 'out'), trx(t.tx_out, t.sku_out), () => openPeriod('keluar', 'Barang Keluar')));
-            host.appendChild(kpi('closing', 'purple', 'Stok Akhir', unitsText(u, 'closing'), `${UI.formatNumber(t.sku_closing, 0)} SKU memiliki stok`));
-        }
+        const nominal = S.mode === 'nominal';
+        const val = (k, nk) => (nominal ? rp(sp[nk || k]) : unitsText(u, k));
+        const adj = nominal ? signedRp(sp.adjustment) : unitsText(u, 'adjustment');
+        host.appendChild(kpi('opening', 'blue', 'Stok Awal', val('opening'), `${UI.formatNumber(t.sku_opening, 0)} SKU memiliki stok`));
+        host.appendChild(kpi('masuk', 'green', 'Barang Masuk', val('in'), `IN · ${trx(t.tx_in, t.sku_in)}`, () => openPeriod('masuk', 'Barang Masuk')));
+        host.appendChild(kpi('keluar', 'red', 'Barang Keluar', val('out'), `OUT · ${trx(t.tx_out, t.sku_out)}`, () => openPeriod('keluar', 'Barang Keluar')));
+        host.appendChild(kpi('tin', 'teal', 'Transfer IN', val('tin'), 'masuk dari gudang lain'));
+        host.appendChild(kpi('tout', 'amber', 'Transfer OUT', val('tout'), 'keluar ke gudang lain'));
+        const adjEl = kpi('adjustment', 'indigo', 'Adjustment', adj, 'koreksi · opname · void');
+        host.appendChild(adjEl);
+        host.appendChild(kpi('closing', 'purple', 'Stok Akhir', val('closing'), `${UI.formatNumber(t.sku_closing, 0)} SKU memiliki stok`));
+        ReportTools.decorateKpis(host);
     }
 
     function renderRecon() {
@@ -211,14 +213,30 @@ const ReportPergerakan = (() => {
         const host = $('mv-chart');
         host.innerHTML = '';
         const ov = S.overview; const qty = S.mode === 'qty';
-        host.appendChild(UI.el('div', { class: 'rp-card-head' }, [UI.el('div', { class: 'rp-card-title' }, ['Grafik Pergerakan Harian ', UI.el('span', { class: 'rp-sub' }, qty ? (ov.single_item ? `(Qty ${ov.single_item.unit})` : '(Qty)') : '(Nominal Rp)')])]));
+        const tog = UI.el('div', { class: 'rp-seg', role: 'group', 'aria-label': 'Tampilan grafik', 'data-testid': 'mv-chart-toggle' }, [['grafik', 'Grafik'], ['tabel', 'Tabel']].map(([k, label]) => {
+            const b = UI.el('button', { type: 'button', class: S.chartView === k ? 'on' : '', 'data-testid': `mv-chartview-${k}`, 'aria-pressed': S.chartView === k ? 'true' : 'false' }, label);
+            b.addEventListener('click', () => { S.chartView = k; renderChart(); });
+            return b;
+        }));
+        const legend = UI.el('div', { class: 'rp-legend' }, [['#3b82f6', 'Stok Awal'], ['#22c55e', 'Barang Masuk'], ['#ef4444', 'Barang Keluar'], ['#8b5cf6', 'Stok Akhir']].map(([c, l]) => UI.el('span', {}, [UI.el('i', { style: `background:${c}` }), l])));
+        host.appendChild(UI.el('div', { class: 'rp-card-head' }, [
+            UI.el('div', { class: 'rp-card-title' }, ['Grafik Pergerakan Stok Harian ', UI.el('span', { class: 'rp-sub' }, qty ? (ov.single_item ? `(Qty ${ov.single_item.unit})` : '(Qty)') : '(Nominal Rp)')]),
+            UI.el('div', { class: 'rp-inline' }, [S.chartView === 'grafik' ? legend : null, tog].filter(Boolean)),
+        ]));
         const rows = ov.rows.filter((r) => !r.is_pre_go_live);
         if (!rows.length) { host.appendChild(UI.el('div', { class: 'rp-empty', 'data-testid': 'mv-chart-empty' }, 'Tidak ada pergerakan pada periode ini.')); return; }
         if (qty && !ov.single_item) { host.appendChild(UI.el('div', { class: 'rp-empty', 'data-testid': 'mv-chart-qty-message' }, 'Pilih satu barang untuk melihat grafik kuantitas — kuantitas berbeda satuan tidak dijumlahkan.')); return; }
         const pick = (r, k) => (qty ? (r.qty ? r.qty[k] : 0) : r.nominal[k]);
         const series = rows.map((r) => ({ date: r.date, masuk: pick(r, 'masuk'), keluar: pick(r, 'keluar'), opening: pick(r, 'opening'), closing: pick(r, 'closing') }));
+        if (S.chartView === 'tabel') {
+            const unit = qty ? ov.single_item.unit : null;
+            const f = (v) => (unit ? `${UI.formatNumber(v, 3)} ${unit}` : UI.formatMoney(v));
+            host.appendChild(UI.el('div', { class: 'rp-scroll mv-chart-table', 'data-testid': 'mv-chart-table' }, [UI.el('table', { class: 'rp-table' }, [
+                UI.el('thead', {}, [UI.el('tr', {}, ['Tanggal', 'Stok Awal', 'Barang Masuk', 'Barang Keluar', 'Stok Akhir'].map((h, i) => UI.el('th', { class: i ? 'num' : '' }, h)))]),
+                UI.el('tbody', {}, series.map((r) => UI.el('tr', {}, [td(fmtDate(r.date)), td(f(r.opening), 'num'), td(f(r.masuk), 'num'), td(f(r.keluar), 'num'), td(f(r.closing), 'num')])))])]));
+            return;
+        }
         host.appendChild(buildSvg(series, qty ? ov.single_item.unit : null));
-        host.appendChild(UI.el('div', { class: 'rp-legend' }, [['#3b82f6', 'Stok Awal'], ['#22c55e', 'Barang Masuk'], ['#ef4444', 'Barang Keluar'], ['#8b5cf6', 'Stok Akhir']].map(([c, l]) => UI.el('span', {}, [UI.el('i', { style: `background:${c}` }), l]))));
     }
 
     function niceMax(v) { if (v <= 0) return 1; const p = 10 ** Math.floor(Math.log10(v)); const n = v / p; return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * p; }
@@ -232,7 +250,7 @@ const ReportPergerakan = (() => {
     }
     function buildSvg(series, unit) {
         const NS = 'http://www.w3.org/2000/svg';
-        const W = 1000; const H = 220; const L = 66; const R = 12; const T = 10; const B = 26;
+        const W = ReportTools.chartWidth($('mv-chart'), 1000); const H = 200; const L = 66; const R = 12; const T = 10; const B = 26;
         const svg = document.createElementNS(NS, 'svg');
         svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', 'Grafik pergerakan stok harian'); svg.setAttribute('data-testid', 'mv-chart-svg');
         const el = (name, attrs, text) => { const e = document.createElementNS(NS, name); Object.entries(attrs).forEach(([k, v]) => e.setAttribute(k, String(v))); if (text !== undefined) e.textContent = text; return e; };
@@ -277,7 +295,18 @@ const ReportPergerakan = (() => {
             b.addEventListener('click', () => { S.view = k; renderData(); });
             return b;
         }));
-        host.appendChild(UI.el('div', { class: 'rp-card-head' }, [tabs, UI.el('div', { class: 'rp-hint' }, S.view === 'harian' ? 'Klik baris untuk rincian barang pada tanggal tersebut.' : 'Klik baris untuk riwayat transaksi barang pada periode ini.')]));
+        // Harian: a client-side date filter (the rows are already loaded). Per Barang has its own server-side search / filter toolbar inside the table area.
+        const search = S.view === 'harian' ? UI.el('input', { type: 'text', class: 'rp-input mv-search', 'data-testid': 'mv-search', placeholder: 'Cari tanggal…', value: S.dayQ }) : null;
+        if (search) {
+            let timer = null;
+            search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { S.dayQ = search.value.trim(); S.dailyPage = 1; const b = $('mv-data-body'); b.innerHTML = ''; renderDaily(b); }, 250); });
+        }
+        const dl = UI.el('button', { type: 'button', class: 'btn btn-secondary rp-btn', 'data-testid': 'mv-download-detail' }, '⬇ Download Detail');
+        dl.addEventListener('click', async () => { dl.disabled = true; try { await doExcel(); } catch (e) { UI.toast ? UI.toast(e.message, 'error') : alert(e.message); } finally { dl.disabled = false; } });
+        host.appendChild(UI.el('div', { class: 'rp-card-head' }, [
+            UI.el('div', { class: 'rp-card-title' }, [S.view === 'harian' ? 'Detail Pergerakan Stok Harian ' : 'Detail Pergerakan Per Barang ', UI.el('span', { class: 'rp-sub' }, S.view === 'harian' ? '(klik baris untuk rincian barang pada tanggal itu)' : '(klik baris untuk riwayat transaksi barang)')]),
+            UI.el('div', { class: 'rp-tools' }, [tabs, search, dl].filter(Boolean)),
+        ]));
         const body = UI.el('div', { id: 'mv-data-body' });
         host.appendChild(body);
         if (S.view === 'harian') renderDaily(body); else loadItems(body);
@@ -285,8 +314,10 @@ const ReportPergerakan = (() => {
 
     function renderDaily(host) {
         const ov = S.overview; const nominal = S.mode === 'nominal';
-        const rows = ov.rows;
-        if (!rows.length || (rows.every((r) => r.is_pre_go_live))) { host.appendChild(UI.el('div', { class: 'rp-empty', 'data-testid': 'mv-empty' }, 'Tidak ada pergerakan pada periode ini.')); return; }
+        const dq = S.dayQ.toLowerCase();
+        const rows = dq ? ov.rows.filter((r) => `${fmtDate(r.date)} ${r.date}`.toLowerCase().includes(dq)) : ov.rows;
+        if (!ov.rows.length || (ov.rows.every((r) => r.is_pre_go_live))) { host.appendChild(UI.el('div', { class: 'rp-empty', 'data-testid': 'mv-empty' }, 'Tidak ada pergerakan pada periode ini.')); return; }
+        if (!rows.length) { host.appendChild(UI.el('div', { class: 'rp-empty', 'data-testid': 'mv-day-empty' }, 'Tidak ada tanggal yang cocok dengan pencarian.')); return; }
         if (!nominal) host.appendChild(unitSummary());
         const total = Math.max(1, Math.ceil(rows.length / S.dailyPer));
         S.dailyPage = Math.min(S.dailyPage, total);

@@ -132,8 +132,8 @@ try {
 
     // ================================================================ C. Ringkasan Sesi table
     const heads = await headsOf(page, 'soa3-sessions-table');
-    check('C columns: No. Sesi, Tanggal, Gudang, Status, P1, P2, Supervisor, Finalizer, Total Item, Match, Mismatch, Recount, Excluded, Selisih Nilai, Adjustment +/−, Evidence, Dibuat Oleh, Finalisasi',
-        JSON.stringify(heads) === JSON.stringify(['No. Sesi', 'Tanggal', 'Gudang', 'Status', 'P1', 'P2', 'Supervisor', 'Finalizer', 'Total Item', 'Match', 'Mismatch', 'Recount', 'Excluded', 'Selisih Nilai', 'Adjustment +/−', 'Evidence', 'Dibuat Oleh', 'Finalisasi']), heads.join('|'));
+    check('C columns (the approved order): No. Sesi, Tanggal, Gudang, Status, P1, P2, Supervisor, Total Item, Match, Mismatch, Recount, Selisih Nilai, Adjustment, Evidence, Finalized By, Finalized At, then Excluded, Dibuat Oleh, Aksi',
+        JSON.stringify(heads) === JSON.stringify(['No. Sesi', 'Tanggal', 'Gudang', 'Status', 'P1', 'P2', 'Supervisor', 'Total Item', 'Match', 'Mismatch', 'Recount', 'Selisih Nilai', 'Adjustment +/−', 'Evidence', 'Finalized By', 'Finalized At', 'Excluded', 'Dibuat Oleh', 'Aksi']), heads.join('|'));
     const ppOpts = await page.locator(`${tid('soa3-sessions-pp')} option`).evaluateAll((o) => o.map((x) => x.value));
     check('C rows-per-page options 10 / 25 / 50 / 100 (default 25)', JSON.stringify(ppOpts) === JSON.stringify(['10', '25', '50', '100']) && (await page.inputValue(tid('soa3-sessions-pp'))) === '25');
     await page.selectOption(tid('soa3-sessions-pp'), '10'); await idle(page);
@@ -145,8 +145,8 @@ try {
     const sess = await apiSessions(page, { date_from: '2026-09-01', date_to: DAY, per_page: '100' });
     const vApi = sess.rows.find((r) => r.id === V.session_id); const lApi = sess.rows.find((r) => r.id === L.session_id);
     const vP1 = await sessCell(page, V.session_id, 'P1');
-    check('C V1 row: P1 = f1a + f1b (voided f1c absent), P2 = f2a, Finalizer = admin, Total Item 9, Match 4, Mismatch 0, Excluded 1', vP1.includes(V.users.f1a.username) && vP1.includes(V.users.f1b.username) && !vP1.includes(V.users.f1c.username)
-        && (await sessCell(page, V.session_id, 'P2')).includes(V.users.f2a.username) && (await sessCell(page, V.session_id, 'Finalizer')) === seed.admin.username && (await sessCell(page, V.session_id, 'Total Item')) === '9'
+    check('C V1 row: P1 = f1a + f1b (voided f1c absent), P2 = f2a, Finalized By = admin, Total Item 9, Match 4, Mismatch 0, Excluded 1', vP1.includes(V.users.f1a.username) && vP1.includes(V.users.f1b.username) && !vP1.includes(V.users.f1c.username)
+        && (await sessCell(page, V.session_id, 'P2')).includes(V.users.f2a.username) && (await sessCell(page, V.session_id, 'Finalized By')) === seed.admin.username && (await sessCell(page, V.session_id, 'Total Item')) === '9'
         && (await sessCell(page, V.session_id, 'Match')) === String(vApi.match) && (await sessCell(page, V.session_id, 'Mismatch')) === '0' && (await sessCell(page, V.session_id, 'Excluded')) === String(vApi.excluded));
     check('C Selisih Nilai == API on both sessions (V1 −Rp 23.100 red, legacy +Rp 2.500 green)', (await sessCell(page, V.session_id, 'Selisih Nilai')) === `-Rp ${idr(Math.abs(vApi.variance_value))}` && vApi.variance_value === -23100
         && (await sessCell(page, L.session_id, 'Selisih Nilai')) === `+Rp ${idr(lApi.variance_value)}` && lApi.variance_value === 2500
@@ -185,15 +185,17 @@ try {
     check('E "Buka Rincian Item" switches to the tab; the context header shows the selected session (select + status + petugas + totals)', (await page.getAttribute(tid('soa3-tab-items'), 'aria-selected')) === 'true' && (await page.inputValue(tid('soa3-session-select'))) === String(V.session_id)
         && (await text(page.locator(tid('soa3-ctx-facts')))).includes(V.users.f2a.username) && (await rows(page, 'soa3-item-row')) === 9);
     const iheads = await headsOf(page, 'soa3-items-table');
-    check('E default columns (12): SKU, Barang, Qty Sistem, Qty Fisik, Good, Expired, Rusak, Deadstock, Selisih Nilai, P1, P2, Status', JSON.stringify(iheads) === JSON.stringify(['SKU', 'Barang', 'Qty Sistem', 'Qty Fisik', 'Good', 'Expired', 'Rusak', 'Deadstock', 'Selisih Nilai', 'P1', 'P2', 'Status']), iheads.join('|'));
+    check('E default columns (12, the approved set and order): SKU, Barang, Satuan, Qty Sistem, Qty Fisik, Selisih Qty, Good, Expired, Rusak, Deadstock, HPP, Selisih Nilai', JSON.stringify(iheads) === JSON.stringify(['SKU', 'Barang', 'Satuan', 'Qty Sistem', 'Qty Fisik', 'Selisih Qty', 'Good', 'Expired', 'Rusak', 'Deadstock', 'HPP', 'Selisih Nilai']), iheads.join('|'));
     const itemsApi = await apiItems(page, { session_ids: String(V.session_id), per_page: '200' });
     check('E rows == API (9); the footer TOTAL Selisih Nilai == API footer; per-unit quantities listed below (never added across units)', itemsApi.pagination.total === 9 && (await text(page.locator(tid('soa3-items-total')))).includes(idr(Math.abs(itemsApi.footer.money.variance_value))) && (await text(page.locator(tid('soa3-items-units')))).includes('KG:'));
     const mixSku = V.items.mix.sku;
     check('E V1 mix row: Qty Sistem 100, Qty Fisik 100, Good 90, Expired 3, Rusak 5, Deadstock 2, Selisih Nilai −Rp 7.000', (await itemCell(page, mixSku, 'system_qty')) === '100' && (await itemCell(page, mixSku, 'final_qty')) === '100' && (await itemCell(page, mixSku, 'good_qty')) === '90'
         && (await itemCell(page, mixSku, 'expired_qty')) === '3' && (await itemCell(page, mixSku, 'rusak_qty')) === '5' && (await itemCell(page, mixSku, 'deadstock_qty')) === '2' && (await itemCell(page, mixSku, 'variance_value')) === '-Rp 7.000');
+    await page.click(tid('soa3-cols')); await page.check(tid('soa3-col-p_hitung')); await page.check(tid('soa3-col-p_verifikasi')); await page.check(tid('soa3-col-line_status')); await page.waitForTimeout(150);
     check('E petugas columns: mix row P1 = f1a, P2 = f2a; "pos" row (a voided f1c finding + live f1b) P1 = f1b only, P2 "—"; unknown values are "—" not 0 (excluded row Qty Fisik "—")', (await itemCell(page, mixSku, 'p_hitung')).includes(V.users.f1a.username) && (await itemCell(page, mixSku, 'p_verifikasi')).includes(V.users.f2a.username)
         && (await itemCell(page, V.items.pos.sku, 'p_hitung')) === V.users.f1b.username && (await itemCell(page, V.items.pos.sku, 'p_verifikasi')) === '—' && (await itemCell(page, V.items.excl.sku, 'final_qty')) === '—');
     check('E Status pills: Match (green) and Dikecualikan / Belum dihitung', await page.locator(`${tid('soa3-item-row')} td[data-col="line_status"] .rp-pill.ok`).count() >= 1 && (await itemCell(page, V.items.excl.sku, 'line_status')) === 'Dikecualikan');
+    await page.uncheck(tid('soa3-col-p_hitung')); await page.uncheck(tid('soa3-col-p_verifikasi')); await page.uncheck(tid('soa3-col-line_status')); await page.click(tid('soa3-cols')); await page.waitForTimeout(150);
     const ig = await page.evaluate(() => { const s = document.querySelector('[data-testid="soa3-items-scroll"]'); return { head: getComputedStyle(s.querySelector('thead th')).position, foot: getComputedStyle(s.querySelector('tfoot td')).position, nums: Array.from(s.querySelectorAll('tbody tr:first-child td.num')).map((t) => getComputedStyle(t).textAlign) }; });
     check('E sticky header + sticky TOTAL row, numeric cells right-aligned', ig.head === 'sticky' && ig.foot === 'sticky' && ig.nums.length >= 7 && ig.nums.every((a) => a === 'right'), JSON.stringify(ig));
     await T.shot(page, 'so3-desktop-1536-items');
@@ -231,7 +233,7 @@ try {
     await page.waitForTimeout(150);
     const heads2 = await headsOf(page, 'soa3-items-table');
     check('E ticking Kategori + Evidence Foto + Adjustment Ref adds exactly those columns (15), the others stay', heads2.length === 15 && heads2.includes('Kategori') && heads2.includes('Evidence') && heads2.includes('Adjustment Ref') && heads2.includes('SKU'));
-    check('E the choice is persisted in localStorage (soa3_item_cols_v1)', await page.evaluate(() => JSON.parse(localStorage.getItem('soa3_item_cols_v1')).includes('adj_ref')));
+    check('E the choice is persisted in localStorage (soa3_item_cols_v2)', await page.evaluate(() => JSON.parse(localStorage.getItem('soa3_item_cols_v2')).includes('adj_ref')));
     await page.click(tid('soa3-cols-all')); await page.waitForTimeout(150);
     const headsAll = await headsOf(page, 'soa3-items-table');
     check(`E "Semua" → every one of the ${catalogue.length} catalogue columns is a table column (labels from the catalogue)`, headsAll.length === catalogue.length && (await page.locator(`${tid('soa3-colpanel')} input:checked`).count()) === catalogue.length);

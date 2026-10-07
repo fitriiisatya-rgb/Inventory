@@ -2047,12 +2047,6 @@ td.soa-aksi-col { background: #161e33; }
    Shared look of the five reports (Pergerakan, IN / OUT, Pembelian, Nilai HPP, Stock Opname): one compact filter card, one KPI grid (no card-in-card),
    segmented toggles / tabs, sticky-header tables, a wide drawer, and the Cetak / Download Excel buttons (report-tools.js). Tokens come from :root above. */
 .rp-page { display: flex; flex-direction: column; gap: 12px; }
-/* The five report pages put display:flex on the .tab-content container itself (.rp-page / .io / .pur / .val / .mvr / .soa3). Without this rule that display beats
-   .tab-content{display:none}: a report opened earlier stayed rendered ABOVE every page opened afterwards. An inactive tab is never shown. */
-.tab-content:not(.active) { display: none !important; }
-/* Sidebar safety net: the old report links are never shown (index.html keeps them only inside .sidebar-legacy-routes; report-tools.js marks any stray one with data-rv3-hide). */
-.sidebar-legacy-routes, .sidebar-legacy-routes * { display: none !important; }
-.sidebar-link[data-rv3-hide] { display: none !important; }
 .rp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .rp-title { font-size: 1.3rem; font-weight: 800; line-height: 1.2; margin: 0; }
 .rp-desc { margin: 3px 0 0; font-size: 0.8rem; color: var(--text2); max-width: 760px; }
@@ -2292,3 +2286,79 @@ td.soa-aksi-col { background: #161e33; }
 .soa3-lb-info { width: 100%; max-width: 900px; color: #dbe3f5; font-size: 0.82rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 18px; }
 @media (max-width: 700px) { .soa3-lb-info { grid-template-columns: minmax(0, 1fr); } .soa3-lb-nav { width: 34px; } }
 /* ===== SOA3 AUDIT UI 20261008 END ===== */
+
+/* ===== RV3 UI CORRECTION 20261019 BEGIN =====
+   Production UI correction — the five reports share ONE shell (compact header · ≤2-row filter card · KPI row · chart · table card) in the Inventory Pro dashboard language
+   (dark panels, thin borders, tinted KPI cards with an icon tile — the approved "Pergerakan Stok Harian" mockup). Frontend only; loaded after every earlier report block. */
+
+/* 1. an inactive page is never displayed. .rp-page / .io / .pur / .val / .mvr / .soa3 put display:flex on the .tab-content container itself, which beat .tab-content{display:none}:
+      a report opened earlier stayed rendered ABOVE every page opened afterwards. */
+.tab-content:not(.active) { display: none !important; }
+/* 2. sidebar safety net: the old report links are never shown (index.html keeps them only inside .sidebar-legacy-routes; report-tools.js marks any stray one with data-rv3-hide) */
+.sidebar-legacy-routes, .sidebar-legacy-routes * { display: none !important; }
+.sidebar-link[data-rv3-hide] { display: none !important; }
+
+/* 3. page rhythm: one gap, one header, one title size */
+.rp-page, .io, .pur, .val, .soa3 { gap: 10px; min-width: 0; max-width: 100%; }
+.rp-head, .io-head, .pur-head, .val-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap; margin: 0 0 2px; }
+.rp-title, .io-title, .pur-title, .val-title { font-size: 1.3rem; font-weight: 800; line-height: 1.2; margin: 0; }
+.rp-desc, .io-desc, .pur-desc, .val-desc { margin: 3px 0 0; font-size: 0.8rem; color: var(--text2); max-width: 78ch; line-height: 1.4; }
+.io-tabs { margin: 0; }
+
+/* 4. KPI cards: ONE row, same card on every report (tone = --rgb) */
+.rp-kpis, .io-kpis, .pur-kpis, .val-kpis { display: grid !important; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); grid-template-columns: none !important; gap: 10px; align-items: stretch; }
+.rp-kpi, .io-kpi, .pur-kpi, .val-kpi {
+  --rgb: 59,130,246; --lt: #93c5fd;
+  position: relative; display: grid !important; grid-template-columns: auto minmax(0, 1fr); column-gap: 10px; align-items: center; align-content: center;
+  min-width: 0; min-height: 66px; padding: 9px 12px !important; margin: 0; border-radius: 12px !important; text-align: left; color: var(--text); font-family: inherit;
+  border: 1px solid rgba(var(--rgb), 0.5) !important;
+  background: linear-gradient(135deg, rgba(var(--rgb), 0.22), rgba(var(--rgb), 0.05) 72%), var(--card) !important;
+  container-type: inline-size;
+}
+.rp-kpi.click:hover { border-color: rgb(var(--rgb)) !important; cursor: pointer; }
+.rp-kpi.t-blue, .io-kpi.tone-blue, .pur-kpi.tone-blue, .pur-kpi.blue, .val-kpi.tone-blue, .val-kpi.blue { --rgb: 59,130,246; --lt: #93c5fd; }
+.rp-kpi.t-green, .io-kpi.tone-green, .pur-kpi.tone-green, .pur-kpi.green, .val-kpi.tone-green, .val-kpi.green { --rgb: 34,197,94; --lt: #86efac; }
+.rp-kpi.t-red, .io-kpi.tone-red, .pur-kpi.tone-red, .pur-kpi.red, .val-kpi.tone-red, .val-kpi.red { --rgb: 239,68,68; --lt: #fca5a5; }
+.rp-kpi.t-amber, .io-kpi.tone-amber, .pur-kpi.tone-amber, .pur-kpi.amber, .val-kpi.tone-amber, .val-kpi.amber { --rgb: 245,158,11; --lt: #fcd34d; }
+.rp-kpi.t-purple, .io-kpi.tone-purple, .pur-kpi.tone-purple, .pur-kpi.purple, .val-kpi.tone-purple, .val-kpi.purple { --rgb: 139,92,246; --lt: #c4b5fd; }
+.rp-kpi.t-cyan, .rp-kpi.t-teal, .io-kpi.tone-teal, .pur-kpi.tone-teal, .pur-kpi.teal, .val-kpi.tone-teal, .val-kpi.teal { --rgb: 20,184,166; --lt: #5eead4; }
+.rp-kpi.t-indigo, .io-kpi.tone-indigo, .pur-kpi.tone-indigo, .pur-kpi.indigo, .val-kpi.tone-indigo, .val-kpi.indigo { --rgb: 99,102,241; --lt: #a5b4fc; }
+.rp-kpi.t-gray, .io-kpi.tone-gray, .pur-kpi.tone-gray, .val-kpi.tone-gray { --rgb: 100,116,139; --lt: #cbd5e1; }
+.rp-kpi-ic, .io-kpi-ic { grid-column: 1; grid-row: 1 / span 3; width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; font-size: 1rem; line-height: 1; color: #fff; background: rgba(var(--rgb), 0.92) !important; box-shadow: 0 2px 8px rgba(var(--rgb), 0.35); }
+.rp-kpi > :not(.rp-kpi-ic), .pur-kpi > :not(.rp-kpi-ic), .val-kpi > :not(.rp-kpi-ic) { grid-column: 2; min-width: 0; }
+.io-kpi-body { grid-column: 2; min-width: 0; display: block; }
+.rp-kpi-l, .io-kpi-label, .pur-kpi-label, .val-kpi-label { font-size: 0.7rem !important; font-weight: 700; letter-spacing: 0.02em; text-transform: none !important; color: var(--lt) !important; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rp-kpi-v, .io-kpi .io-kpi-value, .pur-kpi-value, .val-kpi-value { font-size: clamp(0.92rem, 10.5cqw, 1.12rem) !important; font-weight: 800; margin: 1px 0 0 !important; color: var(--text) !important; font-variant-numeric: tabular-nums; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rp-kpi-s, .io-kpi-sub, .pur-kpi-sub, .val-kpi-sub, .io-kpi-delta { font-size: 0.68rem !important; color: var(--text3) !important; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+@container (max-width: 128px) { .rp-kpi-ic, .io-kpi-ic { display: none; } .rp-kpi, .io-kpi, .pur-kpi, .val-kpi { grid-template-columns: minmax(0, 1fr); } .rp-kpi > :not(.rp-kpi-ic), .pur-kpi > :not(.rp-kpi-ic), .val-kpi > :not(.rp-kpi-ic), .io-kpi-body { grid-column: 1; } }
+@media (max-width: 1100px) { .rp-kpis, .io-kpis, .pur-kpis, .val-kpis { grid-auto-flow: row; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)) !important; } }
+@media (max-width: 760px) { .rp-kpis, .io-kpis, .pur-kpis, .val-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; } }
+
+/* 5. cards: one radius / padding; chart compact */
+.rp-card, .io-card, .pur-card, .val-card { padding: 10px 12px; border-radius: 12px; }
+.rp-chart svg, .io-svg, .pur-svg, .val-svg { width: 100%; height: auto; max-height: 260px; }
+
+/* 6. table card toolbar: title left, controls right on ONE row (wraps on narrow widths) */
+.io-card-tools, .pur-card-tools, .val-card-tools, .rp-tools { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.io-search, .pur-search { flex: 0 1 240px; width: 240px; min-width: 150px; height: 32px; padding: 0 10px; font-size: 0.8rem; border-radius: 8px; }
+.io-col-btn, .pur-col-btn { height: 32px; padding: 0 12px; font-size: 0.78rem; }
+.io-card-head, .pur-card-head, .val-card-head { margin-bottom: 8px; }
+/* Stock Opname: the 3 session KPIs + the 4 condition KPIs are ONE row of seven equal cards */
+.soa3-kpirow { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); grid-template-columns: none; gap: 10px; }
+.soa3-kpirow > .rp-kpis { display: contents !important; }
+@media (max-width: 1100px) { .soa3-kpirow { grid-auto-flow: row; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); } }
+@media (max-width: 760px) { .soa3-kpirow { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.io-kpi-body { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.io-kpi-body > .io-kpi-sub, .io-kpi-body > .io-kpi-delta { display: inline; } .io-kpi-body > .io-kpi-delta::before { content: ' · '; color: var(--text3); }
+.io-kpi-label { display: block; }
+.val-titlerow { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; }
+.val-titlerow .val-badges { margin: 0; display: inline-flex; gap: 6px; flex-wrap: wrap; } .val-badge { padding: 2px 9px; font-size: 0.68rem; }
+.val-detail-grid { grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); }
+.val-subcard { background: transparent; border: 0; border-radius: 0; padding: 0; min-width: 0; overflow-x: auto; }
+.val-detail-left > .val-subcard + .val-subcard, .val-detail-right > .val-subcard + .val-subcard { border-top: 1px solid var(--border); padding-top: 10px; }
+.val-pick { align-items: end; gap: 10px 14px; margin-bottom: 8px; }
+@media (max-width: 1200px) { .val-detail-grid { grid-template-columns: minmax(0, 1fr); } }
+.rp-tools .rp-input, .rp-tools .mv-search { flex: 0 1 220px; width: 220px; min-width: 140px; height: 32px; }
+.rp-tools .rp-tabs { flex: 0 0 auto; padding: 2px; } .rp-tools .rp-tabs button { padding: 5px 14px; }
+.rp-tools .btn { height: 32px; padding: 0 12px; white-space: nowrap; }
+/* ===== RV3 UI CORRECTION 20261019 END ===== */

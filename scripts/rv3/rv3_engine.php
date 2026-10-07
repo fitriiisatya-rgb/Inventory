@@ -115,6 +115,9 @@ function rv3_selfcheck(string $app, string $pkg, array $manifest): array
         return [false, ['missing' => [$err]], $err];
     }
     $routesFile = "{$pkg}/payload/services/ReportsV3Routes.php";
+    if (!is_file($routesFile)) {
+        $routesFile = "{$app}/services/ReportsV3Routes.php";             // frontend-only package: the installed (gated) backend is what is checked
+    }
     $dup = array_filter(['rv3_pur_filters', 'rv3_val_filters', 'rv3_io_filters', 'rv3_deliver', 'rv3_movement_params', 'rv3_soa_filters', 'rv3_soa_line_filters', 'rv3_require_warehouse_scope', 'rv3_so_resolve_warehouse_scope', 'rv3_soa_session_ids', 'rv3_require_so_warehouse_scope'], 'function_exists');
     if ($dup) {
         return [false, ['missing' => ['function(s) already defined: ' . implode(', ', $dup)]], ''];
@@ -393,6 +396,19 @@ if ($cmd === 'verify') {
         }
     }
     $check('every new <script> tag appears exactly once in index.html', $dups === [], implode(', ', $dups));
+    $sbOp = null;
+    foreach ($manifest['ops'] as $op) {
+        if ($op['type'] === 'html_sidebar') {
+            $sbOp = $op;
+        }
+    }
+    if ($sbOp !== null) {
+        $sb = rv3_sidebar_report_links($html, $sbOp);
+        $want = array_map(static fn ($a) => rv3_anchor_label($a['markup']), $sbOp['approved']);
+        $check('the Laporan menu in public/index.html shows exactly the five approved reports (' . implode(' / ', $want) . ')', $sb['visible'] === $want && $sb['old_visible'] === [], 'visible: ' . implode(' | ', array_merge($sb['visible'], $sb['old_visible'])));
+        $present = array_values(array_filter($sbOp['old_report_tabs'], static fn ($t) => str_contains($html, 'data-tab="' . $t . '"')));
+        $check('every old report route present in index.html is inside the hidden container (still routable, never visible)', array_diff($present, $sb['hidden']) === [], 'not hidden: ' . implode(',', array_diff($present, $sb['hidden'])));
+    }
     $nTab = [];
     $js = rv3_read("{$app}/public/assets/js/app.js") ?? '';
     foreach ($manifest['ops'] as $op) {
@@ -415,7 +431,21 @@ if ($cmd === 'verify') {
         $say('NOTE - no state/applied.json (this server was patched by another run of the package, or by hand): hash record check skipped.');
     }
     if ($opt['base-url']) {
-        $ctx = stream_context_create(['http' => ['timeout' => 15, 'ignore_errors' => true]]);
+        $ctx = stream_context_create(['http' => ['timeout' => 15, 'ignore_errors' => true, 'header' => "Cache-Control: no-cache\r\nPragma: no-cache\r\n"]]);
+        // the page the BROWSER receives: index.html as served by the web server vs the file on disk (a cache / CDN / another document root shows the old sidebar even though the file is patched)
+        $served = @file_get_contents($opt['base-url'] . '/?nocache=' . time(), false, $ctx);
+        $code0 = 0;
+        foreach ($http_response_header ?? [] as $h) {
+            if (preg_match('#^HTTP/\S+\s+(\d+)#', $h, $m)) {
+                $code0 = (int) $m[1];
+            }
+        }
+        $check('GET / is served (200)', $code0 === 200 && is_string($served), "HTTP {$code0}");
+        if (is_string($served) && $sbOp !== null) {
+            $sbServed = rv3_sidebar_report_links($served, $sbOp);
+            $check('the index.html the web server SERVES shows exactly the five approved reports (no old report link visible)', $sbServed['visible'] === $want && $sbServed['old_visible'] === [], 'served visible: ' . implode(' | ', array_merge($sbServed['visible'], $sbServed['old_visible'])));
+            $check('the served index.html is byte-identical to public/index.html on disk (else a cache / CDN / another document root answers)', rv3_sha($served) === rv3_sha($html), 'served ' . substr(rv3_sha($served), 0, 12) . ' vs disk ' . substr(rv3_sha($html), 0, 12));
+        }
         foreach ($manifest['ops'] as $op) {
             if ($op['type'] === 'file' && str_starts_with($op['target'], 'public/')) {
                 $body = @file_get_contents($opt['base-url'] . '/' . substr($op['target'], 7), false, $ctx);

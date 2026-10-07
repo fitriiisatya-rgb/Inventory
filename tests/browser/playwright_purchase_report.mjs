@@ -109,16 +109,18 @@ try {
     await openReport(page);
     check('A the default period is the current month (start = day 1)', (await page.inputValue(tid('pur-start'))).endsWith('-01'));
     await setFilters(page, { from: R0.from, to: R0.to });
-    check('A report loads: title, filter bar (Periode/Gudang/Supplier/Kategori/Barang), Nominal/Kuantitas toggle, 6 KPI cards, chart card, invoice table, Rincian per Barang', await page.locator('.pur-title').innerText() === 'Laporan Pembelian'
-        && await page.locator('.pur-kpi').count() === 6 && await page.locator(tid('pur-mode-nominal')).count() === 1 && await page.locator(tid('pur-mode-qty')).count() === 1 && await page.locator(tid('pur-chart')).count() === 1 && await page.locator(tid('pur-invoices-table')).count() === 1 && await page.locator(tid('pur-items-table')).count() === 1);
+    check('A report loads: title, filter bar (Periode/Gudang/Supplier/Kategori/Barang), Nominal/Kuantitas toggle, 5 KPI cards (Total Nilai Pembelian, Subtotal Barang, PPN, Ongkos Kirim, Supplier), chart card, invoice table, Rincian per Barang', await page.locator('.pur-title').innerText() === 'Laporan Pembelian'
+        && await page.locator('.pur-kpi').count() === 5 && await page.locator(tid('pur-mode-nominal')).count() === 1 && await page.locator(tid('pur-mode-qty')).count() === 1 && await page.locator(tid('pur-chart')).count() === 1 && await page.locator(tid('pur-invoices-table')).count() === 1 && await page.locator(tid('pur-items-table')).count() === 1);
 
     const ov = await api(page, '/reports/purchase-v2/overview', qs);
     const n = ov.kpi.nominal;
     const inv = await api(page, '/reports/purchase-v2/invoices', { ...qs, per_page: '100' });
     check('B date filter: 5 invoice rows (A, B, C, legacy PO-LEGACY + the voided INV-VOID); the historical import is not in the default (live) report', await page.locator(tid('pur-invoice-row')).count() === 5 && !(await page.locator(tid('pur-invoices-table')).innerText()).includes('PO-HIST'));
     const kv = (k) => page.locator(tid(`pur-kpi-${k}-value`)).innerText();
-    check('G KPI cards == hand-computed: Total Rp 146.025,5, Subtotal Barang Rp 112.000, Diskon Rp 6.504,5, PPN Rp 9.530, Ongkos Kirim Rp 21.000, 2 supplier', hasMoney(await kv('total'), E.live_total) && hasMoney(await kv('subtotal'), 112000) && hasMoney(await kv('discount'), 6504.5) && hasMoney(await kv('ppn'), 9530) && hasMoney(await kv('freight'), 21000) && (await kv('suppliers')).trim() === '2', [await kv('total'), await kv('discount')].join(' | '));
-    check('G PPN card shows the ACTUAL rates ("0% / 5% / 11%"), never a hard-coded 11 %; Diskon card breaks down Barang / Invoice', (await page.locator(tid('pur-kpi-ppn')).innerText()).includes('0% / 5% / 11%') && (await page.locator(tid('pur-kpi-discount')).innerText()).includes('Barang') && (await page.locator(tid('pur-kpi-discount')).innerText()).includes('Invoice'));
+    check('G KPI cards == hand-computed: Total Rp 146.025,5, Subtotal Barang Rp 112.000, PPN Rp 9.530, Ongkos Kirim Rp 21.000, 2 supplier — exactly the five cards of the approved set', hasMoney(await kv('total'), E.live_total) && hasMoney(await kv('subtotal'), 112000) && hasMoney(await kv('ppn'), 9530) && hasMoney(await kv('freight'), 21000) && (await kv('suppliers')).trim() === '2' && await page.locator(tid('pur-kpi-discount')).count() === 0, [await kv('total'), await kv('subtotal')].join(' | '));
+    const subTxt = await page.locator(tid('pur-kpi-subtotal')).innerText();
+    check('G the discounts are not lost: the Subtotal Barang card breaks them down (diskon barang / invoice) and they add up to the API discount Rp 6.504,5', n.discount === 6504.5 && Math.abs(n.item_discount + n.invoice_discount - n.discount) < 0.01 && subTxt.includes('diskon barang') && hasMoney(subTxt, n.item_discount) && hasMoney(subTxt, n.invoice_discount));
+    check('G PPN card shows the ACTUAL rates ("0% / 5% / 11%"), never a hard-coded 11 %', (await page.locator(tid('pur-kpi-ppn')).innerText()).includes('0% / 5% / 11%'));
     check('banner discloses legacy value, voided invoice (not counted)', (await page.locator('#pur-banner').innerText()).includes('legacy') && (await page.locator('#pur-banner').innerText()).includes('VOID'));
     await shot(page, 'nominal-desktop');
 

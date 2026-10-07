@@ -79,12 +79,14 @@ const ReportNilaiHppV3 = (() => {
         const exportBtn = ReportTools.actions({ id: 'val', print: doPrint, excel: doExcel });
         container.appendChild(UI.el('div', { class: 'val-head' }, [
             UI.el('div', {}, [
-                UI.el('h2', { class: 'val-title', 'data-testid': 'val-title', id: 'val-title' }, ''),
-                UI.el('p', { class: 'val-desc', id: 'val-desc' }, ''),
-                UI.el('div', { class: 'val-badges' }, [
-                    UI.el('span', { class: 'val-badge val-badge-success', 'data-testid': 'val-system-badge' }, 'Metode operasional sistem: FIFO'),
-                    UI.el('span', { class: 'val-badge val-badge-muted', id: 'val-method-badge', 'data-testid': 'val-method-badge' }, ''),
+                UI.el('div', { class: 'val-titlerow' }, [
+                    UI.el('h2', { class: 'val-title', 'data-testid': 'val-title', id: 'val-title' }, ''),
+                    UI.el('div', { class: 'val-badges' }, [
+                        UI.el('span', { class: 'val-badge val-badge-success', 'data-testid': 'val-system-badge' }, 'Metode operasional sistem: FIFO'),
+                        UI.el('span', { class: 'val-badge val-badge-muted', id: 'val-method-badge', 'data-testid': 'val-method-badge' }, ''),
+                    ]),
                 ]),
+                UI.el('p', { class: 'val-desc', id: 'val-desc' }, ''),
             ]),
             exportBtn,
         ]));
@@ -101,8 +103,8 @@ const ReportNilaiHppV3 = (() => {
         const m = S.method;
         $('val-title').textContent = 'Laporan Nilai HPP';
         $('val-desc').textContent = m === 'fifo'
-            ? 'Analisis nilai persediaan dan perhitungan HPP menggunakan metode FIFO (First In First Out) — layer stok nyata dan alokasi FIFO yang benar-benar dipakai sistem.'
-            : 'Inventory Value & HPP dengan metode Average Cost (moving weighted average) — pembanding analitis, read-only; tidak mengubah posting atau HPP tersimpan.';
+            ? 'Nilai persediaan dan HPP dari layer FIFO nyata — metode yang dipakai sistem.'
+            : 'Nilai persediaan dan HPP dengan moving weighted average — pembanding analitis, read-only.';
         $('val-method-badge').textContent = m === 'fifo' ? 'Dilihat: FIFO' : 'Analytical Average — tidak mengubah FIFO operasional';
         document.querySelectorAll('.val-seg-btn[data-method]').forEach((b) => { const on = b.dataset.method === m; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
         document.querySelectorAll('.val-seg-btn[data-view]').forEach((b) => { const on = b.dataset.view === S.view; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
@@ -277,6 +279,7 @@ const ReportNilaiHppV3 = (() => {
             const ok = Math.abs(a.variance) <= 0.05;
             host.appendChild(card('variance', ok ? 'green' : 'red', 'Selisih / Rekonsiliasi', rp(a.variance), `Awal + masuk − pemakaian ± lainnya (${rp(a.other_net)}) = akhir`, a.variance));
         }
+        ReportTools.decorateKpis(host);
     }
 
     function renderCompare() {

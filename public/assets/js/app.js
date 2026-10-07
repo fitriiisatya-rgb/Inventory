@@ -92,7 +92,7 @@
         'trace-center': 'Trace Center',
         laporan: 'Mutasi Stok / Ledger', 'history-transaksi': 'History Transaksi', transaksi: 'Stock IN / OUT',
         transfer: 'Transfer', 'distribusi-do': 'Delivery Order', 'distribusi-invoice': 'Invoice', 'distribusi-pricing': 'Pricing Distribusi', 'distribusi-laporan': 'Laporan Distribusi', produksi: 'Produksi', opname: 'Proses Stock Opname', 'opname-laporan': 'Laporan Stock Opname', import: 'Import',
-        audit: 'Audit Log', closing: 'Tutup Buku', 'laporan-hpp': 'Laporan Nilai Stok & HPP',
+        audit: 'Audit Log', closing: 'Tutup Buku', 'laporan-hpp': 'Laporan Nilai HPP',
         'laporan-ringkasan': 'Ringkasan Inventory',
         'laporan-pergerakan': 'Laporan Pergerakan Stok', 'laporan-rekonsiliasi': 'Rekonsiliasi Arus Stok',
         'laporan-stok': 'Laporan Stok', 'laporan-pembelian': 'Laporan Pembelian', 'laporan-inout': 'Laporan IN / OUT',

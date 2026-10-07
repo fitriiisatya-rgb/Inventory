@@ -45,12 +45,15 @@ $history = static function (string $path) use ($revFull): array {
     return array_keys($hashes);
 };
 
-$token = '20261018-rv3';
-$name = 'reports_v3_' . substr($revFull, 0, 10);
-$pkgName = 'reports_v3_production_deploy_package';
+// RV3_MODE=ui builds the FRONTEND-ONLY incremental package (production UI correction): the six report pages, the CSS blocks, app.js routes / labels and index.html. The validated backend
+// (services/*.php + the one route include in index.php) is NOT shipped; it is a GATE — if it is not installed exactly as validated, the plan is BLOCKED and nothing is written.
+$ui = getenv('RV3_MODE') === 'ui';
+$token = '20261019-rv3ui';
+$name = ($ui ? 'reports_v3_ui_' : 'reports_v3_') . substr($revFull, 0, 10);
+$pkgName = $ui ? 'reports_v3_ui_correction_package' : 'reports_v3_production_deploy_package';
 $tmp = sys_get_temp_dir() . '/rv3_build_' . bin2hex(random_bytes(4));
 $R = "{$tmp}/{$pkgName}";
-foreach (['payload/services', 'payload/public/assets/js', 'payload/css', 'scripts', 'tests/browser/lib', 'tests/lib', 'state'] as $d) {
+foreach (array_merge($ui ? [] : ['payload/services'], ['payload/public/assets/js', 'payload/css', 'scripts', 'tests/browser/lib', 'tests/lib', 'state']) as $d) {
     mkdir("{$R}/{$d}", 0755, true);
 }
 $put = static function (string $rel, string $data) use ($R): void {
@@ -63,12 +66,21 @@ $ops = [];
 $sha = static fn (string $s): string => rv3_sha($s);
 
 // ---------------------------------------------------------------- whole files
-$files = [
+$backendFiles = [
     'services/ReportExportService.php', 'services/MovementReportV3Service.php', 'services/MovementDailyReportService.php', 'services/ReportsV3Routes.php',
     'services/PurchaseReportService.php', 'services/InOutReportService.php', 'services/InventoryValuationService.php', 'services/StockOpnameAuditReportService.php',
+];
+$files = [
     'public/assets/js/report-tools.js', 'public/assets/js/report-pergerakan.js', 'public/assets/js/report-pembelian-v3.js', 'public/assets/js/report-nilai-hpp-v3.js',
     'public/assets/js/report-inout-v3.js', 'public/assets/js/report-opname-audit.js',
 ];
+if (!$ui) {
+    $files = array_merge($backendFiles, $files);
+} else {
+    foreach ($backendFiles as $f) {                                  // GATE: the validated backend must already be installed (never written by this package)
+        $ops[] = ['id' => 'gate:' . basename($f), 'type' => 'require_file', 'target' => $f, 'accept' => [$sha($show($f))]];
+    }
+}
 foreach ($files as $f) {
     $d = $show($f);
     $put("payload/{$f}", $d);
@@ -78,7 +90,7 @@ foreach ($files as $f) {
 
 // ---------------------------------------------------------------- css blocks (extracted by marker from the committed app.css)
 $css = $show('public/assets/css/app.css');
-foreach (['pur' => 'RV3 BLOCK pur 20261008', 'val' => 'RV3 BLOCK val 20261008', 'io' => 'RV3 BLOCK io 20261008', 'rv3' => 'RV3 REPORT FAMILY 20261008', 'soa3' => 'SOA3 AUDIT UI 20261008'] as $k => $label) {
+foreach (['pur' => 'RV3 BLOCK pur 20261008', 'val' => 'RV3 BLOCK val 20261008', 'io' => 'RV3 BLOCK io 20261008', 'rv3' => 'RV3 REPORT FAMILY 20261008', 'soa3' => 'SOA3 AUDIT UI 20261008', 'uic' => 'RV3 UI CORRECTION 20261019'] as $k => $label) {
     $b = "/* ===== {$label} BEGIN =====";
     $e = "/* ===== {$label} END ===== */";
     if (substr_count($css, $b) !== 1 || substr_count($css, $e) !== 1) {
@@ -100,6 +112,14 @@ foreach ([['laporan-pergerakan', false], ['laporan-pembelian', false], ['laporan
     $ops[] = ['id' => "app.js:{$tab}", 'type' => 'app_route', 'target' => 'public/assets/js/app.js', 'tab' => $tab, 'statement' => $m[0], 'optional' => $optional];
 }
 
+// breadcrumb / title labels of the five reports (app.js label map): the Nilai HPP report is called exactly "Laporan Nilai HPP"
+foreach (['laporan-pergerakan' => 'Laporan Pergerakan Stok', 'laporan-inout' => 'Laporan IN / OUT', 'laporan-pembelian' => 'Laporan Pembelian', 'laporan-hpp' => 'Laporan Nilai HPP', 'laporan-opname' => 'Laporan Stock Opname'] as $tab => $label) {
+    if (!preg_match('/\'' . preg_quote($tab, '/') . '\'\s*:\s*\'' . preg_quote($label, '/') . '\'/', $appjs)) {
+        rv3_die("app.js label map: '{$tab}' must be '{$label}' in the committed app.js");
+    }
+    $ops[] = ['id' => "app.js:label:{$tab}", 'type' => 'app_label', 'target' => 'public/assets/js/app.js', 'tab' => $tab, 'label' => $label];
+}
+
 // ---------------------------------------------------------------- index.php: ONE include
 $anchor = '// ---- dispatch: exact match first, then {param} patterns ----';
 $phpText = "// >>> RV3 reports_v3 BEGIN — read-only report routes (keys defined there replace older routes of the same key). Remove this block to disable.\n"
@@ -112,7 +132,11 @@ if (!str_contains($idx, $phpText) || substr_count($idx, $anchor) !== 1) {
         rv3_die('dev index.php does not include ReportsV3Routes.php');
     }
 }
-$ops[] = ['id' => 'index.php:include', 'type' => 'php_include', 'target' => 'public/index.php', 'anchor' => $anchor, 'begin' => '// >>> RV3 reports_v3 BEGIN', 'end' => '// <<< RV3 reports_v3 END', 'text' => $phpText];
+if ($ui) {
+    $ops[] = ['id' => 'gate:index.php:include', 'type' => 'require_marker', 'target' => 'public/index.php', 'marker' => '// >>> RV3 reports_v3 BEGIN'];
+} else {
+    $ops[] = ['id' => 'index.php:include', 'type' => 'php_include', 'target' => 'public/index.php', 'anchor' => $anchor, 'begin' => '// >>> RV3 reports_v3 BEGIN', 'end' => '// <<< RV3 reports_v3 END', 'text' => $phpText];
+}
 
 // ---------------------------------------------------------------- index.html
 $html = $show('public/index.html');
@@ -160,13 +184,13 @@ $put('scripts/apply.sh', $wrap('APPLY (writes). Needs a fresh dry-run plan; add 
 $put('scripts/verify.sh', $wrap('POST-APPLY VERIFY (read-only).', "APP=\"\${1:?usage: verify.sh <APP ROOT> [--base-url=https://host]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" verify --app-root=\"\$APP\" \"\$@\"\n"));
 $put('scripts/rollback.sh', $wrap('ROLLBACK (writes): two-phase, restores the exact pre-apply files.', "APP=\"\${1:?usage: rollback.sh <APP ROOT>}\"\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" rollback --app-root=\"\$APP\"\n"));
 $put('scripts/readonly_validate.sh', $wrap('PRODUCTION READ-ONLY VALIDATOR: SO sessions 11/12 reconciliation (16/16) + the five reports against the REAL data, with the NEW code. SELECT only.', "APP=\"\${1:?usage: readonly_validate.sh <APP ROOT> [--session=11,12] [--start=YYYY-MM-DD --end=YYYY-MM-DD]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_readonly_check.php\" --app-root=\"\$APP\" --package-dir=\"\$HERE/..\" \"\$@\"\n"));
-foreach (['movement_report_v3_test.php', 'inout_report_test.php', 'inventory_valuation_test.php', 'purchase_report_test.php', 'stock_opname_audit_report_test.php', 'report_export_test.php', 'numeric_unit_code_test.php', 'rv3_package_rehearsal.sh'] as $t) {
+foreach (['movement_report_v3_test.php', 'inout_report_test.php', 'inventory_valuation_test.php', 'purchase_report_test.php', 'stock_opname_audit_report_test.php', 'report_export_test.php', 'numeric_unit_code_test.php', 'rv3_sidebar_op_test.php', 'rv3_package_rehearsal.sh'] as $t) {
     $put("tests/{$t}", $show("tests/{$t}"));
 }
 foreach (['lib/rv3.mjs'] as $t) {
     $put("tests/browser/{$t}", $show("tests/browser/{$t}"));
 }
-foreach (['playwright_pergerakan_v3.mjs', 'playwright_inout_report.mjs', 'playwright_purchase_report.mjs', 'playwright_valuation_report.mjs', 'playwright_so_audit_v3.mjs', 'seed_valuation_report.php', 'seed_inout_report.php', 'seed_purchase_report.php', 'seed_so_audit_v3.php'] as $t) {
+foreach (['playwright_pergerakan_v3.mjs', 'playwright_inout_report.mjs', 'playwright_purchase_report.mjs', 'playwright_valuation_report.mjs', 'playwright_so_audit_v3.mjs', 'playwright_sidebar_reports.mjs', 'seed_valuation_report.php', 'seed_inout_report.php', 'seed_purchase_report.php', 'seed_so_audit_v3.php'] as $t) {
     $put("tests/browser/{$t}", $show("tests/browser/{$t}"));
 }
 foreach (['xlsx_dump.php', 'valuation_fixture.php', 'inout_report_fixture.php', 'purchase_report_fixture.php', 'dashboard_fixture.php', 'jejak_real_fixture.php'] as $t) {
@@ -174,7 +198,7 @@ foreach (['xlsx_dump.php', 'valuation_fixture.php', 'inout_report_fixture.php', 
 }
 
 // ---------------------------------------------------------------- README
-$tpl = $show('scripts/rv3/README_DEPLOY.md.tpl');
+$tpl = $show($ui ? 'scripts/rv3/README_UI.md.tpl' : 'scripts/rv3/README_DEPLOY.md.tpl');
 $rows = '';
 foreach ($ops as $o) {
     if ($o['type'] === 'file') {

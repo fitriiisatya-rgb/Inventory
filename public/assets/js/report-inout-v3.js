@@ -106,6 +106,7 @@ const ReportInOutV3 = (() => {
         S.root = container;
         container.innerHTML = '';
         container.classList.add('io');
+        ReportTools.onResize('io-chart', () => { if (S && S.overview && q$('#io-chart') && q$('#io-chart').offsetParent) renderChart(); });
         const exportBtn = ReportTools.actions({ id: 'io', print: doPrint, excel: () => doExcel(S.tab), extras: [{ label: 'Download Semua Tab (3 sheet)', testid: 'io-excel-all', run: () => doExcel('all') }] });
         container.appendChild(UI.el('div', { class: 'io-head' }, [
             UI.el('div', {}, [
@@ -323,7 +324,7 @@ const ReportInOutV3 = (() => {
         const bar = (r) => (S.tab === 'in' ? r.total : S.tab === 'out' ? r.hpp : r.value);
         const bar2 = S.tab === 'out' ? (r) => r.sell : null;
         const NS = 'http://www.w3.org/2000/svg';
-        const W = 1100; const H = 210; const L = 66; const R = 40; const T = 10; const B = 28;
+        const W = ReportTools.chartWidth(q$('#io-chart'), 1100); const H = 200; const L = 66; const R = 40; const T = 10; const B = 28;
         const svg = document.createElementNS(NS, 'svg');
         svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('class', 'io-svg'); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', titles[0]); svg.setAttribute('data-testid', 'io-chart');
         const max = niceMax(Math.max(...rows.map(bar), ...(bar2 ? rows.map(bar2) : [0]), 0));

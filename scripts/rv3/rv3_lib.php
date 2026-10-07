@@ -20,7 +20,7 @@ declare(strict_types=1);
  *   html_sidebar  the Laporan menu = the five approved reports; every other report link is kept hidden in the DOM (route compatibility).
  */
 
-const RV3_APPLY_ORDER = ['file', 'css_block', 'app_route', 'php_include', 'html_scripts', 'html_tokens', 'html_sidebar'];
+const RV3_APPLY_ORDER = ['require_file', 'require_marker', 'file', 'css_block', 'app_route', 'app_label', 'php_include', 'html_scripts', 'html_tokens', 'html_sidebar'];
 
 function rv3_sha(string $s): string
 {
@@ -150,6 +150,51 @@ function rv3_op_app_route(?string $cur, array $op, string $dir): array
         return [$cur, 'done', 'identical'];
     }
     return [preg_replace($re, strtr($op['statement'], ['\\' => '\\\\', '$' => '\\$']), $cur, 1), 'todo', 'was `' . $m[0][0] . '`'];
+}
+
+/**
+ * GATE (never writes): the file must already be one of the accepted versions. Used by the frontend-only package: the validated backend (services) must already be installed;
+ * if it is not, the plan is BLOCKED instead of the package overwriting backend code it was not meant to touch.
+ */
+function rv3_op_require_file(?string $cur, array $op, string $dir): array
+{
+    if ($cur === null) {
+        return [$cur, 'conflict', "required backend file {$op['target']} is not installed — apply the Reports v3 backend package first (this package changes the frontend only)"];
+    }
+    $sha = rv3_sha($cur);
+    if (in_array($sha, $op['accept'], true)) {
+        return [$cur, 'done', 'installed version is the validated one (gate, never written)'];
+    }
+    return [$cur, 'conflict', "backend file {$op['target']} is not at the validated version (found sha256 " . substr($sha, 0, 16) . "…, expected " . substr($op['accept'][0], 0, 16) . '…) — this frontend-only package will NOT overwrite backend code; apply the Reports v3 backend package first'];
+}
+
+/** GATE (never writes): the file must contain the marker text (e.g. the one-line Reports v3 route include in index.php). */
+function rv3_op_require_marker(?string $cur, array $op, string $dir): array
+{
+    if ($cur === null || !str_contains($cur, $op['marker'])) {
+        return [$cur, 'conflict', "{$op['target']} does not contain the Reports v3 marker \"{$op['marker']}\" — the Reports v3 backend is not installed; apply the backend package first"];
+    }
+    return [$cur, 'done', 'marker present (gate, never written)'];
+}
+
+/** the breadcrumb / page-title text of one tab in app.js's label map: 'laporan-hpp': 'Laporan Nilai HPP' */
+function rv3_op_app_label(?string $cur, array $op, string $dir): array
+{
+    if ($cur === null) {
+        return [$cur, 'conflict', 'app.js is missing'];
+    }
+    $re = '/(\'' . preg_quote($op['tab'], '/') . '\'\s*:\s*)\'([^\']*)\'/';
+    $n = preg_match_all($re, $cur, $m);
+    if ($n === 0) {
+        return [$cur, 'done', 'no label entry for this tab on this server'];
+    }
+    if ($n > 1) {
+        return [$cur, 'conflict', "{$n} label entries for {$op['tab']} (expected exactly one)"];
+    }
+    if ($m[2][0] === $op['label']) {
+        return [$cur, 'done', 'identical'];
+    }
+    return [preg_replace($re, '$1\'' . strtr($op['label'], ['\\' => '\\\\', '$' => '\\$']) . '\'', $cur, 1), 'todo', 'was \'' . $m[2][0] . '\''];
 }
 
 // ---------------------------------------------------------------- index.html
@@ -439,6 +484,40 @@ function rv3_sidebar_op_from_html(string $html): array
         'Rekonsiliasi Arus Stok', 'Audit Transaksi', 'Nilai Stok & HPP', 'Laporan Nilai Stok & HPP', 'Laporan P1/P2 Stock Opname', 'Laporan P1/P2 Stock Opname (lama)', 'Laporan Jejak Stock Opname'];
     return ['approved' => $approved, 'legacy' => $legacy, 'legacy_comment_block' => $legacyComment, 'old_report_tabs' => $oldReportTabs, 'old_report_labels' => $oldReportLabels,
         'opname_comment' => $oc[0] ?? '<!-- "Laporan Stock Opname" now lives in the Laporan menu. -->'];
+}
+
+/**
+ * What a visitor sees in the sidebar: the report links outside the hidden container (by route or by label) and the report links kept hidden.
+ * @return array{visible:list<string>,hidden:list<string>,old_visible:list<string>}
+ */
+function rv3_sidebar_report_links(string $html, array $op): array
+{
+    $masked = rv3_mask_comments($html);
+    $nPos = preg_match('#<nav\b[^>]*\bid="sidebar"[^>]*>#', $masked, $nm, PREG_OFFSET_CAPTURE) ? $nm[0][1] : 0;
+    $nEnd = ($e = strpos($masked, '</nav>', $nPos)) === false ? strlen($html) : $e;
+    $cPos = strpos($masked, '<div class="sidebar-legacy-routes"');
+    $c = $cPos === false ? null : rv3_div_span($html, $cPos);
+    $approvedTabs = array_column($op['approved'], 'tab');
+    $approvedLabels = array_map(static fn ($a) => rv3_anchor_label($a['markup']), $op['approved']);
+    $oldTabs = $op['old_report_tabs'] ?? [];
+    $oldLabels = array_map('mb_strtolower', $op['old_report_labels'] ?? []);
+    $r = ['visible' => [], 'hidden' => [], 'old_visible' => []];
+    foreach (rv3_anchor_spans($html) as $a) {
+        if ($a['start'] < $nPos || $a['end'] > $nEnd) {
+            continue;
+        }
+        $label = rv3_anchor_label($a['markup']);
+        $isOld = in_array($a['tab'], $oldTabs, true) || in_array(mb_strtolower($label), $oldLabels, true);
+        $isApproved = in_array($a['tab'], $approvedTabs, true) || in_array($label, $approvedLabels, true);
+        if ($c !== null && $a['start'] >= $c[0] && $a['end'] <= $c[1]) {
+            $r['hidden'][] = $a['tab'];
+        } elseif ($isApproved) {
+            $r['visible'][] = $label;
+        } elseif ($isOld) {
+            $r['old_visible'][] = $label;
+        }
+    }
+    return $r;
 }
 
 /** @param array<string,string> $anchors tab => markup */

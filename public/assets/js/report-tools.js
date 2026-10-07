@@ -240,6 +240,40 @@ table.dense1 th, table.dense1 td { font-size: 7.5pt; padding: 2px 3px; } table.d
     }
 
 
+
+    // ------------------------------------------------------------------ KPI icon tiles (the approved mockup: a solid tone tile with a glyph on every KPI card)
+    const KPI_ICONS = [[/transfer\s*in/i, '↑'], [/transfer\s*out/i, '↓'], [/adjust/i, '±'], [/selisih|variance|rekonsiliasi/i, '⚖'], [/ppn|pajak/i, '%'], [/ongkos|kirim|freight/i, '🚚'], [/supplier|vendor/i, '🏭'],
+        [/layer/i, '🧱'], [/hpp/i, '💰'], [/transaksi|invoice|sesi|session/i, '🧾'], [/diverifikasi|verifikasi/i, '✔'], [/good/i, '✔'], [/expired/i, '⏰'], [/rusak/i, '⚠'], [/deadstock/i, '🕸'],
+        [/masuk|\bin\b|pembelian|cost in/i, '↑'], [/keluar|\bout\b|pemakaian/i, '↓'], [/sku/i, '🏷'], [/subtotal|diskon/i, '🧮'], [/stok|saldo|nilai|qty|persediaan/i, '📦']];
+    function kpiIcon(label) { const l = String(label || ''); const hit = KPI_ICONS.find(([re]) => re.test(l)); return hit ? hit[1] : '📊'; }
+    /** gives every KPI card in $host (that has none yet) the solid icon tile of the mockup; idempotent */
+    function decorateKpis(host) {
+        if (!host) return;
+        host.querySelectorAll('.rp-kpi, .pur-kpi, .val-kpi').forEach((card) => {
+            if (card.querySelector('.rp-kpi-ic')) return;
+            const l = card.querySelector('.rp-kpi-l, .pur-kpi-label, .val-kpi-label');
+            const ic = document.createElement('span');
+            ic.className = 'rp-kpi-ic';
+            ic.setAttribute('aria-hidden', 'true');
+            ic.textContent = kpiIcon(l ? l.textContent : card.textContent);
+            card.insertBefore(ic, card.firstChild);
+        });
+    }
+
+    // ------------------------------------------------------------------ responsive charts
+    /** drawing width for an SVG chart inside $el: the real card width (so a chart fills its card instead of being letter-boxed), clamped */
+    function chartWidth(el, fallback) { const w = el && el.clientWidth ? el.clientWidth - 24 : 0; return Math.max(520, Math.min(1800, Math.round(w || fallback || 1000))); }
+    const resizeHooks = {};
+    /** runs fn (debounced) when the window width changes — one hook per key, so re-rendering a page never stacks listeners */
+    function onResize(key, fn) {
+        if (typeof window === 'undefined') return;
+        if (!resizeHooks[key]) {
+            let timer = null; let last = window.innerWidth;
+            window.addEventListener('resize', () => { if (window.innerWidth === last) return; last = window.innerWidth; clearTimeout(timer); timer = setTimeout(() => { if (resizeHooks[key]) resizeHooks[key](); }, 220); });
+        }
+        resizeHooks[key] = fn;
+    }
+
     // ------------------------------------------------------------------ sidebar guard
     // The Laporan menu shows ONLY the five approved reports. The old report routes stay in the application (drill-downs, tab restore, bookmarks) but their links are never visible.
     // index.html already ships exactly that; this guard is the second line of defence for a cached / hand-edited / older index.html: it hides every old report link (by route OR by its
@@ -285,5 +319,5 @@ table.dense1 th, table.dense1 td { font-size: 7.5pt; padding: 2px 3px; } table.d
         if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', watchSidebar); else watchSidebar();
     }
 
-    return { sanitizeSidebar, apiGet, qsOf, download, printDocument, buildPrintHtml, specFromPayload, metaPairs, fmtCell, actions, get lastPrintHtml() { return lastPrintHtml; } };
+    return { chartWidth, onResize, decorateKpis, kpiIcon, sanitizeSidebar, apiGet, qsOf, download, printDocument, buildPrintHtml, specFromPayload, metaPairs, fmtCell, actions, get lastPrintHtml() { return lastPrintHtml; } };
 })();

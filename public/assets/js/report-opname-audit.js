@@ -14,9 +14,9 @@
  * READ-ONLY: this module only issues GET requests (data, evidence images, exports). It cannot create, change, finalize or post anything.
  */
 const ReportOpnameAudit = (() => {
-    const COLS_KEY = 'soa3_item_cols_v1';
+    const COLS_KEY = 'soa3_item_cols_v2';
     /** Default Rincian Item columns (the chooser offers every column of the service catalogue). */
-    const ITEM_DEFAULT = ['sku', 'name', 'system_qty', 'final_qty', 'good_qty', 'expired_qty', 'rusak_qty', 'deadstock_qty', 'variance_value', 'p_hitung', 'p_verifikasi', 'line_status'];
+    const ITEM_DEFAULT = ['sku', 'name', 'unit', 'system_qty', 'final_qty', 'variance_qty', 'good_qty', 'expired_qty', 'rusak_qty', 'deadstock_qty', 'hpp', 'variance_value'];
     const SESSION_PER_PAGE = [10, 25, 50, 100];
     const ITEM_PER_PAGE = [25, 50, 100, 200];
     const STATUS_OPTIONS = [['', 'Semua status'], ['OPEN', 'Open / Counting'], ['FINALIZED', 'Finalized'], ['POSTED', 'Posted'], ['CANCELLED', 'Cancelled']];
@@ -476,6 +476,7 @@ const ReportOpnameAudit = (() => {
                 const unknown = noItems || (x.sku === 0 && x.unknown !== undefined && x.unknown >= k.items);
                 R.condKpis.appendChild(kpiCard(key, cls, label, unknown ? '—' : `${num(x.sku, 0)} SKU`, unknown ? (noItems ? '—' : 'tidak dicatat') : byUnit(x.by_unit)));
             });
+            ReportTools.decorateKpis(R.kpis); ReportTools.decorateKpis(R.condKpis);
         }
 
         function sessionCols() {
@@ -487,17 +488,18 @@ const ReportOpnameAudit = (() => {
                 { key: 'p1', label: 'P1', cell: (r) => cellBy('people', r.p1) },
                 { key: 'p2', label: 'P2', cell: (r) => cellBy('people', r.p2) },
                 { key: 'supervisor', label: 'Supervisor', cell: (r) => cellBy('text', r.supervisor) },
-                { key: 'finalizer', label: 'Finalizer', cell: (r) => cellBy('text', r.finalizer) },
                 { key: 'total_items', label: 'Total Item', num: true, cell: (r) => num(r.total_items, 0) },
                 { key: 'match', label: 'Match', num: true, cell: (r) => num(r.match, 0) },
                 { key: 'mismatch', label: 'Mismatch', num: true, cell: (r) => num(r.mismatch, 0) },
                 { key: 'recounted', label: 'Recount', num: true, cell: (r) => num(r.recounted, 0) },
-                { key: 'excluded', label: 'Excluded', num: true, cell: (r) => num(r.excluded, 0) },
                 { key: 'variance_value', label: 'Selisih Nilai', num: true, cell: (r) => cellBy('variance_money', r.variance_value) },
                 { key: 'adj', label: 'Adjustment +/−', num: true, cell: (r) => (r.adj_count > 0 ? h('span', { title: `${r.adj_count} adjustment · net ${sgnRp(r.adj_value)}` }, [h('span', { class: 'rp-pos' }, sgnRp(r.adj_pos || 0)), ' / ', h('span', { class: 'rp-neg' }, rp(r.adj_neg || 0))]) : h('span', { class: 'rp-dim', title: r.adj_status }, '—')) },
                 { key: 'evidence_count', label: 'Evidence', num: true, cell: (r) => (r.evidence_count === null || r.evidence_count === undefined ? h('span', { class: 'rp-dim', title: 'Sesi legacy tidak menyimpan evidence' }, '—') : `${num(r.evidence_count, 0)} foto`) },
+                { key: 'finalizer', label: 'Finalized By', cell: (r) => cellBy('text', r.finalizer) },
+                { key: 'finalized_at', label: 'Finalized At', cell: (r) => fmtTs(r.finalized_at) },
+                { key: 'excluded', label: 'Excluded', num: true, cell: (r) => num(r.excluded, 0) },
                 { key: 'created_by', label: 'Dibuat Oleh', cell: (r) => cellBy('text', r.created_by) },
-                { key: 'finalized_at', label: 'Finalisasi', cell: (r) => fmtTs(r.finalized_at) },
+                { key: 'detail', label: 'Aksi', cell: (r) => h('button', { type: 'button', class: 'btn btn-secondary btn-sm soa3-detail-btn', 'data-testid': 'soa3-session-detail', title: 'Buka detail sesi' }, '👁 Detail') },
             ];
         }
 
@@ -621,8 +623,11 @@ const ReportOpnameAudit = (() => {
             }
         }
 
+        // on screen the physical count reads left to right: system qty → final physical → difference → condition split → HPP → value difference (the export keeps the service catalogue order)
+        const ITEM_ORDER = ['no', 'session_number', 'session_date', 'warehouse', 'sku', 'name', 'category', 'unit', 'system_qty', 'final_qty', 'variance_qty', 'good_qty', 'expired_qty', 'rusak_qty', 'deadstock_qty', 'hpp', 'system_value', 'final_value', 'variance_value'];
+        const orderRank = (k) => { const i = ITEM_ORDER.indexOf(k); return i < 0 ? 100 : i; };
         function visibleItemCols() {
-            const cols = S.itemColumns.filter((c) => S.cols.includes(c.key));
+            const cols = S.itemColumns.filter((c) => S.cols.includes(c.key)).map((c, i) => [c, i]).sort((a, b) => (orderRank(a[0].key) - orderRank(b[0].key)) || (a[1] - b[1])).map((x) => x[0]);
             if (!S.selected && !cols.some((c) => c.key === 'session_number')) { const sc = S.itemColumns.find((c) => c.key === 'session_number'); if (sc) cols.unshift(sc); }
             return cols;
         }

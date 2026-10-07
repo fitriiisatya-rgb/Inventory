@@ -44,9 +44,25 @@ try {
     const fh = await page.locator(tid('mv-filters')).boundingBox();
     check('A the filter card is ONE compact card of at most 2 rows (height ≤ 130px at 1536)', fh && fh.height <= 130, String(fh && fh.height));
     check('A KPIs: Stok Awal 124.000 · Barang Masuk 492.000 · Barang Keluar 278.800 · Stok Akhir 326.500', hasMoney(await kpi(page, 'opening'), 124000) && hasMoney(await kpi(page, 'masuk'), 492000) && hasMoney(await kpi(page, 'keluar'), 278800) && hasMoney(await kpi(page, 'closing'), 326500));
+    check('A the other three KPI cards: Transfer IN Rp 32.000 · Transfer OUT Rp 32.000 · Adjustment −Rp 10.700', hasMoney(await kpi(page, 'tin'), 32000) && hasMoney(await kpi(page, 'tout'), 32000) && hasMoney(await kpi(page, 'adjustment'), 10700) && (await kpi(page, 'adjustment')).includes('-'));
+    check('A the KPI cards carry the mockup icon tile (one per card)', (await page.locator(`${tid('mv-kpis')} .rp-kpi .rp-kpi-ic`).count()) === 7);
     check('A the reconciliation strip is green and states "seimbang" with Transfer IN / OUT 32.000 and the formula-adjustment −10.700', await page.locator(tid('mv-recon-ok')).count() === 1 && hasMoney(await text(page.locator(tid('mv-recon-ok'))), 32000) && hasMoney(await text(page.locator(tid('mv-recon-ok'))), 10700));
     const nest = await page.evaluate(() => document.querySelectorAll('#tab-laporan-pergerakan .rp-card .rp-card, #tab-laporan-pergerakan .rp-kpi .rp-kpi').length);
     check('A no card inside a card', nest === 0);
+
+    // ---------------------------------------------------------------- A2. mockup composition: chart Grafik | Tabel, "Detail Pergerakan Stok Harian" card with search + Download Detail
+    check('A2 chart card "Grafik Pergerakan Stok Harian" with the Grafik | Tabel toggle and the legend', (await text(page.locator('#mv-chart .rp-card-title'))).startsWith('Grafik Pergerakan Stok Harian') && await page.locator(tid('mv-chartview-grafik')).count() === 1 && await page.locator('#mv-chart .rp-legend').count() === 1);
+    await page.click(tid('mv-chartview-tabel'));
+    check('A2 "Tabel" shows the daily numbers behind the chart (31 rows, Stok Akhir 326.500 on the last day) and hides the SVG', await page.locator(tid('mv-chart-svg')).count() === 0 && (await page.locator(`${tid('mv-chart-table')} tbody tr`).count()) === 31 && hasMoney(await text(page.locator(`${tid('mv-chart-table')} tbody tr`).last()), 326500));
+    await page.click(tid('mv-chartview-grafik'));
+    check('A2 back on "Grafik": the SVG chart is drawn full width of its card', await page.locator(tid('mv-chart-svg')).count() === 1 && await page.evaluate(() => { const c = document.querySelector('#mv-chart .rp-chart').getBoundingClientRect(); const s = document.querySelector('[data-testid="mv-chart-svg"]').getBoundingClientRect(); return s.width >= c.width - 4; }));
+    check('A2 data card titled "Detail Pergerakan Stok Harian" with the Harian | Per Barang tabs, a date search and "Download Detail"', (await text(page.locator('#mv-data .rp-card-title'))).startsWith('Detail Pergerakan Stok Harian') && await page.locator(tid('mv-search')).count() === 1 && await page.locator(tid('mv-download-detail')).count() === 1);
+    await page.fill(tid('mv-search'), '03 Okt');
+    await page.waitForTimeout(500);
+    check('A2 the date search narrows the daily table to the matching day (03 Okt 2026) and clearing it restores 31 rows', (await page.locator(tid('mv-daily-row')).count()) === 1);
+    await page.fill(tid('mv-search'), '');
+    await page.waitForTimeout(500);
+    check('A2 31 rows again after clearing the search', (await page.locator(tid('mv-daily-row')).count()) === 31);
 
     // ---------------------------------------------------------------- B. daily table
     const heads = await page.evaluate(() => Array.from(document.querySelectorAll('[data-testid="mv-daily-table"] thead th')).map((t) => t.textContent.trim()));
@@ -163,7 +179,16 @@ try {
     for (const [name, vp] of [['desktop-1536', { width: 1536, height: 864 }], ['desktop-1366', { width: 1366, height: 768 }], ['ipad-landscape', { width: 1180, height: 820 }], ['ipad-portrait', { width: 820, height: 1180 }]]) {
         await page.setViewportSize(vp);
         await page.waitForTimeout(250);
-        check(`J ${name}: no horizontal page scroll; KPIs in one grid; filter card compact`, await T.noHScroll(page) && (await page.locator(`${tid('mv-kpis')} .rp-kpi`).count()) === 4);
+        const geo = await page.evaluate(() => {
+            const k = Array.from(document.querySelectorAll('[data-testid="mv-kpis"] .rp-kpi')).map((e) => e.getBoundingClientRect());
+            const f = document.querySelector('[data-testid="mv-filters"]').getBoundingClientRect();
+            const vis = Array.from(document.querySelectorAll('.tab-content')).filter((e) => e.offsetParent !== null).length;
+            return { n: k.length, tops: new Set(k.map((r) => Math.round(r.top))).size, maxH: Math.max(...k.map((r) => r.height)), fh: f.height, vis, w: innerWidth };
+        });
+        check(`J ${name}: no horizontal page scroll; SEVEN KPI cards (Stok Awal, Masuk, Keluar, Transfer IN, Transfer OUT, Adjustment, Stok Akhir) — never a giant card`, await T.noHScroll(page) && geo.n === 7 && geo.maxH <= 92, JSON.stringify(geo));
+        if (vp.width >= 1100) check(`J ${name}: the seven KPI cards sit in ONE row; the filter card is at most two rows (≤ 150px)`, geo.tops === 1 && geo.fh <= 150, JSON.stringify(geo));
+        else check(`J ${name}: KPI cards wrap into a compact grid (2+ columns, ≤ 4 rows)`, geo.tops >= 2 && geo.tops <= 4, JSON.stringify(geo));
+        check(`J ${name}: only the active page is displayed (no earlier report left on screen)`, geo.vis === 1, String(geo.vis));
         await T.shot(page, `pergerakan-v3-${name}`);
     }
     await page.setViewportSize({ width: 1536, height: 864 });
