@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+require_once __DIR__ . '/InventoryEffectiveDateService.php';
+
 use PDO;
 
 /**
@@ -317,10 +319,11 @@ final class DashboardInventoryService
      */
     private static function adjustmentBreakdown(PDO $pdo, string $effStart, string $end, ?int $wh): array
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         $signed = InventoryHppReportService::SIGNED_VALUE_SQL;
         $where = [
-            "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', 't.transaction_date >= :start', 't.transaction_date < :end_excl',
-            "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :start_boundary)",
+            "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', "{$td} >= :start", "{$td} < :end_excl",
+            "NOT (t.transaction_type = 'OPENING' AND {$td} = :start_boundary)",
             "NOT (t.transaction_type = 'IN' AND t.status = 'POSTED')", "t.transaction_type NOT IN ('OUT','TRANSFER_IN','TRANSFER_OUT')",
         ];
         $bind = ['start' => $effStart . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($end . ' +1 day')) . ' 00:00:00', 'start_boundary' => $effStart . ' 00:00:00'];
@@ -374,12 +377,13 @@ final class DashboardInventoryService
     // -------------------------------------------------- ledger balance (awal/akhir)
 
     /** @return array{0:string,1:array<string,mixed>} grouped subquery (item x warehouse) + binds */
-    private static function balanceGrouped(string $beforeDate, bool $boundaryOpening, ?int $wh): array
+    private static function balanceGrouped(PDO $pdo, string $beforeDate, bool $boundaryOpening, ?int $wh): array
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         $signed = InventoryHppReportService::SIGNED_VALUE_SQL;
         $date = $boundaryOpening
-            ? "(t.transaction_date < :before OR (t.transaction_type = 'OPENING' AND t.transaction_date = :before_b))"
-            : 't.transaction_date < :before';
+            ? "({$td} < :before OR (t.transaction_type = 'OPENING' AND {$td} = :before_b))"
+            : "{$td} < :before";
         $bind = ['before' => $beforeDate . ' 00:00:00'];
         if ($boundaryOpening) {
             $bind['before_b'] = $beforeDate . ' 00:00:00';
@@ -404,7 +408,7 @@ final class DashboardInventoryService
      */
     private static function balanceTotals(PDO $pdo, string $beforeDate, bool $boundaryOpening, ?int $wh, array $filters): array
     {
-        [$g, $bind] = self::balanceGrouped($beforeDate, $boundaryOpening, $wh);
+        [$g, $bind] = self::balanceGrouped($pdo, $beforeDate, $boundaryOpening, $wh);
         [$fw, $fb] = self::itemFilterSql($filters, 'g.warehouse_id');
         $stmt = $pdo->prepare("SELECT COALESCE(SUM(g.value),0) AS v, COUNT(DISTINCT g.item_id) AS skus, COUNT(*) AS n
                                  FROM ({$g}) g JOIN items i ON i.id = g.item_id WHERE {$fw}");
@@ -534,6 +538,7 @@ final class DashboardInventoryService
 
     private static function todayActivity(PDO $pdo, ?int $wh, string $today): array
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         $bind = ['start' => $today . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($today . ' +1 day')) . ' 00:00:00'];
         $whSql = '';
         if ($wh !== null) {
@@ -544,7 +549,7 @@ final class DashboardInventoryService
             "SELECT t.transaction_type AS type, COUNT(DISTINCT t.id) AS n, COALESCE(SUM(ABS(l.subtotal)), 0) AS v
                FROM inventory_transaction_lines l JOIN inventory_transactions t ON t.id = l.transaction_id
               WHERE t.status = 'POSTED' AND t.inventory_effect = 1 AND t.transaction_type IN ('IN','OUT','TRANSFER_OUT','TRANSFER_IN')
-                AND t.transaction_date >= :start AND t.transaction_date < :end_excl{$whSql}
+                AND {$td} >= :start AND {$td} < :end_excl{$whSql}
               GROUP BY t.transaction_type"
         );
         $stmt->execute($bind);
@@ -561,6 +566,7 @@ final class DashboardInventoryService
 
     private static function recentActivity(PDO $pdo, ?int $wh, int $limit): array
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         $bind = [];
         $whSql = '';
         if ($wh !== null) {
@@ -568,14 +574,14 @@ final class DashboardInventoryService
             $bind['wh'] = $wh;
         }
         $stmt = $pdo->prepare(
-            "SELECT t.id, t.transaction_type, t.transaction_date, t.reference_no, t.status, w.name AS warehouse_name,
+            "SELECT t.id, t.transaction_type, {$td} AS transaction_date, t.reference_no, t.status, w.name AS warehouse_name,
                     COUNT(*) AS item_count, COALESCE(SUM(ABS(l.subtotal)), 0) AS value
                FROM inventory_transaction_lines l
                JOIN inventory_transactions t ON t.id = l.transaction_id
                JOIN warehouses w ON w.id = t.warehouse_id
               WHERE t.inventory_effect = 1 AND t.transaction_type <> 'REVERSAL'{$whSql}
-              GROUP BY t.id, t.transaction_type, t.transaction_date, t.reference_no, t.status, w.name
-              ORDER BY t.transaction_date DESC, t.id DESC
+              GROUP BY t.id, t.transaction_type, {$td}, t.reference_no, t.status, w.name
+              ORDER BY {$td} DESC, t.id DESC
               LIMIT " . (int) $limit
         );
         $stmt->execute($bind);
@@ -707,7 +713,7 @@ final class DashboardInventoryService
     /** Stok Awal / Stok Akhir rows (item x warehouse). */
     private static function balanceDetail(PDO $pdo, string $before, bool $boundary, ?int $wh, array $filters, int $page, int $perPage): array
     {
-        [$g, $bind] = self::balanceGrouped($before, $boundary, $wh);
+        [$g, $bind] = self::balanceGrouped($pdo, $before, $boundary, $wh);
         [$fw, $fb] = self::itemFilterSql($filters, 'g.warehouse_id');
         $filtered = self::balanceTotals($pdo, $before, $boundary, $wh, $filters);
         $card = self::balanceTotals($pdo, $before, $boundary, $wh, []);
@@ -779,11 +785,12 @@ final class DashboardInventoryService
     /** Pembelian / Stock OUT / other-movement transaction lines. */
     private static function transactionDetail(PDO $pdo, string $type, string $eff, string $end, ?int $wh, array $filters, int $page, int $perPage): array
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         $signed = InventoryHppReportService::SIGNED_VALUE_SQL;
         $where = [
             "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1',
-            't.transaction_date >= :start', 't.transaction_date < :end_excl',
-            "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :start_boundary)",
+            "{$td} >= :start", "{$td} < :end_excl",
+            "NOT (t.transaction_type = 'OPENING' AND {$td} = :start_boundary)",
         ];
         $bind = ['start' => $eff . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($end . ' +1 day')) . ' 00:00:00', 'start_boundary' => $eff . ' 00:00:00'];
         $typeSql = match ($type) {
@@ -847,13 +854,13 @@ final class DashboardInventoryService
         $c = $card->fetch();
 
         $stmt = $pdo->prepare(
-            "SELECT t.id AS transaction_id, t.transaction_date, t.reference_no, t.transaction_type, t.status,
+            "SELECT t.id AS transaction_id, {$td} AS transaction_date, t.reference_no, t.transaction_type, t.status,
                     i.sku, i.name, sup.name AS supplier_name, w.name AS warehouse_name,
                     COALESCE(bd.name, dv.name, l.notes) AS destination,
                     l.input_qty, iu.code AS input_unit, l.base_qty, bu.code AS base_unit, l.unit_cost_base, l.unit_price_input,
                     {$valueExpr} AS value
              {$from} WHERE {$whereSql}
-             ORDER BY t.transaction_date DESC, t.id DESC, l.id DESC
+             ORDER BY {$td} DESC, t.id DESC, l.id DESC
              LIMIT " . (int) $perPage . ' OFFSET ' . (int) (($page - 1) * $perPage)
         );
         $stmt->execute($bind);

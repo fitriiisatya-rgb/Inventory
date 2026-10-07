@@ -1512,6 +1512,26 @@ CREATE TABLE audit_logs (
 ) ENGINE=InnoDB;
 
 -- ============================================================================
+-- 10A. REPORTING EFFECTIVE DATE (period cutoff) — additive; see database/migrations/2026_10_07_inventory_effective_dates.sql
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS inventory_effective_dates (
+    transaction_id            BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+    effective_at              DATETIME NOT NULL,                      -- the instant the transaction counts for in period reports
+    original_transaction_date DATETIME NOT NULL,                      -- inventory_transactions.transaction_date when this row was written (proof nothing was edited)
+    original_posting_date     DATETIME NULL,                          -- inventory_transactions.posting_date when this row was written
+    source_type               VARCHAR(40)  NOT NULL,                  -- STOCK_OPNAME_SESSION
+    source_id                 BIGINT UNSIGNED NOT NULL,               -- e.g. stock_opname_sessions.id
+    source_ref                VARCHAR(100) NULL,                      -- e.g. the session number
+    reason                    VARCHAR(255) NOT NULL,
+    created_by                INT UNSIGNED NULL,
+    created_at                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_ied_source (source_type, source_id),
+    INDEX idx_ied_effective (effective_at)
+) ENGINE=InnoDB
+COMMENT='Reporting effective date override for inventory transactions (period cutoff). Never edits inventory_transactions.';
+
+
+-- ============================================================================
 -- 10. BOOK CLOSING (Section 20 — locks a period, never moves rows out)
 -- ============================================================================
 

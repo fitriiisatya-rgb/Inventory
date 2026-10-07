@@ -149,9 +149,14 @@ $runs = [
     ['Laporan Nilai HPP (FIFO layers = ledger; Average analytical)', 'valuation_reconcile_check.php', ["--start={$start}", "--end={$end}"]],
 ];
 // the dashboard "Ringkasan Pergerakan Stok" must equal the report: checked whenever the package carries the dashboard service (pre-deploy: the payload copy) or is the dashboard package
-$withDash = ($mode === 'predeploy' && $payloadServices !== null && is_file("{$payloadServices}/DashboardInventoryService.php")) || ($mode === 'installed' && (($manifest['mode'] ?? '') === 'dash'));
+$withDash = ($mode === 'predeploy' && $payloadServices !== null && is_file("{$payloadServices}/DashboardInventoryService.php")) || ($mode === 'installed' && in_array(($manifest['mode'] ?? ''), ['dash', 'cutover'], true));
 if ($withDash) {
     $runs[] = ['Dashboard "Ringkasan Pergerakan Stok" == Laporan Pergerakan Stok (Reports v3)', 'dashboard_movement_reconcile_check.php', ['--periods=today,month,last7', "--custom={$start}:{$end}", '--label=' . ($mode === 'installed' ? 'INSTALLED' : 'CANDIDATE')]];
+}
+// period cutoff / opening-balance periodization (effective-date override, Karang Tengah opening): month continuity + override integrity, whenever the package carries InventoryEffectiveDateService
+$withCut = ($mode === 'predeploy' && $payloadServices !== null && is_file("{$payloadServices}/InventoryEffectiveDateService.php")) || ($mode === 'installed' && (($manifest['mode'] ?? '') === 'cutover'));
+if ($withCut) {
+    $runs[] = ['Period cutoff / opening balance: override integrity + month continuity (closing m + controlled opening == opening m+1)', 'period_cutoff_reconcile_check.php', ['--months=4', "--end={$end}"]];
 }
 $rows = [];
 $bad = 0;

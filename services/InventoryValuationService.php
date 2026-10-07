@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+require_once __DIR__ . '/InventoryEffectiveDateService.php';
+
 use PDO;
 
 /**
@@ -263,6 +265,7 @@ final class InventoryValuationService
     /** @return array<string,mixed> */
     private static function build(PDO $pdo, array $f): array
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         $n = self::normalize($f);
         $startTs = $n['start'] . ' 00:00:00';
         $endNext = date('Y-m-d 00:00:00', strtotime($n['end'] . ' +1 day'));
@@ -287,13 +290,13 @@ final class InventoryValuationService
         [$fs2, $fb2] = self::itemFilter($n, 'e');
         $st = $pdo->prepare(
             "SELECT l.id AS line_id, l.transaction_id AS tx_id, l.line_no, l.item_id, l.warehouse_id AS wh, l.base_qty, l.subtotal, l.notes,
-                    t.transaction_type AS type, t.status, t.transaction_date AS ts, t.created_at, t.reference_no AS ref, t.reversal_of_id, t.created_by, u.username AS by_user
+                    t.transaction_type AS type, t.status, {$td} AS ts, t.created_at, t.reference_no AS ref, t.reversal_of_id, t.created_by, u.username AS by_user
                FROM inventory_transaction_lines l
                JOIN inventory_transactions t ON t.id = l.transaction_id
                JOIN items i ON i.id = l.item_id
                LEFT JOIN users u ON u.id = t.created_by
-              WHERE t.inventory_effect = 1 AND t.status IN ('POSTED','VOID') AND t.transaction_date < :endnext {$fs2}
-              ORDER BY l.item_id, t.transaction_date, t.id, l.line_no"
+              WHERE t.inventory_effect = 1 AND t.status IN ('POSTED','VOID') AND {$td} < :endnext {$fs2}
+              ORDER BY l.item_id, {$td}, t.id, l.line_no"
         );
         $st->execute(['endnext' => $endNext] + $fb2);
         $byItem = [];
@@ -454,6 +457,7 @@ final class InventoryValuationService
     /** Loads batches + the allocations on them and rebuilds per-date remaining quantity. */
     private static function loadLayers(PDO $pdo, array &$ctx, array $n, string $endNext): void
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         [$fs, $fb] = self::itemFilter($n, 'b');
         $st = $pdo->prepare(
             "SELECT b.id, b.item_id, b.warehouse_id AS wh, b.original_qty_base AS orig, b.qty_base AS cur, b.unit_cost_base AS cost, b.received_date AS rd, b.is_negative_layer AS neg,
@@ -475,13 +479,13 @@ final class InventoryValuationService
         [$fs3, $fb3] = self::itemFilter($n, 'a');
         $st = $pdo->prepare(
             "SELECT fa.id, fa.batch_id, fa.qty_allocated AS qty, fa.unit_cost_base AS cost, fa.subtotal, fa.transaction_line_id AS line_id, l.base_qty AS line_qty,
-                    t.transaction_date AS ts, t.transaction_type AS type, t.status, t.id AS tx_id
+                    {$td} AS ts, t.transaction_type AS type, t.status, t.id AS tx_id
                FROM fifo_allocations fa
                JOIN inventory_batches b ON b.id = fa.batch_id
                JOIN items i ON i.id = b.item_id
                JOIN inventory_transaction_lines l ON l.id = fa.transaction_line_id
                JOIN inventory_transactions t ON t.id = l.transaction_id
-              WHERE t.transaction_date < :endnext AND t.inventory_effect = 1 {$fs3}
+              WHERE {$td} < :endnext AND t.inventory_effect = 1 {$fs3}
               ORDER BY fa.id"
         );
         $st->execute(['endnext' => $endNext] + $fb3);

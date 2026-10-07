@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+require_once __DIR__ . '/InventoryEffectiveDateService.php';
+
 use PDO;
 
 /**
@@ -514,6 +516,7 @@ final class InventoryHppReportService
     /** @return array{opening:float,purchase:float,fifo_hpp:float,ending:float,reconciliation:float,variance:float,adjustment_net:float,opname_net:float,reversal_net:float,production_net:float,transfer_in:float,transfer_out:float,opening_mid_period:float,voided_out_net:float,voided_in_net:float} */
     public static function periodTotals(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, ?int $categoryId, ?string $q): array
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         [$itemJoin, $itemWhere, $itemBind] = self::itemFilterClauses($categoryId, $q);
 
         $opening = self::signedValueBefore($pdo, $startDate, $warehouseId, $itemJoin, $itemWhere, $itemBind, true);
@@ -525,8 +528,8 @@ final class InventoryHppReportService
         // (opening_mid_period), or it would be double-counted.
         $movWhere = [
             "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1',
-            't.transaction_date >= :start', 't.transaction_date < :end_excl',
-            "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :start_boundary)",
+            "{$td} >= :start", "{$td} < :end_excl",
+            "NOT (t.transaction_type = 'OPENING' AND {$td} = :start_boundary)",
         ];
         $movBind = array_merge([
             'start' => $startDate . ' 00:00:00',
@@ -604,9 +607,10 @@ final class InventoryHppReportService
      */
     public static function signedValueBefore(PDO $pdo, string $beforeDate, ?int $warehouseId, string $itemJoin, array $itemWhere, array $itemBind, bool $isOpeningBoundary = false): float
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         $dateCondition = $isOpeningBoundary
-            ? "(t.transaction_date < :before OR (t.transaction_type = 'OPENING' AND t.transaction_date = :before_boundary))"
-            : 't.transaction_date < :before';
+            ? "({$td} < :before OR (t.transaction_type = 'OPENING' AND {$td} = :before_boundary))"
+            : "{$td} < :before";
         $where = ["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', $dateCondition];
         $bind = array_merge(['before' => $beforeDate . ' 00:00:00'], $itemBind);
         if ($isOpeningBoundary) {
@@ -667,7 +671,8 @@ final class InventoryHppReportService
      */
     private static function opnameNet(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId): float
     {
-        $where = ["t.status IN ('POSTED','VOID')", "sa.adjustment_type = 'OPNAME'", 't.transaction_date >= :start', 't.transaction_date < :end_excl'];
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
+        $where = ["t.status IN ('POSTED','VOID')", "sa.adjustment_type = 'OPNAME'", "{$td} >= :start", "{$td} < :end_excl"];
         $bind = ['start' => $startDate . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'];
         if ($warehouseId !== null) {
             $where[] = 'l.warehouse_id = :wh';
@@ -733,6 +738,7 @@ final class InventoryHppReportService
      */
     public static function buildDailyRows(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId, ?int $categoryId, ?string $q): array
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         [$itemJoin, $itemWhere, $itemBind] = self::itemFilterClauses($categoryId, $q);
         $cutover = self::cutoverContext($pdo, $startDate, $endDate);
         $effectiveStart = $cutover['effective_start_date'];
@@ -749,10 +755,10 @@ final class InventoryHppReportService
 
             $movWhere = [
                 "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1',
-                't.transaction_date >= :start', 't.transaction_date < :end_excl',
+                "{$td} >= :start", "{$td} < :end_excl",
                 // Excludes the same boundary-exact OPENING row $opening above already
                 // counted — otherwise that day's net_signed_value would double it.
-                "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :start_boundary)",
+                "NOT (t.transaction_type = 'OPENING' AND {$td} = :start_boundary)",
             ];
             $bind = array_merge([
                 'start' => $effectiveStart . ' 00:00:00',
@@ -772,7 +778,7 @@ final class InventoryHppReportService
             // path (net_signed_value -> stok_akhir below) is untouched, exactly
             // mirroring periodTotals()'s own equivalent per-period buckets.
             $stmt = $pdo->prepare(
-                "SELECT DATE(t.transaction_date) AS d,
+                "SELECT DATE({$td}) AS d,
                     SUM(CASE WHEN t.transaction_type = 'IN' AND t.status = 'POSTED' THEN l.subtotal ELSE 0 END) AS purchase,
                     SUM(CASE WHEN t.transaction_type = 'TRANSFER_IN' THEN l.subtotal ELSE 0 END) AS transfer_in,
                     SUM(CASE WHEN t.transaction_type = 'TRANSFER_OUT' THEN ABS(l.subtotal) ELSE 0 END) AS transfer_out,
@@ -787,7 +793,7 @@ final class InventoryHppReportService
                  JOIN inventory_transactions t ON t.id = l.transaction_id
                  {$itemJoin}
                  WHERE {$movWhereSql}
-                 GROUP BY DATE(t.transaction_date)"
+                 GROUP BY DATE({$td})"
             );
             $stmt->execute($bind);
             foreach ($stmt->fetchAll() as $r) {
@@ -1006,6 +1012,7 @@ final class InventoryHppReportService
 
     private static function exportNonHppSheet(PDO $pdo, string $startDate, string $endDate, ?int $warehouseId): array
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         $where = [
             "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1',
             // A voided OUT or voided IN (status=VOID) belongs here too — the POSTED
@@ -1014,10 +1021,10 @@ final class InventoryHppReportService
             "(t.transaction_type IN ('ADJUSTMENT','REVERSAL','PRODUCTION_IN','PRODUCTION_OUT','OPENING')
               OR (t.transaction_type = 'OUT' AND t.status = 'VOID')
               OR (t.transaction_type = 'IN' AND t.status = 'VOID'))",
-            't.transaction_date >= :start', 't.transaction_date < :end_excl',
+            "{$td} >= :start", "{$td} < :end_excl",
             // PHASE V2.3C §3: the boundary-exact OPENING row is already disclosed as
             // "Nilai Stok Awal" in the Ringkasan sheet — never listed here a second time.
-            "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :start_boundary)",
+            "NOT (t.transaction_type = 'OPENING' AND {$td} = :start_boundary)",
         ];
         $bind = [
             'start' => $startDate . ' 00:00:00',
@@ -1031,7 +1038,7 @@ final class InventoryHppReportService
         $whereSql = implode(' AND ', $where);
 
         $stmt = $pdo->prepare(
-            "SELECT t.transaction_date, t.transaction_type, t.reference_no, t.transaction_uuid,
+            "SELECT {$td} AS transaction_date, t.transaction_type, t.reference_no, t.transaction_uuid,
                     i.sku, i.name AS item_name, w.code AS warehouse_code, l.subtotal,
                     sa.adjustment_type, sa.reason
              FROM inventory_transaction_lines l
@@ -1040,7 +1047,7 @@ final class InventoryHppReportService
              JOIN warehouses w ON w.id = l.warehouse_id
              LEFT JOIN stock_adjustments sa ON sa.transaction_id = t.id AND sa.item_id = l.item_id AND sa.warehouse_id = l.warehouse_id
              WHERE {$whereSql}
-             ORDER BY t.transaction_date, t.id"
+             ORDER BY {$td}, t.id"
         );
         $stmt->execute($bind);
 

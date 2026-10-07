@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+require_once __DIR__ . '/InventoryEffectiveDateService.php';
+
 use PDO;
 
 /**
@@ -105,12 +107,13 @@ final class MovementReportV3Service
     /** @return array<string,array{tin:float,tout:float}> gross TRANSFER_IN / TRANSFER_OUT value per date (same filters as the daily service) */
     private static function transferGross(PDO $pdo, string $start, string $end, ?int $wh, ?int $cat, ?string $q, ?int $item): array
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         $sc = self::scope($wh, $cat, $q, $item);
-        $where = array_merge(["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', "t.transaction_type IN ('TRANSFER_IN','TRANSFER_OUT')", 't.transaction_date >= :g_start', 't.transaction_date < :g_end'], $sc['where']);
+        $where = array_merge(["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', "t.transaction_type IN ('TRANSFER_IN','TRANSFER_OUT')", "{$td} >= :g_start", "{$td} < :g_end"], $sc['where']);
         $bind = array_merge(['g_start' => $start . ' 00:00:00', 'g_end' => self::nextDay($end) . ' 00:00:00'], $sc['bind']);
         $st = $pdo->prepare(
-            "SELECT DATE(t.transaction_date) AS d, SUM(CASE WHEN t.transaction_type = 'TRANSFER_IN' THEN l.subtotal ELSE 0 END) AS v_tin, SUM(CASE WHEN t.transaction_type = 'TRANSFER_OUT' THEN ABS(l.subtotal) ELSE 0 END) AS v_tout
-               FROM inventory_transaction_lines l JOIN inventory_transactions t ON t.id = l.transaction_id {$sc['join']} WHERE " . implode(' AND ', $where) . ' GROUP BY DATE(t.transaction_date)'
+            "SELECT DATE({$td}) AS d, SUM(CASE WHEN t.transaction_type = 'TRANSFER_IN' THEN l.subtotal ELSE 0 END) AS v_tin, SUM(CASE WHEN t.transaction_type = 'TRANSFER_OUT' THEN ABS(l.subtotal) ELSE 0 END) AS v_tout
+               FROM inventory_transaction_lines l JOIN inventory_transactions t ON t.id = l.transaction_id {$sc['join']} WHERE " . implode(' AND ', $where) . " GROUP BY DATE({$td})"
         );
         $st->execute($bind);
         $out = [];
@@ -127,9 +130,10 @@ final class MovementReportV3Service
      */
     private static function qtyByUnit(PDO $pdo, string $start, string $end, ?int $wh, ?int $cat, ?string $q, ?int $item, array $svc): array
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         $sc = self::scope($wh, $cat, $q, $item);
-        $where = array_merge(["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', 't.transaction_date >= :u_start', 't.transaction_date < :u_end',
-            "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :u_boundary)"], $sc['where']);
+        $where = array_merge(["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', "{$td} >= :u_start", "{$td} < :u_end",
+            "NOT (t.transaction_type = 'OPENING' AND {$td} = :u_boundary)"], $sc['where']);
         $bind = array_merge(['u_start' => $start . ' 00:00:00', 'u_end' => self::nextDay($end) . ' 00:00:00', 'u_boundary' => $start . ' 00:00:00'], $sc['bind']);
         $st = $pdo->prepare(
             "SELECT u.code AS unit,
@@ -177,6 +181,7 @@ final class MovementReportV3Service
      */
     public static function perItem(PDO $pdo, string $start, string $end, ?int $wh, ?int $cat, ?string $q, ?int $item): array
     {
+        $td = InventoryEffectiveDateService::col($pdo);   // reporting date (effective-date override aware; plain transaction_date when no override exists)
         $cut = InventoryHppReportService::cutoverContext($pdo, $start, $end);
         if ($cut['is_pre_go_live_period']) {
             return [];
@@ -186,7 +191,7 @@ final class MovementReportV3Service
         $sv = InventoryHppReportService::SIGNED_VALUE_SQL;
         $sq = MovementDailyReportService::SIGNED_QTY_SQL;
         // opening
-        $w0 = array_merge(["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', "(t.transaction_date < :o_before OR (t.transaction_type = 'OPENING' AND t.transaction_date = :o_boundary))"], $sc['where']);
+        $w0 = array_merge(["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', "({$td} < :o_before OR (t.transaction_type = 'OPENING' AND {$td} = :o_boundary))"], $sc['where']);
         $b0 = array_merge(['o_before' => $eff . ' 00:00:00', 'o_boundary' => $eff . ' 00:00:00'], $sc['bind']);
         $st = $pdo->prepare("SELECT l.item_id, SUM({$sq}) AS q, SUM({$sv}) AS v FROM inventory_transaction_lines l JOIN inventory_transactions t ON t.id = l.transaction_id {$sc['join']} WHERE " . implode(' AND ', $w0) . ' GROUP BY l.item_id');
         $st->execute($b0);
@@ -195,7 +200,7 @@ final class MovementReportV3Service
             $rows[(int) $r['item_id']] = ['oq' => (float) $r['q'], 'ov' => (float) $r['v']];
         }
         // movement
-        $w1 = array_merge(["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', 't.transaction_date >= :m_start', 't.transaction_date < :m_end', "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :m_boundary)"], $sc['where']);
+        $w1 = array_merge(["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', "{$td} >= :m_start", "{$td} < :m_end", "NOT (t.transaction_type = 'OPENING' AND {$td} = :m_boundary)"], $sc['where']);
         $b1 = array_merge(['m_start' => $eff . ' 00:00:00', 'm_end' => self::nextDay($end) . ' 00:00:00', 'm_boundary' => $eff . ' 00:00:00'], $sc['bind']);
         $st = $pdo->prepare(
             "SELECT l.item_id,

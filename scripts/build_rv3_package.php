@@ -49,13 +49,15 @@ $history = static function (string $path) use ($revFull): array {
 // (services/*.php + the one route include in index.php) is NOT shipped; it is a GATE — if it is not installed exactly as validated, the plan is BLOCKED and nothing is written.
 $modeEnv = getenv('RV3_MODE') ?: 'full';
 $dash = $modeEnv === 'dash';                       // dashboard-only package: DashboardInventoryService + dashboard.js + one CSS block, behind the same backend gates
-$ui = $modeEnv === 'ui' || $dash;                  // gated (does not ship the Reports v3 backend)
+$cut = $modeEnv === 'cutover';                     // period cutoff + Karang Tengah opening balance: InventoryEffectiveDateService + the period-aware report services + the controlled scripts (+ the dashboard ops, idempotent)
+$ui = $modeEnv === 'ui' || $dash || $cut;          // gated (does not ship the Reports v3 backend that the package does not own)
+$dashLike = $dash || $cut;                         // dashboard files / css block / tokens are part of the package
 $token = '20261020-dmv';
-$name = ($dash ? 'dashboard_movement_' : ($ui ? 'reports_v3_ui_' : 'reports_v3_')) . substr($revFull, 0, 10);
-$pkgName = $dash ? 'dashboard_movement_correction_package' : ($ui ? 'reports_v3_ui_correction_package' : 'reports_v3_recovery_package');
+$name = ($cut ? 'period_cutoff_karang_opening_' : ($dash ? 'dashboard_movement_' : ($ui ? 'reports_v3_ui_' : 'reports_v3_'))) . substr($revFull, 0, 10);
+$pkgName = $cut ? 'period_cutoff_karang_opening_package' : ($dash ? 'dashboard_movement_correction_package' : ($ui ? 'reports_v3_ui_correction_package' : 'reports_v3_recovery_package'));
 $tmp = sys_get_temp_dir() . '/rv3_build_' . bin2hex(random_bytes(4));
 $R = "{$tmp}/{$pkgName}";
-foreach (array_merge($ui && !$dash ? [] : ['payload/services'], ['payload/public/assets/js', 'payload/css', 'scripts', 'tests/browser/lib', 'tests/lib', 'state']) as $d) {
+foreach (array_merge($ui && !$dashLike ? [] : ['payload/services'], ['payload/public/assets/js', 'payload/css', 'scripts', 'tests/browser/lib', 'tests/lib', 'tests/fixtures/karang', 'data', 'state']) as $d) {
     mkdir("{$R}/{$d}", 0755, true);
 }
 $put = static function (string $rel, string $data) use ($R): void {
@@ -76,14 +78,28 @@ $files = [
     'public/assets/js/report-tools.js', 'public/assets/js/report-pergerakan.js', 'public/assets/js/report-pembelian-v3.js', 'public/assets/js/report-nilai-hpp-v3.js',
     'public/assets/js/report-inout-v3.js', 'public/assets/js/report-opname-audit.js',
 ];
+$cutOwned = ['services/InventoryEffectiveDateService.php', 'services/MovementDailyReportService.php', 'services/MovementReportV3Service.php', 'services/InventoryValuationService.php', 'services/InventoryHppReportService.php', 'services/DashboardInventoryService.php'];
 if ($dash) {
     $files = ['services/DashboardInventoryService.php', 'public/assets/js/dashboard.js'];
+}
+if ($cut) {
+    $files = array_merge($cutOwned, ['public/assets/js/dashboard.js']);
 }
 if (!$ui) {
     $files = array_merge($backendFiles, $files);
 } else {
     foreach ($backendFiles as $f) {                                  // GATE: the validated backend must already be installed (never written by this package)
-        $ops[] = ['id' => 'gate:' . basename($f), 'type' => 'require_file', 'target' => $f, 'accept' => [$sha($show($f))]];
+        if ($cut && in_array($f, $cutOwned, true)) {
+            continue;                                                // owned (replaced) by the cutover package: a file op with its known earlier versions
+        }
+        $accept = [$sha($show($f))];
+        if ($cut) {                                                  // the cutover package does not change this file: the validated recovery-package version (project history) is equally acceptable
+            foreach (array_keys($history($f)) as $hh) {
+                $accept[] = $hh;
+            }
+            $accept = array_slice(array_values(array_unique($accept)), 0, 4);
+        }
+        $ops[] = ['id' => 'gate:' . basename($f), 'type' => 'require_file', 'target' => $f, 'accept' => $accept];
     }
 }
 foreach ($files as $f) {
@@ -98,7 +114,7 @@ foreach ($files as $f) {
 // ---------------------------------------------------------------- css blocks (extracted by marker from the committed app.css)
 $css = $show('public/assets/css/app.css');
 foreach (['pur' => 'RV3 BLOCK pur 20261008', 'val' => 'RV3 BLOCK val 20261008', 'io' => 'RV3 BLOCK io 20261008', 'rv3' => 'RV3 REPORT FAMILY 20261008', 'soa3' => 'SOA3 AUDIT UI 20261008', 'uic' => 'RV3 UI CORRECTION 20261019', 'dashmv' => 'RV3 DASHBOARD MOVEMENT 20261020'] as $k => $label) {
-    if ($dash ? $k !== 'dashmv' : $k === 'dashmv') {
+    if ($dashLike ? $k !== 'dashmv' : $k === 'dashmv') {
         continue;
     }
     $b = "/* ===== {$label} BEGIN =====";
@@ -115,7 +131,7 @@ foreach (['pur' => 'RV3 BLOCK pur 20261008', 'val' => 'RV3 BLOCK val 20261008', 
 
 // ---------------------------------------------------------------- app.js routes (statements copied from the committed app.js)
 $appjs = $show('public/assets/js/app.js');
-foreach ($dash ? [] : [['laporan-pergerakan', false], ['laporan-pembelian', false], ['laporan-hpp', false], ['laporan-inout', false], ['laporan-transfer', true], ['laporan-opname', false], ['opname-laporan', true]] as [$tab, $optional]) {
+foreach ($dashLike ? [] : [['laporan-pergerakan', false], ['laporan-pembelian', false], ['laporan-hpp', false], ['laporan-inout', false], ['laporan-transfer', true], ['laporan-opname', false], ['opname-laporan', true]] as [$tab, $optional]) {
     if (!preg_match('/\b[A-Za-z_]\w*\.render\(document\.getElementById\(\'tab-' . preg_quote($tab, '/') . '\'\)(?:,\s*\{[^}]*\})?\);/', $appjs, $m)) {
         rv3_die("app.js statement for {$tab} not found");
     }
@@ -123,7 +139,7 @@ foreach ($dash ? [] : [['laporan-pergerakan', false], ['laporan-pembelian', fals
 }
 
 // breadcrumb / title labels of the five reports (app.js label map): the Nilai HPP report is called exactly "Laporan Nilai HPP"
-foreach ($dash ? [] : ['laporan-pergerakan' => 'Laporan Pergerakan Stok', 'laporan-inout' => 'Laporan IN / OUT', 'laporan-pembelian' => 'Laporan Pembelian', 'laporan-hpp' => 'Laporan Nilai HPP', 'laporan-opname' => 'Laporan Stock Opname'] as $tab => $label) {
+foreach ($dashLike ? [] : ['laporan-pergerakan' => 'Laporan Pergerakan Stok', 'laporan-inout' => 'Laporan IN / OUT', 'laporan-pembelian' => 'Laporan Pembelian', 'laporan-hpp' => 'Laporan Nilai HPP', 'laporan-opname' => 'Laporan Stock Opname'] as $tab => $label) {
     if (!preg_match('/\'' . preg_quote($tab, '/') . '\'\s*:\s*\'' . preg_quote($label, '/') . '\'/', $appjs)) {
         rv3_die("app.js label map: '{$tab}' must be '{$label}' in the committed app.js");
     }
@@ -158,7 +174,7 @@ foreach (['report-tools.js', 'report-pergerakan.js', 'report-pembelian-v3.js', '
     preg_match('/\?v=([^"]+)"/', $m[0][0], $tm);
     $tags[] = ['file' => $f, 'token' => $tm[1]];
 }
-if ($dash) {
+if ($dashLike) {
     // the dashboard package changes dashboard.js and app.css only: their cache-bust tokens (the dashboard script tag must already exist exactly once)
     $ops[] = ['id' => 'index.html:tokens', 'type' => 'html_tokens', 'target' => 'public/index.html', 'assets' => [['path' => 'assets/js/dashboard.js', 'token' => $token], ['path' => 'assets/css/app.css', 'token' => $token]]];
 } else {
@@ -187,8 +203,12 @@ foreach (array_merge($backendFiles) as $f) {
         $v3Classes['App\\Services\\' . basename($f, '.php')] = basename($f);
     }
 }
-if ($dash) {
+if ($dashLike) {
     $v3Classes['App\\Services\\DashboardInventoryService'] = 'DashboardInventoryService.php';
+}
+if ($cut) {
+    $v3Classes['App\\Services\\InventoryEffectiveDateService'] = 'InventoryEffectiveDateService.php';
+    $v3Classes['App\\Services\\InventoryHppReportService'] = 'InventoryHppReportService.php';
 }
 $tmpRoutes = tempnam(sys_get_temp_dir(), 'rv3routes');
 file_put_contents($tmpRoutes, $show('services/ReportsV3Routes.php'));
@@ -197,7 +217,7 @@ $routeKeys = json_decode((string) shell_exec('php -r ' . escapeshellarg('$pdo = 
 if (!is_array($routeKeys) || count($routeKeys) < 10) {
     rv3_die('could not read the route keys of ReportsV3Routes.php');
 }
-$manifest = ['name' => $name, 'mode' => $dash ? 'dash' : ($ui ? 'ui' : 'full'), 'source_commit' => $revFull, 'built' => date('c'), 'token' => $token, 'requirements' => $requirements, 'v3_classes' => $v3Classes, 'route_keys' => $routeKeys, 'ops' => $ops];
+$manifest = ['name' => $name, 'mode' => $cut ? 'cutover' : ($dash ? 'dash' : ($ui ? 'ui' : 'full')), 'source_commit' => $revFull, 'built' => date('c'), 'token' => $token, 'requirements' => $requirements, 'v3_classes' => $v3Classes, 'route_keys' => $routeKeys, 'ops' => $ops];
 $put('manifest.json', json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
 
 // ---------------------------------------------------------------- scripts + tests
@@ -207,6 +227,18 @@ foreach (['rv3/rv3_lib.php' => 'scripts/rv3_lib.php', 'rv3/rv3_bootstrap.php' =>
 foreach (['opname_audit_reconcile_check.php', 'movement_reconcile_check.php', 'inout_reconcile_check.php', 'purchase_reconcile_check.php', 'valuation_reconcile_check.php', 'rv3/movement_v3_reconcile_check.php', 'rv3/dashboard_movement_reconcile_check.php'] as $f) {
     $put('scripts/' . basename($f), $show("scripts/{$f}"));
 }
+if ($cut) {
+    foreach (['rv3/kt_opening.php' => 'kt_opening.php', 'rv3/kt_opening_lib.php' => 'kt_opening_lib.php', 'rv3/pc_lib.php' => 'pc_lib.php', 'rv3/period_cutoff.php' => 'period_cutoff.php', 'rv3/period_cutoff_reconcile_check.php' => 'period_cutoff_reconcile_check.php'] as $src => $dst) {
+        $put("scripts/{$dst}", $show("scripts/{$src}"));
+    }
+    $xlsx = (string) shell_exec('git show ' . escapeshellarg("{$revFull}:tests/fixtures/karang/Hasil_SO_Factory_Karang.xlsx"));
+    if (strlen($xlsx) < 1000) {
+        rv3_die('source workbook tests/fixtures/karang/Hasil_SO_Factory_Karang.xlsx not found in the commit');
+    }
+    $put('data/Hasil_SO_Factory_Karang.xlsx', $xlsx);
+    $put('database/2026_10_07_inventory_effective_dates.sql', $show('database/migrations/2026_10_07_inventory_effective_dates.sql'));
+    $put('database/2026_10_07_inventory_effective_dates_rollback.sql', $show('database/migrations/2026_10_07_inventory_effective_dates_rollback.sql'));
+}
 $wrap = static function (string $title, string $body): string {
     return "#!/usr/bin/env bash\n# {$title}\nset -eu\nHERE=\"\$(cd \"\$(dirname \"\$0\")\" && pwd)\"\nPHP=\"\${PHP_BIN:-php}\"\nexport PHP_BIN=\"\$PHP\"\n" . $body;
 };
@@ -215,10 +247,16 @@ $put('scripts/dryrun.sh', $wrap('DRY-RUN (read-only for the application): writes
 $put('scripts/apply.sh', $wrap('APPLY (writes). Needs a fresh dry-run plan; add --yes to really apply.', "APP=\"\${1:?usage: apply.sh <APP ROOT> [--yes]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" apply --app-root=\"\$APP\" \"\$@\"\n"));
 $put('scripts/verify.sh', $wrap('POST-APPLY VERIFY (read-only).', "APP=\"\${1:?usage: verify.sh <APP ROOT> [--base-url=https://host]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" verify --app-root=\"\$APP\" \"\$@\"\n"));
 $put('scripts/dashboard_before_after.sh', $wrap('DASHBOARD BEFORE / AFTER (read-only, real data): the INSTALLED dashboard service (BEFORE: what the dashboard shows now) vs the PACKAGE dashboard service (AFTER) vs Laporan Pergerakan Stok, for every warehouse and period.', "APP=\"\${1:?usage: dashboard_before_after.sh <APP ROOT> [--custom=YYYY-MM-DD:YYYY-MM-DD]}\"; shift\necho '################ BEFORE (installed dashboard) ################'\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/dashboard_movement_reconcile_check.php\" --app-root=\"\$APP\" --label=BEFORE \"\$@\" || true\necho\necho '################ AFTER (package dashboard) ################'\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/dashboard_movement_reconcile_check.php\" --app-root=\"\$APP\" --package-dir=\"\$(dirname \"\$HERE\")\" --label=AFTER \"\$@\"\n"));
+if ($cut) {
+    $put('scripts/karang_preview.sh', $wrap('KARANG TENGAH OPENING — READ-ONLY mapping + reconciliation of the 380-row physical SO workbook against Master Barang (SELECT only, READ ONLY transaction). Writes the CSV / JSON results into <package>/out/ (outside the application).', "APP=\"\${1:?usage: karang_preview.sh <APP ROOT> [--warehouse-code=KARANG_TENGAH]}\"; shift\nPKG=\"\$(dirname \"\$HERE\")\"\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/kt_opening.php\" preview --app-root=\"\$APP\" --package-dir=\"\$PKG\" --source=\"\$PKG/data/Hasil_SO_Factory_Karang.xlsx\" --out=\"\$PKG/out\" \"\$@\"\n"));
+    $put('scripts/karang_verify.sh', $wrap('KARANG TENGAH OPENING — READ-ONLY post-write reconciliation (run only AFTER the opening was posted): transaction == on-hand == FIFO layer, values, report classification.', "APP=\"\${1:?usage: karang_verify.sh <APP ROOT>}\"\nPKG=\"\$(dirname \"\$HERE\")\"\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/kt_opening.php\" verify --app-root=\"\$APP\" --source=\"\$PKG/data/Hasil_SO_Factory_Karang.xlsx\"\n"));
+    $put('scripts/period_cutoff_preview.sh', $wrap('PERIOD CUTOFF — READ-ONLY preview: which Stock Opname adjustment transactions would count for the cutoff day, and the BEFORE / AFTER figures of the next month per warehouse and company-wide.', "APP=\"\${1:?usage: period_cutoff_preview.sh <APP ROOT> [--sessions=11,12] [--cutoff=2026-09-30]}\"; shift\nSESS=\"11,12\"; CUT=\"2026-09-30\"\nfor a in \"\$@\"; do case \"\$a\" in --sessions=*) SESS=\"\${a#--sessions=}\";; --cutoff=*) CUT=\"\${a#--cutoff=}\";; esac; done\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/period_cutoff.php\" preview --app-root=\"\$APP\" --package-dir=\"\$(dirname \"\$HERE\")\" --sessions=\"\$SESS\" --cutoff=\"\$CUT\"\n"));
+    $put('scripts/period_cutoff_verify.sh', $wrap('PERIOD CUTOFF — READ-ONLY post-write verification (run only AFTER the cutoff rows were written).', "APP=\"\${1:?usage: period_cutoff_verify.sh <APP ROOT> [--sessions=11,12] [--cutoff=2026-09-30]}\"; shift\nSESS=\"11,12\"; CUT=\"2026-09-30\"\nfor a in \"\$@\"; do case \"\$a\" in --sessions=*) SESS=\"\${a#--sessions=}\";; --cutoff=*) CUT=\"\${a#--cutoff=}\";; esac; done\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/period_cutoff.php\" verify --app-root=\"\$APP\" --sessions=\"\$SESS\" --cutoff=\"\$CUT\"\n"));
+}
 $put('scripts/rollback.sh', $wrap('ROLLBACK (writes): two-phase, restores the exact pre-apply files.', "APP=\"\${1:?usage: rollback.sh <APP ROOT>}\"\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" rollback --app-root=\"\$APP\"\n"));
 $put('scripts/predeploy_validate.sh', $wrap('PRE-DEPLOY READ-ONLY VALIDATOR (candidate code = the package payload, loaded IN MEMORY): proves the package works against the REAL database. It does NOT prove anything is installed.', "APP=\"\${1:?usage: predeploy_validate.sh <APP ROOT> [--session=11,12] [--start=YYYY-MM-DD --end=YYYY-MM-DD]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_readonly_check.php\" --app-root=\"\$APP\" --mode=predeploy --package-dir=\"\$(dirname \"\$HERE\")\" \"\$@\"\n"));
 $put('scripts/installed_verify.sh', $wrap('POST-DEPLOY INSTALLED VERIFICATION (read-only): (1) every packaged file exists IN THE APPLICATION with the packaged sha256, index.php carries the marker; (2) every V3 class is loaded from <APP>/services (Reflection) and never from the package; (3) all reports reconcile using ONLY the installed code. Fails if any backend file is absent.', "APP=\"\${1:?usage: installed_verify.sh <APP ROOT> [--session=11,12] [--start=YYYY-MM-DD --end=YYYY-MM-DD] [--base-url=https://host]}\"; shift\nBASE=\"\"; REST=()\nfor a in \"\$@\"; do case \"\$a\" in --base-url=*) BASE=\"\$a\";; *) REST+=(\"\$a\");; esac; done\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" verify --app-root=\"\$APP\" \${BASE:+\"\$BASE\"} || { echo \"INSTALLED VERIFICATION FAILED (engine verify)\"; exit 1; }\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_readonly_check.php\" --app-root=\"\$APP\" --mode=installed \"\${REST[@]+\"\${REST[@]}\"}\"\n"));
-foreach (['movement_report_v3_test.php', 'inout_report_test.php', 'inventory_valuation_test.php', 'purchase_report_test.php', 'stock_opname_audit_report_test.php', 'report_export_test.php', 'numeric_unit_code_test.php', 'rv3_sidebar_op_test.php', 'inventory_dashboard_test.php', 'rv3_package_rehearsal.sh', 'rv3_dash_package_rehearsal.sh'] as $t) {
+foreach (['movement_report_v3_test.php', 'inout_report_test.php', 'inventory_valuation_test.php', 'purchase_report_test.php', 'stock_opname_audit_report_test.php', 'report_export_test.php', 'numeric_unit_code_test.php', 'rv3_sidebar_op_test.php', 'inventory_dashboard_test.php', 'rv3_package_rehearsal.sh', 'rv3_dash_package_rehearsal.sh', 'karang_opening_test.php', 'period_cutoff_test.php', 'october_opening_combined_test.php', 'rv3_cutover_package_rehearsal.sh'] as $t) {
     $put("tests/{$t}", $show("tests/{$t}"));
 }
 foreach (['lib/rv3.mjs'] as $t) {
@@ -227,12 +265,13 @@ foreach (['lib/rv3.mjs'] as $t) {
 foreach (['playwright_pergerakan_v3.mjs', 'playwright_inout_report.mjs', 'playwright_purchase_report.mjs', 'playwright_valuation_report.mjs', 'playwright_so_audit_v3.mjs', 'playwright_sidebar_reports.mjs', 'playwright_dashboard_real_data.mjs', 'seed_dashboard_real.php', 'seed_valuation_report.php', 'seed_inout_report.php', 'seed_purchase_report.php', 'seed_so_audit_v3.php'] as $t) {
     $put("tests/browser/{$t}", $show("tests/browser/{$t}"));
 }
+$put('tests/fixtures/karang/Hasil_SO_Factory_Karang.xlsx', (string) shell_exec('git show ' . escapeshellarg("{$revFull}:tests/fixtures/karang/Hasil_SO_Factory_Karang.xlsx")));
 foreach (['xlsx_dump.php', 'valuation_fixture.php', 'inout_report_fixture.php', 'purchase_report_fixture.php', 'dashboard_fixture.php', 'jejak_real_fixture.php'] as $t) {
     $put("tests/lib/{$t}", $show("tests/lib/{$t}"));
 }
 
 // ---------------------------------------------------------------- README
-$tpl = $show($dash ? 'scripts/rv3/README_DASH.md.tpl' : ($ui ? 'scripts/rv3/README_UI.md.tpl' : 'scripts/rv3/README_DEPLOY.md.tpl'));
+$tpl = $show($cut ? 'scripts/rv3/README_CUTOVER.md.tpl' : ($dash ? 'scripts/rv3/README_DASH.md.tpl' : ($ui ? 'scripts/rv3/README_UI.md.tpl' : 'scripts/rv3/README_DEPLOY.md.tpl')));
 $rows = '';
 foreach ($ops as $o) {
     if ($o['type'] === 'file') {
