@@ -2,9 +2,10 @@
 declare(strict_types=1);
 
 /**
- * PRODUCTION READ-ONLY VALIDATOR for Reports v3. SELECT only — it never writes the database (every sub-check opens a READ ONLY transaction and first PROVES that a write is rejected).
- * It runs the reconciliation of every report with the NEW code (production services + this package's payload services loaded together) against the REAL data:
- *   1. Stock Opname sessions 11 / 12 (default): the SOA reconciliation A–G (16 checks for the two sessions)
+ * PRODUCTION READ-ONLY VALIDATOR for Reports v3. SELECT only — it never writes the database (every sub-check opens a READ ONLY transaction and first PROVES that a write is rejected)
+ * and never writes a file. It needs no shell: no child process, no escapeshellarg, no symlink, no temp file — the reconciliation scripts are included and run IN THIS PROCESS.
+ * It runs the reconciliation of every report with the NEW code (the installed services, with the package's service files substituted in memory) against the REAL data:
+ *   1. Stock Opname sessions 11 / 12 (default): the SOA reconciliation A–G
  *   2. Laporan Pergerakan Stok (v3 split), the daily movement service, IN / OUT / Transfer, Pembelian, Nilai HPP (FIFO layers = ledger, Average analytical)
  * The result is a table + an exit code (0 only when every check of every report passes). Nothing in the application tree is touched.
  *
@@ -12,6 +13,25 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/rv3_lib.php';
+
+/** runs one reconciliation script in a function scope (its variables never leak) and returns [exit code, its output]. The scripts end through rv3_script_exit(), which throws here instead of exiting. */
+function rv3_include_script(string $path, array $argv): array
+{
+    $argc = count($argv);
+    ob_start();
+    $rc = 255;
+    try {
+        include $path;
+        $rc = 0;
+    } catch (RV3ScriptExit $e) {
+        $rc = $e->getCode();
+    } catch (Throwable $e) {
+        echo "\nFATAL " . get_class($e) . ': ' . $e->getMessage() . ' (' . basename($e->getFile()) . ':' . $e->getLine() . ")\n";
+        $rc = 255;
+    }
+    $text = (string) ob_get_clean();
+    return [$rc, $text];
+}
 
 $app = $pkg = $sess = $start = $end = null;
 foreach (array_slice($argv, 1) as $a) {
@@ -25,10 +45,11 @@ foreach (array_slice($argv, 1) as $a) {
 if ($app === null || !is_dir("{$app}/services")) {
     rv3_die('usage: php rv3_readonly_check.php --app-root=<APP ROOT> [--package-dir=<package>] [--session=11,12] [--start=YYYY-MM-DD --end=YYYY-MM-DD]', 2);
 }
+$app = realpath($app) ?: $app;
 $sess ??= '11,12';
 $end ??= date('Y-m-d');
 $start ??= date('Y-m-01', strtotime('-2 months', strtotime($end)));
-$payload = $pkg !== null && is_dir("{$pkg}/payload") ? "{$pkg}/payload" : null;
+$payloadServices = $pkg !== null && is_dir("{$pkg}/payload/services") ? "{$pkg}/payload/services" : null;
 $here = __DIR__;
 $find = static function (string $n) use ($here): string {
     foreach ([$here, dirname($here)] as $d) {
@@ -37,11 +58,17 @@ $find = static function (string $n) use ($here): string {
     rv3_die("validator script missing: {$n}");
 };
 
-$app = realpath($app) ?: $app;
-$env = $payload !== null ? 'RV3_PAYLOAD_SERVICES=' . escapeshellarg("{$payload}/services") . ' ' : '';
 echo "== Reports v3 — production READ-ONLY validator ==\n";
-echo "application: {$app} (read-only: nothing is written, copied or linked)\n" . ($payload ? "code under test: the installed services, with the package's service files substituted in memory\n" : "code under test: the services installed in the application\n");
+echo "application: {$app} (read-only: nothing is written, copied, linked or executed in a shell)\n";
+echo $payloadServices ? "code under test: the installed services, with the package's service files substituted in memory\n" : "code under test: the services installed in the application\n";
 echo "period: {$start} .. {$end}   Stock Opname sessions: {$sess}\n";
+
+define('RV3_INPROCESS', true);
+$err = rv3_load_services(rv3_service_files($app, $payloadServices));
+if ($err !== null) {
+    echo "\nFAIL - could not load the services: {$err}\n";
+    exit(255);
+}
 $runs = [
     ['Stock Opname reconciliation (sessions ' . $sess . ')', 'opname_audit_reconcile_check.php', ["--session={$sess}"]],
     ['Laporan Pergerakan Stok v3 (Transfer IN / OUT split)', 'movement_v3_reconcile_check.php', ["--start={$start}", "--end={$end}"]],
@@ -54,8 +81,7 @@ $rows = [];
 $bad = 0;
 foreach ($runs as [$label, $script, $args]) {
     echo "\n######## {$label} ########\n";
-    $cmd = $env . rv3_php_cmd() . ' ' . escapeshellarg($find($script)) . ' --app-root=' . escapeshellarg($app) . ' ' . implode(' ', array_map('escapeshellarg', $args));
-    [$rc, $text] = rv3_run($cmd);
+    [$rc, $text] = rv3_include_script($find($script), array_merge([$script, "--app-root={$app}"], $args));
     echo $text . "\n";
     preg_match('#(\d+) / (\d+) checks passed#', $text, $m);
     $rows[] = [$label, $m ? "{$m[1]} / {$m[2]}" : 'n/a', $rc === 0 ? 'PASS' : 'FAIL', $rc];

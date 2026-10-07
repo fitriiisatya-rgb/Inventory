@@ -86,8 +86,7 @@ function rv3_status(array $eval): string
 
 function rv3_php_lint(string $file): ?string
 {
-    [$rc, $out] = rv3_run(rv3_php_cmd() . ' -l ' . escapeshellarg($file));
-    return $rc === 0 ? null : trim(str_replace("\n", ' ', $out));
+    return rv3_lint($file);
 }
 
 function rv3_write_atomic(string $path, string $data, ?int $mode): void
@@ -98,41 +97,52 @@ function rv3_write_atomic(string $path, string $data, ?int $mode): void
         @unlink($tmp);
         rv3_die("short write to {$tmp}");
     }
-    @chmod($tmp, $mode ?? 0644);
+    if (rv3_fn('chmod')) {
+        @chmod($tmp, $mode ?? 0644);
+    }
     if (!rename($tmp, $path)) {
         @unlink($tmp);
         rv3_die("could not move {$tmp} into place");
     }
 }
 
-/** production services + the payload's, loaded together in a CHILD process (php -r: no temp file, no copy, no link, no database access): proves syntax, no missing dependency file, no redeclared symbol. */
+/** production services + the payload's, loaded together IN THIS PROCESS (no child process, no temp file, no copy, no link, no database access): proves syntax, no missing dependency file, no redeclared symbol. */
 function rv3_selfcheck(string $app, string $pkg, array $manifest): array
 {
-    $args = json_encode(['files' => rv3_service_files($app, "{$pkg}/payload/services"), 'routes' => "{$pkg}/payload/services/ReportsV3Routes.php", 'req' => $manifest['requirements'] ?? []]);
-    $code = <<<'CHILD'
-error_reporting(E_ALL);
-ini_set('display_errors', '1');
-$a = json_decode((string) end($argv), true);
-foreach ($a['files'] as $f) {
-    require_once $f;
-}
-$pdo = new stdClass();
-$query = [];
-$routes = [];
-$routes = require $a['routes'];
-$missing = [];
-foreach ($a['req'] as $r) {
-    $c = $r['class'];
-    if (!class_exists($c) && !interface_exists($c)) { $missing[] = "class {$c}"; continue; }
-    if (isset($r['method']) && !method_exists($c, $r['method'])) { $missing[] = "{$c}::{$r['method']}()"; }
-    if (isset($r['const']) && !defined("{$c}::{$r['const']}")) { $missing[] = "{$c}::{$r['const']}"; }
-}
-echo json_encode(['routes' => count($routes), 'missing' => $missing]);
-CHILD;
-    [$rc, $text] = rv3_run(rv3_php_cmd() . ' -r ' . escapeshellarg($code) . ' -- ' . escapeshellarg((string) $args));
-    $lines = explode("\n", trim($text));
-    $j = json_decode((string) end($lines), true);
-    return [$rc === 0 && is_array($j) && $j['missing'] === [] && $j['routes'] > 0, is_array($j) ? $j : [], trim($text)];
+    $files = rv3_service_files($app, "{$pkg}/payload/services");
+    $err = rv3_load_services($files);
+    if ($err !== null) {
+        return [false, ['missing' => [$err]], $err];
+    }
+    $routesFile = "{$pkg}/payload/services/ReportsV3Routes.php";
+    $dup = array_filter(['rv3_pur_filters', 'rv3_val_filters', 'rv3_io_filters', 'rv3_deliver', 'rv3_movement_params', 'rv3_soa_filters', 'rv3_soa_line_filters', 'rv3_require_warehouse_scope', 'rv3_so_resolve_warehouse_scope', 'rv3_soa_session_ids', 'rv3_require_so_warehouse_scope'], 'function_exists');
+    if ($dup) {
+        return [false, ['missing' => ['function(s) already defined: ' . implode(', ', $dup)]], ''];
+    }
+    $pdo = new stdClass();                 // the routes file only builds closures: no database is ever touched here
+    $query = [];
+    $routes = [];
+    try {
+        $routes = require $routesFile;
+    } catch (Throwable $e) {
+        return [false, ['missing' => [get_class($e) . ': ' . $e->getMessage()]], ''];
+    }
+    $missing = [];
+    foreach ($manifest['requirements'] ?? [] as $r) {
+        $c = $r['class'];
+        if (!class_exists($c) && !interface_exists($c)) {
+            $missing[] = "class {$c}";
+            continue;
+        }
+        if (isset($r['method']) && !method_exists($c, $r['method'])) {
+            $missing[] = "{$c}::{$r['method']}()";
+        }
+        if (isset($r['const']) && !defined("{$c}::{$r['const']}")) {
+            $missing[] = "{$c}::{$r['const']}";
+        }
+    }
+    $info = ['routes' => is_array($routes) ? count($routes) : 0, 'missing' => $missing];
+    return [$missing === [] && $info['routes'] > 0, $info, ''];
 }
 function rv3_print_eval(callable $say, array $eval): void
 {
@@ -174,7 +184,7 @@ if ($cmd === 'preflight' || $cmd === 'plan') {
     }
     $check('application directories are writable by this user', $writable);
     $check('package state directory is writable', is_dir($stateDir) ? is_writable($stateDir) : is_writable($pkg));
-    $free = @disk_free_space($app);
+    $free = rv3_fn('disk_free_space') ? @disk_free_space($app) : false;
     $check('free disk space >= 50 MB', $free === false || $free > 50 * 1024 * 1024, $free === false ? 'unknown' : round($free / 1048576) . ' MB');
     $say();
     $say('-- package integrity');
@@ -271,7 +281,7 @@ if ($cmd === 'apply') {
     }
     rv3_mkdir($stateDir);
     $lockH = fopen("{$stateDir}/apply.lock", 'c');
-    if (!$lockH || !flock($lockH, LOCK_EX | LOCK_NB)) {
+    if (!$lockH || (rv3_fn('flock') && !flock($lockH, LOCK_EX | LOCK_NB))) {
         rv3_die('another apply/rollback is running', 3);
     }
     $run = date('Ymd_His');

@@ -334,10 +334,10 @@ function rv3_service_files(string $app, ?string $payloadServices): array
 {
     $files = [];
     $payload = [];
-    foreach ($payloadServices !== null ? (glob(rtrim($payloadServices, '/') . '/*.php') ?: []) : [] as $f) {
+    foreach ($payloadServices !== null ? rv3_glob(rtrim($payloadServices, '/') . '/*.php') : [] as $f) {
         $payload[basename($f)] = $f;
     }
-    foreach (glob(rtrim($app, '/') . '/services/*.php') ?: [] as $f) {
+    foreach (rv3_glob(rtrim($app, '/') . '/services/*.php') as $f) {
         $b = basename($f);
         if ($b === 'ReportsV3Routes.php') {
             continue;
@@ -353,49 +353,74 @@ function rv3_service_files(string $app, ?string $payloadServices): array
     return $files;
 }
 
-/** the php binary for child processes: PHP_BIN, else the running binary (unless it is a cgi / fpm one), else "php"; PHP_ARGS (extra ini flags) is passed through. */
-function rv3_php_cmd(): string
+/** true when the host really has the function (shared hosting removes some: symlink, escapeshellarg, exec, disk_free_space …) */
+function rv3_fn(string $name): bool
 {
-    $b = getenv('PHP_BIN') ?: PHP_BINARY;
-    if ($b === '' || str_contains(basename($b), 'cgi') || str_contains(basename($b), 'fpm')) {
-        $b = 'php';
-    }
-    return escapeshellarg($b) . (getenv('PHP_ARGS') ? ' ' . getenv('PHP_ARGS') : '');
+    return function_exists($name) && is_callable($name);
 }
 
-/** runs a shell command; tries exec, shell_exec, proc_open, popen in turn (hosts disable different ones). @return array{0:int,1:string} exit code, combined output */
-function rv3_run(string $cmd): array
+/** glob() with a scandir() fallback (single "*.ext" pattern in one directory) */
+function rv3_glob(string $pattern): array
 {
-    $dis = array_map('trim', explode(',', (string) ini_get('disable_functions')));
-    $ok = static fn (string $f): bool => function_exists($f) && !in_array($f, $dis, true);
-    if ($ok('exec')) {
-        $o = [];
-        $rc = 0;
-        exec($cmd . ' 2>&1', $o, $rc);
-        return [$rc, implode("\n", $o)];
+    if (rv3_fn('glob')) {
+        return glob($pattern) ?: [];
     }
-    if ($ok('proc_open')) {
-        $h = proc_open($cmd . ' 2>&1', [1 => ['pipe', 'w']], $pipes);
-        if (is_resource($h)) {
-            $out = (string) stream_get_contents($pipes[1]);
-            fclose($pipes[1]);
-            return [proc_close($h), $out];
+    $dir = dirname($pattern);
+    $ext = substr(basename($pattern), 1);
+    $out = [];
+    foreach (is_dir($dir) ? (scandir($dir) ?: []) : [] as $f) {
+        if ($f !== '.' && $f !== '..' && str_ends_with($f, $ext)) {
+            $out[] = $dir . '/' . $f;
         }
     }
-    if ($ok('popen')) {
-        $h = popen($cmd . ' 2>&1', 'r');
-        if (is_resource($h)) {
-            $out = '';
-            while (!feof($h)) {
-                $out .= (string) fread($h, 8192);
+    sort($out);
+    return $out;
+}
+
+/** syntax check IN-PROCESS (token_get_all with TOKEN_PARSE throws ParseError exactly where `php -l` would fail): no child process, no shell. @return ?string the error, null when valid */
+function rv3_lint(string $file): ?string
+{
+    $src = rv3_read($file);
+    if ($src === null) {
+        return 'cannot read the file';
+    }
+    try {
+        token_get_all($src, TOKEN_PARSE);
+    } catch (ParseError $e) {
+        return $e->getMessage() . ' on line ' . $e->getLine();
+    }
+    return null;
+}
+
+/**
+ * Loads the services IN-PROCESS (no child process, no copy, no link). Before requiring anything it checks that every file parses and that no class / function would be declared twice or
+ * clashes with one already defined — so a problem is reported as a FAIL line instead of a fatal error. @param list<string> $files @return ?string the problem, null when loaded
+ */
+function rv3_load_services(array $files): ?string
+{
+    $seen = [];
+    foreach ($files as $f) {
+        if (($e = rv3_lint($f)) !== null) {
+            return basename($f) . ': syntax error — ' . $e;
+        }
+        $src = (string) rv3_read($f);
+        $ns = preg_match('/^\s*namespace\s+([\w\\\\]+)\s*;/m', $src, $m) ? $m[1] . '\\' : '';
+        if (preg_match_all('/^\s*(?:final\s+|abstract\s+|readonly\s+)*(?:class|interface|trait|enum)\s+(\w+)/m', $src, $cm)) {
+            foreach ($cm[1] as $c) {
+                $fq = $ns . $c;
+                if (isset($seen[strtolower($fq)]) || class_exists($fq, false) || interface_exists($fq, false)) {
+                    return "{$fq} would be declared twice ({$f} and " . ($seen[strtolower($fq)] ?? 'an already loaded file') . ')';
+                }
+                $seen[strtolower($fq)] = basename($f);
             }
-            return [pclose($h), $out];
         }
     }
-    if ($ok('shell_exec')) {
-        $out = (string) shell_exec('(' . $cmd . ') 2>&1; echo "__RC=$?"');
-        $rc = preg_match('/__RC=(\d+)\s*$/', $out, $m) ? (int) $m[1] : 1;
-        return [$rc, (string) preg_replace('/__RC=\d+\s*$/', '', $out)];
+    try {
+        foreach ($files as $f) {
+            require_once $f;
+        }
+    } catch (Throwable $e) {
+        return get_class($e) . ': ' . $e->getMessage();
     }
-    return [127, 'no way to start a child process on this host (exec, proc_open, popen and shell_exec are all disabled)'];
+    return null;
 }

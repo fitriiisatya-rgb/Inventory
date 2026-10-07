@@ -1,6 +1,9 @@
 <?php
 declare(strict_types=1);
 
+if (!class_exists('RV3ScriptExit', false)) { final class RV3ScriptExit extends RuntimeException {} }
+if (!function_exists('rv3_script_exit')) { function rv3_script_exit(int $c): never { if (defined('RV3_INPROCESS')) { throw new RV3ScriptExit('exit', $c); } exit($c); } }   // run in-process by the package validator: no child process, no shell
+
 /**
  * READ-ONLY reconciliation of "Laporan Pergerakan Stok" (v3: Transfer IN / OUT split) against the real ledger. Never writes (READ ONLY transaction; a write is proved to be rejected first).
  * For "Semua Gudang" and every warehouse:
@@ -18,18 +21,17 @@ foreach (array_slice($argv, 1) as $arg) {
     elseif (str_starts_with($arg, '--start=')) { $start = substr($arg, 8); }
     elseif (str_starts_with($arg, '--end=')) { $end = substr($arg, 6); }
     elseif (str_starts_with($arg, '--warehouse=')) { $whArg = substr($arg, 12); }
-    else { fwrite(STDERR, "unknown argument: {$arg}\n"); exit(2); }
+    else { fwrite(STDERR, "unknown argument: {$arg}\n"); rv3_script_exit(2); }
 }
 $end ??= date('Y-m-d');
 $start ??= date('Y-m-01', strtotime($end));
 if ($appRoot === null || !is_dir("{$appRoot}/services") || strtotime($start) === false || strtotime($end) === false || $start > $end) {
     fwrite(STDERR, "usage: php movement_v3_reconcile_check.php --app-root=<dir> [--start=YYYY-MM-DD --end=YYYY-MM-DD] [--warehouse=<code|id|all>]\n");
-    exit(2);
+    rv3_script_exit(2);
 }
-// RV3_PAYLOAD_SERVICES (optional, set by the package validator): load the package's service files instead of the installed ones of the same name — no copy, no symlink, nothing written
-$__pl = []; foreach ((getenv('RV3_PAYLOAD_SERVICES') ? glob(rtrim((string) getenv('RV3_PAYLOAD_SERVICES'), '/') . '/*.php') : []) ?: [] as $__f) { if (basename($__f) !== 'ReportsV3Routes.php') { $__pl[basename($__f)] = $__f; } }
-foreach (glob("{$appRoot}/services/*.php") ?: [] as $f) { if (basename($f) === 'ReportsV3Routes.php') { continue; } require_once $__pl[basename($f)] ?? $f; unset($__pl[basename($f)]); }
-foreach ($__pl as $f) { require_once $f; }
+if (!defined('RV3_INPROCESS')) {   // in-process (package validator) the services are already loaded: the installed ones, with the package's substituted in memory
+    foreach (glob("{$appRoot}/services/*.php") ?: [] as $f) { if (basename($f) !== 'ReportsV3Routes.php') { require_once $f; } }
+}
 
 use App\Services\Database;
 use App\Services\MovementReportV3Service as M;
@@ -41,7 +43,7 @@ try {
     $pdo->exec('UPDATE items SET id = id WHERE 1 = 0');
     fwrite(STDERR, "ABORT: the connection accepted a write inside the READ ONLY transaction.\n");
     $pdo->exec('ROLLBACK');
-    exit(3);
+    rv3_script_exit(3);
 } catch (PDOException $e) {
     echo "read-only guard verified: a write attempt is rejected by the server ({$e->getCode()}).\n";
 }
@@ -88,4 +90,4 @@ if (isset($tot['Semua Gudang']) && count($scopes) === count($warehouses) + 1) {
 }
 $pdo->exec('ROLLBACK');
 echo "\n" . ($n - $fail) . " / {$n} checks passed" . ($fail ? " — {$fail} FAILED — DO NOT DEPLOY" : ' — all reconcile') . "\n";
-exit($fail ? 1 : 0);
+rv3_script_exit($fail ? 1 : 0);

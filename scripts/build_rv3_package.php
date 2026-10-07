@@ -199,12 +199,18 @@ foreach ($ops as $o) {
 }
 $put('README_DEPLOY.md', strtr($tpl, ['@@NAME@@' => $name, '@@COMMIT@@' => $revFull, '@@FILES@@' => $rows, '@@TOKEN@@' => $token]));
 
-// ---------------------------------------------------------------- shared hosting: symlink() / link() / readlink() are often disabled — nothing that ships may call them
+// ---------------------------------------------------------------- shared hosting: many functions are REMOVED there (symlink, link, readlink, escapeshellarg, escapeshellcmd, exec, shell_exec, proc_open, popen, passthru, system …)
+// Nothing that ships (scripts / payload; the dev tests/ are not run on the server) may call any of them. Method calls such as $pdo->exec() are fine: PDO is not a shell.
 foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($R, FilesystemIterator::SKIP_DOTS)) as $f) {
     if ($f->isFile() && preg_match('/\.(php|sh)$/', $f->getFilename()) && !str_contains($f->getPathname(), '/tests/')) {
         $src = preg_replace(['#/\*.*?\*/#s', '#^\s*(//|\#).*$#m'], '', (string) file_get_contents($f->getPathname()));
-        if (preg_match('/(?<![A-Za-z_>:])(symlink|link|readlink|linkinfo)\s*\(|\bln\s+-s/', $src, $m)) {
-            rv3_die("forbidden call '{$m[0]}' in " . substr($f->getPathname(), strlen($R) + 1));
+        if (str_ends_with($f->getFilename(), '.php')) {
+            $src = preg_replace('/(["\'])(?:\\\\.|(?!\1).)*\1/s', '""', $src);          // string literals are not calls
+            if (preg_match('/(?<![A-Za-z0-9_>:$])(symlink|link|readlink|linkinfo|escapeshellarg|escapeshellcmd|exec|shell_exec|proc_open|popen|passthru|system|pcntl_exec)\s*\(/', $src, $m)) {
+                rv3_die("forbidden runtime call '{$m[1]}(' in " . substr($f->getPathname(), strlen($R) + 1));
+            }
+        } elseif (preg_match('/\bln\s+-s/', $src)) {
+            rv3_die('forbidden "ln -s" in ' . substr($f->getPathname(), strlen($R) + 1));
         }
     }
 }
