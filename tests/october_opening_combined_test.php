@@ -17,6 +17,7 @@ foreach (glob(__DIR__ . '/../services/*.php') as $f) {
 require_once __DIR__ . '/lib/jejak_real_fixture.php';
 require_once __DIR__ . '/../scripts/rv3/pc_lib.php';
 require_once __DIR__ . '/../scripts/rv3/kt_opening_lib.php';
+require_once __DIR__ . '/../scripts/rv3/of_lib.php';
 
 use App\Services\DashboardInventoryService as D;
 use App\Services\Database;
@@ -64,12 +65,14 @@ $whB = $fig((int) $L['warehouse_id'], '2026-10-01', '2026-10-31');
 $dashB = D::overview($pdo, null, 'custom', '2026-10-01', $today)['movement'];
 check('0 baseline: SO adjustment (3.500) is an October movement in the company-wide October adjustment', $near($allB['adjustment'], 3500.0) && $near($allB['in'], 0.0), json_encode([$allB['opening'], $allB['in'], $allB['adjustment']]));
 
-// ---- 1. period cutoff
+// ---- the READ-ONLY forecast, computed BEFORE anything is written
 $plan = pc_plan($pdo, [$sid], '2026-09-30');
-pc_post($pdo, $plan, $fx['admin']['username'], $plan['preview_sha']);
-// ---- 2. Karang Tengah opening
 $src = kt_read_source($tmp);
 $kp = kt_plan($pdo, $src);
+$fc = of_forecast($pdo, $plan, $kp);
+// ---- 1. period cutoff
+pc_post($pdo, $plan, $fx['admin']['username'], $plan['preview_sha']);
+// ---- 2. Karang Tengah opening
 check('K1 Karang plan: 2 postable rows (KT3 zero qty / HPP 0 informational), no blocker, value ' . $ktValue, $kp['blocked'] === false && $kp['summary']['rows']['postable'] === 2 && $near($kp['summary']['normalized_value'], $ktValue), json_encode($kp['blockers']));
 kt_post($pdo, $kp, $fx['admin']['username'], $kp['preview_sha']);
 // kt_post requires SUPERADMIN: the fixture admin is one
@@ -94,6 +97,27 @@ check('11 September company closing == October opening minus Karang Tengah (the 
 $vk = array_filter(kt_verify_ledger($pdo, kt_plan($pdo, $src)), static fn ($c) => !$c[1]);
 $vr = array_filter(kt_verify_reports($pdo, kt_plan($pdo, $src)), static fn ($c) => !$c[1]);
 check('12 Karang Tengah ledger + report verification (opening qty == on-hand == FIFO layer, classification) all PASS', $vk === [] && $vr === [], json_encode(array_values(array_merge($vk, $vr))));
+// ---- the forecast against reality
+InventoryEffectiveDateService::resetCache();
+$bad = [];
+foreach ($fc['rows'] as $r) {
+    $a = V3::overview($pdo, '2026-10-01', '2026-10-31', $r['warehouse_id'])['split_totals'];
+    foreach (['opening', 'in', 'adjustment', 'closing'] as $k) {
+        if (!$near((float) $a[$k], $r['after'][$k])) {
+            $bad[] = "{$r['code']}.{$k}: forecast {$r['after'][$k]} actual {$a[$k]}";
+        }
+    }
+}
+$allA = V3::overview($pdo, '2026-10-01', '2026-10-31', null)['split_totals'];
+foreach (['opening', 'in', 'adjustment', 'closing'] as $k) {
+    if (!$near((float) $allA[$k], $fc['company']['after'][$k])) {
+        $bad[] = "ALL.{$k}: forecast {$fc['company']['after'][$k]} actual {$allA[$k]}";
+    }
+}
+check('13 the READ-ONLY forecast made before writing == the real October figures afterwards (every warehouse and company-wide: opening, Stock IN, adjustment, closing)', $bad === [], implode(' | ', $bad));
+check('14 forecast invariants all hold (no double counting; company closing moves only by the Karang opening; Stock IN unchanged; Σ warehouses == Semua Gudang)', count(array_filter($fc['invariants'], static fn ($i) => !$i[1])) === 0, json_encode($fc['invariants']));
+$lines = implode("\n", of_lines($fc));
+check('15 the printed forecast lists every warehouse + SEMUA GUDANG with SEBELUM → SESUDAH', str_contains($lines, 'SEMUA GUDANG') && str_contains($lines, 'Awal SESUDAH') && substr_count($lines, 'PASS - ') === 4);
 @unlink($tmp);
 $ok = count(array_filter($results));
 echo "\n{$ok} / " . count($results) . " PASSED\n";

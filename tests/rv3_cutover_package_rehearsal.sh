@@ -114,6 +114,13 @@ if [ "${RV3_VALIDATE:-0}" = 1 ]; then
   [ $rc -eq 11 ] && grep -q "PREVIEW SHA256" "$W/kt_prev.txt" && grep -q "380" "$W/kt_prev.txt" && grep -q "STATUS POSTING : DIBLOKIR" "$W/kt_prev.txt"; chk "[karang] preview against this DB (no Karang master): exit 11, 380 rows read, blockers listed, preview sha printed" $?
   [ -s "$P/out/karang_mapping_all_rows.csv" ] && [ "$(wc -l < "$P/out/karang_mapping_all_rows.csv")" = 381 ] && [ -s "$P/out/karang_blockers.csv" ] && [ -s "$P/out/karang_summary.json" ]; chk "[karang] the mapping csv has 380 rows + header, plus blockers.csv and summary.json (written OUTSIDE the application)" $?
   [ "$(tree_sum "$T")" = "$before" ]; chk "[karang] preview wrote nothing into the application" $?
+  [ -s "$P/out/karang_unit_conversions.csv" ] && [ -s "$P/out/karang_inactive_items.csv" ]; chk "[karang] unit-conversion and inactive-master lists are written too" $?
+  grep -q "PERINGATAN        : judul sheet sumber menyebut" "$W/kt_prev.txt" && grep -q "tanggal efektif yang disetujui = 2026-10-01" "$W/kt_prev.txt"; chk "[karang] the sheet title 'Periode Juli 2026' is a WARNING only; the effective date stays 2026-10-01" $?
+  bash "$P/scripts/karang_activation_plan.sh" "$T" >"$W/act_plan.txt" 2>&1; rc=$?
+  [ $rc -ne 0 ] && grep -q "FAIL - " "$W/act_plan.txt" && grep -q "UPDATE warehouses SET is_active = 1, activation_locked = 0" "$W/act_plan.txt"; chk "[activation] plan runs read-only; with no opening posted the gates FAIL (exit $rc) and the one-row change is stated" $?
+  bash "$P/scripts/october_forecast.sh" "$T" --sessions=1,2 --cutoff=2026-09-30 >"$W/oct_fc.txt" 2>&1; rc=$?
+  grep -q "PREDIKSI STOK AWAL OKTOBER" "$W/oct_fc.txt" && grep -q "SEMUA GUDANG" "$W/oct_fc.txt" && grep -q "PASS - No double counting" "$W/oct_fc.txt"; chk "[forecast] the October opening forecast prints every warehouse + SEMUA GUDANG with the invariants (exit $rc)" $?
+  [ "$(tree_sum "$T")" = "$before" ]; chk "[forecast] the previews wrote nothing into the application" $?
   bash "$P/scripts/period_cutoff_preview.sh" "$T" --sessions=1,2 --cutoff=2026-09-30 >"$W/pc_prev.txt" 2>&1; rc=$?
   grep -q "PERIOD CUTOFF — PREVIEW" "$W/pc_prev.txt" && grep -q "PREVIEW SHA256" "$W/pc_prev.txt"; chk "[period cutoff] preview runs against the real tables (exit $rc), prints the plan and the preview sha" $?
   [ "$(mysql -uroot -N "${DB_DATABASE:-inventory_test}" -e "SELECT COUNT(*) FROM inventory_effective_dates")" = 0 ]; chk "[period cutoff] preview wrote no override row" $?

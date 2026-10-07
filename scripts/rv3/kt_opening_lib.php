@@ -89,6 +89,19 @@ function kt_read_source(string $path): array
             $declared = kt_num((string) $cells[$cols['total']]);
         }
     }
+    // the title lines above the header ("SO Nominal Gudang Kecil", "Area : …", "Periode Juli 2026") are kept as AUDIT METADATA only — never as the inventory effective date
+    $titleLines = [];
+    foreach ($grid as $rn => $cells) {
+        if ($rn >= $headerRow) {
+            break;
+        }
+        foreach ($cells as $v) {
+            $t = trim((string) $v);
+            if ($t !== '' && kt_num($t) === null) {
+                $titleLines[] = $t;
+            }
+        }
+    }
     $rows = [];
     $errors = [];
     foreach ($grid as $rn => $cells) {
@@ -132,7 +145,27 @@ function kt_read_source(string $path): array
             'declared_value' => $declaredValue, 'source_value' => $qty === null ? null : $qty * ($price ?? 0.0), 'invalid' => $invalid,
         ];
     }
-    return ['file' => basename($path), 'sha256' => hash_file('sha256', $path), 'header_row' => $headerRow, 'declared_total' => $declared, 'rows' => $rows, 'errors' => $errors];
+    return ['file' => basename($path), 'sha256' => hash_file('sha256', $path), 'header_row' => $headerRow, 'declared_total' => $declared, 'rows' => $rows, 'errors' => $errors,
+        'title' => implode(' | ', $titleLines), 'sheets' => kt_sheet_names($path)];
+}
+
+/** @return list<string> worksheet names of the workbook (audit metadata) */
+function kt_sheet_names(string $path): array
+{
+    $z = new ZipArchive();
+    if ($z->open($path) !== true) {
+        return [];
+    }
+    $x = $z->getFromName('xl/workbook.xml');
+    $z->close();
+    if ($x === false || ($wb = @simplexml_load_string($x)) === false) {
+        return [];
+    }
+    $names = [];
+    foreach ($wb->sheets->sheet ?? [] as $sh) {
+        $names[] = (string) $sh['name'];
+    }
+    return $names;
 }
 
 // ============================================================================ plan (read-only)
@@ -191,7 +224,7 @@ function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_C
             'source_row' => $r['row'], 'source_code' => $r['code'], 'source_name' => $r['name'], 'source_uom' => $r['uom'],
             'source_qty_production' => $r['qty_production'], 'source_qty_warehouse' => $r['qty_warehouse'], 'source_qty' => $qty,
             'source_hpp' => $r['price'], 'source_value' => $r['source_value'], 'source_declared_value' => $r['declared_value'],
-            'item_id' => null, 'master_sku' => null, 'master_name' => null, 'master_base_unit' => null, 'unit_conversion' => null,
+            'item_id' => null, 'master_sku' => null, 'master_name' => null, 'master_status' => null, 'master_base_unit' => null, 'unit_conversion' => null,
             'norm_qty' => null, 'norm_unit_hpp' => null, 'norm_value' => null, 'value_drift' => null,
             'status' => '', 'severity' => '', 'issue' => '', 'postable' => false,
         ];
@@ -230,6 +263,7 @@ function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_C
             $row['item_id'] = (int) $item['id'];
             $row['master_sku'] = $item['sku'];
             $row['master_name'] = $item['name'];
+            $row['master_status'] = $item['status'];
             $row['master_base_unit'] = $item['base_code'];
             $itemUse[(int) $item['id']][] = $r['code'];
         }
@@ -240,6 +274,8 @@ function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_C
                 $status = 'ITEM_INACTIVE';
                 $sev = 'BLOCKER';
                 $issues[] = 'Master Barang INACTIVE';
+            } elseif ((string) $item['status'] !== 'ACTIVE') {
+                $issues[] = 'Master Barang INACTIVE (qty 0 — informasi, tidak memblokir)';
             }
             $named = kt_units_named($m['units'], $r['uom']);
             $baseHit = false;
@@ -295,6 +331,11 @@ function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_C
         }
         if ($status === 'ZERO_QTY' && $item === null) {
             $status = 'NOT_FOUND';
+        }
+        if ($positive && $r['declared_value'] !== null && abs((float) $r['declared_value'] - (float) $r['source_value']) > KT_LINE_TOLERANCE && !in_array($status, ['QTY_INVALID'], true)) {
+            $status = 'QTY_INVALID';
+            $sev = 'BLOCKER';
+            $issues[] = sprintf('nilai sumber tidak valid: kolom Jumlah %.4f ≠ qty × HARGA %.4f', (float) $r['declared_value'], (float) $r['source_value']);
         }
         $row['status'] = $status ?? 'NOT_FOUND';
         $row['severity'] = $sev;
@@ -430,9 +471,31 @@ function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_C
     foreach ($global as $g) {
         $blockers[] = ['source_row' => null, 'source_code' => '(global)', 'source_name' => '', 'status' => 'GLOBAL', 'issue' => $g];
     }
+    $unitConv = [];
+    $inactive = [];
+    foreach ($rows as $x) {
+        if ($x['status'] === 'MATCH_WITH_UNIT_CONVERSION') {
+            $unitConv[] = ['source_row' => $x['source_row'], 'source_code' => $x['source_code'], 'source_name' => $x['source_name'], 'source_uom' => $x['source_uom'], 'master_base_unit' => $x['master_base_unit'],
+                'unit_conversion' => $x['unit_conversion'], 'source_qty' => $x['source_qty'], 'norm_qty' => $x['norm_qty'], 'source_hpp' => $x['source_hpp'], 'norm_unit_hpp' => $x['norm_unit_hpp'], 'source_value' => $x['source_value'], 'norm_value' => $x['norm_value']];
+        }
+        if ($x['master_status'] !== null && $x['master_status'] !== 'ACTIVE') {
+            $inactive[] = ['source_row' => $x['source_row'], 'source_code' => $x['source_code'], 'master_sku' => $x['master_sku'], 'master_name' => $x['master_name'], 'master_status' => $x['master_status'],
+                'source_qty' => $x['source_qty'], 'status' => $x['status'], 'severity' => $x['severity']];
+        }
+    }
+    $byStatus = [];
+    foreach ($rows as $x) {
+        $byStatus[$x['status']] = ($byStatus[$x['status']] ?? 0) + 1;
+    }
+    ksort($byStatus);
+    $titleWarn = [];
+    if (($source['title'] ?? '') !== '' && preg_match('/periode\s+([A-Za-z]+\s+\d{4})/i', (string) $source['title'], $tm) === 1) {
+        $titleWarn[] = "judul sheet sumber menyebut \"Periode {$tm[1]}\" — hanya metadata audit; tanggal efektif yang disetujui = {$effectiveDate}";
+    }
     $plan = [
         'reference' => KT_REFERENCE, 'effective_date' => $effectiveDate, 'warehouse' => $state, 'rows' => $rows, 'summary' => $summary, 'blockers' => $blockers,
-        'blocked' => $blockers !== [], 'source' => ['file' => $source['file'], 'sha256' => $source['sha256'], 'header_row' => $source['header_row']],
+        'blocked' => $blockers !== [], 'by_status' => $byStatus, 'unit_conversions' => $unitConv, 'inactive_items' => $inactive, 'warnings' => $titleWarn,
+        'source' => ['file' => $source['file'], 'sha256' => $source['sha256'], 'header_row' => $source['header_row'], 'title' => $source['title'] ?? '', 'sheets' => $source['sheets'] ?? []],
     ];
     $plan['preview_sha'] = kt_preview_sha($plan);
     return $plan;
@@ -465,6 +528,10 @@ function kt_report_lines(array $plan): array
     $o = [];
     $o[] = '=== KARANG TENGAH OPENING BALANCE — PREVIEW (READ ONLY) ===';
     $o[] = "Sumber            : {$s['source_file']}  sha256={$s['source_sha256']}";
+    $o[] = '                    sheet: ' . ($plan['source']['sheets'] ? implode(', ', $plan['source']['sheets']) : '—') . '   judul: ' . ($plan['source']['title'] !== '' ? $plan['source']['title'] : '—');
+    foreach ($plan['warnings'] as $warn) {
+        $o[] = "PERINGATAN        : {$warn}";
+    }
     $o[] = "Referensi         : {$plan['reference']}   Effective date: {$plan['effective_date']} 00:00:00   Tipe ledger: OPENING (bukan Pembelian / Stock IN / Transfer / Adjustment)";
     $o[] = sprintf('Gudang            : %s (%s)  id=%s  is_active=%s  activation_locked=%s  mode posting=%s', $w['warehouse_name'] ?? '—', $w['warehouse_code'], $w['warehouse_id'] ?? '—', $w['is_active'] ?? '—', $w['activation_locked'] ?? '—', $w['mode'] ?? 'DITOLAK');
     $o[] = sprintf('Ledger gudang    : %d baris lain, %d FIFO layer sebelum posting; sudah diposting dengan referensi ini: %s', $w['existing_ledger_rows'], $w['existing_batches'], $w['already_posted'] ? "YA ({$w['already_posted_transactions']} transaksi)" : 'tidak');
@@ -486,6 +553,16 @@ function kt_report_lines(array $plan): array
     $o[] = '  total nilai sumber (qty×HARGA): Rp ' . kt_fmt($s['source_value'], 4) . '   (total kontrol file: ' . ($s['source_declared_total'] === null ? '—' : 'Rp ' . kt_fmt((float) $s['source_declared_total'], 4)) . ')';
     $o[] = '  total nilai ternormalisasi    : Rp ' . kt_fmt($s['normalized_value'], 4);
     $o[] = '  selisih (norm − sumber, qty>0): Rp ' . kt_fmt($s['difference'], 4) . "   selisih terbesar per baris: Rp " . kt_fmt($s['max_line_drift'], 4) . '   (toleransi baris ' . KT_LINE_TOLERANCE . ' / total ' . KT_TOTAL_TOLERANCE . ' — hanya pembulatan 6 dp qty & 4 dp HPP)';
+    $o[] = '  baris per status              : ' . implode(' · ', array_map(static fn ($k, $v) => "{$k} {$v}", array_keys($plan['by_status']), $plan['by_status']));
+    $o[] = '';
+    $o[] = 'DAFTAR KONVERSI SATUAN (' . count($plan['unit_conversions']) . ' baris; hanya dari item_unit_conversions):';
+    foreach ($plan['unit_conversions'] as $c) {
+        $o[] = sprintf('  baris %d  %s  %s  %s  qty %s → %s %s   HPP %s → %s   nilai %s → %s', $c['source_row'], $c['source_code'], trim($c['source_name']), $c['unit_conversion'], kt_fmt($c['source_qty'], 6), kt_fmt($c['norm_qty'], 6), $c['master_base_unit'], kt_fmt($c['source_hpp'], 6), kt_fmt($c['norm_unit_hpp'], 4), kt_fmt((float) $c['source_value'], 4), kt_fmt($c['norm_value'], 4));
+    }
+    $o[] = 'MASTER BARANG NONAKTIF (' . count($plan['inactive_items']) . ' baris):';
+    foreach ($plan['inactive_items'] as $i) {
+        $o[] = sprintf('  baris %d  %s  %s  status master %s  qty %s  → %s%s', $i['source_row'], $i['source_code'], trim((string) $i['master_name']), $i['master_status'], kt_fmt($i['source_qty'], 6), $i['status'], $i['severity'] === 'BLOCKER' ? ' (BLOCKER)' : ' (informasi)');
+    }
     $o[] = '';
     $o[] = 'PREVIEW SHA256 : ' . $plan['preview_sha'];
     $o[] = 'STATUS POSTING : ' . ($plan['blocked'] ? 'DIBLOKIR — ' . count($plan['blockers']) . ' blocker' : 'SIAP (tidak ada blocker) — belum ada yang ditulis');
@@ -508,7 +585,7 @@ function kt_write_outputs(array $plan, string $dir): array
         throw new RuntimeException("cannot create output directory {$dir}");
     }
     $files = [];
-    $cols = ['source_row', 'source_code', 'source_name', 'source_uom', 'source_qty_production', 'source_qty_warehouse', 'source_qty', 'source_hpp', 'source_value', 'item_id', 'master_sku', 'master_name',
+    $cols = ['source_row', 'source_code', 'source_name', 'source_uom', 'source_qty_production', 'source_qty_warehouse', 'source_qty', 'source_hpp', 'source_value', 'item_id', 'master_sku', 'master_name', 'master_status',
         'master_base_unit', 'unit_conversion', 'norm_qty', 'norm_unit_hpp', 'norm_value', 'value_drift', 'status', 'severity', 'issue'];
     $f = fopen($dir . '/karang_mapping_all_rows.csv', 'w');
     fwrite($f, "\xEF\xBB\xBF");
@@ -526,8 +603,19 @@ function kt_write_outputs(array $plan, string $dir): array
     }
     fclose($f);
     $files[] = $dir . '/karang_blockers.csv';
+    foreach (['karang_unit_conversions.csv' => ['unit_conversions', ['source_row', 'source_code', 'source_name', 'source_uom', 'master_base_unit', 'unit_conversion', 'source_qty', 'norm_qty', 'source_hpp', 'norm_unit_hpp', 'source_value', 'norm_value']],
+        'karang_inactive_items.csv' => ['inactive_items', ['source_row', 'source_code', 'master_sku', 'master_name', 'master_status', 'source_qty', 'status', 'severity']]] as $file => [$key, $c]) {
+        $f = fopen($dir . '/' . $file, 'w');
+        fwrite($f, "\xEF\xBB\xBF");
+        fputcsv($f, $c, ',', '"', '');
+        foreach ($plan[$key] as $r) {
+            fputcsv($f, array_map(static fn ($k) => $r[$k] ?? '', $c), ',', '"', '');
+        }
+        fclose($f);
+        $files[] = $dir . '/' . $file;
+    }
     file_put_contents($dir . '/karang_summary.json', json_encode(['reference' => $plan['reference'], 'effective_date' => $plan['effective_date'], 'preview_sha' => $plan['preview_sha'], 'blocked' => $plan['blocked'],
-        'warehouse' => $plan['warehouse'], 'summary' => $plan['summary'], 'blockers' => $plan['blockers']], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        'warehouse' => $plan['warehouse'], 'summary' => $plan['summary'], 'by_status' => $plan['by_status'], 'warnings' => $plan['warnings'], 'source' => $plan['source'], 'blockers' => $plan['blockers']], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
     $files[] = $dir . '/karang_summary.json';
     return $files;
 }
@@ -617,7 +705,8 @@ function kt_post(PDO $pdo, array $plan, string $actorUsername, string $previewSh
         foreach ($posted as $p) {
             $x = $p['row'];
             AuditService::log($tx, (int) $actor['id'], (string) $actor['username'], 'KARANG_OPENING_LINE', 'inventory_transactions', $p['transaction_id'], null, [
-                'source_reference' => KT_REFERENCE, 'source_file' => $plan['source']['file'], 'source_sha256' => $plan['source']['sha256'], 'source_row' => $x['source_row'], 'source_code' => $x['source_code'],
+                'source_reference' => KT_REFERENCE, 'source_file' => $plan['source']['file'], 'source_sha256' => $plan['source']['sha256'], 'source_sheet' => $plan['source']['sheets'], 'source_title' => $plan['source']['title'],
+                'warehouse_id' => $whId, 'source_row' => $x['source_row'], 'source_code' => $x['source_code'],
                 'source_name' => $x['source_name'], 'source_uom' => $x['source_uom'], 'source_qty_production' => $x['source_qty_production'], 'source_qty_warehouse' => $x['source_qty_warehouse'],
                 'source_qty' => $x['source_qty'], 'source_hpp' => $x['source_hpp'], 'source_value' => $x['source_value'], 'item_id' => $x['item_id'], 'master_sku' => $x['master_sku'],
                 'unit_conversion' => $x['unit_conversion'], 'normalized_qty' => $x['norm_qty'], 'normalized_unit_hpp' => $x['norm_unit_hpp'], 'normalized_value' => $x['norm_value'],
@@ -625,7 +714,7 @@ function kt_post(PDO $pdo, array $plan, string $actorUsername, string $previewSh
             ], KT_REFERENCE);
         }
         AuditService::log($tx, (int) $actor['id'], (string) $actor['username'], 'KARANG_OPENING_POST', 'warehouses', $whId, null, [
-            'source_reference' => KT_REFERENCE, 'source_file' => $plan['source']['file'], 'source_sha256' => $plan['source']['sha256'], 'preview_sha256' => $plan['preview_sha'],
+            'source_reference' => KT_REFERENCE, 'source_file' => $plan['source']['file'], 'source_sha256' => $plan['source']['sha256'], 'source_sheet' => $plan['source']['sheets'], 'source_title' => $plan['source']['title'], 'source_title_warnings' => $plan['warnings'], 'preview_sha256' => $plan['preview_sha'],
             'effective_date' => $plan['effective_date'], 'posted_at' => $postedAt, 'lines' => count($posted), 'normalized_qty_by_base_unit' => $plan['summary']['normalized_qty_by_base_unit'],
             'normalized_value' => round($valueTotal, 4), 'source_value' => $plan['summary']['source_value'], 'items_unlocked_before' => $itemWasUnlocked,
             'transaction_ids' => array_column($posted, 'transaction_id'), 'warehouse_mode' => $plan['warehouse']['mode'],

@@ -98,6 +98,10 @@ check('A12 the printed preview carries the spec summary (rows, exact, conversion
 $out = kt_write_outputs($plan, $tmp . '/out');
 check('A13 mapping csv has all 380 rows + header; blockers csv; summary json', count(file($tmp . '/out/karang_mapping_all_rows.csv')) === 381 && is_file($tmp . '/out/karang_blockers.csv') && json_decode((string) file_get_contents($tmp . '/out/karang_summary.json'), true)['preview_sha'] === $plan['preview_sha']);
 
+check('A14 the sheet title "Periode Juli 2026" is kept ONLY as audit metadata + a warning; the effective date stays 2026-10-01', str_contains((string) $plan['source']['title'], 'Periode Juli 2026') && $plan['effective_date'] === '2026-10-01' && count($plan['warnings']) === 1 && str_contains($plan['warnings'][0], 'tanggal efektif yang disetujui = 2026-10-01') && $plan['source']['sheets'] !== []);
+check('A15 summary by status + unit-conversion list + inactive-master list are part of the plan (284 EXACT, 96 ZERO_QTY; no conversion, no inactive in the simulated master)', $plan['by_status'] === ['MATCH_EXACT' => 284, 'ZERO_QTY' => 96] && $plan['unit_conversions'] === [] && $plan['inactive_items'] === []);
+check('A16 the mapping csv carries master_status; conversions / inactive csv are written', str_contains((string) file($tmp . '/out/karang_mapping_all_rows.csv')[0], 'master_status') && is_file($tmp . '/out/karang_unit_conversions.csv') && is_file($tmp . '/out/karang_inactive_items.csv'));
+
 // ================================================================== B. synthetic workbooks — every blocker
 echo "\n== B. blockers (synthetic workbooks) ==\n";
 $mkXlsx = static function (string $name, array $dataRows, ?float $declared = null) use ($tmp): string {
@@ -121,6 +125,13 @@ $p = $syn([$row(1, 'CONV1', 'Gram', 20, 5000, ''), $row(2, '777101', 'pcs', 10, 
 $x = $by($p, 'CONV1');
 check('B1 unit conversion from item_unit_conversions only: 5000 Gram → 5 KG, HPP 20/g → 20.000/kg, value unchanged (inverse HPP)', $x['status'] === 'MATCH_WITH_UNIT_CONVERSION' && abs($x['norm_qty'] - 5.0) < 1e-9 && abs($x['norm_unit_hpp'] - 20000.0) < 1e-9 && abs($x['norm_value'] - 100000.0) < 1e-6 && abs($x['norm_value'] - $x['source_value']) < 1e-6, json_encode($x));
 check('B2 that plan has no blocker (conversion + exact rows)', $p['blocked'] === false, json_encode($p['blockers']));
+check('B1b the unit-conversion list names the conversion used (source qty / HPP → base qty / HPP, values equal)', count($p['unit_conversions']) === 1 && $p['unit_conversions'][0]['source_code'] === 'CONV1' && str_contains($p['unit_conversions'][0]['unit_conversion'], '0.001') && abs($p['unit_conversions'][0]['norm_value'] - $p['unit_conversions'][0]['source_value']) < 1e-6);
+$pdo->exec("INSERT INTO items (sku, name, base_unit_id, status) VALUES ('INACT0','Inactive zero',{$kgId},'INACTIVE')");
+$p = $syn([$row(1, 'INACT0', 'kg', 10, 0, 0), $row(2, '777101', 'pcs', 10, 1, 0)], 10);
+check('B1c an INACTIVE master item with qty 0 is listed (informational) and does NOT block', count($p['inactive_items']) === 1 && $p['inactive_items'][0]['master_sku'] === 'INACT0' && $p['inactive_items'][0]['severity'] !== 'BLOCKER' && !$p['blocked']);
+$jm = $mkXlsx('jumlah', [[1, 'item', '777101', 'pcs', 10, 5, 0, 999]], 999.0);
+$p = kt_plan($pdo, kt_read_source($jm));
+check('B1d invalid source value: the Jumlah column (999) ≠ qty × HARGA (50) on a positive row → QTY_INVALID, BLOCKS', $by($p, '777101')['status'] === 'QTY_INVALID' && $p['blocked'] && str_contains($by($p, '777101')['issue'], 'nilai sumber tidak valid'));
 $p = $syn([$row(1, 'NOCONV1', 'Gram', 20, 5000, ''), $row(2, '777101', 'pcs', 10, 1, 0)], 100000 + 10);
 check('B3 Gram → KG without a master conversion = UNIT_UNRESOLVED and BLOCKS (nothing guessed or hard-coded)', $by($p, 'NOCONV1')['status'] === 'UNIT_UNRESOLVED' && $p['blocked'], $by($p, 'NOCONV1')['issue']);
 $p = $syn([$row(1, 'NOPE999', 'pcs', 10, 5, 0), $row(2, '777101', 'pcs', 10, 1, 0)], 60);
@@ -179,7 +190,7 @@ $a = $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action_code = 'KARANG_OP
 $h = json_decode((string) $pdo->query("SELECT after_data FROM audit_logs WHERE action_code = 'KARANG_OPENING_POST'")->fetchColumn(), true);
 $l = json_decode((string) $pdo->query("SELECT after_data FROM audit_logs WHERE action_code = 'KARANG_OPENING_LINE' ORDER BY id LIMIT 1")->fetchColumn(), true);
 check('C12 audit: 284 line rows + 1 header; each line keeps source file / row / code / qty / UoM / HPP / value, normalised qty / HPP / value, item_id, posted_by, posted_at, effective_date',
-    (int) $a === 284 && $h['lines'] === 284 && $h['source_sha256'] === $src['sha256'] && isset($l['source_row'], $l['source_uom'], $l['source_qty'], $l['source_hpp'], $l['source_value'], $l['normalized_qty'], $l['normalized_unit_hpp'], $l['normalized_value'], $l['item_id'], $l['posted_by'], $l['posted_at'], $l['effective_date']) && $l['effective_date'] === '2026-10-01');
+    (int) $a === 284 && $h['lines'] === 284 && $h['source_sha256'] === $src['sha256'] && isset($l['source_title'], $l['source_sheet'], $l['warehouse_id'], $l['source_row'], $l['source_uom'], $l['source_qty'], $l['source_hpp'], $l['source_value'], $l['normalized_qty'], $l['normalized_unit_hpp'], $l['normalized_value'], $l['item_id'], $l['posted_by'], $l['posted_at'], $l['effective_date']) && $l['effective_date'] === '2026-10-01');
 
 echo "\n== D. reports: the opening is October OPENING, never Stock IN ==\n";
 $rep = kt_verify_reports($pdo, kt_plan($pdo, $src));
