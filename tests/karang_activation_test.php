@@ -64,10 +64,10 @@ echo "== A. the sequence: NOTHING is activated before the opening is posted + re
 [$code, $o] = $cli('plan');
 check('A1 plan BEFORE the opening: exit 11, gates FAIL (opening not posted), warehouse still ACTIVE + LOCKED', $code === 11 && str_contains($o, 'FAIL - opening balance posted') && $wh() == [1, 1], "exit {$code}");
 $lists = $o;
-check('A2 plan lists every warehouse (SCM, CIBADAK, KARANG_TENGAH) with is_active / activation_locked and states CURRENT ACTIVE + LOCKED → TARGET ACTIVE + UNLOCKED and the exact one-row change', str_contains($lists, 'SCM') && str_contains($lists, 'CIBADAK') && str_contains($lists, 'KARANG_TENGAH') && str_contains($lists, 'CURRENT : ACTIVE + LOCKED') && str_contains($lists, 'TARGET  : ACTIVE + UNLOCKED') && str_contains($lists, 'UPDATE warehouses SET activation_locked = 0 WHERE id = ' . $khId));
+check('A2 plan lists every warehouse (SCM, CIBADAK, KARANG_TENGAH) with is_active / activation_locked and states CURRENT ACTIVE + LOCKED → TARGET ACTIVE + UNLOCKED and the exact one-row change', str_contains($lists, 'SCM') && str_contains($lists, 'CIBADAK') && str_contains($lists, 'KARANG_TENGAH') && str_contains($lists, 'CURRENT: ACTIVE + LOCKED') && str_contains($lists, 'TARGET: ACTIVE + UNLOCKED') && str_contains($lists, 'planned mutation: activation_locked 1 -> 0') && !str_contains($lists, 'SET is_active') && str_contains($lists, 'UPDATE warehouses SET activation_locked = 0 WHERE id = ' . $khId));
 $before = $ledger();
 [$code, $o] = $cli('activate --plan-sha=' . str_repeat('0', 64) . ' --actor=kta_super --yes');
-check('A3 activate --yes BEFORE the opening is posted: refused (exit 11 GATES_FAILED), nothing changed', $code === 11 && str_contains($o, 'GATES_FAILED') && $wh() == [1, 1] && $ledger() === $before, $o);
+check('A3 activate --yes BEFORE the opening is posted: refused (exit 11 WAITING_OPENING_NOT_RECONCILED), nothing changed', $code === 11 && str_contains($o, 'WAITING_OPENING_NOT_RECONCILED') && $wh() == [1, 1] && $ledger() === $before, $o);
 
 $plan = kt_plan($pdo, kt_read_source($tmp));
 kt_post($pdo, $plan, 'kta_super', $plan['preview_sha']);
@@ -92,7 +92,7 @@ check('B6 no other warehouse was touched', $pdo->query('SELECT id, is_active, ac
 $au = json_decode((string) $pdo->query("SELECT after_data FROM audit_logs WHERE action_code = 'WAREHOUSE_ACTIVATE_CUTOVER'")->fetchColumn(), true);
 check('B7 audit row: before (ACTIVE + LOCKED) → after (ACTIVE + UNLOCKED) + the ledger fingerprint + reference', is_array($au) && $au['is_active'] === 1 && $au['activation_locked'] === 0 && $au['source_reference'] === KT_REFERENCE && isset($au['ledger_fingerprint']));
 [$code, $o] = $cli("activate --plan-sha={$sha} --actor=kta_super --yes");
-check('B8 idempotent: a second activation = "ALREADY ACTIVE", exit 0, still ONE audit row', $code === 0 && str_contains($o, 'ALREADY ACTIVE + UNLOCKED') && (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action_code = 'WAREHOUSE_ACTIVATE_CUTOVER'")->fetchColumn() === 1, $o);
+check('B8 idempotent: a second activation = "ALREADY ACTIVE", exit 0, still ONE audit row', $code === 0 && str_contains($o, 'ALREADY_ACTIVE_AND_UNLOCKED') && (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action_code = 'WAREHOUSE_ACTIVATE_CUTOVER'")->fetchColumn() === 1, $o);
 
 echo "\n== C. Karang Tengah stays an operational warehouse like Cibadak ==\n";
 $active = array_column($pdo->query('SELECT code FROM warehouses WHERE is_active = 1 ORDER BY id')->fetchAll(), 'code');

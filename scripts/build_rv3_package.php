@@ -265,7 +265,7 @@ if ($cut) {
 $put('scripts/rollback.sh', $wrap('ROLLBACK (writes): two-phase, restores the exact pre-apply files.', "APP=\"\${1:?usage: rollback.sh <APP ROOT>}\"\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" rollback --app-root=\"\$APP\"\n"));
 $put('scripts/predeploy_validate.sh', $wrap('PRE-DEPLOY READ-ONLY VALIDATOR (candidate code = the package payload, loaded IN MEMORY): proves the package works against the REAL database. It does NOT prove anything is installed.', "APP=\"\${1:?usage: predeploy_validate.sh <APP ROOT> [--session=11,12] [--start=YYYY-MM-DD --end=YYYY-MM-DD]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_readonly_check.php\" --app-root=\"\$APP\" --mode=predeploy --package-dir=\"\$(dirname \"\$HERE\")\" \"\$@\"\n"));
 $put('scripts/installed_verify.sh', $wrap('POST-DEPLOY INSTALLED VERIFICATION (read-only): (1) every packaged file exists IN THE APPLICATION with the packaged sha256, index.php carries the marker; (2) every V3 class is loaded from <APP>/services (Reflection) and never from the package; (3) all reports reconcile using ONLY the installed code. Fails if any backend file is absent.', "APP=\"\${1:?usage: installed_verify.sh <APP ROOT> [--session=11,12] [--start=YYYY-MM-DD --end=YYYY-MM-DD] [--base-url=https://host]}\"; shift\nBASE=\"\"; REST=()\nfor a in \"\$@\"; do case \"\$a\" in --base-url=*) BASE=\"\$a\";; *) REST+=(\"\$a\");; esac; done\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" verify --app-root=\"\$APP\" \${BASE:+\"\$BASE\"} || { echo \"INSTALLED VERIFICATION FAILED (engine verify)\"; exit 1; }\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_readonly_check.php\" --app-root=\"\$APP\" --mode=installed \"\${REST[@]+\"\${REST[@]}\"}\"\n"));
-foreach (['movement_report_v3_test.php', 'inout_report_test.php', 'inventory_valuation_test.php', 'purchase_report_test.php', 'stock_opname_audit_report_test.php', 'report_export_test.php', 'numeric_unit_code_test.php', 'rv3_sidebar_op_test.php', 'inventory_dashboard_test.php', 'rv3_package_rehearsal.sh', 'rv3_dash_package_rehearsal.sh', 'karang_opening_test.php', 'karang_activation_test.php', 'warehouse_model_test.php', 'period_cutoff_test.php', 'october_opening_combined_test.php', 'rv3_cutover_package_rehearsal.sh'] as $t) {
+foreach (['movement_report_v3_test.php', 'inout_report_test.php', 'inventory_valuation_test.php', 'purchase_report_test.php', 'stock_opname_audit_report_test.php', 'report_export_test.php', 'numeric_unit_code_test.php', 'rv3_sidebar_op_test.php', 'inventory_dashboard_test.php', 'rv3_package_rehearsal.sh', 'rv3_dash_package_rehearsal.sh', 'karang_opening_test.php', 'karang_activation_test.php', 'karang_unlock_state_test.php', 'warehouse_model_test.php', 'period_cutoff_test.php', 'october_opening_combined_test.php', 'rv3_cutover_package_rehearsal.sh'] as $t) {
     $put("tests/{$t}", $show("tests/{$t}"));
 }
 foreach (['lib/rv3.mjs'] as $t) {
@@ -301,6 +301,19 @@ foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($R, Filesy
             }
         } elseif (preg_match('/\bln\s+-s/', $src)) {
             rv3_die('forbidden "ln -s" in ' . substr($f->getPathname(), strlen($R) + 1));
+        }
+    }
+}
+// ---------------------------------------------------------------- the cutover must never assign warehouses.is_active (the unlock changes activation_locked ONLY): fail the BUILD on any UPDATE warehouses whose SET clause names it
+foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($R, FilesystemIterator::SKIP_DOTS)) as $f) {
+    if ($f->isFile() && str_ends_with($f->getFilename(), '.php') && !str_contains($f->getPathname(), '/tests/') && !str_contains($f->getPathname(), '/payload/')) {
+        $raw = (string) file_get_contents($f->getPathname());
+        if (preg_match_all('/UPDATE\s+warehouses\s+SET\s+((?:(?!\bWHERE\b)[^\'"])*)/i', $raw, $um)) {
+            foreach ($um[1] as $setClause) {
+                if (preg_match('/\bis_active\b/i', $setClause)) {
+                    rv3_die('a shipped script assigns warehouses.is_active in an UPDATE (' . substr($f->getPathname(), strlen($R) + 1) . ') — the cutover may only change activation_locked');
+                }
+            }
         }
     }
 }

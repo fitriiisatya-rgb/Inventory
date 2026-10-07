@@ -158,7 +158,7 @@ $act = static function (string $args) use ($root, $tmp): array {
 };
 $khState = static fn (): array => array_map('intval', $GLOBALS['pdo']->query("SELECT is_active, activation_locked FROM warehouses WHERE id = {$GLOBALS['kt']}")->fetch(PDO::FETCH_NUM));
 [$code, $o] = $act('plan');
-check('E1 plan reports the production state as "ACTIVE + LOCKED" (never just "inactive") with TARGET ACTIVE + UNLOCKED; gates FAIL while no opening is posted', $code === 11 && str_contains($o, 'CURRENT : ACTIVE + LOCKED') && str_contains($o, 'TARGET  : ACTIVE + UNLOCKED') && !preg_match('/CURRENT : INACTIVE/', $o) && str_contains($o, 'FAIL - opening balance posted'), $o);
+check('E1 plan reports the production state as "ACTIVE + LOCKED" (never just "inactive") with TARGET ACTIVE + UNLOCKED; gates FAIL while no opening is posted', $code === 11 && str_contains($o, 'CURRENT: ACTIVE + LOCKED') && str_contains($o, 'TARGET: ACTIVE + UNLOCKED') && str_contains($o, 'unlock permitted: NO') && str_contains($o, 'planned mutation: activation_locked 1 -> 0') && !str_contains($o, 'SET is_active') && !preg_match('/CURRENT: INACTIVE/', $o) && str_contains($o, 'FAIL - opening balance posted'), $o);
 $kp = kt_plan($pdo, kt_read_source($tmp));
 check('E2 the opening plan accepts ACTIVE + LOCKED (normal posting path, no bypass) and prints the state in words', $kp['warehouse']['mode'] === 'normal-active' && str_contains(implode("\n", kt_report_lines($kp)), 'ACTIVE + LOCKED') && !$kp['blocked']);
 [$code, $o] = $act('activate --plan-sha=' . str_repeat('0', 64) . ' --actor=wm_super --yes');
@@ -175,14 +175,14 @@ check('E6 NO stock movement: ledger / FIFO / quantities / values / transfers / S
 $au = json_decode((string) $pdo->query("SELECT before_data FROM audit_logs WHERE action_code = 'WAREHOUSE_ACTIVATE_CUTOVER'")->fetchColumn(), true);
 check('E7 audit before = ACTIVE + LOCKED', $au['is_active'] === 1 && $au['activation_locked'] === 1 && $au['state'] === 'ACTIVE + LOCKED');
 [$code, $o] = $act("activate --plan-sha={$planKt} --actor=wm_super --yes");
-check('E8 idempotent: already ACTIVE + UNLOCKED → "nothing to do", exit 0, ONE audit row', $code === 0 && str_contains($o, 'ALREADY ACTIVE + UNLOCKED') && (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action_code = 'WAREHOUSE_ACTIVATE_CUTOVER'")->fetchColumn() === 1);
+check('E8 idempotent: already ACTIVE + UNLOCKED → "nothing to do", exit 0, ONE audit row', $code === 0 && str_contains($o, 'ALREADY_ACTIVE_AND_UNLOCKED') && (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action_code = 'WAREHOUSE_ACTIVATE_CUTOVER'")->fetchColumn() === 1);
 [$code, $o] = $act('rollback --yes --confirm=ACTIVATE_ROLLBACK');
 check('E9 rollback (no operational transaction): back to ACTIVE + LOCKED — is_active never touched', $code === 0 && $khState() === [1, 1], $o);
 $pdo->exec("UPDATE warehouses SET is_active = 0 WHERE id = {$kt}");
 [$code, $o] = $act('plan');
 $bad = $sha($o);
 [$code2, $o2] = $act("activate --plan-sha={$bad} --actor=wm_super --yes");
-check('E10 an UNEXPECTEDLY INACTIVE Karang Tengah is never silently activated: plan reports CURRENT INACTIVE + LOCKED as unexpected, activate refused (exit 11), is_active stays 0', $code === 11 && str_contains($o, 'CURRENT: INACTIVE + LOCKED') && $code2 === 11 && $khState()[0] === 0, $o2);
+check('E10 an UNEXPECTEDLY INACTIVE Karang Tengah is never silently activated: plan reports CURRENT INACTIVE + LOCKED as UNEXPECTED_INACTIVE_STATE, activate refused (exit 11), is_active stays 0', $code === 11 && str_contains($o, 'CURRENT: INACTIVE + LOCKED') && str_contains($o, 'UNEXPECTED_INACTIVE_STATE') && $code2 === 11 && $khState()[0] === 0, $o2);
 $pdo->exec("UPDATE warehouses SET is_active = 1 WHERE id = {$kt}");
 @unlink($tmp);
 

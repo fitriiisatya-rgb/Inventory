@@ -112,8 +112,8 @@ $build = static function () use ($pdo, $source, $opt, $fingerprint): array {
     }
     $ia = $w['is_active'] ?? null;
     $lk = $w['activation_locked'] ?? null;
-    $state = $ia === 1 && $lk === 0 ? 'ALREADY_UNLOCKED' : ($ia === 1 && $lk === 1 ? 'READY_TO_UNLOCK' : 'UNEXPECTED');
-    $gates[] = ['current state is ACTIVE + LOCKED (the supported production state) or already ACTIVE + UNLOCKED', $state !== 'UNEXPECTED', 'CURRENT: ' . kt_state_label($ia, $lk)];
+    $state = kt_unlock_state($ia, $lk);
+    $gates[] = ['state is ACTIVE + LOCKED (the supported production state) or already ACTIVE + UNLOCKED — never INACTIVE (UNEXPECTED_INACTIVE_STATE)', in_array($state, ['READY_TO_UNLOCK', 'ALREADY_ACTIVE_AND_UNLOCKED'], true), 'CURRENT: ' . kt_state_label($ia, $lk)];
     $ok = count(array_filter($gates, static fn ($g) => !$g[1])) === 0;
     return ['warehouse_id' => $w['warehouse_id'], 'before' => ['is_active' => $w['is_active'], 'activation_locked' => $w['activation_locked']], 'state' => $state, 'gates' => $gates, 'gates_ok' => $ok, 'warehouses' => $whs,
         'fingerprint' => $fingerprint($pdo), 'plan' => $plan,
@@ -124,6 +124,7 @@ try {
     if ($mode === 'plan' || ($mode === 'activate' && !$yes)) {
         $a = $readOnly($build);
         $say('=== KARANG TENGAH UNLOCK — PLAN (READ ONLY) ===');
+        $say('script: kt_activate.php (unlock-only: activation_locked 1 -> 0, is_active never assigned)  sha256=' . substr((string) hash_file('sha256', __FILE__), 0, 16));
         $say('Gudang saat ini:');
         foreach ($a['warehouses'] as $w) {
             $say(sprintf('  #%-3d %-16s %-28s tipe %-8s is_active=%d activation_locked=%d  → %s', $w['id'], $w['code'], $w['name'], $w['warehouse_type'], $w['is_active'], $w['activation_locked'], kt_state_label((int) $w['is_active'], (int) $w['activation_locked'])));
@@ -134,18 +135,26 @@ try {
             $say(($ok ? 'PASS' : 'FAIL') . " - {$n}  [{$d}]");
         }
         $say('');
-        $say('CURRENT : ' . kt_state_label($a['before']['is_active'], $a['before']['activation_locked']));
-        $say('TARGET  : ACTIVE + UNLOCKED   (is_active tetap 1; hanya activation_locked 1 → 0)');
-        $say('PERUBAHAN: UPDATE warehouses SET activation_locked = 0 WHERE id = ' . ($a['warehouse_id'] ?? '?') . ' AND is_active = 1 AND activation_locked = 1  (satu baris; tidak ada transaksi, FIFO layer, qty atau nilai yang dibuat / diubah; gudang lain tidak disentuh)');
-        $say('SESUDAH: gudang yang SUDAH aktif ini kembali berperilaku seperti Cibadak (activation_locked = 0): bukan lagi dikecualikan oleh kunci aktivasi / hapus; pemilih gudang operasional (is_active = 1) tidak berubah.');
+        $openingGate = array_values(array_filter($a['gates'], static fn ($g) => str_starts_with($g[0], 'opening balance posted')))[0] ?? ['', false, ''];
+        $reconOk = count(array_filter($a['gates'], static fn ($g) => !$g[1] && !str_starts_with($g[0], 'state is '))) === 0;
+        $permitted = $a['state'] === 'READY_TO_UNLOCK' && $a['gates_ok'];
+        $say('Karang Tengah:');
+        $say('CURRENT: ' . kt_state_label($a['before']['is_active'], $a['before']['activation_locked']));
+        $say('TARGET: ACTIVE + UNLOCKED');
+        $say('opening posted: ' . ($openingGate[1] ? 'PASS' : 'FAIL / WAITING — opening not posted') . '   [' . $openingGate[2] . ']');
+        $say('ledger + FIFO + Reports V3 reconciliation: ' . ($reconOk ? 'PASS' : 'FAIL / WAITING'));
+        $say('unlock permitted: ' . ($a['state'] === 'ALREADY_ACTIVE_AND_UNLOCKED' ? 'NOT NEEDED (ALREADY_ACTIVE_AND_UNLOCKED)' : ($a['state'] === 'UNEXPECTED_INACTIVE_STATE' ? 'NO (UNEXPECTED_INACTIVE_STATE — never activated by this process)' : ($permitted ? 'YES' : 'NO'))));
+        $say('planned mutation: activation_locked 1 -> 0   (is_active is NOT modified)');
+        $say('SQL (affected_rows must be 1, otherwise ROLLBACK): ' . str_replace(':id', (string) ($a['warehouse_id'] ?? '?'), KT_UNLOCK_SQL));
+        $say('Satu baris; tidak ada transaksi, FIFO layer, qty atau nilai yang dibuat / diubah; gudang lain tidak disentuh. Karang Tengah sudah aktif (is_active = 1) dan tetap aktif; pemilih gudang operasional tidak berubah.');
         $say('Sidik jari ledger (harus identik sesudah aktivasi): ' . json_encode($a['fingerprint']));
         $say('PLAN SHA256 : ' . $a['sha']);
-        $say('STATUS      : ' . ($a['state'] === 'ALREADY_UNLOCKED' ? 'sudah ACTIVE + UNLOCKED — tidak ada yang perlu dilakukan' : ($a['gates_ok'] ? 'SIAP (belum ada yang ditulis)' : 'DIBLOKIR — gerbang belum lulus / status tidak terduga')));
+        $say('STATUS      : ' . ($a['state'] === 'ALREADY_ACTIVE_AND_UNLOCKED' ? 'ALREADY_ACTIVE_AND_UNLOCKED — tidak ada yang perlu dilakukan' : ($a['state'] === 'UNEXPECTED_INACTIVE_STATE' ? 'UNEXPECTED_INACTIVE_STATE — DIBLOKIR' : ($a['gates_ok'] ? 'SIAP (belum ada yang ditulis)' : 'WAITING / BLOCKED — ' . ($openingGate[1] ? 'rekonsiliasi belum lulus' : 'opening not posted')))));
         if ($mode === 'activate') {
             $say('NOT APPLIED — activate was started without --yes; nothing was written.');
             rv3_script_exit(10);
         }
-        rv3_script_exit($a['state'] === 'ALREADY_UNLOCKED' || $a['gates_ok'] ? 0 : 11);
+        rv3_script_exit($a['state'] === 'ALREADY_ACTIVE_AND_UNLOCKED' || $a['gates_ok'] ? 0 : 11);
     }
     if ($mode === 'activate') {
         if ($opt['plan-sha'] === null || $opt['actor'] === null) {
@@ -153,12 +162,16 @@ try {
             rv3_script_exit(2);
         }
         $a = $readOnly($build);
-        if ($a['state'] === 'ALREADY_UNLOCKED') {
-            $say('ALREADY ACTIVE + UNLOCKED — nothing to do (idempotent, no audit row written).');
+        if ($a['state'] === 'ALREADY_ACTIVE_AND_UNLOCKED') {
+            $say('ALREADY_ACTIVE_AND_UNLOCKED — ALREADY ACTIVE + UNLOCKED, nothing to do (idempotent: no write, no audit row).');
             rv3_script_exit(0);
         }
+        if ($a['state'] === 'UNEXPECTED_INACTIVE_STATE' || $a['state'] === 'NOT_FOUND') {
+            fwrite(STDERR, "{$a['state']}: Karang Tengah is " . kt_state_label($a['before']['is_active'], $a['before']['activation_locked']) . " — blocked; this process never sets is_active and never activates a warehouse\n");
+            rv3_script_exit(11);
+        }
         if (!$a['gates_ok']) {
-            fwrite(STDERR, "GATES_FAILED: the opening balance is not posted + reconciled, or the warehouse state is unexpected — Karang Tengah is NOT unlocked\n");
+            fwrite(STDERR, "WAITING_OPENING_NOT_RECONCILED: the opening balance is not posted + reconciled — Karang Tengah is NOT unlocked\n");
             rv3_script_exit(11);
         }
         if (!hash_equals($a['sha'], (string) $opt['plan-sha'])) {
@@ -175,10 +188,10 @@ try {
         $whId = (int) $a['warehouse_id'];
         $res = Database::transaction(function (PDO $tx) use ($whId, $actor, $fingerprint, $a) {
             $before = $fingerprint($tx);
-            $n = $tx->prepare('UPDATE warehouses SET activation_locked = 0 WHERE id = :id AND is_active = 1 AND activation_locked = 1');
+            $n = $tx->prepare(KT_UNLOCK_SQL);
             $n->execute(['id' => $whId]);
             if ($n->rowCount() !== 1) {
-                throw new RuntimeException('exactly one warehouse row must change — nothing was changed');
+                throw new RuntimeException('affected_rows must be exactly 1 — rolled back, nothing was changed');
             }
             $after = $fingerprint($tx);
             if ($before !== $after) {
@@ -220,7 +233,10 @@ try {
     if ((int) $tr->fetchColumn() > 0) {
         $problems[] = 'a transfer references the warehouse';
     }
-    $say('UNLOCK ROLLBACK PLAN: warehouse id ' . $whId . ' back to ACTIVE + LOCKED (is_active stays 1, activation_locked=' . ($row ? (json_decode((string) $row['before_data'], true)['activation_locked'] ?? 1) : 1) . ')');
+    $say('UNLOCK ROLLBACK PLAN: warehouse id ' . $whId . ' back to ACTIVE + LOCKED — activation_locked 0 -> 1 only (is_active is NOT modified): ' . str_replace(':id', (string) $whId, KT_RELOCK_SQL));
+    if (kt_unlock_state($a['before']['is_active'], $a['before']['activation_locked']) !== 'ALREADY_ACTIVE_AND_UNLOCKED') {
+        $problems[] = 'the warehouse is not ACTIVE + UNLOCKED now (' . kt_state_label($a['before']['is_active'], $a['before']['activation_locked']) . ') — nothing to roll back';
+    }
     if ($problems) {
         foreach ($problems as $p) {
             $say("BLOCKED: {$p}");
@@ -231,10 +247,13 @@ try {
         $say('NOT APPLIED — add  --yes --confirm=ACTIVATE_ROLLBACK  to execute.');
         rv3_script_exit(10);
     }
-    $lock = (int) (json_decode((string) $row['before_data'], true)['activation_locked'] ?? 1);
-    Database::transaction(static function (PDO $tx) use ($whId, $lock) {
-        $tx->prepare('UPDATE warehouses SET activation_locked = :l WHERE id = :id AND is_active = 1')->execute(['l' => $lock, 'id' => $whId]);
-        AuditService::log($tx, null, 'kt_activate_cli', 'WAREHOUSE_ACTIVATE_ROLLBACK', 'warehouses', $whId, ['is_active' => 1, 'activation_locked' => 0], ['is_active' => 1, 'activation_locked' => $lock], KT_REFERENCE);
+    Database::transaction(static function (PDO $tx) use ($whId) {
+        $n = $tx->prepare(KT_RELOCK_SQL);
+        $n->execute(['id' => $whId]);
+        if ($n->rowCount() !== 1) {
+            throw new RuntimeException('affected_rows must be exactly 1 — rolled back, nothing was changed');
+        }
+        AuditService::log($tx, null, 'kt_activate_cli', 'WAREHOUSE_ACTIVATE_ROLLBACK', 'warehouses', $whId, ['is_active' => 1, 'activation_locked' => 0], ['is_active' => 1, 'activation_locked' => 1], KT_REFERENCE);
     });
     $say('ROLLED BACK — warehouse is ACTIVE + LOCKED again.');
     rv3_script_exit(0);

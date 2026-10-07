@@ -149,6 +149,40 @@ function kt_read_source(string $path): array
         'title' => implode(' | ', $titleLines), 'sheets' => kt_sheet_names($path)];
 }
 
+/**
+ * The ONLY two warehouse mutations the cutover may ever perform. Neither touches is_active: it is a WHERE condition, never an assignment. affected_rows must be exactly 1.
+ * (tests/karang_unlock_state_test.php parses these statements and proves the SET column list is exactly [activation_locked].)
+ */
+const KT_UNLOCK_SQL = 'UPDATE warehouses SET activation_locked = 0 WHERE id = :id AND is_active = 1 AND activation_locked = 1';
+const KT_RELOCK_SQL = 'UPDATE warehouses SET activation_locked = 1 WHERE id = :id AND is_active = 1 AND activation_locked = 0';
+
+/** @return list<string> the columns assigned in the SET clause of an UPDATE statement */
+function kt_set_columns(string $sql): array
+{
+    if (preg_match('/\bSET\s+(.*?)\s+WHERE\b/is', $sql, $m) !== 1) {
+        return [];
+    }
+    $cols = [];
+    foreach (explode(',', $m[1]) as $part) {
+        if (preg_match('/^\s*`?(\w+)`?\s*=/', $part, $c) === 1) {
+            $cols[] = strtolower($c[1]);
+        }
+    }
+    return $cols;
+}
+
+/** the unlock state machine: READY_TO_UNLOCK (ACTIVE + LOCKED, still gated) · ALREADY_ACTIVE_AND_UNLOCKED (no write) · UNEXPECTED_INACTIVE_STATE (blocked, never activated) · NOT_FOUND */
+function kt_unlock_state(?int $isActive, ?int $locked): string
+{
+    if ($isActive === null || $locked === null) {
+        return 'NOT_FOUND';
+    }
+    if ($isActive !== 1) {
+        return 'UNEXPECTED_INACTIVE_STATE';
+    }
+    return $locked === 1 ? 'READY_TO_UNLOCK' : 'ALREADY_ACTIVE_AND_UNLOCKED';
+}
+
 /** the warehouse state in words — "inactive" is never used for an ACTIVE + LOCKED warehouse */
 function kt_state_label(?int $isActive, ?int $locked): string
 {
