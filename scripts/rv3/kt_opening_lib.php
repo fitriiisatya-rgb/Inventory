@@ -149,6 +149,15 @@ function kt_read_source(string $path): array
         'title' => implode(' | ', $titleLines), 'sheets' => kt_sheet_names($path)];
 }
 
+/** the warehouse state in words — "inactive" is never used for an ACTIVE + LOCKED warehouse */
+function kt_state_label(?int $isActive, ?int $locked): string
+{
+    if ($isActive === null || $locked === null) {
+        return 'NOT FOUND';
+    }
+    return ($isActive === 1 ? 'ACTIVE' : 'INACTIVE') . ' + ' . ($locked === 1 ? 'LOCKED' : 'UNLOCKED');
+}
+
 /** @return list<string> worksheet names of the workbook (audit metadata) */
 function kt_sheet_names(string $path): array
 {
@@ -374,7 +383,7 @@ function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_C
     // ---- warehouse + global gates
     $wh = $m['warehouse'];
     $state = ['warehouse_found' => $wh !== null, 'warehouse_id' => $wh ? (int) $wh['id'] : null, 'warehouse_code' => $warehouseCode, 'warehouse_name' => $wh['name'] ?? null,
-        'is_active' => $wh ? (int) $wh['is_active'] : null, 'activation_locked' => $wh ? (int) $wh['activation_locked'] : null, 'mode' => null,
+        'warehouse_type' => $wh['warehouse_type'] ?? null, 'is_active' => $wh ? (int) $wh['is_active'] : null, 'activation_locked' => $wh ? (int) $wh['activation_locked'] : null, 'mode' => null,
         'existing_ledger_rows' => 0, 'existing_batches' => 0, 'already_posted' => false, 'already_posted_transactions' => 0, 'period_locked' => false];
     $global = [];
     if ($wh === null) {
@@ -533,7 +542,7 @@ function kt_report_lines(array $plan): array
         $o[] = "PERINGATAN        : {$warn}";
     }
     $o[] = "Referensi         : {$plan['reference']}   Effective date: {$plan['effective_date']} 00:00:00   Tipe ledger: OPENING (bukan Pembelian / Stock IN / Transfer / Adjustment)";
-    $o[] = sprintf('Gudang            : %s (%s)  id=%s  is_active=%s  activation_locked=%s  mode posting=%s', $w['warehouse_name'] ?? '—', $w['warehouse_code'], $w['warehouse_id'] ?? '—', $w['is_active'] ?? '—', $w['activation_locked'] ?? '—', $w['mode'] ?? 'DITOLAK');
+    $o[] = sprintf('Gudang            : %s (%s)  id=%s  tipe=%s  is_active=%s  activation_locked=%s  → %s   mode posting=%s', $w['warehouse_name'] ?? '—', $w['warehouse_code'], $w['warehouse_id'] ?? '—', $w['warehouse_type'] ?? '—', $w['is_active'] ?? '—', $w['activation_locked'] ?? '—', kt_state_label($w['is_active'] ?? null, $w['activation_locked'] ?? null), $w['mode'] ?? 'DITOLAK');
     $o[] = sprintf('Ledger gudang    : %d baris lain, %d FIFO layer sebelum posting; sudah diposting dengan referensi ini: %s', $w['existing_ledger_rows'], $w['existing_batches'], $w['already_posted'] ? "YA ({$w['already_posted_transactions']} transaksi)" : 'tidak');
     $o[] = '';
     $o[] = 'RINGKASAN';

@@ -2,8 +2,8 @@
 declare(strict_types=1);
 
 /**
- * Karang Tengah WAREHOUSE ACTIVATION (scripts/rv3/kt_activate.php): sequence-gated (opening posted AND reconciled first), idempotent, one warehouse row, no stock movement,
- * Karang Tengah then appears wherever Cibadak appears (the single is_active source of every operational warehouse selector), rollback guarded.
+ * Karang Tengah UNLOCK (scripts/rv3/kt_activate.php): production state is ACTIVE + LOCKED → ACTIVE + UNLOCKED. Sequence-gated (opening posted AND reconciled first), idempotent, one warehouse row,
+ * is_active never touched, no stock movement, Karang Tengah stays in every operational selector (the single is_active source), rollback guarded.
  *
  * Usage: php tests/karang_activation_test.php
  */
@@ -38,7 +38,7 @@ foreach ([['kta_super', $super], ['kta_admin', $admin]] as [$n, $r]) {
 $superId = (int) $pdo->query("SELECT id FROM users WHERE username='kta_super'")->fetchColumn();
 $pdo->exec("INSERT INTO items (sku, name, base_unit_id, status) VALUES ('A1','Item A1',{$kg},'ACTIVE'), ('A2','Item A2',{$kg},'ACTIVE')");
 $pdo->exec("INSERT INTO warehouses (code, name, warehouse_type, is_active) VALUES ('SCM','Gudang SCM','MAIN',1), ('CIBADAK','Gudang Cibadak','TRANSIT',1)");
-$pdo->exec("INSERT INTO warehouses (code, name, warehouse_type, is_active, activation_locked) VALUES ('KARANG_TENGAH','Gudang Karang Tengah','TRANSIT',0,1)");
+$pdo->exec("INSERT INTO warehouses (code, name, warehouse_type, is_active, activation_locked) VALUES ('KARANG_TENGAH','Gudang Karang Tengah','TRANSIT',1,1)");   // the PRODUCTION state: ACTIVE + LOCKED
 $khId = (int) $pdo->query("SELECT id FROM warehouses WHERE code='KARANG_TENGAH'")->fetchColumn();
 $scmId = (int) $pdo->query("SELECT id FROM warehouses WHERE code='SCM'")->fetchColumn();
 $a1 = (int) $pdo->query("SELECT id FROM items WHERE sku='A1'")->fetchColumn();
@@ -62,12 +62,12 @@ $ledger = static fn (): string => json_encode([$pdo->query('SELECT COUNT(*) FROM
 
 echo "== A. the sequence: NOTHING is activated before the opening is posted + reconciled ==\n";
 [$code, $o] = $cli('plan');
-check('A1 plan BEFORE the opening: exit 11, gates FAIL (opening not posted), warehouse still inactive + locked', $code === 11 && str_contains($o, 'FAIL - opening balance posted') && $wh() == [0, 1], "exit {$code}");
+check('A1 plan BEFORE the opening: exit 11, gates FAIL (opening not posted), warehouse still ACTIVE + LOCKED', $code === 11 && str_contains($o, 'FAIL - opening balance posted') && $wh() == [1, 1], "exit {$code}");
 $lists = $o;
-check('A2 plan lists every warehouse (SCM, CIBADAK, KARANG_TENGAH) with is_active / activation_locked and states the exact one-row change', str_contains($lists, 'SCM') && str_contains($lists, 'CIBADAK') && str_contains($lists, 'KARANG_TENGAH') && str_contains($lists, 'UPDATE warehouses SET is_active = 1, activation_locked = 0 WHERE id = ' . $khId));
+check('A2 plan lists every warehouse (SCM, CIBADAK, KARANG_TENGAH) with is_active / activation_locked and states CURRENT ACTIVE + LOCKED → TARGET ACTIVE + UNLOCKED and the exact one-row change', str_contains($lists, 'SCM') && str_contains($lists, 'CIBADAK') && str_contains($lists, 'KARANG_TENGAH') && str_contains($lists, 'CURRENT : ACTIVE + LOCKED') && str_contains($lists, 'TARGET  : ACTIVE + UNLOCKED') && str_contains($lists, 'UPDATE warehouses SET activation_locked = 0 WHERE id = ' . $khId));
 $before = $ledger();
 [$code, $o] = $cli('activate --plan-sha=' . str_repeat('0', 64) . ' --actor=kta_super --yes');
-check('A3 activate --yes BEFORE the opening is posted: refused (exit 11 GATES_FAILED), nothing changed', $code === 11 && str_contains($o, 'GATES_FAILED') && $wh() == [0, 1] && $ledger() === $before, $o);
+check('A3 activate --yes BEFORE the opening is posted: refused (exit 11 GATES_FAILED), nothing changed', $code === 11 && str_contains($o, 'GATES_FAILED') && $wh() == [1, 1] && $ledger() === $before, $o);
 
 $plan = kt_plan($pdo, kt_read_source($tmp));
 kt_post($pdo, $plan, 'kta_super', $plan['preview_sha']);
@@ -75,28 +75,28 @@ $afterOpening = $ledger();
 [$code, $o] = $cli('plan');
 $sha = $planSha($o);
 check('A4 plan AFTER the opening: every gate PASS (posted, ledger reconciliation, report reconciliation), exit 0, plan sha printed', $code === 0 && !str_contains($o, 'FAIL -') && str_contains($o, 'STATUS      : SIAP') && $sha !== '', "exit {$code}: " . substr($o, -300));
-check('A5 plan wrote nothing', $wh() == [0, 1] && $ledger() === $afterOpening);
+check('A5 plan wrote nothing', $wh() == [1, 1] && $ledger() === $afterOpening);
 
 echo "\n== B. activation ==\n";
 [$code, $o] = $cli("activate --plan-sha={$sha} --actor=kta_super");
-check('B1 activate without --yes: exit 10 NOT APPLIED, nothing changed', $code === 10 && str_contains($o, 'NOT APPLIED') && $wh() == [0, 1]);
+check('B1 activate without --yes: exit 10 NOT APPLIED, nothing changed', $code === 10 && str_contains($o, 'NOT APPLIED') && $wh() == [1, 1]);
 [$code, $o] = $cli('activate --plan-sha=' . str_repeat('0', 64) . ' --actor=kta_super --yes');
-check('B2 a plan sha that is not the reviewed one: exit 13, nothing changed', $code === 13 && $wh() == [0, 1], $o);
+check('B2 a plan sha that is not the reviewed one: exit 13, nothing changed', $code === 13 && $wh() == [1, 1], $o);
 [$code, $o] = $cli("activate --plan-sha={$sha} --actor=kta_admin --yes");
-check('B3 by a non-SUPERADMIN: exit 14, nothing changed', $code === 14 && $wh() == [0, 1], $o);
+check('B3 by a non-SUPERADMIN: exit 14, nothing changed', $code === 14 && $wh() == [1, 1], $o);
 $otherWh = $pdo->query('SELECT id, is_active, activation_locked FROM warehouses WHERE id <> ' . $khId . ' ORDER BY id')->fetchAll(PDO::FETCH_NUM);
 [$code, $o] = $cli("activate --plan-sha={$sha} --actor=kta_super --yes");
-check('B4 activate --yes: exit 0, Karang Tengah is_active=1 activation_locked=0', $code === 0 && $wh() == [1, 0] && str_contains($o, 'ACTIVATED'), "exit {$code}: {$o}");
-check('B5 activation created NO stock movement: transactions / lines / FIFO layers / quantities / values / allocations identical to the moment after the opening', $ledger() === $afterOpening);
+check('B4 activate --yes: exit 0, ACTIVE + LOCKED → ACTIVE + UNLOCKED (is_active stays 1, activation_locked 1 → 0)', $code === 0 && $wh() == [1, 0] && str_contains($o, 'UNLOCKED'), "exit {$code}: {$o}");
+check('B5 the unlock created NO stock movement: transactions / lines / FIFO layers / quantities / values / allocations identical to the moment after the opening', $ledger() === $afterOpening);
 check('B6 no other warehouse was touched', $pdo->query('SELECT id, is_active, activation_locked FROM warehouses WHERE id <> ' . $khId . ' ORDER BY id')->fetchAll(PDO::FETCH_NUM) == $otherWh);
 $au = json_decode((string) $pdo->query("SELECT after_data FROM audit_logs WHERE action_code = 'WAREHOUSE_ACTIVATE_CUTOVER'")->fetchColumn(), true);
-check('B7 audit row: before (inactive / locked) → after (active / unlocked) + the ledger fingerprint + reference', is_array($au) && $au['is_active'] === 1 && $au['activation_locked'] === 0 && $au['source_reference'] === KT_REFERENCE && isset($au['ledger_fingerprint']));
+check('B7 audit row: before (ACTIVE + LOCKED) → after (ACTIVE + UNLOCKED) + the ledger fingerprint + reference', is_array($au) && $au['is_active'] === 1 && $au['activation_locked'] === 0 && $au['source_reference'] === KT_REFERENCE && isset($au['ledger_fingerprint']));
 [$code, $o] = $cli("activate --plan-sha={$sha} --actor=kta_super --yes");
-check('B8 idempotent: a second activation = "ALREADY ACTIVE", exit 0, still ONE audit row', $code === 0 && str_contains($o, 'ALREADY ACTIVE') && (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action_code = 'WAREHOUSE_ACTIVATE_CUTOVER'")->fetchColumn() === 1, $o);
+check('B8 idempotent: a second activation = "ALREADY ACTIVE", exit 0, still ONE audit row', $code === 0 && str_contains($o, 'ALREADY ACTIVE + UNLOCKED') && (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action_code = 'WAREHOUSE_ACTIVATE_CUTOVER'")->fetchColumn() === 1, $o);
 
-echo "\n== C. Karang Tengah now behaves like Cibadak ==\n";
+echo "\n== C. Karang Tengah stays an operational warehouse like Cibadak ==\n";
 $active = array_column($pdo->query('SELECT code FROM warehouses WHERE is_active = 1 ORDER BY id')->fetchAll(), 'code');
-check('C1 the single source of every operational selector (GET /warehouses → is_active = 1) lists SCM, CIBADAK and KARANG_TENGAH', $active === ['SCM', 'CIBADAK', 'KARANG_TENGAH'], json_encode($active));
+check('C1 the single source of every operational selector (GET /warehouses → is_active = 1) lists SCM, CIBADAK and KARANG_TENGAH (before AND after the unlock)', $active === ['SCM', 'CIBADAK', 'KARANG_TENGAH'], json_encode($active));
 $guard = true;
 try {
     WarehouseGuardService::assertActive($pdo, $khId);
@@ -109,7 +109,7 @@ check('C3 a normal Stock IN into Karang Tengah works WITHOUT the cutover bypass 
 
 echo "\n== D. rollback guard ==\n";
 [$code, $o] = $cli('rollback --yes --confirm=ACTIVATE_ROLLBACK');
-check('D1 rollback is BLOCKED once an operational transaction exists (the Stock IN of C3); warehouse stays active', $code === 11 && str_contains($o, 'operational transactions exist') && $wh() == [1, 0], $o);
+check('D1 rollback is BLOCKED once an operational transaction exists (the Stock IN of C3); stays ACTIVE + UNLOCKED', $code === 11 && str_contains($o, 'operational transactions exist') && $wh() == [1, 0], $o);
 $batchIds = implode(',', array_map('intval', $pdo->query("SELECT created_batch_id FROM inventory_transaction_lines WHERE transaction_id = {$r['transaction_id']}")->fetchAll(PDO::FETCH_COLUMN)));
 $pdo->exec("UPDATE inventory_transaction_lines SET created_batch_id = NULL WHERE transaction_id = {$r['transaction_id']}");
 $pdo->exec("DELETE FROM inventory_batches WHERE id IN ({$batchIds})");
@@ -117,9 +117,9 @@ $pdo->exec("DELETE FROM item_price_history WHERE source_transaction_line_id IN (
 $pdo->exec("DELETE FROM inventory_transaction_lines WHERE transaction_id = {$r['transaction_id']}");
 $pdo->exec("DELETE FROM inventory_transactions WHERE id = {$r['transaction_id']}");
 [$code, $o] = $cli('rollback');
-check('D2 rollback without --yes: exit 10, lists the plan, changes nothing', $code === 10 && str_contains($o, 'back to is_active=0') && $wh() == [1, 0], $o);
+check('D2 rollback without --yes: exit 10, lists the plan, changes nothing', $code === 10 && str_contains($o, 'back to ACTIVE + LOCKED') && $wh() == [1, 0], $o);
 [$code, $o] = $cli('rollback --yes --confirm=ACTIVATE_ROLLBACK');
-check('D3 rollback --yes --confirm (no operational transaction): inactive + locked again, ledger untouched, rollback audited', $code === 0 && $wh() == [0, 1] && $ledger() === $afterOpening && (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action_code = 'WAREHOUSE_ACTIVATE_ROLLBACK'")->fetchColumn() === 1, $o);
+check('D3 rollback --yes --confirm (no operational transaction): ACTIVE + LOCKED again (is_active untouched), ledger untouched, rollback audited', $code === 0 && $wh() == [1, 1] && $ledger() === $afterOpening && (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action_code = 'WAREHOUSE_ACTIVATE_ROLLBACK'")->fetchColumn() === 1, $o);
 [$code, $o] = $cli('plan');
 $sha2 = $planSha($o);
 [$code, $o] = $cli("activate --plan-sha={$sha2} --actor=kta_super --yes");

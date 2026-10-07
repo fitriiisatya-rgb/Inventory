@@ -117,7 +117,10 @@ if [ "${RV3_VALIDATE:-0}" = 1 ]; then
   [ -s "$P/out/karang_unit_conversions.csv" ] && [ -s "$P/out/karang_inactive_items.csv" ]; chk "[karang] unit-conversion and inactive-master lists are written too" $?
   grep -q "PERINGATAN        : judul sheet sumber menyebut" "$W/kt_prev.txt" && grep -q "tanggal efektif yang disetujui = 2026-10-01" "$W/kt_prev.txt"; chk "[karang] the sheet title 'Periode Juli 2026' is a WARNING only; the effective date stays 2026-10-01" $?
   bash "$P/scripts/karang_activation_plan.sh" "$T" >"$W/act_plan.txt" 2>&1; rc=$?
-  [ $rc -ne 0 ] && grep -q "FAIL - " "$W/act_plan.txt" && grep -q "UPDATE warehouses SET is_active = 1, activation_locked = 0" "$W/act_plan.txt"; chk "[activation] plan runs read-only; with no opening posted the gates FAIL (exit $rc) and the one-row change is stated" $?
+  [ $rc -ne 0 ] && grep -q "FAIL - " "$W/act_plan.txt" && grep -q "UPDATE warehouses SET activation_locked = 0" "$W/act_plan.txt" && grep -q "TARGET  : ACTIVE + UNLOCKED" "$W/act_plan.txt"; chk "[unlock] plan runs read-only; with no opening posted the gates FAIL (exit $rc), TARGET is ACTIVE + UNLOCKED and the one-row change is stated" $?
+  bash "$P/scripts/warehouse_model_check.sh" "$T" >"$W/wm_check.txt" 2>&1; rc=$?
+  grep -q "MODEL GUDANG — CHECK" "$W/wm_check.txt" && grep -q "PEMBACA warehouse_type DI KODE TERPASANG" "$W/wm_check.txt" && grep -q "KESIMPULAN" "$W/wm_check.txt"; chk "[warehouse model] the read-only check prints the type of every warehouse, every reader of warehouse_type in the installed code and the conclusion (exit $rc)" $?
+  grep -q "TINJAU!" "$W/wm_check.txt"; [ $? -ne 0 ]; chk "[warehouse model] no unknown reader of warehouse_type in the installed code of this tree" $?
   bash "$P/scripts/october_forecast.sh" "$T" --sessions=1,2 --cutoff=2026-09-30 >"$W/oct_fc.txt" 2>&1; rc=$?
   grep -q "PREDIKSI STOK AWAL OKTOBER" "$W/oct_fc.txt" && grep -q "SEMUA GUDANG" "$W/oct_fc.txt" && grep -q "PASS - No double counting" "$W/oct_fc.txt"; chk "[forecast] the October opening forecast prints every warehouse + SEMUA GUDANG with the invariants (exit $rc)" $?
   [ "$(tree_sum "$T")" = "$before" ]; chk "[forecast] the previews wrote nothing into the application" $?

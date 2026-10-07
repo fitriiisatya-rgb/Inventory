@@ -46,7 +46,7 @@ $today = min(date('Y-m-d'), '2026-10-31');
 // ---- Karang Tengah master + a 3-row physical SO file
 $kgId = (int) $pdo->query("SELECT id FROM units WHERE code='KG'")->fetchColumn();
 $pdo->exec("INSERT INTO items (sku, name, base_unit_id, status) VALUES ('KT1','Karang item 1',{$kgId},'ACTIVE'), ('KT2','Karang item 2',{$kgId},'ACTIVE'), ('KT3','Karang zero',{$kgId},'ACTIVE')");
-$pdo->exec("INSERT INTO warehouses (code, name, warehouse_type, is_active, activation_locked) VALUES ('KARANG_TENGAH', 'Gudang Karang Tengah', 'TRANSIT', 0, 1)");
+$pdo->exec("INSERT INTO warehouses (code, name, warehouse_type, is_active, activation_locked) VALUES ('KARANG_TENGAH', 'Gudang Karang Tengah', 'TRANSIT', 1, 1)");   // the production state: ACTIVE + LOCKED
 $khId = (int) $pdo->query("SELECT id FROM warehouses WHERE code='KARANG_TENGAH'")->fetchColumn();
 $tmp = sys_get_temp_dir() . '/oc_' . bin2hex(random_bytes(3)) . '.xlsx';
 ExcelWriterService::write($tmp, ['S' => ['headers' => ['', '', '', '', '', '', '', 1000 * 12.5 + 40 * 100.25], 'rows' => [
