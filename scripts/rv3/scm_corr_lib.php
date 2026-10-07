@@ -497,6 +497,9 @@ function sc_load_overrides(?string $path): array
         }
         $res['rows'][$row][$field] = in_array($field, ['hpp_basis', 'condition', 'accept_revaluation', 'mapping_confirmed'], true) ? strtoupper($r['value']) : $r['value'];
         $res['rows'][$row]['_approved_by'] = $r['approved_by'];
+        if (($r['workbook_name'] ?? '') !== '') {
+            $res['rows'][$row]['_expect_name'] = $r['workbook_name'];   // guards against an overrides file used with another workbook
+        }
         $applied[] = [$row, $field, $res['rows'][$row][$field], $r['approved_by']];
     }
     fclose($h);
@@ -600,6 +603,17 @@ function sc_plan(PDO $pdo, array $wb, array $ov, string $warehouseCode = SC_WARE
     }
     foreach ($ov['errors'] as $e) {
         $global[] = 'overrides: ' . $e;
+    }
+    $byRowName = [];
+    foreach ($wb['rows'] as $wr) {
+        $byRowName[$wr['row']] = $wr['name'];
+    }
+    foreach ($ov['rows'] as $orow => $o) {
+        if (!isset($byRowName[$orow])) {
+            $global[] = "overrides: baris workbook {$orow} tidak ada";
+        } elseif (isset($o['_expect_name']) && sc_key($o['_expect_name']) !== sc_key($byRowName[$orow])) {
+            $global[] = "overrides: baris {$orow} diharapkan \"{$o['_expect_name']}\" tetapi workbook berisi \"{$byRowName[$orow]}\" — file overrides dibuat untuk workbook lain";
+        }
     }
     $rows = [];
     $items = [];
@@ -775,8 +789,16 @@ function sc_plan_row(array $row, array $wb, array $st, array $facts): array
         $newQ = round($row['qty_so'] / $L, 6);
         $qtySource = 'SO_QTY_FALLBACK (Keterangan 2 tidak menyebut qty; qty fisik hasil SO dipertahankan)';
     } elseif ($in['nominal'] !== null) {
-        $newQ = $oldQ;
-        $qtySource = 'UNCHANGED (hanya nominal yang dikoreksi)';
+        // only the nominal is corrected: the quantity the workbook has validated (Qty SO = Qty SCM) is authoritative — NOT the ledger opening, which may differ from it
+        $agree = $row['qty_so'] > 0 && abs($row['qty_so'] - $row['qty_scm']) <= SC_QTY_TOL * max(1.0, $row['qty_so']);
+        if (!$agree) {
+            $block('NOMINAL_ONLY_QTY_AMBIGUOUS', sprintf('hanya nominal yang dikoreksi tetapi Qty SO (%s) ≠ Qty SCM (%s) — qty otoritatif tidak jelas; isi final_qty_base lewat overrides', rtrim(rtrim(number_format($row['qty_so'], 6, '.', ''), '0'), '.'), rtrim(rtrim(number_format($row['qty_scm'], 6, '.', ''), '0'), '.')));
+        } elseif (kr_unit_dim($row['workbook_unit']) !== '' && kr_unit_dim($kUnit) !== '' && kr_unit_dim($row['workbook_unit']) !== kr_unit_dim($kUnit) && abs($L - 1.0) < 1e-12) {
+            $block('UNIT_DIMENSION_MISMATCH', "satuan workbook ({$row['workbook_unit']}) dan satuan SCM ({$kUnit}) berdimensi berbeda dengan Faktor 1 — qty {$row['qty_so']} tidak dapat dipastikan dalam {$it['base_code']}; isi final_qty_base lewat overrides yang disetujui admin");
+        } else {
+            $newQ = round($row['qty_so'] / $L, 6);
+            $qtySource = 'WORKBOOK_QTY (Qty SO = Qty SCM = qty fisik tervalidasi; hanya nominal yang dikoreksi)';
+        }
     } elseif ($in['mapping'] !== null) {
         $block('MAPPING_TARGET_QTY_UNSPECIFIED', 'Keterangan 2 mengoreksi pemetaan item tetapi tidak menyebut qty final — isi final_qty_base untuk item tujuan lewat overrides');
     } else {
@@ -943,7 +965,7 @@ function sc_plan_row(array $row, array $wb, array $st, array $facts): array
     $r['fifo_class'] = $blk !== [] && $fifoClass === 'NO_CHANGE' ? 'BLOCKED' : ($blk !== [] ? $fifoClass : $fifoClass);
     // effective correction types: a stated quantity that already equals the opening is NOT a quantity correction
     $types = [];
-    if ($in['qty'] !== null || isset($o['final_qty_base']) || in_array('QTY_FROM_SO_FALLBACK', $in['flags'], true)) {
+    if ($in['qty'] !== null || isset($o['final_qty_base']) || in_array('QTY_FROM_SO_FALLBACK', $in['flags'], true) || ($in['nominal'] !== null && $newQ !== null)) {
         if ($delta === null || abs($delta) > SC_QTY_TOL) {
             $types[] = 'QTY_CORRECTION';
         }
@@ -954,7 +976,8 @@ function sc_plan_row(array $row, array $wb, array $st, array $facts): array
     if (in_array('UOM_CORRECTION', $in['types'], true)) {
         $types[] = 'UOM_CORRECTION';
     }
-    if (in_array('HPP_VALUE_CORRECTION', $in['types'], true) && (($r['fifo']['cost_differs'] ?? false) || $in['nominal'] !== null || $in['price'] !== null || str_starts_with($in['price_basis'], 'PER_'))) {
+    // an HPP correction exists only when the corrected unit cost really differs from the opening unit cost (a stated nominal that equals qty × the existing HPP is NOT an HPP correction)
+    if (($r['fifo']['cost_differs'] ?? false) || (isset($o['final_value']) && $oldQ <= 0)) {
         $types[] = 'HPP_VALUE_CORRECTION';
     }
     if ($in['conditions'] !== [] || isset($o['condition'])) {

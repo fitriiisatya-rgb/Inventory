@@ -1,0 +1,4 @@
+# Approved settlements for Perbandingan_Stok_SCM_vs_SO.xlsx (sha256 3fd5bedc...1e15). source_row = row of sheet "Perbandingan"; workbook_name guards against another workbook. Only rows with approved_by are applied.
+source_row,field,value,approved_by,note,workbook_name
+7,final_qty_base,240,Admin SCM (klarifikasi),"PEWARNA CROSS ORANGE @60 ML: opening 1 Okt 2026 = 240 ml (bukan 300 ml; tidak ada konsumsi)",PEWARNA CROSS ORANGE @60 ML
+7,final_value,120000,Admin SCM (klarifikasi),"nilai opening Rp120.000 -> HPP Rp500/ml; tanpa restatement COGS",PEWARNA CROSS ORANGE @60 ML

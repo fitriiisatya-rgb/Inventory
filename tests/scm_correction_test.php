@@ -142,7 +142,7 @@ $add('Dus Down', 'Pcs', 80, 100, 4400, 5400, 'PCS', 1, 'yang betul stok 80', 'RM
 $add('Terigu Zero', 'kg', 0, 5, 0, 40000, 'KG', 1, 'yang betul stok 0', 'RM-T-ZERO');
 $add('Plastik Exceed', 'pcs', 0, 10, 0, 1000, 'PCS', 1, 'yang betul stok 0', 'RM-T-EXC');
 $add('Pewarna Hpp Safe', 'Pcs', 100, 100, 5000, 10000, 'PCS', 1, 'nominal yang betul 5.000', 'RM-T-HSAFE');
-$add('Pewarna Hpp Cogs', 'Pcs', 100, 70, 5000, 7000, 'PCS', 1, 'nominal yang betul 5.000', 'RM-T-HCOGS');
+$add('Pewarna Hpp Cogs', 'Pcs', 100, 100, 5000, 7000, 'PCS', 1, 'nominal yang betul 5.000', 'RM-T-HCOGS');
 $add('Patung Baru', 'Pcs', 40, 0, 400000, 0, '', 1, 'yang betul stok 40 (deadstok)', null);
 $add('Pastricia Gr', 'Kg', 60, 50, 3000000, 50, 'GR', 0.001, 'yang betul stok 60', 'RM-T-KG');
 $add('Hand Glove X', 'Pcs', 35, 3500, 239750, 23975000, 'PCS', 1, 'Yang betul stok 35 pak karena harga yang tercantum per pak', 'RM-T-GLOVE');
@@ -400,6 +400,52 @@ $planAfter = sc_plan($pdo, $wbC, $ovC);
 $pdo->exec('ROLLBACK');
 $pdo->exec('SET SESSION TRANSACTION READ WRITE');
 check('C25 a new preview after the posting reports the correction as already posted (blocked, SCM_OPENING_CORRECTION_ALREADY_POSTED) and every corrected row now has delta 0', $planAfter['blocked'] && str_contains(json_encode($planAfter['blockers']), 'SCM_OPENING_CORRECTION_ALREADY_POSTED') && count(array_filter($planAfter['rows'], static fn ($r) => $r['ket2'] !== '' && $r['delta_qty'] !== null && abs($r['delta_qty']) > 0.0005)) === 0);
+
+echo "\n== D. admin clarification — PEWARNA CROSS ORANGE @60 ML (opening 240 ml / Rp120.000, HPP Rp500/ml, nothing consumed) ==\n";
+$ml = $unit['ML'];
+$orange = $mk('RM-T-ORANGE', 'Pewarna Cross Orange @60 ML', 'ML');
+$in($orange, 'ML', 300, 500, '2026-09-20 09:00:00', 'T-OR-1');                                  // the system opening: 300 ml @ Rp500 = Rp150.000
+$out($orange, 'ML', 60, '2026-10-05 09:00:00', 'T-OR-OUT');                                      // 60 ml leave the layer in October → current 240
+$fill = static fn (int $i) => ['Filler ' . $i, 'Pcs', 1, 1, 0, 1, 1, 0, 'Sama', sc_key('Filler ' . $i), 'PCS', 1, ''];
+$dRows = [$fill(1), $fill(2), $fill(3), $fill(4), $fill(5),                                      // rows 2..6 → the Orange row is row 7, exactly as in the real workbook
+    ['PEWARNA CROSS ORANGE @60 ML', 'Pcs', 240, 240, 0, 7200000, 120000, -7080000, 'Selisih nominal', sc_key('PEWARNA CROSS ORANGE @60 ML'), 'ML', 1, 'nominal yang betul 120.000']];
+$dPath = $tmp . '/orange.xlsx';
+ExcelWriterService::write($dPath, ['Perbandingan' => ['headers' => $hdr, 'rows' => $dRows], 'Data SCM' => ['headers' => ['SKU', 'Nama Produk', 'Kategori', 'Satuan', 'Stok Tersedia', 'Stok Minimal', 'Status', 'Nilai Stok (Rp)', 'Key'], 'rows' => [['RM-T-ORANGE', 'PEWARNA CROSS ORANGE @60 ML', 'Premix', 'ML', 240, 0, 'AMAN', 120000, sc_key('PEWARNA CROSS ORANGE @60 ML')]]]]);
+$wbD = sc_read_workbook($dPath);
+$planOf = static function (array $w, array $o) use ($pdo): array {
+    $pdo->exec('SET SESSION TRANSACTION READ ONLY');
+    $pdo->exec('START TRANSACTION');
+    $p = sc_plan($pdo, $w, $o);
+    $pdo->exec('ROLLBACK');
+    $pdo->exec('SET SESSION TRANSACTION READ WRITE');
+    return $p;
+};
+$byName = static function (array $p, string $n): array {
+    foreach ($p['rows'] as $r) {
+        if ($r['workbook_name'] === $n) {
+            return $r;
+        }
+    }
+    return [];
+};
+$pD0 = $planOf($wbD, sc_load_overrides(null));
+$x = $byName($pD0, 'PEWARNA CROSS ORANGE @60 ML');
+check('D1 the ledger really is the situation the admin corrects: opening 300 ml / Rp150.000 @500, 60 ml consumed since 1 Oct, current 240', $near($x['old_qty'], 300.0) && $near($x['old_value'], 150000.0) && $near((float) $x['old_unit_cost'], 500.0) && $near($x['recon']['actual_qty'], 240.0) && $near($x['recon']['out'], -60.0));
+check('D2 WITHOUT the admin clarification the row is never a COGS restatement: the workbook unit (Pcs) vs the SCM unit (ML) with factor 1 is not trusted → BLOCKED UNIT_DIMENSION_MISMATCH', $x['status'] === 'BLOCKED' && in_array('UNIT_DIMENSION_MISMATCH', $x['blocker_codes'], true) && !in_array('REQUIRES_COGS_RESTATEMENT', $x['blocker_codes'], true), json_encode($x['blocker_codes']));
+$ovD = sc_load_overrides($root . '/tests/fixtures/scm/scm_admin_overrides.csv');
+check('D3 the packaged admin clarification file loads: row 7 final_qty_base 240 + final_value 120000, approved by the admin, no error', isset($ovD['rows'][7]['final_qty_base']) && $ovD['rows'][7]['final_qty_base'] === '240' && $ovD['rows'][7]['final_value'] === '120000' && $ovD['errors'] === [] && $ovD['digest'] !== '');
+$pD = $planOf($wbD, $ovD);
+$x = $byName($pD, 'PEWARNA CROSS ORANGE @60 ML');
+check('D4 with the clarification: opening qty 240 ml is authoritative, HPP stays Rp500/ml, value Rp120.000; delta −60 ml / −Rp30.000; READY, DECREASE', $x['status'] === 'READY' && $near($x['new_qty'], 240.0) && $near((float) $x['new_unit_cost'], 500.0, 0.0001) && $near($x['new_value'], 120000.0) && $near($x['delta_qty'], -60.0) && $near($x['delta_value'], -30000.0) && $x['action'] === 'DECREASE', json_encode([$x['status'], $x['blockers'], $x['new_qty'], $x['new_value']]));
+check('D5 classification QTY_CORRECTION only (not HPP, not UOM, not condition): from system opening 300 ml to admin opening 240 ml', $x['types'] === ['QTY_CORRECTION'], json_encode($x['types']));
+check('D6 FIFO: SAFE_QTY_CORRECTION — no COGS restatement, no consumed-layer correction (cost unchanged 500 → 500; the 60 ml reduction fits the remaining opening layer of 240)', $x['fifo_class'] === 'SAFE_QTY_CORRECTION' && $x['fifo']['cost_differs'] === false && !isset($x['fifo']['cogs_restatement']) && !in_array('REQUIRES_COGS_RESTATEMENT', $x['blocker_codes'], true) && $near($x['fifo']['remaining_open'], 240.0), json_encode($x['fifo']));
+check('D7 the planned value delta equals the FIFO value the reduction removes: 60 × 500 = Rp30.000 (the layer is reduced from the remaining stock, nothing consumed is edited)', $near(sc_simulate_decrease(sc_fifo_facts($pdo, sc_load_state($pdo, 'SCM'), [$x['item_id']])[$x['item_id']], 60.0)['value'], 30000.0));
+check('D8 the correction belongs to the opening of 2026-10-01: transaction instant 2026-09-30 23:59:59 (Stok Akhir September = Stok Awal Oktober), never an October movement', SC_TX_INSTANT === '2026-09-30 23:59:59' && SC_EFFECTIVE_DATE === '2026-10-01');
+$rd = $x['recon'];
+check('D9 reconciliation is shown honestly: before the correction actual 240 = old opening 300 + movement −60 (unexplained 0); after it the expected current is 180, difference −60 = the correction delta', $near($rd['actual_qty'] - ($x['old_qty'] + $rd['move_qty']), 0.0) && $near($x['new_qty'] + $rd['move_qty'], 180.0) && $near(($x['new_qty'] + $rd['move_qty']) - $rd['actual_qty'], $x['delta_qty']));
+
+$pWrong = $planOf($wb, $ovD);
+check('D10 the clarification file refuses to apply to another workbook (row 7 of that workbook is a different item) → global blocker, not a silent mis-application', str_contains(json_encode($pWrong['blockers']), 'file overrides dibuat untuk workbook lain'));
 
 $ok = count(array_filter($results));
 echo "\n{$ok} / " . count($results) . " PASSED\n";

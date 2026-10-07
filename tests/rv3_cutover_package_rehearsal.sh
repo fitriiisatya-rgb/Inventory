@@ -141,6 +141,7 @@ if [ "${RV3_VALIDATE:-0}" = 1 ]; then
   bash "$P/scripts/scm_correction_preview.sh" "$T" >"$W/scm_prev.txt" 2>&1; rc=$?
   grep -q "SCM OPENING CORRECTION — PREVIEW" "$W/scm_prev.txt" && grep -q "PREVIEW SHA256" "$W/scm_prev.txt" && [ -s "$P/out/scm_fifo_impact.csv" ] && [ -s "$P/out/scm_current_reconciliation.csv" ] && [ -s "$P/out/scm_admin_correction_summary.json" ] && [ -s "$P/out/scm_blockers.csv" ]; chk "[scm correction] preview runs read-only against the real tables (exit $rc), prints the sha and writes the output files" $?
   [ "$(mysql -uroot -N "${DB_DATABASE:-inventory_test}" -e "SELECT COUNT(*) FROM inventory_transactions WHERE reference_no = 'SCM_ADMIN_CORRECTION_20261001'")" = 0 ]; chk "[scm correction] the preview posted nothing" $?
+  ! grep -q "dibuat untuk workbook lain" "$W/scm_prev.txt" && grep -q '"applied_rows": 1' "$P/out/scm_admin_correction_summary.json"; chk "[scm correction] the packaged admin clarification (PEWARNA CROSS ORANGE row 7: 240 ml / Rp120.000) is applied to the real workbook" $?
   mysql -uroot "${DB_DATABASE:-inventory_test}" -e "DELETE FROM warehouses WHERE code = 'SCM'"
   bash "$P/scripts/period_cutoff_preview.sh" "$T" --sessions=1,2 --cutoff=2026-09-30 >"$W/pc_prev.txt" 2>&1; rc=$?
   grep -q "PERIOD CUTOFF — PREVIEW" "$W/pc_prev.txt" && grep -q "PREVIEW SHA256" "$W/pc_prev.txt"; chk "[period cutoff] preview runs against the real tables (exit $rc), prints the plan and the preview sha" $?
