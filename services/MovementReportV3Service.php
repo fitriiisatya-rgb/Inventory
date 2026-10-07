@@ -154,8 +154,8 @@ final class MovementReportV3Service
         };
         $open = $pick($svc['opening'] ?? []);
         $close = $pick($svc['closing'] ?? []);
-        $units = array_unique(array_merge(array_keys($by), array_keys($open), array_keys($close)));
-        sort($units);
+        $units = array_map('strval', array_unique(array_merge(array_keys($by), array_keys($open), array_keys($close))));   // numeric unit codes are int array keys
+        sort($units, SORT_STRING);
         $out = [];
         foreach ($units as $u) {
             $b = $by[$u] ?? ['in' => 0.0, 'out' => 0.0, 'tin' => 0.0, 'tout' => 0.0];
@@ -245,7 +245,7 @@ final class MovementReportV3Service
                 'closing_qty' => round($closeQ, 6), 'closing_value' => round($closeV, 4), 'tx_count' => (int) ($m['tx'] ?? 0),
             ];
         }
-        usort($out, static fn ($a, $b) => strcmp($a['sku'], $b['sku']));
+        usort($out, static fn ($a, $b) => strcmp((string) $a['sku'], (string) $b['sku']));
         return $out;
     }
 
@@ -280,7 +280,7 @@ final class MovementReportV3Service
         $allowed = ['sku', 'name', 'category', 'unit', 'opening_qty', 'opening_value', 'in_qty', 'in_value', 'out_qty', 'out_value', 'tin_qty', 'tin_value', 'tout_qty', 'tout_value', 'adjustment_qty', 'adjustment_value', 'closing_qty', 'closing_value', 'tx_count'];
         $sort = in_array($sort, $allowed, true) ? $sort : 'sku';
         $mul = strtolower($dir) === 'desc' ? -1 : 1;
-        usort($all, static fn ($a, $b) => ($mul * (is_numeric($a[$sort]) ? $a[$sort] <=> $b[$sort] : strcmp((string) $a[$sort], (string) $b[$sort]))) ?: strcmp($a['sku'], $b['sku']));
+        usort($all, static fn ($a, $b) => ($mul * (is_numeric($a[$sort]) ? $a[$sort] <=> $b[$sort] : strcmp((string) $a[$sort], (string) $b[$sort]))) ?: strcmp((string) $a['sku'], (string) $b['sku']));
         $perPage = max(1, min(200, $perPage));
         $pages = max(1, (int) ceil(count($all) / $perPage));
         $page = max(1, min($page, $pages));

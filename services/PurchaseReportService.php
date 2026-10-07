@@ -540,7 +540,7 @@ final class PurchaseReportService
         $n['suppliers'] = count(array_filter(array_keys($suppliers), static fn ($k) => $k !== 'x'));
         $n['skus'] = count($skus);
         $n['ppn_rates'] = array_map(static fn ($r) => rtrim(rtrim(number_format($r, 4, '.', ''), '0'), '.') . '%', $rateList);
-        return ['nominal' => $n, 'qty_by_unit' => array_map(static fn ($u, $q) => ['unit' => $u, 'qty' => round($q, 6)], array_keys($qty), $qty)];
+        return ['nominal' => $n, 'qty_by_unit' => array_map(static fn ($u, $q) => ['unit' => (string) $u, 'qty' => round($q, 6)], array_keys($qty), $qty)];
     }
 
     /** @return list<array<string,mixed>> */
@@ -710,7 +710,7 @@ final class PurchaseReportService
             $t[$k] = round($v, 4);
         }
         ksort($byUnit);
-        return ['totals' => $t, 'count' => count($rows), 'qty_by_unit' => array_map(static fn ($u, $q) => ['unit' => $u, 'qty' => round($q, 6)], array_keys($byUnit), $byUnit)];
+        return ['totals' => $t, 'count' => count($rows), 'qty_by_unit' => array_map(static fn ($u, $q) => ['unit' => (string) $u, 'qty' => round($q, 6)], array_keys($byUnit), $byUnit)];
     }
 
     // ----------------------------------------------------------------------

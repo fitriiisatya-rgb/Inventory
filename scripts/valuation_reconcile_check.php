@@ -1,8 +1,8 @@
 <?php
 declare(strict_types=1);
 
-if (!class_exists('RV3ScriptExit', false)) { final class RV3ScriptExit extends RuntimeException {} }
-if (!function_exists('rv3_script_exit')) { function rv3_script_exit(int $c): never { if (defined('RV3_INPROCESS')) { throw new RV3ScriptExit('exit', $c); } exit($c); } }   // run in-process by the package validator: no child process, no shell
+require_once is_file(__DIR__ . '/rv3_bootstrap.php') ? __DIR__ . '/rv3_bootstrap.php' : __DIR__ . '/rv3/rv3_bootstrap.php';   // common bootstrap: rv3_script_exit(), --package-dir, service loader
+$__rv3_payload = rv3_bootstrap_args($argv);
 
 /**
  * READ-ONLY reconciliation of "Laporan Nilai Stok & HPP" (FIFO + Average) against the real ledger / FIFO tables. Never writes (a READ ONLY transaction; a write is
@@ -32,9 +32,7 @@ if ($appRoot === null || !is_dir("{$appRoot}/services") || strtotime($start) ===
     fwrite(STDERR, "usage: php scripts/valuation_reconcile_check.php --app-root=<dir> [--start=YYYY-MM-DD --end=YYYY-MM-DD] [--warehouse=<code|id|all>] [--category=<id>] [--q=<text>]\n");
     rv3_script_exit(2);
 }
-if (!defined('RV3_INPROCESS')) {   // in-process (package validator) the services are already loaded: the installed ones, with the package's substituted in memory
-    foreach (glob("{$appRoot}/services/*.php") ?: [] as $f) { if (basename($f) !== 'ReportsV3Routes.php') { require_once $f; } }
-}
+rv3_bootstrap_load($appRoot, $__rv3_payload);
 
 use App\Services\Database;
 use App\Services\InventoryValuationService as V;

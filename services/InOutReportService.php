@@ -522,7 +522,7 @@ final class InOutReportService
         $n['suppliers'] = count($sup);
         $n['avg_invoice'] = $n['invoices'] > 0 ? round($n['total'] / $n['invoices'], 4) : null;
         ksort($qty);
-        return ['nominal' => $n, 'qty_by_unit' => array_map(static fn ($u, $q) => ['unit' => $u, 'qty' => round($q, 6)], array_keys($qty), $qty)];
+        return ['nominal' => $n, 'qty_by_unit' => array_map(static fn ($u, $q) => ['unit' => (string) $u, 'qty' => round($q, 6)], array_keys($qty), $qty)];
     }
 
     private static function inTrend(array $d, string $start, string $end, string $bucket): array
@@ -904,7 +904,7 @@ final class InOutReportService
         $priced = $n['sell'] > 0;
         $n['margin_pct'] = $priced ? round($n['margin'] * 100 / $n['sell'], 2) : null;
         ksort($qty);
-        return ['nominal' => $n, 'qty_by_unit' => array_map(static fn ($u, $q) => ['unit' => $u, 'qty' => round($q, 6)], array_keys($qty), $qty)];
+        return ['nominal' => $n, 'qty_by_unit' => array_map(static fn ($u, $q) => ['unit' => (string) $u, 'qty' => round($q, 6)], array_keys($qty), $qty)];
     }
 
     private static function outTrend(array $d, string $start, string $end, string $bucket): array
@@ -1251,7 +1251,7 @@ final class InOutReportService
         $n['avg_lead_hours'] = $lead ? round(array_sum($lead) / count($lead), 2) : null;
         $n['lead_samples'] = count($lead);
         ksort($qty);
-        return ['nominal' => $n, 'qty_by_unit' => array_map(static fn ($u, $q) => ['unit' => $u, 'qty' => round($q, 6)], array_keys($qty), $qty)];
+        return ['nominal' => $n, 'qty_by_unit' => array_map(static fn ($u, $q) => ['unit' => (string) $u, 'qty' => round($q, 6)], array_keys($qty), $qty)];
     }
 
     private static function trfTrend(array $d, string $start, string $end, string $bucket): array

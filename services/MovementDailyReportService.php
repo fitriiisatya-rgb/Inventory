@@ -421,8 +421,8 @@ final class MovementDailyReportService
         $periodTx = $live ? self::periodTxCounts($pdo, $effStart, $endDate, $warehouseId, $sc) : ['tx_total' => 0, 'tx_in' => 0, 'tx_out' => 0, 'tx_other' => 0];
         $fmtUnits = static function (array $m): array {
             $out = [];
-            foreach ($m as $u => $v) { if (abs($v) > self::EPS_QTY) { $out[] = ['unit' => $u, 'qty' => round($v, 6)]; } }
-            usort($out, static fn ($a, $b) => strcmp($a['unit'], $b['unit']));
+            foreach ($m as $u => $v) { if (abs($v) > self::EPS_QTY) { $out[] = ['unit' => (string) $u, 'qty' => round($v, 6)]; } }   // (string): a numeric unit code is an int array key
+            usort($out, static fn ($a, $b) => strcmp((string) $a['unit'], (string) $b['unit']));
             return $out;
         };
         $totals = [
@@ -564,8 +564,8 @@ final class MovementDailyReportService
         foreach (['opening_value', 'masuk_value', 'keluar_value', 'adjustment_value', 'closing_value'] as $k) { $tot[$k] = round($tot[$k], 4); }
         foreach ($tot['qty_by_unit'] as $k => $units) {
             $list = [];
-            foreach ($units as $u => $v) { if (abs($v) > self::EPS_QTY) { $list[] = ['unit' => $u, 'qty' => round($v, 6)]; } }
-            usort($list, static fn ($a, $b) => strcmp($a['unit'], $b['unit']));
+            foreach ($units as $u => $v) { if (abs($v) > self::EPS_QTY) { $list[] = ['unit' => (string) $u, 'qty' => round($v, 6)]; } }
+            usort($list, static fn ($a, $b) => strcmp((string) $a['unit'], (string) $b['unit']));
             $tot['qty_by_unit'][$k] = $list;
         }
         $sortable = ['sku', 'name', 'category', 'opening_value', 'masuk_value', 'keluar_value', 'adjustment_value', 'closing_value', 'opening_qty', 'masuk_qty', 'keluar_qty', 'closing_qty', 'tx_count'];
@@ -574,7 +574,7 @@ final class MovementDailyReportService
         usort($rows, static function ($a, $b) use ($sortKey, $mul) {
             $x = $a[$sortKey]; $y = $b[$sortKey];
             $c = is_numeric($x) && is_numeric($y) ? ($x <=> $y) : strcasecmp((string) $x, (string) $y);
-            return $c === 0 ? strcmp($a['sku'], $b['sku']) : $c * $mul;
+            return $c === 0 ? strcmp((string) $a['sku'], (string) $b['sku']) : $c * $mul;
         });
         $total = count($rows);
         return [

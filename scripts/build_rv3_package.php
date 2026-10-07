@@ -64,7 +64,7 @@ $sha = static fn (string $s): string => rv3_sha($s);
 
 // ---------------------------------------------------------------- whole files
 $files = [
-    'services/ReportExportService.php', 'services/MovementReportV3Service.php', 'services/ReportsV3Routes.php',
+    'services/ReportExportService.php', 'services/MovementReportV3Service.php', 'services/MovementDailyReportService.php', 'services/ReportsV3Routes.php',
     'services/PurchaseReportService.php', 'services/InOutReportService.php', 'services/InventoryValuationService.php', 'services/StockOpnameAuditReportService.php',
     'public/assets/js/report-tools.js', 'public/assets/js/report-pergerakan.js', 'public/assets/js/report-pembelian-v3.js', 'public/assets/js/report-nilai-hpp-v3.js',
     'public/assets/js/report-inout-v3.js', 'public/assets/js/report-opname-audit.js',
@@ -161,7 +161,7 @@ $manifest = ['name' => $name, 'source_commit' => $revFull, 'built' => date('c'),
 $put('manifest.json', json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
 
 // ---------------------------------------------------------------- scripts + tests
-foreach (['rv3/rv3_lib.php' => 'scripts/rv3_lib.php', 'rv3/rv3_engine.php' => 'scripts/rv3_engine.php', 'rv3/rv3_readonly_check.php' => 'scripts/rv3_readonly_check.php'] as $src => $dst) {
+foreach (['rv3/rv3_lib.php' => 'scripts/rv3_lib.php', 'rv3/rv3_bootstrap.php' => 'scripts/rv3_bootstrap.php', 'rv3/rv3_engine.php' => 'scripts/rv3_engine.php', 'rv3/rv3_readonly_check.php' => 'scripts/rv3_readonly_check.php'] as $src => $dst) {
     $put($dst, $show("scripts/{$src}"));
 }
 foreach (['opname_audit_reconcile_check.php', 'movement_reconcile_check.php', 'inout_reconcile_check.php', 'purchase_reconcile_check.php', 'valuation_reconcile_check.php', 'rv3/movement_v3_reconcile_check.php'] as $f) {
@@ -176,7 +176,7 @@ $put('scripts/apply.sh', $wrap('APPLY (writes). Needs a fresh dry-run plan; add 
 $put('scripts/verify.sh', $wrap('POST-APPLY VERIFY (read-only).', "APP=\"\${1:?usage: verify.sh <APP ROOT> [--base-url=https://host]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" verify --app-root=\"\$APP\" \"\$@\"\n"));
 $put('scripts/rollback.sh', $wrap('ROLLBACK (writes): two-phase, restores the exact pre-apply files.', "APP=\"\${1:?usage: rollback.sh <APP ROOT>}\"\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" rollback --app-root=\"\$APP\"\n"));
 $put('scripts/readonly_validate.sh', $wrap('PRODUCTION READ-ONLY VALIDATOR: SO sessions 11/12 reconciliation (16/16) + the five reports against the REAL data, with the NEW code. SELECT only.', "APP=\"\${1:?usage: readonly_validate.sh <APP ROOT> [--session=11,12] [--start=YYYY-MM-DD --end=YYYY-MM-DD]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_readonly_check.php\" --app-root=\"\$APP\" --package-dir=\"\$HERE/..\" \"\$@\"\n"));
-foreach (['movement_report_v3_test.php', 'inout_report_test.php', 'inventory_valuation_test.php', 'purchase_report_test.php', 'stock_opname_audit_report_test.php', 'report_export_test.php', 'rv3_package_rehearsal.sh'] as $t) {
+foreach (['movement_report_v3_test.php', 'inout_report_test.php', 'inventory_valuation_test.php', 'purchase_report_test.php', 'stock_opname_audit_report_test.php', 'report_export_test.php', 'numeric_unit_code_test.php', 'rv3_package_rehearsal.sh'] as $t) {
     $put("tests/{$t}", $show("tests/{$t}"));
 }
 foreach (['lib/rv3.mjs'] as $t) {

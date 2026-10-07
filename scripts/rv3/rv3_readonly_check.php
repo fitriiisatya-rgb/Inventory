@@ -13,6 +13,7 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/rv3_lib.php';
+require_once __DIR__ . '/rv3_bootstrap.php';
 
 /** runs one reconciliation script in a function scope (its variables never leak) and returns [exit code, its output]. The scripts end through rv3_script_exit(), which throws here instead of exiting. */
 function rv3_include_script(string $path, array $argv): array
