@@ -116,10 +116,14 @@ if [ "${RV3_VALIDATE:-0}" = 1 ]; then
   [ "$(tree_sum "$T")" = "$before" ]; chk "[karang] preview wrote nothing into the application" $?
   [ -s "$P/out/karang_unit_conversions.csv" ] && [ -s "$P/out/karang_inactive_items.csv" ]; chk "[karang] unit-conversion and inactive-master lists are written too" $?
   grep -q "PERINGATAN        : judul sheet sumber menyebut" "$W/kt_prev.txt" && grep -q "tanggal efektif yang disetujui = 2026-10-01" "$W/kt_prev.txt"; chk "[karang] the sheet title 'Periode Juli 2026' is a WARNING only; the effective date stays 2026-10-01" $?
+  # production state of Karang Tengah: ACTIVE (is_active = 1) + LOCKED (activation_locked = 1), TRANSIT, no opening posted yet
+  mysql -uroot "${DB_DATABASE:-inventory_test}" -e "INSERT INTO warehouses (code, name, warehouse_type, is_active, activation_locked) VALUES ('KARANG_TENGAH', 'Karang Tengah', 'TRANSIT', 1, 1)"
   bash "$P/scripts/karang_activation_plan.sh" "$T" >"$W/act_plan.txt" 2>&1; rc=$?
   [ $rc -ne 0 ] && grep -q "FAIL - " "$W/act_plan.txt" && grep -q "CURRENT: ACTIVE + LOCKED" "$W/act_plan.txt" && grep -q "TARGET: ACTIVE + UNLOCKED" "$W/act_plan.txt" && grep -q "opening posted: FAIL / WAITING" "$W/act_plan.txt" && grep -q "unlock permitted: NO" "$W/act_plan.txt" && grep -q "planned mutation: activation_locked 1 -> 0" "$W/act_plan.txt"; chk "[unlock] plan runs read-only: CURRENT ACTIVE + LOCKED, TARGET ACTIVE + UNLOCKED, opening posted FAIL / WAITING, unlock permitted NO, planned mutation activation_locked 1 -> 0 (exit $rc)" $?
   ! grep -q "SET is_active" "$W/act_plan.txt" && ! grep -qi "warehouse state is inactive" "$W/act_plan.txt"; chk "[unlock] the plan never contains 'SET is_active' and never calls this state inactive" $?
   ! grep -rqE "UPDATE[[:space:]]+warehouses[[:space:]]+SET[[:space:]]+is_active" "$P/scripts"; chk "[unlock] no shipped script contains an UPDATE warehouses that assigns is_active" $?
+  [ "$(mysql -uroot -N "${DB_DATABASE:-inventory_test}" -e "SELECT CONCAT(is_active, '/', activation_locked) FROM warehouses WHERE code = 'KARANG_TENGAH'")" = "1/1" ]; chk "[unlock] the read-only plan left Karang Tengah at ACTIVE + LOCKED (1/1)" $?
+  mysql -uroot "${DB_DATABASE:-inventory_test}" -e "DELETE FROM warehouses WHERE code = 'KARANG_TENGAH'"
   bash "$P/scripts/warehouse_model_check.sh" "$T" >"$W/wm_check.txt" 2>&1; rc=$?
   grep -q "MODEL GUDANG — CHECK" "$W/wm_check.txt" && grep -q "PEMBACA warehouse_type DI KODE TERPASANG" "$W/wm_check.txt" && grep -q "KESIMPULAN" "$W/wm_check.txt"; chk "[warehouse model] the read-only check prints the type of every warehouse, every reader of warehouse_type in the installed code and the conclusion (exit $rc)" $?
   grep -q "TINJAU!" "$W/wm_check.txt"; [ $? -ne 0 ]; chk "[warehouse model] no unknown reader of warehouse_type in the installed code of this tree" $?
