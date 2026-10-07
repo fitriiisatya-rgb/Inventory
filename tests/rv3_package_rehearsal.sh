@@ -94,7 +94,7 @@ neg "a missing render statement in app.js" "sed -i \"s/tab-laporan-pembelian/tab
 neg "a broken CSS marker pair" 'printf "\n/* ===== RV3 REPORT FAMILY 20261008 BEGIN =====\n.x{}\n" >> public/assets/css/app.css' "marker pair broken"
 neg "a duplicated script tag" 'sed -i "s#<script src=\"assets/js/app.js#<script src=\"assets/js/report-tools.js?v=1\"></script>\n<script src=\"assets/js/report-tools.js?v=2\"></script>\n<script src=\"assets/js/app.js#" public/index.html' "duplicate"
 neg "the dispatch anchor missing in index.php" 'sed -i "s#// ---- dispatch: exact match first, then {param} patterns ----#// moved#" public/index.php' "anchor line"
-neg "a missing dependency service the payload needs" 'rm services/MovementDailyReportService.php' "FAIL|missing"
+neg "a missing dependency service the payload needs (InventoryHppReportService is not shipped)" 'rm services/InventoryHppReportService.php' "FAIL|missing"
 
 # tampered package
 echo
@@ -141,7 +141,7 @@ if [ "${RV3_VALIDATE:-0}" = 1 ]; then
   chk "[validator] movement_v3 run alone WITH --package-dir works before apply: exit 0" $rc
   "$PHP" $PHPA "$P/scripts/rv3_readonly_check.php" --app-root="$T" --package-dir="$P" --session=1,2 --start=2026-09-01 --end=2026-09-30 >"$W/val_all.txt" 2>&1; rc=$?
   chk "[validator] readonly_validate on the unpatched tree: exit 0 — Stock Opname, Movement V3, Movement Daily, IN/OUT/Transfer, Pembelian, Nilai HPP" $rc
-  [ "$(grep -c '^PASS ' "$W/val_all.txt")" = 6 ]; chk "[validator] all six reports PASS" $?
+  [ "$(grep -cE '^PASS +[0-9]+ / [0-9]+ ' "$W/val_all.txt")" = 6 ]; chk "[validator] all six reports PASS" $?
   [ "$(tree_sum "$T")" = "$before" ]; chk "[validator] the application tree is byte-identical after the validator (nothing written)" $?
 fi
 
