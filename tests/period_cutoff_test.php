@@ -138,6 +138,11 @@ $audit = $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action_code = 'PERIO
 check('C14 audit: one PERIOD_CUTOFF_SET entry with before/after figures', (int) $audit === 1);
 [$code, $o] = $cli("verify {$base}");
 check('C15 CLI verify: exit 0', $code === 0 && str_contains($o, 'VERIFY OK'), $o);
+check('C15b CASE A verify output: "PASS - period cutoff applied", override rows required: 3, inventory_effective_dates REQUIRED, STATUS: OVERRIDE_APPLIED, ledger unchanged PASS', str_contains($o, 'PASS - period cutoff applied') && str_contains($o, 'override rows required: 3') && str_contains($o, 'inventory_effective_dates: REQUIRED') && str_contains($o, 'STATUS: OVERRIDE_APPLIED') && str_contains($o, 'ledger unchanged: PASS') && str_contains($o, 'report periodization: PASS'), $o);
+[$code, $o] = $cli("verify {$base} --ledger-checksum={$plan['ledger_checksum']}");
+check('C15c the LEDGER CHECKSUM printed by the preview BEFORE the post equals the one AFTER the post (sessions, adjustment transactions, lines, stock_adjustments untouched)', $code === 0 && str_contains($o, 'equals the expected one') && !str_contains($o, 'FAIL -'), substr($o, 0, 400));
+[$code, $o] = $cli("verify {$base} --ledger-checksum=" . str_repeat('0', 64));
+check('C15d a wrong expected checksum makes verify FAIL (the checksum check is not vacuous)', $code === 1 && str_contains($o, 'FAIL - ledger checksum'), substr($o, 0, 300));
 $plan2 = pc_plan($pdo, [$sid], '2026-09-30');
 check('C16 idempotent: a second plan has nothing to write (ALREADY_SET); posting again writes nothing', $plan2['to_write'] === 0 && count(array_filter($plan2['transactions'], static fn ($r) => $r['state'] === 'ALREADY_SET')) === 3);
 [$code, $o] = $cli("post {$base} --preview-sha={$plan2['preview_sha']} --actor=" . $fx['admin']['username'] . ' --yes');
@@ -155,6 +160,77 @@ check('D1 rollback without --yes: exit 10, removes nothing', $code === 10 && (in
 $r = $figs($wh);
 check('D2 rollback --yes --confirm: override rows removed; October / September figures are EXACTLY the original ones; ledger still identical', $code === 0 && (int) $pdo->query('SELECT COUNT(*) FROM inventory_effective_dates')->fetchColumn() === 0 && $near($r['oct']['opening'], $b['oct']['opening']) && $near($r['oct']['adjustment'], $b['oct']['adjustment']) && $near($r['sep']['closing'], $b['sep']['closing']) && $snap() === $snapBefore, $o);
 check('D3 dormant again: reporting date == transaction_date', InventoryEffectiveDateService::col($pdo) === 't.transaction_date');
+
+echo "\n== E. CASE B — zero overrides required (production: every SO transaction already dated at the cutoff) ==\n";
+// production situation: the adjustment transactions already carry 2026-09-30 23:59:59 and inventory_effective_dates does not even exist
+$pdo->prepare("UPDATE inventory_transactions SET transaction_date = '2026-09-30 23:59:59' WHERE transaction_uuid LIKE :u")->execute(['u' => $uuid . ':%']);
+$pdo->prepare("UPDATE stock_opname_sessions SET session_date = '2026-09-30' WHERE id = :i")->execute(['i' => $sid]);
+$pdo->exec('DROP TABLE IF EXISTS inventory_effective_dates');
+InventoryEffectiveDateService::resetCache();
+$snapE = $snap();
+$tableGone = static fn (): bool => !pc_table_exists($pdo);
+check('E0 setup: table inventory_effective_dates is ABSENT and every target transaction is already dated 2026-09-30 23:59:59', $tableGone() && (int) $pdo->query("SELECT COUNT(*) FROM inventory_transactions WHERE transaction_uuid LIKE '{$uuid}:%' AND transaction_date = '2026-09-30 23:59:59'")->fetchColumn() === 3);
+[$code, $oPrev] = $cli("preview {$base}");
+$planE = pc_plan($pdo, [$sid], '2026-09-30');
+check('E1 preview: exit 0, 0 planned rows, required override rows 0, status NO_OVERRIDE_REQUIRED (not "SIAP"), table NOT REQUIRED', $code === 0 && $planE['to_write'] === 0 && $planE['required_override_count'] === 0 && $planE['status'] === 'NO_OVERRIDE_REQUIRED' && str_contains($oPrev, 'STATUS POSTING : NO_OVERRIDE_REQUIRED') && !str_contains($oPrev, 'STATUS POSTING : SIAP') && str_contains($oPrev, 'TIDAK DIPERLUKAN') && str_contains($oPrev, 'LEDGER CHECKSUM'), substr($oPrev, -500));
+check('E2 preview wrote nothing and did not create the table', $tableGone() && $snap() === $snapE);
+[$code, $o] = $cli("post {$base} --preview-sha={$planE['preview_sha']} --actor=" . $fx['admin']['username']);
+check('E3 post without --yes: exit 10, nothing written', $code === 10 && $tableGone());
+[$code, $o] = $cli("post {$base} --preview-sha={$planE['preview_sha']} --actor=" . $fx['admin']['username'] . ' --yes');
+check('E4 post --yes: exit 0, written 0, status NO_OVERRIDE_REQUIRED, the table was NOT created (no cosmetic empty table), ledger identical', $code === 0 && str_contains($o, '"written":0') && str_contains($o, 'NO_OVERRIDE_REQUIRED') && $tableGone() && $snap() === $snapE, $o);
+check('E5 no audit entry, no fake override row (nothing was written at all)', (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action_code = 'PERIOD_CUTOFF_SET'")->fetchColumn() === 1 /* the case-A post only */ && $tableGone());
+[$code, $oV] = $cli("verify {$base}");
+check('E6 verify WITHOUT the table: exit 0, "PASS - period cutoff already correct", sessions, cutoff, override rows required 0, table NOT REQUIRED, ledger unchanged PASS, report periodization PASS, STATUS NO_OVERRIDE_REQUIRED',
+    $code === 0 && str_contains($oV, 'PASS - period cutoff already correct') && str_contains($oV, "sessions: {$sid}") && str_contains($oV, 'cutoff: 2026-09-30') && str_contains($oV, 'override rows required: 0') && str_contains($oV, 'inventory_effective_dates: NOT REQUIRED') && str_contains($oV, 'ledger unchanged: PASS') && str_contains($oV, 'report periodization: PASS') && str_contains($oV, 'STATUS: NO_OVERRIDE_REQUIRED') && !str_contains($oV, 'table missing') && !str_contains($oV, 'FAIL -'), $oV);
+check('E7 verify still proves each point from the transactions: every target resolves to the cutoff, September closing includes it, none in October, continuity, identity', str_contains($oV, 'every target adjustment resolves to the approved cutoff 2026-09-30 23:59:59') && str_contains($oV, 'closing includes ALL target adjustments') && str_contains($oV, 'none of them is counted again') && str_contains($oV, 'closing of the cutoff month == opening of the next month') && str_contains($oV, 'identity opening'), $oV);
+[$code, $o] = $cli("verify {$base} --ledger-checksum={$planE['ledger_checksum']}");
+check('E8 the checksum printed by the preview equals the one verify computes (ledger / sessions unchanged)', $code === 0 && str_contains($o, 'equals the expected one'), substr($o, 0, 300));
+[$code, $o] = $cli("verify {$base} --ledger-checksum=" . str_repeat('f', 64));
+check('E9 a wrong expected checksum → verify FAILS even with zero overrides', $code === 1 && str_contains($o, 'FAIL - ledger checksum'));
+$e = $figs($wh);
+$eall = $figs(null);
+check('E10 reports straight from the transactions (no table): September ADJUSTMENT = 3.500, October ADJUSTMENT = 0, October opening == September closing, identity 0; "Semua Gudang" the same', $near($e['sep']['adjustment'], 3500.0) && $near($e['oct']['adjustment'], 0.0) && $near($e['sep']['closing'], $e['oct']['opening']) && $near($e['sep']['difference'], 0.0) && $near($e['oct']['difference'], 0.0) && $near($eall['sep']['closing'], $eall['oct']['opening']) && $near($eall['oct']['adjustment'], 0.0));
+check('E11 closing value unchanged vs the case-A result (same September closing / October closing as after the override)', $near($e['sep']['closing'], $a['sep']['closing']) && $near($e['oct']['closing'], $a['oct']['closing']) && $near($e['oct']['opening'], $a['oct']['opening']));
+// idempotency: the whole cycle repeated twice
+$cycle = [];
+for ($i = 0; $i < 2; $i++) {
+    [$c1, $p1] = $cli("preview {$base}");
+    $pl = pc_plan($pdo, [$sid], '2026-09-30');
+    [$c2, $p2] = $cli("post {$base} --preview-sha={$pl['preview_sha']} --actor=" . $fx['admin']['username'] . ' --yes');
+    [$c3, $p3] = $cli("verify {$base}");
+    $cycle[] = $c1 === 0 && $pl['to_write'] === 0 && str_contains($p1, 'NO_OVERRIDE_REQUIRED') && $c2 === 0 && str_contains($p2, '"written":0') && $c3 === 0 && str_contains($p3, 'STATUS: NO_OVERRIDE_REQUIRED');
+}
+check('E12 idempotent: preview = 0 planned rows, post = 0 written, verify = PASS / NO_OVERRIDE_REQUIRED — repeated twice; table still absent; ledger identical', $cycle === [true, true] && $tableGone() && $snap() === $snapE);
+// the table being PRESENT but empty is equally valid for zero overrides
+$pdo->exec(pc_ddl());
+InventoryEffectiveDateService::resetCache();
+[$code, $o] = $cli("verify {$base}");
+check('E13 table present but EMPTY and zero overrides required: still PASS / NO_OVERRIDE_REQUIRED', $code === 0 && str_contains($o, 'STATUS: NO_OVERRIDE_REQUIRED') && str_contains($o, 'table present, 0 row(s), not needed'), substr($o, -400));
+$pdo->exec('DROP TABLE inventory_effective_dates');
+InventoryEffectiveDateService::resetCache();
+
+echo "\n== F. the verifier is not vacuous: an override IS required → table + rows are demanded ==\n";
+// one target dated in October (needs an override); the table does not exist
+$oneTx = $txIds[0];
+$pdo->prepare("UPDATE inventory_transactions SET transaction_date = '2026-10-02 23:59:59' WHERE id = :i")->execute(['i' => $oneTx]);
+[$code, $o] = $cli("verify {$base}");
+check('F1 required 1 and the table is missing → FAIL "table missing" (exit 1); October counts the transaction', $code === 1 && str_contains($o, 'required override rows = 1') && str_contains($o, 'FAIL - inventory_effective_dates exists (1 override row(s) are required)') && str_contains($o, 'table missing') && str_contains($o, 'FAIL - none of them is counted again'), $o);
+[$code, $o] = $cli("preview {$base}");
+$planF = pc_plan($pdo, [$sid], '2026-09-30');
+check('F2 preview: status READY, 1 row to write, required 1 (only the transaction that really needs it — the other two are not touched)', $code === 0 && $planF['to_write'] === 1 && $planF['required_override_count'] === 1 && $planF['status'] === 'READY' && count(array_filter($planF['transactions'], static fn ($r) => $r['state'] === 'UNCHANGED')) === 2 && str_contains($o, 'SIAP — 1 baris'), substr($o, -450));
+[$code, $o] = $cli("post {$base} --preview-sha={$planF['preview_sha']} --actor=" . $fx['admin']['username'] . ' --yes');
+check('F3 post --yes: table created, exactly 1 override row, ledger identical', $code === 0 && str_contains($o, '"written":1') && (int) $pdo->query('SELECT COUNT(*) FROM inventory_effective_dates')->fetchColumn() === 1, $o);
+[$code, $o] = $cli("verify {$base}");
+check('F4 verify: PASS, STATUS OVERRIDE_APPLIED, required 1, table REQUIRED with 1 row', $code === 0 && str_contains($o, 'STATUS: OVERRIDE_APPLIED') && str_contains($o, 'override rows required: 1') && str_contains($o, 'inventory_effective_dates: REQUIRED — 1 row(s) present'), substr($o, -500));
+$pdo->exec('DELETE FROM inventory_effective_dates');
+InventoryEffectiveDateService::resetCache();
+[$code, $o] = $cli("verify {$base}");
+check('F5 table present but the required row is missing → FAIL (0 / 1 rows)', $code === 1 && str_contains($o, 'FAIL - every transaction that needs one has an override row') && str_contains($o, '0 / 1 rows'), substr($o, -500));
+$pdo->prepare("UPDATE inventory_transactions SET transaction_date = '2026-09-29 12:00:00' WHERE id = :i")->execute(['i' => $oneTx]);
+[$code, $o] = $cli("verify {$base}");
+check('F6 a target dated BEFORE the cutoff day can never resolve to the cutoff → FAIL (not hidden by the no-override path)', $code === 1 && str_contains($o, 'FAIL'), substr($o, -400));
+[$code, $o] = $cli("preview {$base}");
+check('F7 …and the preview refuses it as a blocker (exit 11)', $code === 11 && str_contains($o, 'tidak boleh dimajukan'));
 
 $ok = count(array_filter($results));
 echo "\n{$ok} / " . count($results) . " PASSED\n";

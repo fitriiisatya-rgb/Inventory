@@ -9,7 +9,9 @@ declare(strict_types=1);
  *       untouched), the proposed effective date, and the BEFORE → AFTER figures of the next month per warehouse and company-wide. Prints the PREVIEW SHA256.
  *   php period_cutoff.php post     --app-root=<app> --sessions=… --cutoff=… --preview-sha=<sha256> --actor=<SUPERADMIN> [--yes]
  *       WITHOUT --yes: repeats the preview and exits 10 "NOT APPLIED". With --yes: creates the (additive) table if missing and inserts the rows in ONE transaction.
- *   php period_cutoff.php verify   --app-root=<app> --sessions=… --cutoff=…           READ ONLY post-write reconciliation
+ *   php period_cutoff.php verify   --app-root=<app> --sessions=… --cutoff=… [--ledger-checksum=<sha256 printed by preview>]   READ ONLY reconciliation.
+ *       First decides how many override rows are required: > 0 → inventory_effective_dates must exist with those rows (OVERRIDE_APPLIED); = 0 → the table is NOT required and
+ *       absence is valid (NO_OVERRIDE_REQUIRED) — the result is proven straight from the transactions either way.
  *   php period_cutoff.php rollback --app-root=<app> --sessions=… [--yes --confirm=PERIOD_CUTOFF] [--drop-table]
  *       removes ONLY the override rows of those sessions (reports return to the original dates); the ledger was never edited so there is nothing else to undo.
  *
@@ -23,7 +25,7 @@ require_once __DIR__ . '/pc_lib.php';
 $payload = rv3_bootstrap_args($argv);
 // the mode is the first argument (preview|post|verify|rollback) or --mode=<mode> (when the read-only validator runs the script in-process)
 $mode = isset($argv[1]) && !str_starts_with($argv[1], '--') ? $argv[1] : '';
-$opt = ['mode' => null, 'app-root' => null, 'sessions' => null, 'cutoff' => null, 'preview-sha' => null, 'actor' => null, 'confirm' => null];
+$opt = ['mode' => null, 'app-root' => null, 'sessions' => null, 'cutoff' => null, 'preview-sha' => null, 'actor' => null, 'confirm' => null, 'ledger-checksum' => null];
 $yes = false;
 $drop = false;
 foreach (array_slice($argv, $mode === '' ? 1 : 2) as $a) {
@@ -101,11 +103,25 @@ try {
         rv3_script_exit(0);
     }
     if ($mode === 'verify') {
-        $checks = $readOnly(static fn () => pc_verify($pdo, $sessions, (string) $opt['cutoff']));
+        $v = $readOnly(static fn () => pc_verify_full($pdo, $sessions, (string) $opt['cutoff'], $opt['ledger-checksum']));
         $fail = 0;
-        foreach ($checks as [$name, $ok, $detail]) {
+        $groupFail = ['override' => 0, 'ledger' => 0, 'report' => 0];
+        foreach ($v['checks'] as [$name, $ok, $detail, $group]) {
             $say(($ok ? 'PASS' : 'FAIL') . " - {$name}  [{$detail}]");
             $fail += $ok ? 0 : 1;
+            $groupFail[$group] += $ok ? 0 : 1;
+        }
+        $say('');
+        if ($fail === 0) {
+            $say($v['status'] === 'NO_OVERRIDE_REQUIRED' ? 'PASS - period cutoff already correct' : 'PASS - period cutoff applied');
+            $say('sessions: ' . implode(',', $sessions));
+            $say('cutoff: ' . $opt['cutoff']);
+            $say('override rows required: ' . $v['required']);
+            $say('inventory_effective_dates: ' . ($v['required'] === 0 ? 'NOT REQUIRED' . ($v['table_exists'] ? " (table present, {$v['override_rows']} row(s), not needed)" : ' (table absent — valid)') : "REQUIRED — {$v['override_rows']} row(s) present"));
+            $say('ledger unchanged: PASS');
+            $say('report periodization: PASS');
+            $say('LEDGER CHECKSUM: ' . $v['ledger_checksum']);
+            $say('STATUS: ' . $v['status']);
         }
         $say($fail === 0 ? 'VERIFY OK' : "VERIFY FAILED ({$fail})");
         rv3_script_exit($fail === 0 ? 0 : 1);

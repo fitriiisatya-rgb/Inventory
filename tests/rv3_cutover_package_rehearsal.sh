@@ -133,6 +133,10 @@ if [ "${RV3_VALIDATE:-0}" = 1 ]; then
   bash "$P/scripts/period_cutoff_preview.sh" "$T" --sessions=1,2 --cutoff=2026-09-30 >"$W/pc_prev.txt" 2>&1; rc=$?
   grep -q "PERIOD CUTOFF — PREVIEW" "$W/pc_prev.txt" && grep -q "PREVIEW SHA256" "$W/pc_prev.txt"; chk "[period cutoff] preview runs against the real tables (exit $rc), prints the plan and the preview sha" $?
   [ "$(mysql -uroot -N "${DB_DATABASE:-inventory_test}" -e "SELECT COUNT(*) FROM inventory_effective_dates")" = 0 ]; chk "[period cutoff] preview wrote no override row" $?
+  grep -q "Override yang dibutuhkan: " "$W/pc_prev.txt" && grep -q "LEDGER CHECKSUM: " "$W/pc_prev.txt"; chk "[period cutoff] preview states how many override rows are required and prints the ledger checksum" $?
+  bash "$P/scripts/period_cutoff_verify.sh" "$T" --sessions=1,2 --cutoff=2026-09-30 --ledger-checksum=$(printf '0%.0s' $(seq 64)) >"$W/pc_ver.txt" 2>&1; rc=$?
+  [ $rc -ne 0 ] && grep -q "required override rows = " "$W/pc_ver.txt" && grep -q "FAIL - ledger checksum" "$W/pc_ver.txt"; chk "[period cutoff] verify wrapper runs read-only, decides the required override count first and rejects a wrong --ledger-checksum (exit $rc)" $?
+  [ "$(mysql -uroot -N "${DB_DATABASE:-inventory_test}" -e "SELECT COUNT(*) FROM inventory_effective_dates")" = 0 ]; chk "[period cutoff] verify wrote no override row" $?
   "$PHP" $PHPA "$P/scripts/rv3_engine.php" plan --app-root="$T" >/dev/null 2>&1; "$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/val_apply.txt" 2>&1; chk "[installed] apply --yes (files only)" $?
   bash "$P/scripts/installed_verify.sh" "$T" --session=1,2 >"$W/inst1.txt" 2>&1; rc=$?; chk "[installed] AFTER the apply installed_verify.sh passes" $rc; [ $rc -ne 0 ] && grep -E "^FAIL|FAILED" "$W/inst1.txt" | head -5
   [ "$(grep -cE '^PASS +[0-9]+ / [0-9]+ ' "$W/inst1.txt")" = 8 ]; chk "[installed] eight reconciliations PASS (six reports + dashboard + period cutoff continuity)" $?
