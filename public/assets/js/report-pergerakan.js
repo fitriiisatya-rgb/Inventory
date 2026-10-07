@@ -527,9 +527,12 @@ const ReportPergerakan = (() => {
         const spec = ReportTools.specFromPayload(payload, picks, {
             subtitle: `Periode ${fmtDate(S.start)} s/d ${fmtDate(S.end)}`,
             meta: ReportTools.metaPairs(payload.meta).filter((m) => ['Periode', 'Gudang', 'Kategori', 'Pencarian barang', 'Tampilan'].includes(m[0])).concat([['Tab', S.view === 'harian' ? 'Harian' : 'Per Barang']]),
-            kpis: nominal
-                ? [{ label: 'Stok Awal', value: rp(sp.opening) }, { label: 'Barang Masuk', value: rp(sp.in) }, { label: 'Barang Keluar', value: rp(sp.out) }, { label: 'Transfer IN / OUT', value: `${rp(sp.tin)} / ${rp(sp.tout)}` }, { label: 'Adjustment', value: signedRp(sp.adjustment) }, { label: 'Stok Akhir', value: rp(sp.closing) }]
-                : [],
+            kpis: (() => {
+                const u = S.overview.qty_units || [];
+                const val = (k) => (nominal ? rp(sp[k]) : unitsText(u, k));
+                return [{ label: 'Stok Awal', value: val('opening') }, { label: 'Barang Masuk (IN)', value: val('in') }, { label: 'Barang Keluar (OUT)', value: val('out') }, { label: 'Transfer IN', value: val('tin') },
+                    { label: 'Transfer OUT', value: val('tout') }, { label: 'Adjustment', value: nominal ? signedRp(sp.adjustment) : unitsText(u, 'adjustment') }, { label: 'Stok Akhir', value: val('closing') }];
+            })(),
             orientation: 'landscape',
         });
         ReportTools.printDocument(spec);

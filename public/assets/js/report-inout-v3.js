@@ -266,30 +266,30 @@ const ReportInOutV3 = (() => {
         let cards = [];
         if (S.tab === 'in') {
             cards = [
-                card('total', 'green', '⬆', 'Total Nilai Barang Masuk', rp(n.total), `Diskon ${rp(n.discount)}`, dl.total),
-                card('invoices', 'blue', '🧾', 'Jumlah Transaksi', `${int(n.invoices)} transaksi`, `Rata-rata ${rp(n.avg_invoice)} / transaksi`, dl.invoices),
-                card('skus', 'teal', '📦', 'Jumlah SKU Masuk', `${int(n.skus)} SKU`, unitList, dl.skus),
-                card('suppliers', 'amber', '🛒', 'Jumlah Supplier', `${int(n.suppliers)} supplier`, `${int(n.invoices)} transaksi`, dl.suppliers),
+                card('total', 'green', '⬆', 'Total Nilai Masuk', rp(n.total), `Diskon ${rp(n.discount)}`, dl.total),
+                card('invoices', 'blue', '🧾', 'Transaksi', `${int(n.invoices)} transaksi`, `Rata-rata ${rp(n.avg_invoice)} / transaksi`, dl.invoices),
+                card('skus', 'teal', '📦', 'SKU Masuk', `${int(n.skus)} SKU`, unitList, dl.skus),
+                card('suppliers', 'amber', '🛒', 'Supplier', `${int(n.suppliers)} supplier`, `${int(n.invoices)} transaksi`, dl.suppliers),
                 card('ppn', 'purple', '％', 'PPN', rp(n.ppn), 'Dari invoice Stock IN V2', dl.ppn),
                 card('freight', 'indigo', '🚚', 'Ongkos Kirim', rp(n.freight), 'Ongkir pada invoice', dl.freight),
             ];
         } else if (S.tab === 'out') {
             cards = [
-                card('hpp', 'red', '⬇', 'Total Nilai HPP Keluar', rp(n.hpp), n.hpp_without_sell > 0 ? `${rp(n.hpp_without_sell)} tanpa nilai jual (legacy)` : 'Biaya FIFO tersimpan', dl.hpp),
-                card('sell', 'green', '💰', 'Total Nilai Jual (Invoice)', rp(n.sell), `+ Ongkir ${rp(n.shipping)} = ${rp(n.grand_total)}`, dl.sell),
+                card('hpp', 'red', '⬇', 'HPP Keluar (FIFO)', rp(n.hpp), n.hpp_without_sell > 0 ? `${rp(n.hpp_without_sell)} tanpa nilai jual (legacy)` : 'Biaya FIFO tersimpan', dl.hpp),
+                card('sell', 'green', '💰', 'Nilai Jual (Invoice)', rp(n.sell), `+ Ongkir ${rp(n.shipping)} = ${rp(n.grand_total)}`, dl.sell),
                 card('margin', 'teal', '📈', 'Margin', rp(n.margin), nil(n.margin_pct) ? 'Margin % tidak diketahui' : `${UI.formatNumber(n.margin_pct, 2)}% dari nilai jual`, dl.margin),
-                card('documents', 'blue', '🧾', 'Jumlah Transaksi', `${int(n.documents)} transaksi`, `${int(n.skus)} SKU · ${unitList}`, dl.documents),
+                card('documents', 'blue', '🧾', 'Transaksi', `${int(n.documents)} transaksi`, `${int(n.skus)} SKU · ${unitList}`, dl.documents),
                 card('bakeries', 'amber', '🏪', 'Bakery Tujuan', `${int(n.bakeries)} bakery`, 'Bakery berbeda', dl.bakeries),
                 card('shipping', 'indigo', '🚚', 'Ongkos Kirim', rp(n.shipping), 'Ongkir pada invoice', dl.shipping),
             ];
         } else {
             cards = [
                 card('transfers', 'blue', '🔁', 'Total Transfer', int(n.transfers), 'Transfer aktif (Pending + Diterima)', dl.transfers),
-                card('pending', 'amber', '⏳', 'Transfer Pending', int(n.pending), `Dalam perjalanan ${rp(n.in_transit_value)}`, dl.pending),
-                card('received', 'green', '✔', 'Transfer Diterima', int(n.received), `Nilai ${rp(n.received_value)}`, dl.received),
-                card('skus', 'teal', '📦', 'Jumlah SKU Dipindahkan', `${int(n.skus)} SKU`, unitList, dl.skus),
-                card('value', 'purple', '💲', 'Nilai Cost Transfer', rp(n.value), 'Biaya layer asli (tidak di-reprice)', dl.value),
-                card('lead', 'indigo', '⏱', 'Rata-rata Lead Time', nil(n.avg_lead_hours) ? '—' : (n.avg_lead_hours >= 24 ? `${UI.formatNumber(n.avg_lead_hours / 24, 1)} hari` : `${UI.formatNumber(n.avg_lead_hours, 1)} jam`), n.lead_samples > 0 ? `Dari ${int(n.lead_samples)} transfer diterima` : 'Belum ada transfer diterima'),
+                card('pending', 'amber', '⏳', 'Pending', int(n.pending), `Dalam perjalanan ${rp(n.in_transit_value)}`, dl.pending),
+                card('received', 'green', '✔', 'Diterima', int(n.received), `Nilai ${rp(n.received_value)}`, dl.received),
+                card('skus', 'teal', '📦', 'SKU Dipindah', `${int(n.skus)} SKU`, unitList, dl.skus),
+                card('value', 'purple', '💲', 'Nilai Cost', rp(n.value), 'Biaya layer asli (tidak di-reprice)', dl.value),
+                card('lead', 'indigo', '⏱', 'Lead Time (rata-rata)', nil(n.avg_lead_hours) ? '—' : (n.avg_lead_hours >= 24 ? `${UI.formatNumber(n.avg_lead_hours / 24, 1)} hari` : `${UI.formatNumber(n.avg_lead_hours, 1)} jam`), n.lead_samples > 0 ? `Dari ${int(n.lead_samples)} transfer diterima` : 'Belum ada transfer diterima'),
             ];
         }
         cards.forEach((c) => host.appendChild(c));
