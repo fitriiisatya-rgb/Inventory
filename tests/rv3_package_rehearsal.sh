@@ -15,9 +15,9 @@ tree_sum() { ( cd "$1" && find . -type f ! -path './state/*' -print0 | sort -z |
 PKG="${1:-}"
 if [ -z "$PKG" ]; then
   "$PHP" scripts/build_rv3_package.php "$W/out" >"$W/build.log" 2>&1 || { cat "$W/build.log"; exit 1; }
-  PKG="$W/out/reports_v3_production_deploy_package.tar.gz"
+  PKG="$W/out/reports_v3_recovery_package.tar.gz"
 fi
-unpack() { rm -rf "${1:?}"; mkdir -p "$1"; tar -xzf "$PKG" -C "$1"; echo "$1/reports_v3_production_deploy_package"; }
+unpack() { rm -rf "${1:?}"; mkdir -p "$1"; tar -xzf "$PKG" -C "$1"; echo "$1/reports_v3_recovery_package"; }
 echo "package: $PKG"; sha256sum "$PKG" | cut -d' ' -f1
 
 # production-like trees: the project history at the commits where each earlier package was delivered, + the current tree (everything already applied)
@@ -45,13 +45,23 @@ for rev in $TREES; do
   grep -q "PLAN: OK" "$W/plan_$rev.txt"; chk "[$rev] dry-run prints 'PLAN: OK'" $?
   chk "[$rev] dry-run changed no application file (plan + report live in the package folder)" $([ "$(tree_sum "$T")" = "$before" ] && echo 0 || echo 1)
   [ -f "$P/state/plan.json" ] && [ -f "$P/state/dryrun_report.txt" ]; chk "[$rev] state/plan.json and state/dryrun_report.txt written" $?
-  "$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" >"$W/applyno_$rev.txt" 2>&1; chk "[$rev] apply WITHOUT --yes writes nothing" $([ "$(tree_sum "$T")" = "$before" ] && echo 0 || echo 1)
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" >"$W/applyno_$rev.txt" 2>&1; rcno=$?; chk "[$rev] apply WITHOUT --yes writes nothing" $([ "$(tree_sum "$T")" = "$before" ] && echo 0 || echo 1)
+  [ $rcno -eq 10 ] && grep -q "NOT APPLIED" "$W/applyno_$rev.txt"; chk "[$rev] apply WITHOUT --yes exits 10 and says NOT APPLIED (it can never look like a successful apply: the previous package exited 0)" $?
+  grep -q "INSTALL PLAN" "$W/plan_$rev.txt" && grep -qE "^ +CREATE +services/MovementReportV3Service.php" "$W/plan_$rev.txt"; chk "[$rev] the dry-run prints the INSTALL PLAN naming CREATE for the absent V3 services" $?
+  "$PHP" $PHPA "$P/scripts/rv3_readonly_check.php" --app-root="$T" --mode=installed >"$W/inst_before_$rev.txt" 2>&1; rcib=$?
+  [ $rcib -ne 0 ] && grep -q "FAIL - INSTALLED file exists in the application: services/MovementReportV3Service.php" "$W/inst_before_$rev.txt"; chk "[$rev] the INSTALLED validator FAILS before the apply (absent services are reported; nothing is validated against package code)" $?
+  "$PHP" $PHPA "$P/scripts/rv3_readonly_check.php" --app-root="$T" --mode=installed --package-dir="$P" >"$W/inst_pkg_$rev.txt" 2>&1; [ $? -eq 2 ] && grep -q "refuses --package-dir" "$W/inst_pkg_$rev.txt"; chk "[$rev] the INSTALLED validator REFUSES --package-dir (exit 2)" $?
   "$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/apply_$rev.txt" 2>&1; rc=$?
   chk "[$rev] apply --yes succeeds" $rc; [ $rc -ne 0 ] && tail -8 "$W/apply_$rev.txt"
   after="$(tree_sum "$T")"
   [ "$after" != "$before" ]; chk "[$rev] the tree changed" $?
   "$PHP" $PHPA "$P/scripts/rv3_engine.php" verify --app-root="$T" >"$W/verify_$rev.txt" 2>&1; rc=$?
-  chk "[$rev] verify passes (all operations done, php -l, one tag each, one render per tab, recorded hashes)" $rc; [ $rc -ne 0 ] && grep -E "FAIL|todo|conflict" "$W/verify_$rev.txt" | head
+  chk "[$rev] verify passes (all operations done, php -l, one tag each, one render per tab, recorded hashes, INSTALLED file assertions)" $rc; [ $rc -ne 0 ] && grep -E "FAIL|todo|conflict" "$W/verify_$rev.txt" | head
+  grep -q "PASS - INSTALLED file exists in the application: services/ReportsV3Routes.php" "$W/verify_$rev.txt" && grep -q "PASS - INSTALLED public/index.php contains the marker" "$W/verify_$rev.txt"; chk "[$rev] verify asserted the real installed files (services/*, ReportsV3Routes.php, index.php marker)" $?
+  rm -f "$T/services/MovementReportV3Service.php"; "$PHP" $PHPA "$P/scripts/rv3_engine.php" verify --app-root="$T" >"$W/verify_gone_$rev.txt" 2>&1; rcg=$?
+  [ $rcg -ne 0 ] && grep -q "FAIL - INSTALLED file exists in the application: services/MovementReportV3Service.php" "$W/verify_gone_$rev.txt"; chk "[$rev] verify FAILS when one installed V3 service is deleted afterwards" $?
+  cp "$W/pkg_$rev/reports_v3_recovery_package/payload/services/MovementReportV3Service.php" "$T/services/MovementReportV3Service.php"
+  [ "$(tree_sum "$T")" = "$after" ]; chk "[$rev] (restored the deleted file: the tree equals the applied tree again)" $?
   # the result must be the SAME tree no matter where we started: compare the files the package owns with the final (HEAD) ones
   mism=0; for f in public/assets/js/report-tools.js public/assets/js/report-pergerakan.js public/assets/js/report-pembelian-v3.js public/assets/js/report-nilai-hpp-v3.js public/assets/js/report-inout-v3.js public/assets/js/report-opname-audit.js services/ReportsV3Routes.php services/ReportExportService.php services/MovementReportV3Service.php services/PurchaseReportService.php services/InOutReportService.php services/InventoryValuationService.php services/StockOpnameAuditReportService.php services/MovementDailyReportService.php; do
     cmp -s "$T/$f" <(git show HEAD:"$f") || { mism=1; echo "   differs from HEAD: $f"; }
@@ -139,10 +149,33 @@ if [ "${RV3_VALIDATE:-0}" = 1 ]; then
   [ $rc -eq 2 ] && grep -q "package-dir" "$W/val_v3_nopkg.txt"; chk "[validator] movement_v3 run alone WITHOUT the package: a clear ABORT (exit 2) telling to pass --package-dir, not a fatal error" $?
   "$PHP" $PHPA "$P/scripts/movement_v3_reconcile_check.php" --app-root="$T" --package-dir="$P" --start=2026-09-01 --end=2026-09-30 >"$W/val_v3.txt" 2>&1; rc=$?
   chk "[validator] movement_v3 run alone WITH --package-dir works before apply: exit 0" $rc
-  "$PHP" $PHPA "$P/scripts/rv3_readonly_check.php" --app-root="$T" --package-dir="$P" --session=1,2 --start=2026-09-01 --end=2026-09-30 >"$W/val_all.txt" 2>&1; rc=$?
-  chk "[validator] readonly_validate on the unpatched tree: exit 0 — Stock Opname, Movement V3, Movement Daily, IN/OUT/Transfer, Pembelian, Nilai HPP" $rc
-  [ "$(grep -cE '^PASS +[0-9]+ / [0-9]+ ' "$W/val_all.txt")" = 6 ]; chk "[validator] all six reports PASS" $?
-  [ "$(tree_sum "$T")" = "$before" ]; chk "[validator] the application tree is byte-identical after the validator (nothing written)" $?
+  "$PHP" $PHPA "$P/scripts/rv3_readonly_check.php" --app-root="$T" --mode=predeploy --package-dir="$P" --session=1,2 --start=2026-09-01 --end=2026-09-30 >"$W/val_all.txt" 2>&1; rc=$?
+  chk "[predeploy] PRE-DEPLOY validator on the unpatched tree: exit 0 (candidate code from the payload works against the real data)" $rc
+  [ "$(grep -cE '^PASS +[0-9]+ / [0-9]+ ' "$W/val_all.txt")" = 6 ]; chk "[predeploy] all six reports PASS" $?
+  grep -q "does NOT prove anything is installed" "$W/val_all.txt"; chk "[predeploy] its verdict says it does NOT prove anything is installed" $?
+  [ "$(tree_sum "$T")" = "$before" ]; chk "[predeploy] the application tree is byte-identical after the validator (nothing written)" $?
+  # THE PRODUCTION INCIDENT: the pre-deploy validator passes on a server where nothing is installed — the INSTALLED validator must NOT
+  "$PHP" $PHPA "$P/scripts/rv3_readonly_check.php" --app-root="$T" --mode=installed --session=1,2 --start=2026-09-01 --end=2026-09-30 >"$W/val_inst0.txt" 2>&1; rc=$?
+  [ $rc -ne 0 ] && grep -q "FAIL - INSTALLED file exists in the application: services/MovementReportV3Service.php" "$W/val_inst0.txt" && grep -q "NOT (fully) installed" "$W/val_inst0.txt"; chk "[installed] INCIDENT REPRODUCED: with the backend absent the pre-deploy validator passes but the INSTALLED validator FAILS (exit != 0)" $?
+  bash "$P/scripts/installed_verify.sh" "$T" --session=1,2 >"$W/val_inst0b.txt" 2>&1; [ $? -ne 0 ]; chk "[installed] installed_verify.sh FAILS on the unpatched tree" $?
+  "$PHP" $PHPA "$P/scripts/rv3_engine.php" plan --app-root="$T" >/dev/null 2>&1; "$PHP" $PHPA "$P/scripts/rv3_engine.php" apply --app-root="$T" --yes >"$W/val_apply.txt" 2>&1; chk "[installed] apply --yes (exit 0) with the INSTALLED-CHECK line" $?
+  grep -q "INSTALLED-CHECK: every packaged file exists" "$W/val_apply.txt"; chk "[installed] apply printed INSTALLED-CHECK" $?
+  bash "$P/scripts/installed_verify.sh" "$T" --session=1,2 --start=2026-09-01 --end=2026-09-30 >"$W/val_inst1.txt" 2>&1; rc=$?
+  chk "[installed] AFTER the apply installed_verify.sh passes: exit 0" $rc; [ $rc -ne 0 ] && grep -E "^FAIL|FAILED" "$W/val_inst1.txt" | head -5
+  [ "$(grep -cE '^PASS +[0-9]+ / [0-9]+ ' "$W/val_inst1.txt")" = 6 ]; chk "[installed] all six reports PASS using the installed code" $?
+  [ "$(grep -c "PASS - App.Services.*is loaded from .*/services/" "$W/val_inst1.txt")" = 7 ]; chk "[installed] Reflection: all 7 V3 classes are loaded from <APP>/services/ (never from the package)" $?
+  grep -q "PASS - no file of the package payload was loaded during this validation" "$W/val_inst1.txt"; chk "[installed] no package payload file was loaded" $?
+  grep -q "PASS - ReportsV3Routes.php was included from the application" "$W/val_inst1.txt"; chk "[installed] ReportsV3Routes.php is the installed one" $?
+  grep -q "$T/services/MovementReportV3Service.php" "$W/val_inst1.txt"; chk "[installed] the Reflection line shows the real path under the application root" $?
+  inst_before="$(tree_sum "$T")"
+  for case in "service deleted|rm services/InOutReportService.php|FAIL - INSTALLED file exists in the application: services/InOutReportService.php" "service hand-edited|echo '// edit' >> services/PurchaseReportService.php|FAIL - INSTALLED file is the packaged version" "route include removed from index.php|sed -i 's#// >>> RV3 reports_v3 BEGIN#// >>> gone#' public/index.php|FAIL - INSTALLED public/index.php contains the marker" "routes file emptied|echo '<?php return [];' > services/ReportsV3Routes.php|FAIL"; do
+    IFS='|' read -r cname cmut cexp <<<"$case"
+    cp -r "$T" "$W/val_tree_mut"; ( cd "$W/val_tree_mut" && eval "$cmut" )
+    "$PHP" $PHPA "$P/scripts/rv3_readonly_check.php" --app-root="$W/val_tree_mut" --mode=installed --session=1,2 >"$W/val_mut.txt" 2>&1; rc=$?
+    [ $rc -ne 0 ] && grep -q "$cexp" "$W/val_mut.txt"; chk "[installed] $cname: the INSTALLED validator FAILS ($cexp)" $?
+    rm -rf "${W:?}/val_tree_mut"
+  done
+  [ "$(tree_sum "$T")" = "$inst_before" ]; chk "[installed] the installed validator wrote nothing to the application" $?
 fi
 
 echo; echo "$pass passed, $fail failed"

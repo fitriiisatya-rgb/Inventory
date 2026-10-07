@@ -32,17 +32,17 @@ $show = static function (string $path) use ($revFull): string {
 };
 /** every version of the file that ever existed in the project history (sha256 of the content) — the "known earlier versions" a replace may start from */
 $history = static function (string $path) use ($revFull): array {
-    $hashes = [];
+    $hashes = [];                                    // sha256 => "commit date subject" (the newest commit that produced exactly that content)
     foreach (explode("\n", trim((string) shell_exec('git rev-list ' . escapeshellarg($revFull) . ' -- ' . escapeshellarg($path)))) as $c) {
         if ($c === '') {
             continue;
         }
         $d = shell_exec('git show ' . escapeshellarg("{$c}:{$path}") . ' 2>/dev/null');
         if ($d !== null && $d !== '') {
-            $hashes[rv3_sha($d)] = true;
+            $hashes[rv3_sha($d)] ??= trim((string) shell_exec('git log -1 --format="%h (%cs) %s" ' . escapeshellarg($c)));
         }
     }
-    return array_keys($hashes);
+    return $hashes;
 };
 
 // RV3_MODE=ui builds the FRONTEND-ONLY incremental package (production UI correction): the six report pages, the CSS blocks, app.js routes / labels and index.html. The validated backend
@@ -50,7 +50,7 @@ $history = static function (string $path) use ($revFull): array {
 $ui = getenv('RV3_MODE') === 'ui';
 $token = '20261019-rv3ui';
 $name = ($ui ? 'reports_v3_ui_' : 'reports_v3_') . substr($revFull, 0, 10);
-$pkgName = $ui ? 'reports_v3_ui_correction_package' : 'reports_v3_production_deploy_package';
+$pkgName = $ui ? 'reports_v3_ui_correction_package' : 'reports_v3_recovery_package';
 $tmp = sys_get_temp_dir() . '/rv3_build_' . bin2hex(random_bytes(4));
 $R = "{$tmp}/{$pkgName}";
 foreach (array_merge($ui ? [] : ['payload/services'], ['payload/public/assets/js', 'payload/css', 'scripts', 'tests/browser/lib', 'tests/lib', 'state']) as $d) {
@@ -85,7 +85,9 @@ foreach ($files as $f) {
     $d = $show($f);
     $put("payload/{$f}", $d);
     $h = $sha($d);
-    $ops[] = ['id' => 'file:' . basename($f), 'type' => 'file', 'target' => $f, 'payload' => $f, 'sha256' => $h, 'known' => array_values(array_diff($history($f), [$h]))];
+    $hist = $history($f);
+    unset($hist[$h]);
+    $ops[] = ['id' => 'file:' . basename($f), 'type' => 'file', 'target' => $f, 'payload' => $f, 'sha256' => $h, 'known' => array_keys($hist), 'known_info' => $hist];
 }
 
 // ---------------------------------------------------------------- css blocks (extracted by marker from the committed app.css)
@@ -165,7 +167,21 @@ $requirements = [
     ['class' => 'App\Services\InventoryValuationService', 'method' => 'exportWorkbook'],
 ];
 
-$manifest = ['name' => $name, 'source_commit' => $revFull, 'built' => date('c'), 'token' => $token, 'requirements' => $requirements, 'ops' => $ops];
+// what the POST-DEPLOY validator asserts about the INSTALLED code: every V3 class resolves to <APP>/services/<file>, and the installed routes file defines every route key
+$v3Classes = [];
+foreach (array_merge($backendFiles) as $f) {
+    if (basename($f) !== 'ReportsV3Routes.php') {
+        $v3Classes['App\\Services\\' . basename($f, '.php')] = basename($f);
+    }
+}
+$tmpRoutes = tempnam(sys_get_temp_dir(), 'rv3routes');
+file_put_contents($tmpRoutes, $show('services/ReportsV3Routes.php'));
+$routeKeys = json_decode((string) shell_exec('php -r ' . escapeshellarg('$pdo = new stdClass(); $query = []; $routes = []; echo json_encode(array_keys(require $argv[1]));') . ' ' . escapeshellarg($tmpRoutes)), true);
+@unlink($tmpRoutes);
+if (!is_array($routeKeys) || count($routeKeys) < 10) {
+    rv3_die('could not read the route keys of ReportsV3Routes.php');
+}
+$manifest = ['name' => $name, 'mode' => $ui ? 'ui' : 'full', 'source_commit' => $revFull, 'built' => date('c'), 'token' => $token, 'requirements' => $requirements, 'v3_classes' => $v3Classes, 'route_keys' => $routeKeys, 'ops' => $ops];
 $put('manifest.json', json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
 
 // ---------------------------------------------------------------- scripts + tests
@@ -183,7 +199,8 @@ $put('scripts/dryrun.sh', $wrap('DRY-RUN (read-only for the application): writes
 $put('scripts/apply.sh', $wrap('APPLY (writes). Needs a fresh dry-run plan; add --yes to really apply.', "APP=\"\${1:?usage: apply.sh <APP ROOT> [--yes]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" apply --app-root=\"\$APP\" \"\$@\"\n"));
 $put('scripts/verify.sh', $wrap('POST-APPLY VERIFY (read-only).', "APP=\"\${1:?usage: verify.sh <APP ROOT> [--base-url=https://host]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" verify --app-root=\"\$APP\" \"\$@\"\n"));
 $put('scripts/rollback.sh', $wrap('ROLLBACK (writes): two-phase, restores the exact pre-apply files.', "APP=\"\${1:?usage: rollback.sh <APP ROOT>}\"\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" rollback --app-root=\"\$APP\"\n"));
-$put('scripts/readonly_validate.sh', $wrap('PRODUCTION READ-ONLY VALIDATOR: SO sessions 11/12 reconciliation (16/16) + the five reports against the REAL data, with the NEW code. SELECT only.', "APP=\"\${1:?usage: readonly_validate.sh <APP ROOT> [--session=11,12] [--start=YYYY-MM-DD --end=YYYY-MM-DD]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_readonly_check.php\" --app-root=\"\$APP\" --package-dir=\"\$HERE/..\" \"\$@\"\n"));
+$put('scripts/predeploy_validate.sh', $wrap('PRE-DEPLOY READ-ONLY VALIDATOR (candidate code = the package payload, loaded IN MEMORY): proves the package works against the REAL database. It does NOT prove anything is installed.', "APP=\"\${1:?usage: predeploy_validate.sh <APP ROOT> [--session=11,12] [--start=YYYY-MM-DD --end=YYYY-MM-DD]}\"; shift\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_readonly_check.php\" --app-root=\"\$APP\" --mode=predeploy --package-dir=\"\$(dirname \"\$HERE\")\" \"\$@\"\n"));
+$put('scripts/installed_verify.sh', $wrap('POST-DEPLOY INSTALLED VERIFICATION (read-only): (1) every packaged file exists IN THE APPLICATION with the packaged sha256, index.php carries the marker; (2) every V3 class is loaded from <APP>/services (Reflection) and never from the package; (3) all reports reconcile using ONLY the installed code. Fails if any backend file is absent.', "APP=\"\${1:?usage: installed_verify.sh <APP ROOT> [--session=11,12] [--start=YYYY-MM-DD --end=YYYY-MM-DD] [--base-url=https://host]}\"; shift\nBASE=\"\"; REST=()\nfor a in \"\$@\"; do case \"\$a\" in --base-url=*) BASE=\"\$a\";; *) REST+=(\"\$a\");; esac; done\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_engine.php\" verify --app-root=\"\$APP\" \${BASE:+\"\$BASE\"} || { echo \"INSTALLED VERIFICATION FAILED (engine verify)\"; exit 1; }\n\"\$PHP\" \${PHP_ARGS:-} \"\$HERE/rv3_readonly_check.php\" --app-root=\"\$APP\" --mode=installed \"\${REST[@]+\"\${REST[@]}\"}\"\n"));
 foreach (['movement_report_v3_test.php', 'inout_report_test.php', 'inventory_valuation_test.php', 'purchase_report_test.php', 'stock_opname_audit_report_test.php', 'report_export_test.php', 'numeric_unit_code_test.php', 'rv3_sidebar_op_test.php', 'rv3_package_rehearsal.sh'] as $t) {
     $put("tests/{$t}", $show("tests/{$t}"));
 }

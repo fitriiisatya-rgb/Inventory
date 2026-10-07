@@ -637,3 +637,55 @@ function rv3_load_services(array $files): ?string
     }
     return null;
 }
+
+// ---------------------------------------------------------------- INSTALLED assertions (shared by apply and the post-deploy validator)
+/**
+ * What is ACTUALLY on disk in the application — never the package payload:
+ *   - every `file` op of the manifest: the target exists in <app>, and its sha256 equals the packaged version
+ *   - public/index.php carries the Reports v3 route include (marker) and still parses
+ *   - app.js / index.html / app.css carry the packaged blocks (every non-file op reports `done`)
+ * @param callable(string,bool,string):void $check
+ */
+function rv3_installed_assertions(string $app, array $manifest, string $payloadDir, callable $check): void
+{
+    $app = rtrim($app, '/');
+    foreach ($manifest['ops'] as $op) {
+        if ($op['type'] !== 'file') {
+            continue;
+        }
+        $path = "{$app}/{$op['target']}";
+        $cur = rv3_read($path);
+        $check('INSTALLED file exists in the application: ' . $op['target'], $cur !== null, $cur === null ? 'ABSENT at ' . $path : 'present');
+        if ($cur !== null) {
+            $check('INSTALLED file is the packaged version (sha256 ' . substr($op['sha256'], 0, 12) . '…): ' . $op['target'], hash_equals($op['sha256'], rv3_sha($cur)), 'installed ' . substr(rv3_sha($cur), 0, 12) . '…');
+        }
+    }
+    foreach ($manifest['ops'] as $op) {
+        if ($op['type'] === 'php_include') {
+            $idx = rv3_read("{$app}/{$op['target']}");
+            $check("INSTALLED {$op['target']} contains the marker \"{$op['begin']}\" exactly once", $idx !== null && substr_count($idx, $op['begin']) === 1 && substr_count($idx, $op['end']) === 1, $idx === null ? 'ABSENT' : 'markers: ' . substr_count($idx, $op['begin']));
+            $check("INSTALLED {$op['target']} includes services/ReportsV3Routes.php", $idx !== null && str_contains($idx, "services/ReportsV3Routes.php"));
+            $check("INSTALLED {$op['target']} parses (php lint, in process)", $idx !== null && rv3_lint("{$app}/{$op['target']}") === null);
+        }
+    }
+    $notDone = [];
+    foreach (rv3_group($manifest) as $target => $ops) {
+        [, $rep] = rv3_fold_file(rv3_read("{$app}/{$target}"), $ops, $payloadDir);
+        foreach ($rep as $r) {
+            if ($r['state'] !== 'done') {
+                $notDone[] = "{$target}: {$r['id']} ({$r['state']})";
+            }
+        }
+    }
+    $check('INSTALLED every packaged operation (blocks, routes, labels, tags, sidebar) reports done against the real files', $notDone === [], implode(' | ', array_slice($notDone, 0, 6)));
+}
+
+/** same grouping the engine uses (target => ops); kept here so the installed assertions work without the engine */
+function rv3_group(array $manifest): array
+{
+    $g = [];
+    foreach ($manifest['ops'] as $op) {
+        $g[$op['target']][] = $op;
+    }
+    return $g;
+}

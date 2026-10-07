@@ -7,7 +7,7 @@ declare(strict_types=1);
  *   php rv3_engine.php preflight --app-root=<APP ROOT>                  READ-ONLY. Environment, package integrity, dependency self-check (production services + payload loaded together), state of
  *                                                                        every operation, SHA256 of every target file.
  *   php rv3_engine.php plan      --app-root=<APP ROOT>                  = DRY-RUN. Everything preflight does + writes state/plan.json (binds the apply to the exact hashes seen now).
- *   php rv3_engine.php apply     --app-root=<APP ROOT> [--yes]          Applies the plan. Refuses without a fresh, unblocked plan; backs everything up first; atomic write + re-verify per file; any failure rolls the run back.
+ *   php rv3_engine.php apply     --app-root=<APP ROOT> [--yes]          Applies the plan (WITHOUT --yes it writes nothing and exits 10 = NOT APPLIED). Refuses without a fresh, unblocked plan; backs everything up first; atomic write + re-verify per file; any failure rolls the run back.
  *   php rv3_engine.php verify    --app-root=<APP ROOT> [--base-url=URL] Post-apply: every operation done, syntax of every changed PHP file, no duplicate script tags, final hashes.
  *   php rv3_engine.php rollback  --app-root=<APP ROOT>                  Two-phase: first checks every file is still byte-identical to what apply produced, then restores.
  *
@@ -46,13 +46,10 @@ $say = static function (string $line = '') use (&$out): void {
     echo $line . "\n";
 };
 
-/** @return array<string,list<array>> target => ops (original order) */
-function rv3_group(array $manifest): array
+/** @return array<string,list<array>> target => ops (original order), the files with the earliest operation type first */
+function rv3_group_ranked(array $manifest): array
 {
-    $g = [];
-    foreach ($manifest['ops'] as $op) {
-        $g[$op['target']][] = $op;
-    }
+    $g = rv3_group($manifest);
     $rank = static function (array $ops): int {
         $r = 99;
         foreach ($ops as $o) {
@@ -68,7 +65,7 @@ function rv3_group(array $manifest): array
 function rv3_evaluate(string $app, array $manifest, string $payloadDir): array
 {
     $res = [];
-    foreach (rv3_group($manifest) as $target => $ops) {
+    foreach (rv3_group_ranked($manifest) as $target => $ops) {
         $cur = rv3_read("{$app}/{$target}");
         [$post, $report] = rv3_fold_file($cur, $ops, $payloadDir);
         $blocked = (bool) array_filter($report, static fn ($r) => $r['state'] === 'conflict');
@@ -147,6 +144,42 @@ function rv3_selfcheck(string $app, string $pkg, array $manifest): array
     $info = ['routes' => is_array($routes) ? count($routes) : 0, 'missing' => $missing];
     return [$missing === [] && $info['routes'] > 0, $info, ''];
 }
+/** The plan in plain words, against the REAL application: CREATE (absent now) / UPDATE (installed file differs; its identity is named) / EDIT (a block inside an existing file) / UNCHANGED / BLOCKED. */
+function rv3_print_install_plan(callable $say, array $eval, array $manifest): void
+{
+    $info = [];
+    foreach ($manifest['ops'] as $op) {
+        if ($op['type'] === 'file') {
+            $info[$op['target']] = $op;
+        }
+    }
+    $n = ['CREATE' => 0, 'UPDATE' => 0, 'EDIT' => 0, 'UNCHANGED' => 0, 'BLOCKED' => 0];
+    foreach ($eval as $target => $e) {
+        $isFile = isset($info[$target]);
+        if ($e['action'] === 'BLOCKED') {
+            $kind = 'BLOCKED';
+            $why = implode(' | ', array_map(static fn ($r) => $r['note'], array_filter($e['report'], static fn ($r) => $r['state'] === 'conflict')));
+        } elseif ($e['action'] === 'none') {
+            $kind = 'UNCHANGED';
+            $why = 'already correct' . ($e['pre_sha'] ? ' (sha256 ' . substr($e['pre_sha'], 0, 12) . '…)' : '');
+        } elseif ($e['pre'] === null) {
+            $kind = 'CREATE';
+            $why = 'ABSENT in the application now -> installed from the package (sha256 ' . substr((string) $e['post_sha'], 0, 12) . '…)';
+        } elseif ($isFile) {
+            $kind = 'UPDATE';
+            $known = $info[$target]['known_info'][$e['pre_sha']] ?? null;
+            $why = 'installed sha256 ' . substr((string) $e['pre_sha'], 0, 12) . '… is ' . ($known !== null ? 'the project version ' . (mb_strlen($known) > 96 ? mb_substr($known, 0, 93) . '…' : $known) : 'a known earlier version') . ' -> replaced by ' . substr((string) $e['post_sha'], 0, 12) . '…';
+        } else {
+            $kind = 'EDIT';
+            $why = implode('; ', array_map(static fn ($r) => "{$r['id']}: {$r['note']}", array_filter($e['report'], static fn ($r) => $r['state'] === 'todo')));
+        }
+        $n[$kind]++;
+        $say(sprintf('  %-9s %-46s %s', $kind, $target, $why));
+    }
+    $say(sprintf('  COUNT     CREATE %d · UPDATE %d · EDIT %d · UNCHANGED %d · BLOCKED %d', $n['CREATE'], $n['UPDATE'], $n['EDIT'], $n['UNCHANGED'], $n['BLOCKED']));
+    $say('  Nothing outside this list is touched: no database write, no data, no file of Stock Opname / FIFO / HPP / dashboard / master data / Stock IN-OUT is changed.');
+}
+
 function rv3_print_eval(callable $say, array $eval): void
 {
     foreach ($eval as $target => $e) {
@@ -221,6 +254,9 @@ if ($cmd === 'preflight' || $cmd === 'plan') {
     $say('-- operations (state of every target file right now)');
     $eval = rv3_evaluate($app, $manifest, $payloadDir);
     rv3_print_eval($say, $eval);
+    $say();
+    $say('-- INSTALL PLAN against the REAL application at ' . $app . '  (read-only: nothing is written by this command)');
+    rv3_print_install_plan($say, $eval, $manifest);
     $status = rv3_status($eval);
     $say();
     $say('-- SHA256 of the target files as they are on the server now');
@@ -278,9 +314,12 @@ if ($cmd === 'apply') {
         }
     }
     if (!$opt['yes']) {
-        $say('Plan verified against the live files. Re-run with --yes to apply.');
-        rv3_print_eval($say, array_filter($eval, static fn ($e) => $e['action'] !== 'none'));
-        exit(0);
+        $say('Plan verified against the live files.');
+        rv3_print_install_plan($say, $eval, $manifest);
+        $say();
+        $say('NOT APPLIED: --yes was not given, NOTHING was written (exit code 10 so that this can never be mistaken for a successful apply).');
+        $say('Apply for real with:  bash scripts/apply.sh <APP ROOT> --yes');
+        exit(10);
     }
     rv3_mkdir($stateDir);
     $lockH = fopen("{$stateDir}/apply.lock", 'c');
@@ -342,6 +381,22 @@ if ($cmd === 'apply') {
         file_put_contents("{$stateDir}/run_{$run}.json", json_encode($record, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
         rv3_die('apply failed and was rolled back: ' . $ex->getMessage(), 4);
     }
+    // the files must be on disk in THE APPLICATION (re-read through a fresh stat, not from memory), exactly as packaged
+    clearstatcache(true);
+    $inst = [];
+    rv3_installed_assertions($app, $manifest, $payloadDir, static function (string $name, bool $ok, string $detail = '') use (&$inst): void {
+        if (!$ok) {
+            $inst[] = $name . ($detail !== '' ? " ({$detail})" : '');
+        }
+    });
+    if ($inst) {
+        $restore();
+        $record['status'] = 'failed_rolled_back';
+        $record['error'] = 'installed assertions failed: ' . implode(' | ', $inst);
+        file_put_contents("{$stateDir}/run_{$run}.json", json_encode($record, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+        rv3_die('apply wrote the files but they are not installed as packaged — rolled back: ' . implode(' | ', array_slice($inst, 0, 4)), 4);
+    }
+    $say('INSTALLED-CHECK: every packaged file exists in ' . $app . ' with the packaged sha256; index.php carries the Reports v3 marker.');
     $record['status'] = 'applied';
     $record['finished'] = date('c');
     file_put_contents("{$stateDir}/run_{$run}.json", json_encode($record, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
@@ -357,7 +412,7 @@ if ($cmd === 'apply') {
         $say('  ' . $l);
     }
     $say('Backups: ' . $backupDir);
-    $say('Next: run the post-apply verification, then hard-refresh the browser (Ctrl+F5).');
+    $say('Next: bash scripts/installed_verify.sh <APP ROOT> --session=11,12   (post-deploy, loads ONLY the installed application code), then hard-refresh the browser (Ctrl+F5).');
     exit(0);
 }
 
@@ -366,6 +421,7 @@ if ($cmd === 'verify') {
     $say('== Reports v3 — post-apply verification (read-only) ==');
     $eval = rv3_evaluate($app, $manifest, $payloadDir);
     $check('every operation reports done (the files are exactly the packaged state; re-applying would change nothing)', rv3_status($eval) === 'NOTHING_TO_DO', rv3_status($eval));
+    rv3_installed_assertions($app, $manifest, $payloadDir, $check);
     foreach ($eval as $target => $e) {
         foreach ($e['report'] as $r) {
             if ($r['state'] !== 'done') {

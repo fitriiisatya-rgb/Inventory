@@ -1,47 +1,41 @@
-# Inventory Pro — Reports v3 (satu paket produksi untuk 5 laporan)
+# Inventory Pro — Reports v3 · PAKET PEMULIHAN PRODUKSI (backend + frontend, sadar-kondisi-produksi)
 
 Paket: `@NAME@` · sumber commit `@COMMIT@` · token cache-bust `@TOKEN@`
 
-**Isi (semua sekaligus, tidak ada patch manual satu per satu):**
+## Kenapa paket sebelumnya "lolos" padahal backend tidak terpasang
+1. **Validator "post-apply" lama memuat kode dari payload paket (in-memory), bukan dari `APP/services`.** Ia lulus (EXIT=0) pada server yang tidak pernah dipasangi satu pun file. Ini terbukti dengan tes: validator lama lulus pada tree yang belum di-apply.
+2. **`apply` tanpa `--yes` berakhir dengan exit 0** ("plan verified, re-run with --yes") dan tidak menulis apa pun — tak dapat dibedakan dari apply sukses lewat exit code.
+Perbaikan di paket ini: `apply` tanpa `--yes` kini **exit 10 "NOT APPLIED"**; apply selalu diakhiri **asersi terpasang** (file ada di `APP` dengan sha256 paket, marker `index.php`) dan **rollback otomatis** bila gagal;
+validator dipisah menjadi **dua mode yang masing-masing harus lulus**: `predeploy_validate.sh` (kode kandidat dari payload, hanya membuktikan paket bekerja) dan `installed_verify.sh` (**hanya** kode terpasang; menolak `--package-dir`; gagal bila ada service yang tidak ada / berbeda / dimuat dari folder paket).
 
-| Laporan | Halaman | Endpoint (semua GET, read-only) |
-|---|---|---|
-| Laporan Pergerakan Stok | `report-pergerakan.js` | `/reports/movement/v3/{overview,items,export}` |
-| Laporan IN / OUT (3 tab) | `report-inout-v3.js` | `/reports/io/*` (+ `view=lines`, `tab=all`) |
-| Laporan Pembelian | `report-pembelian-v3.js` | `/reports/purchase-v2/*` |
-| Laporan Nilai HPP (FIFO/Average × Per Barang/Per Hari) | `report-nilai-hpp-v3.js` | `/reports/inventory-valuation*` |
-| Laporan Stock Opname | `report-opname-audit.js` | `/reports/opname-audit/*` (backend SOA dipakai ulang; hanya export diperluas) |
+## Yang dilakukan paket ini (hanya kode — tidak ada data yang disentuh)
+Dry-run membaca **produksi nyata** dan menampilkan *INSTALL PLAN*: `CREATE` (file V3 yang belum ada), `UPDATE` (hanya file yang isinya berbeda; sha256 terpasang disebut dan dicocokkan dengan commit proyek yang menghasilkannya),
+`EDIT` (blok di dalam file yang ada: satu include route di `public/index.php`, blok CSS, label/route di `app.js`, tag script/token/sidebar di `index.html`), `UNCHANGED`, `BLOCKED`.
+Versi file yang tidak dikenal = `BLOCKED` (tidak ditimpa buta, tidak ada yang ditulis). Tidak ada migrasi / INSERT / UPDATE / DELETE database; sesi Stock Opname 11 & 12, FIFO/HPP, dashboard, master data, Stock IN/OUT tidak disentuh.
 
-Semua laporan punya **Cetak** (dokumen cetak putih, tabel ber-border, header berulang, tanpa sidebar/tombol) dan **Download Excel** (.xlsx bertipe: angka tetap angka, Rupiah angka dengan format, tanggal valid, header beku, autofilter, lebar kolom).
-Sidebar **LAPORAN** menjadi 5 menu; link laporan lain tetap ada di DOM (disembunyikan) sehingga rute lama tetap bekerja.
+Hasil akhir: backend Reports V3 benar-benar terpasang di `APP/services`, sidebar LAPORAN tepat 5 menu (Laporan Pergerakan Stok · Laporan IN / OUT · Laporan Pembelian · Laporan Nilai HPP · Laporan Stock Opname; link lama disembunyikan, rute tetap ada),
+dan setiap laporan punya **Cetak** + **Download Excel**.
 
-## Yang TIDAK dilakukan paket ini
-* Tidak menulis database (tidak ada migrasi, tidak ada UPDATE/INSERT/DELETE). Validator hanya `SELECT` dan membuktikan koneksinya menolak tulis.
-* Tidak mengubah qty / hasil / adjustment / evidence sesi Stock Opname 11 & 12, tidak repost, tidak menyentuh FIFO / HPP / riwayat transaksi.
-* Tidak menghapus backend / route / halaman laporan lama (hanya disembunyikan dari sidebar). Route baru **menimpa** route lama dengan key yang sama lewat satu include di `index.php`; menghapus blok include itu mengembalikan perilaku lama.
-
-## Cara kerja (fail-closed)
-Setiap perubahan adalah operasi atas satu file: *file baru*, *ganti file dengan versi yang dikenal*, *blok CSS bermarker*, *satu include di index.php*, *re-point baris render di app.js*, *script tag + token + sidebar di index.html*. Setiap operasi dievaluasi terhadap isi file sekarang: `done` / `todo` / `conflict`.
-Keadaan yang tidak dikenal (`conflict`) = **berhenti, tidak menulis apa pun**. Dry-run menyimpan plan terikat SHA256; apply menolak jika file berubah sejak dry-run. Backup, tulis atomik + baca-ulang, rollback otomatis bila gagal, idempoten (dijalankan dua kali aman).
-
-## Langkah 1 — PRE-FLIGHT dan DRY-RUN (read-only terhadap aplikasi)
-
+## Langkah 1 — PRE-FLIGHT, DRY-RUN, PRE-DEPLOY VALIDATOR (read-only terhadap aplikasi)
 ```bash
 cd <folder paket hasil ekstrak>
 bash scripts/preflight.sh  /home/u7566812/public_html/newinventory
 bash scripts/dryrun.sh     /home/u7566812/public_html/newinventory      # menulis state/plan.json + state/dryrun_report.txt DI DALAM folder paket
-bash scripts/readonly_validate.sh /home/u7566812/public_html/newinventory --session=11,12
+bash scripts/predeploy_validate.sh /home/u7566812/public_html/newinventory --session=11,12
 ```
+Kirim hasilnya. **Perintah apply tidak diberikan sebelum hasil ditinjau.**
 
-`readonly_validate.sh` menjalankan rekonsiliasi semua laporan dengan kode BARU terhadap data NYATA produksi (hanya SELECT): Stock Opname sesi 11 & 12 (harus 16/16 PASS, EXIT_CODE=0), Pergerakan v3, IN/OUT, Pembelian, Nilai HPP.
-
-Kirim hasil ketiga perintah. **Perintah apply tidak diberikan sebelum hasil dry-run ditinjau.**
+## Setelah apply (nanti): verifikasi HANYA kode terpasang
+```bash
+bash scripts/installed_verify.sh /home/u7566812/public_html/newinventory --session=11,12 --base-url=https://newinventory.amorgroup.id
+```
+Memeriksa: tiap file backend ada di `APP/services` dengan sha256 paket · `index.php` memuat marker · setiap kelas V3 (Reflection) berasal dari `APP/services/` dan tidak pernah dari folder paket · `ReportsV3Routes.php` terpasang mendefinisikan semua route ·
+semua laporan rekonsiliasi memakai kode terpasang saja (sesi 11 & 12 = 16/16) · `index.html` yang disajikan web server = 5 menu dan identik dengan file di disk.
 
 ## File yang dipasang
 | File | SHA256 (awal) | Catatan |
 |---|---|---|
 @@FILES@@
-Plus 5 blok CSS bermarker di `app.css`, 1 blok include di `index.php`, 7 re-point `app.js`, script tag + token + sidebar di `index.html`.
 
 ## Isi folder
-`payload/` file yang dipasang · `scripts/` engine, wrapper, validator read-only · `tests/` suite yang membuktikannya · `manifest.json` · `SHA256SUMS`.
+`payload/` file yang dipasang · `scripts/` engine, wrapper, validator · `tests/` suite pembuktian · `manifest.json` · `SHA256SUMS`. Rollback: `bash scripts/rollback.sh <APP ROOT>` (dua fase, byte-identik).

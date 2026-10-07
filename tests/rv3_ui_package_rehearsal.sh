@@ -152,7 +152,7 @@ if [ "${RV3_VALIDATE:-0}" = 1 ]; then
   mysql -uroot -e "DROP DATABASE IF EXISTS ${DB_DATABASE:-inventory_test}; CREATE DATABASE ${DB_DATABASE:-inventory_test} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" && mysql -uroot "${DB_DATABASE:-inventory_test}" < database/schema.sql && php tests/browser/seed_so_audit_v3.php >/dev/null 2>&1
   mkdir -p "$T/storage"; cp -r storage/stock_opname_photos "$T/storage/" 2>/dev/null
   before="$(tree_sum "$T")"
-  "$PHP" $PHPA "$P/scripts/rv3_readonly_check.php" --app-root="$T" --session=1,2 --start=2026-09-01 --end=2026-09-30 >"$W/val_all.txt" 2>&1; rc=$?
+  "$PHP" $PHPA "$P/scripts/rv3_readonly_check.php" --app-root="$T" --mode=installed --session=1,2 --start=2026-09-01 --end=2026-09-30 >"$W/val_all.txt" 2>&1; rc=$?
   chk "[validator] readonly_validate (installed backend, before and after the UI apply is irrelevant: SELECT only): exit 0" $rc
   [ "$(grep -cE '^PASS +[0-9]+ / [0-9]+ ' "$W/val_all.txt")" = 6 ]; chk "[validator] all six reports PASS (Stock Opname, Movement V3, Movement Daily, IN/OUT/Transfer, Pembelian, Nilai HPP)" $?
   [ "$(tree_sum "$T")" = "$before" ]; chk "[validator] the application tree is byte-identical after the validator (nothing written)" $?
