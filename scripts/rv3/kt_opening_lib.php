@@ -220,8 +220,10 @@ function kt_master(PDO $pdo, string $warehouseCode, string $effectiveDate): arra
     $warehouse = $wh->fetch() ?: null;
     $units = $pdo->query('SELECT id, code, name FROM units')->fetchAll();
     $items = [];
+    $byId = [];
     foreach ($pdo->query('SELECT i.id, i.sku, i.name, i.status, i.base_unit_id, u.code AS base_code, u.name AS base_name FROM items i JOIN units u ON u.id = i.base_unit_id')->fetchAll() as $r) {
         $items[mb_strtoupper(trim((string) $r['sku']), 'UTF-8')][] = $r;
+        $byId[(int) $r['id']] = $r;
     }
     $conv = [];
     $cs = $pdo->prepare('SELECT item_id, unit_id, conversion_to_base FROM item_unit_conversions WHERE valid_from <= :at AND (valid_to IS NULL OR valid_to > :at2)');
@@ -229,7 +231,7 @@ function kt_master(PDO $pdo, string $warehouseCode, string $effectiveDate): arra
     foreach ($cs->fetchAll() as $r) {
         $conv[(int) $r['item_id']][(int) $r['unit_id']][] = (float) $r['conversion_to_base'];
     }
-    return ['warehouse' => $warehouse, 'units' => $units, 'items' => $items, 'conv' => $conv];
+    return ['warehouse' => $warehouse, 'units' => $units, 'items' => $items, 'by_id' => $byId, 'conv' => $conv];
 }
 
 /** @param list<array<string,mixed>> $units @return list<array<string,mixed>> units whose code OR name equals the (case-normalised) source UoM */
@@ -246,12 +248,98 @@ function kt_units_named(array $units, string $uom): array
 }
 
 /**
+ * APPROVED RESOLUTIONS — the only way a NOT_FOUND / AMBIGUOUS code or a missing unit conversion is resolved for the opening WITHOUT touching Master Barang. A CSV a person reviewed and signed:
+ *
+ *   kind,source_code,item_id,master_sku,source_uom,base_qty_per_source_unit,evidence,approved_by
+ *   MAP_ITEM,<source code>,<items.id>,<items.sku>,,,<why this is the same item>,<approver>
+ *   UNIT_FACTOR,<source code>,,,<source UoM>,<base units in ONE source unit>,<where the factor comes from>,<approver>
+ *
+ * Rows with an empty approved_by are NOT approved and are ignored (listed as such). Nothing is guessed: a MAP_ITEM names the exact items.id (and its sku, cross-checked), a UNIT_FACTOR
+ * names the exact factor and its evidence. Every approved row must be consumed by a source row that really needs it — otherwise it is a BLOCKER, never silently dropped. The file's
+ * digest is part of the preview SHA256, so a post is bound to exactly the resolutions that were reviewed.
+ *
+ * @return array{file:string,sha256:string,map:array<string,array<string,mixed>>,unit:array<string,array<string,mixed>>,errors:list<string>,ignored:list<string>,digest:string}
+ */
+function kt_load_resolutions(string $path): array
+{
+    if (!is_file($path)) {
+        throw new RuntimeException("resolutions file not found: {$path}");
+    }
+    $raw = (string) file_get_contents($path);
+    $res = ['file' => basename($path), 'sha256' => hash('sha256', $raw), 'map' => [], 'unit' => [], 'errors' => [], 'ignored' => [], 'digest' => ''];
+    $h = fopen('php://memory', 'w+');
+    fwrite($h, preg_replace('/^\xEF\xBB\xBF/', '', $raw));
+    rewind($h);
+    $hdr = null;
+    $line = 0;
+    while (($f = fgetcsv($h, 0, ',', '"', '')) !== false) {
+        $line++;
+        if ($f === [null] || (isset($f[0]) && str_starts_with(trim((string) $f[0]), '#'))) {
+            continue;
+        }
+        if ($hdr === null) {
+            $hdr = array_map(static fn ($c) => strtolower(trim((string) $c)), $f);
+            foreach (['kind', 'source_code', 'item_id', 'master_sku', 'source_uom', 'base_qty_per_source_unit', 'evidence', 'approved_by'] as $need) {
+                if (!in_array($need, $hdr, true)) {
+                    fclose($h);
+                    throw new RuntimeException("resolutions file: header column missing: {$need}");
+                }
+            }
+            continue;
+        }
+        $r = [];
+        foreach ($hdr as $i => $name) {
+            $r[$name] = trim((string) ($f[$i] ?? ''));
+        }
+        if (implode('', $r) === '') {
+            continue;
+        }
+        $kind = strtoupper($r['kind']);
+        $code = mb_strtoupper($r['source_code'], 'UTF-8');
+        $where = "resolutions baris {$line} ({$kind} {$r['source_code']})";
+        if ($r['approved_by'] === '') {
+            $res['ignored'][] = "{$where}: belum disetujui (approved_by kosong) — diabaikan";
+            continue;
+        }
+        if ($code === '' || $r['evidence'] === '') {
+            $res['errors'][] = "{$where}: source_code dan evidence wajib diisi";
+            continue;
+        }
+        if ($kind === 'MAP_ITEM') {
+            if (preg_match('/^[1-9]\d*$/', $r['item_id']) !== 1 || $r['master_sku'] === '') {
+                $res['errors'][] = "{$where}: item_id (bilangan bulat > 0) dan master_sku wajib diisi";
+            } elseif (isset($res['map'][$code])) {
+                $res['errors'][] = "{$where}: kode sumber dipetakan lebih dari satu kali";
+            } else {
+                $res['map'][$code] = ['source_code' => $r['source_code'], 'item_id' => (int) $r['item_id'], 'master_sku' => $r['master_sku'], 'evidence' => $r['evidence'], 'approved_by' => $r['approved_by'], 'used' => false, 'line' => $line];
+            }
+        } elseif ($kind === 'UNIT_FACTOR') {
+            $fac = kt_num($r['base_qty_per_source_unit']);
+            if ($r['source_uom'] === '' || $fac === null || !is_finite($fac) || $fac <= 0) {
+                $res['errors'][] = "{$where}: source_uom dan base_qty_per_source_unit (> 0) wajib diisi";
+            } elseif (isset($res['unit'][$code])) {
+                $res['errors'][] = "{$where}: faktor unit untuk kode ini diberikan lebih dari satu kali";
+            } else {
+                $res['unit'][$code] = ['source_code' => $r['source_code'], 'source_uom' => $r['source_uom'], 'factor' => $fac, 'evidence' => $r['evidence'], 'approved_by' => $r['approved_by'], 'used' => false, 'line' => $line];
+            }
+        } else {
+            $res['errors'][] = "{$where}: kind harus MAP_ITEM atau UNIT_FACTOR";
+        }
+    }
+    fclose($h);
+    return $res;
+}
+
+/**
  * @param array<string,mixed> $source kt_read_source() result
+ * @param array<string,mixed>|null $res kt_load_resolutions() result (approved MAP_ITEM / UNIT_FACTOR rows) — null = none
  * @return array<string,mixed> { rows, summary, blockers, warehouse, state, preview_sha, ... }
  */
-function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_CODE, string $effectiveDate = KT_EFFECTIVE_DATE): array
+function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_CODE, string $effectiveDate = KT_EFFECTIVE_DATE, ?array $res = null): array
 {
     $m = kt_master($pdo, $warehouseCode, $effectiveDate);
+    $res ??= ['file' => null, 'sha256' => null, 'map' => [], 'unit' => [], 'errors' => [], 'ignored' => [], 'digest' => ''];
+    $resErrors = $res['errors'];
     $rows = [];
     $codeCount = [];
     foreach ($source['rows'] as $r) {
@@ -269,7 +357,7 @@ function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_C
             'source_hpp' => $r['price'], 'source_value' => $r['source_value'], 'source_declared_value' => $r['declared_value'],
             'item_id' => null, 'master_sku' => null, 'master_name' => null, 'master_status' => null, 'master_base_unit' => null, 'unit_conversion' => null,
             'norm_qty' => null, 'norm_unit_hpp' => null, 'norm_value' => null, 'value_drift' => null,
-            'status' => '', 'severity' => '', 'issue' => '', 'postable' => false,
+            'status' => '', 'severity' => '', 'issue' => '', 'postable' => false, 'resolution' => '',
         ];
         $issues = [];
         $status = null;
@@ -290,7 +378,31 @@ function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_C
         $item = null;
         if ($status === null || $status === 'AMBIGUOUS') {
             $cands = $m['items'][mb_strtoupper($r['code'], 'UTF-8')] ?? [];
-            if (count($cands) === 1) {
+            $codeKey = mb_strtoupper($r['code'], 'UTF-8');
+            $rm = $res['map'][$codeKey] ?? null;
+            $chosen = null;
+            if ($rm !== null) {
+                $res['map'][$codeKey]['handled'] = true;
+                $cand = $m['by_id'][$rm['item_id']] ?? null;
+                if (count($cands) === 1) {
+                    $resErrors[] = "MAP_ITEM {$r['code']}: ditolak — kode sudah cocok tepat dengan Master Barang {$cands[0]['sku']}; pemetaan eksplisit hanya untuk kode yang tidak ditemukan / ambigu";
+                } elseif ($cand === null || mb_strtoupper(trim((string) $cand['sku']), 'UTF-8') !== mb_strtoupper($rm['master_sku'], 'UTF-8')) {
+                    $resErrors[] = "MAP_ITEM {$r['code']}: item_id {$rm['item_id']} tidak ada di Master Barang atau SKU-nya bukan {$rm['master_sku']}";
+                } elseif (count($cands) > 1 && !in_array($rm['item_id'], array_map(static fn ($c) => (int) $c['id'], $cands), true)) {
+                    $resErrors[] = "MAP_ITEM {$r['code']}: item_id {$rm['item_id']} bukan salah satu kandidat yang cocok dengan kode ini";
+                } elseif ($status === 'AMBIGUOUS' && count($cands) <= 1) {
+                    $resErrors[] = "MAP_ITEM {$r['code']}: ditolak — kode ganda di file sumber tidak bisa diselesaikan lewat pemetaan; perbaiki file sumber";
+                } else {
+                    $chosen = $cand;
+                    $res['map'][$codeKey]['used'] = true;
+                }
+            }
+            if ($chosen !== null) {
+                $item = $chosen;
+                $row['resolution'] = 'MAP_ITEM';
+                $issues[] = "dipetakan lewat resolusi yang disetujui {$rm['approved_by']} ke Master Barang {$chosen['sku']} (item_id {$chosen['id']}); bukti: {$rm['evidence']}";
+                $status = null;
+            } elseif (count($cands) === 1) {
                 $item = $cands[0];
             } elseif (count($cands) > 1 && $status === null) {
                 $status = 'AMBIGUOUS';
@@ -320,6 +432,8 @@ function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_C
             } elseif ((string) $item['status'] !== 'ACTIVE') {
                 $issues[] = 'Master Barang INACTIVE (qty 0 — informasi, tidak memblokir)';
             }
+            $unitIssues = [];
+            $unitAmbiguous = false;
             $named = kt_units_named($m['units'], $r['uom']);
             $baseHit = false;
             foreach ($named as $u) {
@@ -336,15 +450,37 @@ function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_C
                     $factor = $facts[0];
                     $row['unit_conversion'] = "1 {$named[0]['code']} = {$facts[0]} {$item['base_code']} (item_unit_conversions)";
                 } elseif (count($facts) > 1) {
-                    $issues[] = "lebih dari satu konversi aktif {$named[0]['code']}→{$item['base_code']}";
+                    $unitAmbiguous = true;
+                    $unitIssues[] = "lebih dari satu konversi aktif {$named[0]['code']}→{$item['base_code']}";
                 } else {
-                    $issues[] = "tidak ada konversi {$named[0]['code']}→{$item['base_code']} untuk item ini di item_unit_conversions";
+                    $unitIssues[] = "tidak ada konversi {$named[0]['code']}→{$item['base_code']} untuk item ini di item_unit_conversions";
                 }
             } elseif (count($named) > 1) {
-                $issues[] = 'UoM sumber cocok dengan lebih dari satu unit master (' . implode(', ', array_map(static fn ($u) => $u['code'], $named)) . ')';
+                $unitAmbiguous = true;
+                $unitIssues[] = 'UoM sumber cocok dengan lebih dari satu unit master (' . implode(', ', array_map(static fn ($u) => $u['code'], $named)) . ')';
             } else {
-                $issues[] = "UoM sumber \"{$r['uom']}\" tidak ada di master units (dibandingkan tanpa beda huruf besar/kecil)";
+                $unitIssues[] = "UoM sumber \"{$r['uom']}\" tidak ada di master units (dibandingkan tanpa beda huruf besar/kecil)";
             }
+            $ru = $res['unit'][mb_strtoupper($r['code'], 'UTF-8')] ?? null;
+            if ($ru !== null) {
+                $res['unit'][mb_strtoupper($r['code'], 'UTF-8')]['handled'] = true;
+            }
+            if ($factor === null && $ru !== null) {
+                if ($unitAmbiguous) {
+                    $resErrors[] = "UNIT_FACTOR {$r['code']}: ditolak — Master Barang punya konversi / unit yang ambigu; perbaiki master, jangan ditimpa";
+                } elseif (kt_norm_unit($ru['source_uom']) !== kt_norm_unit($r['uom'])) {
+                    $resErrors[] = "UNIT_FACTOR {$r['code']}: source_uom {$ru['source_uom']} bukan UoM baris sumber ({$r['uom']})";
+                } else {
+                    $factor = (float) $ru['factor'];
+                    $res['unit'][mb_strtoupper($r['code'], 'UTF-8')]['used'] = true;
+                    $row['resolution'] = trim($row['resolution'] . ' UNIT_FACTOR');
+                    $row['unit_conversion'] = "1 {$r['uom']} = " . rtrim(rtrim(number_format($factor, 6, '.', ''), '0'), '.') . " {$item['base_code']} (resolusi disetujui {$ru['approved_by']}; bukti: {$ru['evidence']})";
+                    $unitIssues = [];
+                }
+            } elseif ($factor !== null && $ru !== null) {
+                $resErrors[] = "UNIT_FACTOR {$r['code']}: ditolak — satuan ini sudah terselesaikan oleh Master Barang (" . ($row['unit_conversion'] ?? '') . "); resolusi tidak boleh menimpa master";
+            }
+            $issues = array_merge($issues, $unitIssues);
             if ($factor === null && $status === null) {
                 if ($positive) {
                     $status = 'UNIT_UNRESOLVED';
@@ -414,6 +550,13 @@ function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_C
     }
     unset($row);
 
+    foreach (['map' => 'MAP_ITEM', 'unit' => 'UNIT_FACTOR'] as $k => $kind) {
+        foreach ($res[$k] as $e) {
+            if (!$e['used'] && empty($e['handled'])) {
+                $resErrors[] = "{$kind} {$e['source_code']}: tidak dipakai — tidak ada baris sumber yang membutuhkannya (kode tidak ada di file sumber, atau baris sudah terselesaikan / diblokir oleh hal lain)";
+            }
+        }
+    }
     // ---- warehouse + global gates
     $wh = $m['warehouse'];
     $state = ['warehouse_found' => $wh !== null, 'warehouse_id' => $wh ? (int) $wh['id'] : null, 'warehouse_code' => $warehouseCode, 'warehouse_name' => $wh['name'] ?? null,
@@ -455,6 +598,9 @@ function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_C
     }
     if ($source['declared_total'] === null) {
         $global[] = 'total kontrol (Jumlah) tidak ditemukan di file sumber';
+    }
+    foreach ($resErrors as $e) {
+        $global[] = 'resolusi: ' . $e;
     }
 
     // ---- summary
@@ -539,9 +685,28 @@ function kt_plan(PDO $pdo, array $source, string $warehouseCode = KT_WAREHOUSE_C
         'reference' => KT_REFERENCE, 'effective_date' => $effectiveDate, 'warehouse' => $state, 'rows' => $rows, 'summary' => $summary, 'blockers' => $blockers,
         'blocked' => $blockers !== [], 'by_status' => $byStatus, 'unit_conversions' => $unitConv, 'inactive_items' => $inactive, 'warnings' => $titleWarn,
         'source' => ['file' => $source['file'], 'sha256' => $source['sha256'], 'header_row' => $source['header_row'], 'title' => $source['title'] ?? '', 'sheets' => $source['sheets'] ?? []],
+        'resolutions' => kt_resolution_summary($res),
     ];
     $plan['preview_sha'] = kt_preview_sha($plan);
     return $plan;
+}
+
+/** @return array<string,mixed> what was approved, what was applied, and the digest that binds the post to it */
+function kt_resolution_summary(array $res): array
+{
+    $applied = [];
+    foreach ($res['map'] as $e) {
+        if ($e['used']) {
+            $applied[] = ['kind' => 'MAP_ITEM', 'source_code' => $e['source_code'], 'item_id' => $e['item_id'], 'master_sku' => $e['master_sku'], 'approved_by' => $e['approved_by'], 'evidence' => $e['evidence']];
+        }
+    }
+    foreach ($res['unit'] as $e) {
+        if ($e['used']) {
+            $applied[] = ['kind' => 'UNIT_FACTOR', 'source_code' => $e['source_code'], 'source_uom' => $e['source_uom'], 'factor' => $e['factor'], 'approved_by' => $e['approved_by'], 'evidence' => $e['evidence']];
+        }
+    }
+    usort($applied, static fn ($a, $b) => [$a['kind'], $a['source_code']] <=> [$b['kind'], $b['source_code']]);
+    return ['file' => $res['file'], 'sha256' => $res['sha256'], 'applied' => $applied, 'ignored_not_approved' => $res['ignored'], 'digest' => $applied === [] ? '' : hash('sha256', json_encode($applied, JSON_UNESCAPED_UNICODE))];
 }
 
 /** SHA256 of exactly what would be posted — the binding between the reviewed preview and the post. */
@@ -553,7 +718,11 @@ function kt_preview_sha(array $plan): string
             $lines[] = [$x['source_code'], $x['item_id'], number_format((float) $x['norm_qty'], 6, '.', ''), number_format((float) $x['norm_unit_hpp'], 4, '.', '')];
         }
     }
-    return hash('sha256', json_encode([$plan['reference'], $plan['effective_date'], $plan['warehouse']['warehouse_id'], $plan['source']['sha256'], $lines], JSON_UNESCAPED_UNICODE));
+    $parts = [$plan['reference'], $plan['effective_date'], $plan['warehouse']['warehouse_id'], $plan['source']['sha256'], $lines];
+    if (($plan['resolutions']['digest'] ?? '') !== '') {
+        $parts[] = $plan['resolutions']['digest'];   // only when approved resolutions were applied — a plan without them keeps its original sha
+    }
+    return hash('sha256', json_encode($parts, JSON_UNESCAPED_UNICODE));
 }
 
 // ============================================================================ output
@@ -607,6 +776,18 @@ function kt_report_lines(array $plan): array
         $o[] = sprintf('  baris %d  %s  %s  status master %s  qty %s  → %s%s', $i['source_row'], $i['source_code'], trim((string) $i['master_name']), $i['master_status'], kt_fmt($i['source_qty'], 6), $i['status'], $i['severity'] === 'BLOCKER' ? ' (BLOCKER)' : ' (informasi)');
     }
     $o[] = '';
+    $rs = $plan['resolutions'] ?? ['applied' => [], 'ignored_not_approved' => [], 'file' => null];
+    if ($rs['file'] !== null) {
+        $o[] = sprintf('RESOLUSI YANG DISETUJUI (%s sha256=%s): %d dipakai (%d MAP_ITEM, %d UNIT_FACTOR), %d belum disetujui diabaikan', $rs['file'], substr((string) $rs['sha256'], 0, 16), count($rs['applied']),
+            count(array_filter($rs['applied'], static fn ($a) => $a['kind'] === 'MAP_ITEM')), count(array_filter($rs['applied'], static fn ($a) => $a['kind'] === 'UNIT_FACTOR')), count($rs['ignored_not_approved']));
+        foreach ($rs['applied'] as $a) {
+            $o[] = '  ' . ($a['kind'] === 'MAP_ITEM' ? "MAP_ITEM    {$a['source_code']} → item_id {$a['item_id']} ({$a['master_sku']})" : "UNIT_FACTOR {$a['source_code']} 1 {$a['source_uom']} = {$a['factor']} base") . "   disetujui {$a['approved_by']}; bukti: {$a['evidence']}";
+        }
+        foreach ($rs['ignored_not_approved'] as $ig) {
+            $o[] = '  (diabaikan) ' . $ig;
+        }
+        $o[] = '';
+    }
     $o[] = 'PREVIEW SHA256 : ' . $plan['preview_sha'];
     $o[] = 'STATUS POSTING : ' . ($plan['blocked'] ? 'DIBLOKIR — ' . count($plan['blockers']) . ' blocker' : 'SIAP (tidak ada blocker) — belum ada yang ditulis');
     foreach ($plan['blockers'] as $b) {
@@ -629,7 +810,7 @@ function kt_write_outputs(array $plan, string $dir): array
     }
     $files = [];
     $cols = ['source_row', 'source_code', 'source_name', 'source_uom', 'source_qty_production', 'source_qty_warehouse', 'source_qty', 'source_hpp', 'source_value', 'item_id', 'master_sku', 'master_name', 'master_status',
-        'master_base_unit', 'unit_conversion', 'norm_qty', 'norm_unit_hpp', 'norm_value', 'value_drift', 'status', 'severity', 'issue'];
+        'master_base_unit', 'unit_conversion', 'norm_qty', 'norm_unit_hpp', 'norm_value', 'value_drift', 'status', 'severity', 'issue', 'resolution'];
     $f = fopen($dir . '/karang_mapping_all_rows.csv', 'w');
     fwrite($f, "\xEF\xBB\xBF");
     fputcsv($f, $cols, ',', '"', '');
@@ -658,7 +839,7 @@ function kt_write_outputs(array $plan, string $dir): array
         $files[] = $dir . '/' . $file;
     }
     file_put_contents($dir . '/karang_summary.json', json_encode(['reference' => $plan['reference'], 'effective_date' => $plan['effective_date'], 'preview_sha' => $plan['preview_sha'], 'blocked' => $plan['blocked'],
-        'warehouse' => $plan['warehouse'], 'summary' => $plan['summary'], 'by_status' => $plan['by_status'], 'warnings' => $plan['warnings'], 'source' => $plan['source'], 'blockers' => $plan['blockers']], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        'warehouse' => $plan['warehouse'], 'summary' => $plan['summary'], 'by_status' => $plan['by_status'], 'warnings' => $plan['warnings'], 'source' => $plan['source'], 'resolutions' => $plan['resolutions'] ?? null, 'blockers' => $plan['blockers']], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
     $files[] = $dir . '/karang_summary.json';
     return $files;
 }
@@ -752,7 +933,7 @@ function kt_post(PDO $pdo, array $plan, string $actorUsername, string $previewSh
                 'warehouse_id' => $whId, 'source_row' => $x['source_row'], 'source_code' => $x['source_code'],
                 'source_name' => $x['source_name'], 'source_uom' => $x['source_uom'], 'source_qty_production' => $x['source_qty_production'], 'source_qty_warehouse' => $x['source_qty_warehouse'],
                 'source_qty' => $x['source_qty'], 'source_hpp' => $x['source_hpp'], 'source_value' => $x['source_value'], 'item_id' => $x['item_id'], 'master_sku' => $x['master_sku'],
-                'unit_conversion' => $x['unit_conversion'], 'normalized_qty' => $x['norm_qty'], 'normalized_unit_hpp' => $x['norm_unit_hpp'], 'normalized_value' => $x['norm_value'],
+                'unit_conversion' => $x['unit_conversion'], 'resolution' => $x['resolution'] ?: null, 'normalized_qty' => $x['norm_qty'], 'normalized_unit_hpp' => $x['norm_unit_hpp'], 'normalized_value' => $x['norm_value'],
                 'value_drift' => $x['value_drift'], 'batch_id' => $p['batch_id'], 'effective_date' => $plan['effective_date'], 'posted_at' => $postedAt, 'posted_by' => $actor['username'],
             ], KT_REFERENCE);
         }
@@ -760,7 +941,7 @@ function kt_post(PDO $pdo, array $plan, string $actorUsername, string $previewSh
             'source_reference' => KT_REFERENCE, 'source_file' => $plan['source']['file'], 'source_sha256' => $plan['source']['sha256'], 'source_sheet' => $plan['source']['sheets'], 'source_title' => $plan['source']['title'], 'source_title_warnings' => $plan['warnings'], 'preview_sha256' => $plan['preview_sha'],
             'effective_date' => $plan['effective_date'], 'posted_at' => $postedAt, 'lines' => count($posted), 'normalized_qty_by_base_unit' => $plan['summary']['normalized_qty_by_base_unit'],
             'normalized_value' => round($valueTotal, 4), 'source_value' => $plan['summary']['source_value'], 'items_unlocked_before' => $itemWasUnlocked,
-            'transaction_ids' => array_column($posted, 'transaction_id'), 'warehouse_mode' => $plan['warehouse']['mode'],
+            'transaction_ids' => array_column($posted, 'transaction_id'), 'warehouse_mode' => $plan['warehouse']['mode'], 'approved_resolutions' => $plan['resolutions']['applied'] ?? [], 'resolutions_file_sha256' => $plan['resolutions']['sha256'] ?? null,
         ], KT_REFERENCE);
         return ['lines' => count($posted), 'qty_total_mixed_units' => round($qtyTotal, 6), 'value_total' => round($valueTotal, 4), 'posted_at' => $postedAt, 'transaction_ids' => array_column($posted, 'transaction_id')];
     });

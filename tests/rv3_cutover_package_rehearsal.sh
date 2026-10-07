@@ -115,6 +115,11 @@ if [ "${RV3_VALIDATE:-0}" = 1 ]; then
   [ -s "$P/out/karang_mapping_all_rows.csv" ] && [ "$(wc -l < "$P/out/karang_mapping_all_rows.csv")" = 381 ] && [ -s "$P/out/karang_blockers.csv" ] && [ -s "$P/out/karang_summary.json" ]; chk "[karang] the mapping csv has 380 rows + header, plus blockers.csv and summary.json (written OUTSIDE the application)" $?
   [ "$(tree_sum "$T")" = "$before" ]; chk "[karang] preview wrote nothing into the application" $?
   [ -s "$P/out/karang_unit_conversions.csv" ] && [ -s "$P/out/karang_inactive_items.csv" ]; chk "[karang] unit-conversion and inactive-master lists are written too" $?
+  ic0="$(mysql -uroot -N "${DB_DATABASE:-inventory_test}" -e "SELECT COUNT(*), COALESCE(SUM(id),0) FROM items")"
+  bash "$P/scripts/karang_blocker_resolution.sh" "$T" >"$W/kt_res.txt" 2>&1; rc=$?
+  [ $rc -eq 0 ] && grep -q "NOT_FOUND total" "$W/kt_res.txt" && grep -q "NOTHING WAS CREATED" "$W/kt_res.txt" && [ -s "$P/out/not_found_resolution.csv" ] && [ -s "$P/out/unit_resolution.csv" ] && [ -s "$P/out/proposed_new_master.csv" ] && [ -s "$P/out/ambiguous_items.csv" ] && [ -s "$P/out/blocker_resolution_summary.json" ] && [ -s "$P/out/karang_resolutions_PROPOSED.csv" ]; chk "[karang] blocker resolution runs read-only (exit $rc), prints the NOT_FOUND / UNIT_UNRESOLVED counts and writes the six files outside the application" $?
+  [ "$(tree_sum "$T")" = "$before" ]; chk "[karang] blocker resolution wrote nothing into the application" $?
+  [ "$(mysql -uroot -N "${DB_DATABASE:-inventory_test}" -e "SELECT COUNT(*), COALESCE(SUM(id),0) FROM items")" = "$ic0" ]; chk "[karang] no master item is created by the analysis (items count + id sum identical)" $?
   grep -q "PERINGATAN        : judul sheet sumber menyebut" "$W/kt_prev.txt" && grep -q "tanggal efektif yang disetujui = 2026-10-01" "$W/kt_prev.txt"; chk "[karang] the sheet title 'Periode Juli 2026' is a WARNING only; the effective date stays 2026-10-01" $?
   # production state of Karang Tengah: ACTIVE (is_active = 1) + LOCKED (activation_locked = 1), TRANSIT, no opening posted yet
   mysql -uroot "${DB_DATABASE:-inventory_test}" -e "INSERT INTO warehouses (code, name, warehouse_type, is_active, activation_locked) VALUES ('KARANG_TENGAH', 'Karang Tengah', 'TRANSIT', 1, 1)"

@@ -4,7 +4,7 @@ declare(strict_types=1);
 /**
  * Karang Tengah OPENING BALANCE — controlled cutover CLI.
  *
- *   php kt_opening.php preview --app-root=<app> --source=<xlsx> [--out=<dir outside the app>] [--package-dir=<package>] [--warehouse-code=KARANG_TENGAH]
+ *   php kt_opening.php preview --app-root=<app> --source=<xlsx> [--out=<dir outside the app>] [--package-dir=<package>] [--warehouse-code=KARANG_TENGAH] [--resolutions=<approved resolutions csv>]
  *       READ ONLY (the whole run is one READ ONLY transaction that is rolled back; MySQL itself rejects a write — proved first). Maps all rows, prints the summary,
  *       the blocker list and the PREVIEW SHA256; --out writes karang_mapping_all_rows.csv / karang_blockers.csv / karang_summary.json.
  *   php kt_opening.php verify  --app-root=<app> --source=<xlsx> [--package-dir=<package>]
@@ -16,6 +16,9 @@ declare(strict_types=1);
  *       LAST RESORT (the primary rollback is the database backup taken right before the post). Lists exactly what it would remove; with --yes + --confirm it removes ONLY the rows
  *       this reference created, and only while every layer is untouched (no consumption, no later movement, no report-locked period).
  *
+ * --resolutions=<csv>  (preview / verify / post / rollback) applies ONLY rows a person approved (approved_by filled): MAP_ITEM source code → exact items.id, UNIT_FACTOR source code → exact factor + evidence
+ *   (kt_load_resolutions in kt_opening_lib.php). Nothing in Master Barang is changed; the digest of the applied rows is part of the preview SHA256, so a post must use the same file.
+ *
  * Exit codes: 0 ok · 1 verification failed · 2 usage · 3 abort · 10 NOT APPLIED · 11 blocked · 12 already posted · 13 preview mismatch · 14 invalid actor · 15 old FifoService · 16 post-verify failed.
  * Never touches Stock Opname sessions, existing FIFO layers, other warehouses, purchases, transfers, or the effective-date table.
  */
@@ -26,7 +29,7 @@ require_once __DIR__ . '/kt_opening_lib.php';
 $payload = rv3_bootstrap_args($argv);
 // the mode is the first argument (preview|post|verify|rollback) or --mode=<mode> (when the read-only validator runs the script in-process)
 $mode = isset($argv[1]) && !str_starts_with($argv[1], '--') ? $argv[1] : '';
-$opt = ['mode' => null, 'app-root' => null, 'source' => null, 'out' => null, 'warehouse-code' => KT_WAREHOUSE_CODE, 'preview-sha' => null, 'actor' => null, 'confirm' => null];
+$opt = ['mode' => null, 'app-root' => null, 'source' => null, 'out' => null, 'warehouse-code' => KT_WAREHOUSE_CODE, 'preview-sha' => null, 'actor' => null, 'confirm' => null, 'resolutions' => null];
 $yes = false;
 foreach (array_slice($argv, $mode === '' ? 1 : 2) as $a) {
     if ($a === '--yes') {
@@ -42,7 +45,7 @@ if ($mode === '' && $opt['mode'] !== null) {
     $mode = (string) $opt['mode'];
 }
 if (!in_array($mode, ['preview', 'verify', 'post', 'rollback'], true) || $opt['app-root'] === null || !is_dir($opt['app-root'] . '/services') || $opt['source'] === null) {
-    fwrite(STDERR, "usage: php kt_opening.php preview|verify|post|rollback --app-root=<dir with services/> --source=<Hasil_SO xlsx> [--out=<dir>] [--package-dir=<package>] [--preview-sha=… --actor=… --yes]\n");
+    fwrite(STDERR, "usage: php kt_opening.php preview|verify|post|rollback --app-root=<dir with services/> --source=<Hasil_SO xlsx> [--out=<dir>] [--package-dir=<package>] [--resolutions=<csv>] [--preview-sha=… --actor=… --yes]\n");
     rv3_script_exit(2);
 }
 $appRoot = rtrim($opt['app-root'], '/');
@@ -59,6 +62,15 @@ try {
 } catch (Throwable $e) {
     fwrite(STDERR, 'ABORT: ' . $e->getMessage() . "\n");
     rv3_script_exit(3);
+}
+$resolutions = null;
+if ($opt['resolutions'] !== null) {
+    try {
+        $resolutions = kt_load_resolutions((string) $opt['resolutions']);
+    } catch (Throwable $e) {
+        fwrite(STDERR, 'ABORT: ' . $e->getMessage() . "\n");
+        rv3_script_exit(3);
+    }
 }
 $pdo = Database::connection();
 
@@ -85,7 +97,7 @@ $readOnly = static function (callable $fn) use ($pdo) {
 };
 
 if ($mode === 'preview' || ($mode === 'post' && !$yes)) {
-    $plan = $readOnly(static fn () => kt_plan($pdo, $source, (string) $opt['warehouse-code']));
+    $plan = $readOnly(static fn () => kt_plan($pdo, $source, (string) $opt['warehouse-code'], KT_EFFECTIVE_DATE, $resolutions));
     foreach (kt_report_lines($plan) as $l) {
         $say($l);
     }
@@ -108,7 +120,7 @@ if ($mode === 'preview' || ($mode === 'post' && !$yes)) {
 }
 
 if ($mode === 'verify') {
-    $plan = $readOnly(static fn () => kt_plan($pdo, $source, (string) $opt['warehouse-code']));
+    $plan = $readOnly(static fn () => kt_plan($pdo, $source, (string) $opt['warehouse-code'], KT_EFFECTIVE_DATE, $resolutions));
     if ($plan['warehouse']['warehouse_id'] === null) {
         fwrite(STDERR, "ABORT: warehouse not found\n");
         rv3_script_exit(3);
@@ -128,7 +140,7 @@ if ($mode === 'post') {
         fwrite(STDERR, "post needs --preview-sha=<sha256 printed by preview> and --actor=<SUPERADMIN username>\n");
         rv3_script_exit(2);
     }
-    $plan = $readOnly(static fn () => kt_plan($pdo, $source, (string) $opt['warehouse-code']));
+    $plan = $readOnly(static fn () => kt_plan($pdo, $source, (string) $opt['warehouse-code'], KT_EFFECTIVE_DATE, $resolutions));
     try {
         $res = kt_post($pdo, $plan, (string) $opt['actor'], (string) $opt['preview-sha']);
     } catch (KtOpeningException $e) {
@@ -141,7 +153,7 @@ if ($mode === 'post') {
 }
 
 // ---- rollback (last resort)
-$plan = $readOnly(static fn () => kt_plan($pdo, $source, (string) $opt['warehouse-code']));
+$plan = $readOnly(static fn () => kt_plan($pdo, $source, (string) $opt['warehouse-code'], KT_EFFECTIVE_DATE, $resolutions));
 $whId = $plan['warehouse']['warehouse_id'];
 if ($whId === null) {
     fwrite(STDERR, "ABORT: warehouse not found\n");
