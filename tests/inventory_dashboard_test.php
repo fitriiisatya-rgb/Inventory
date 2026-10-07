@@ -11,7 +11,7 @@ declare(strict_types=1);
  *
  *   A. every card equals the EXISTING engines (InventorySummaryReportService /
  *      InventoryMovementReportService / signedValueBefore / the batch valuation)
- *   B. Stok Awal + Pembelian - Barang Keluar + Σ Pergerakan Lain = Stok Akhir
+ *   B. Stok Awal + Stock IN - Stock OUT + Transfer IN - Transfer OUT + Adjustment = Stok Akhir, and every component == Reports v3 (MovementReportV3Service) for the same filter
  *   C. every drill-down's grand total == its card, summed over ALL pages;
  *      search/category filters narrow rows but never the card total
  *   D. Stok Akhir == live inventory_batches valuation when the period ends today
@@ -30,6 +30,7 @@ use App\Services\InventoryHppReportService;
 use App\Services\InventoryMovementReportService;
 use App\Services\InventoryService;
 use App\Services\InventorySummaryReportService;
+use App\Services\MovementReportV3Service;
 
 $results = [];
 function check(string $name, bool $pass, string $detail = ''): void
@@ -89,25 +90,35 @@ foreach ($scopes as $label => $wh) {
     $eng = InventoryHppReportService::signedValueBefore($pdo, $R['from'], $wh, '', [], [], true);
     check("[$label] Stok Awal == InventoryHppReportService::signedValueBefore()", near($m['opening_stock']['value'], $eng), "{$m['opening_stock']['value']} vs {$eng}");
     check("[$label] Stok Awal == Ringkasan Inventory beginning_inventory_value", near($m['opening_stock']['value'], $sum['beginning_inventory_value']));
-    check("[$label] Pembelian / Stock IN == Ringkasan 'external_purchase'", near($m['purchase_in']['value'], $sum['external_purchase']), "{$m['purchase_in']['value']} vs {$sum['external_purchase']}");
+    check("[$label] Pembelian / Stock IN == Ringkasan 'external_purchase'", near($m['stock_in']['value'], $sum['external_purchase']), "{$m['stock_in']['value']} vs {$sum['external_purchase']}");
     check("[$label] Barang Keluar / Stock OUT == Ringkasan 'out_usage'", near($m['stock_out']['value'], $sum['out_usage']), "{$m['stock_out']['value']} vs {$sum['out_usage']}");
     check("[$label] Stok Akhir == Ringkasan ending_inventory_value == Pergerakan Harian last stok_akhir", near($m['closing_stock']['value'], $sum['ending_inventory_value']) && near($m['closing_stock']['value'], $engineClosing), "{$m['closing_stock']['value']} vs {$sum['ending_inventory_value']} / {$engineClosing}");
-    $other = [];
-    foreach ($m['other_movements']['items'] as $it) { $other[$it['key']] = $it['value']; }
-    check("[$label] Adjustment + / − == Ringkasan", near($other['adjustment_positive'], $sum['adjustment_positive']) && near($other['adjustment_negative'], -$sum['adjustment_negative']));
+    $adjItems = [];
+    foreach ($m['adjustment_breakdown']['items'] as $it) { $adjItems[$it['key']] = $it['value']; }
+    check("[$label] Adjustment + / − == Ringkasan", near($adjItems['adjustment_positive'] ?? 0.0, $sum['adjustment_positive']) && near($adjItems['adjustment_negative'] ?? 0.0, -$sum['adjustment_negative']));
     if ($wh !== null) {
-        check("[$label] Transfer IN / OUT == Ringkasan transfer_in / transfer_out", near($other['transfer_in'], (float) $sum['transfer_in']) && near($other['transfer_out'], -(float) $sum['transfer_out']));
+        check("[$label] Transfer IN / OUT == Ringkasan transfer_in / transfer_out", near($m['transfer']['in']['value'], (float) $sum['transfer_in']) && near($m['transfer']['out']['value'], (float) $sum['transfer_out']));
     } else {
-        check("[$label] company: in-transit net == Ringkasan transfer_elimination", near($other['transfer_net'], (float) $sum['transfer_elimination']), "{$other['transfer_net']} vs {$sum['transfer_elimination']}");
+        check("[$label] company: Transfer IN − OUT (in transit) == Ringkasan transfer_elimination", near($m['transfer']['net'], (float) $sum['transfer_elimination']), "{$m['transfer']['net']} vs {$sum['transfer_elimination']}");
     }
+    check("[$label] there is NO generic 'Pergerakan lain' in the payload", !array_key_exists('other_movements', $m));
 
     // ---------------- B. identity
-    $calc = $m['opening_stock']['value'] + $m['purchase_in']['value'] - $m['stock_out']['value'] + $m['other_movements']['net'];
-    check("[$label] Stok Awal + Pembelian − Keluar + Σ Pergerakan Lain = Stok Akhir", near($calc, $m['closing_stock']['value']) && $m['reconciliation']['ok'], "calc {$calc} vs {$m['closing_stock']['value']} diff {$m['reconciliation']['identity_diff']}");
+    $c = $m['components'];
+    $calc = $c['opening'] + $c['in'] - $c['out'] + $c['transfer_in'] - $c['transfer_out'] + $c['adjustment'];
+    check("[$label] Stok Awal + Stock IN − Stock OUT + Transfer IN − Transfer OUT + Adjustment = Stok Akhir", near($calc, $m['closing_stock']['value']) && $m['reconciliation']['ok'], "calc {$calc} vs {$m['closing_stock']['value']} diff {$m['reconciliation']['identity_diff']}");
+    $v3 = MovementReportV3Service::overview($pdo, $R['from'], $R['to'], $wh)['split_totals'];
+    check("[$label] dashboard components == Reports v3 components (opening / IN / OUT / Transfer IN / Transfer OUT / Adjustment / closing)",
+        near($c['opening'], $v3['opening']) && near($c['in'], $v3['in']) && near($c['out'], $v3['out']) && near($c['transfer_in'], $v3['tin']) && near($c['transfer_out'], $v3['tout']) && near($c['adjustment'], $v3['adjustment']) && near($c['closing'], $v3['closing']), json_encode([$c, $v3]));
+    check("[$label] cards == components; Adjustment named by ledger type sums EXACTLY to the Adjustment (no plug)", near($m['adjustment']['value'], $c['adjustment']) && near($m['adjustment_breakdown']['net'], $c['adjustment']) && abs($m['adjustment_breakdown']['explained_diff']) < 0.01 && $m['reconciliation']['adjustment_explained'], (string) $m['adjustment_breakdown']['explained_diff']);
+    check("[$label] every breakdown row is a real ledger type (no 'lain / lainnya' catch-all label)", count(array_filter($m['adjustment_breakdown']['items'], static fn ($it) => preg_match('/^(pergerakan )?lain(nya)?$/i', trim($it['label'])) === 1)) === 0);
+    if ($wh === null) {
+        check("[$label] company-wide Transfer IN − Transfer OUT == in-transit (0 when every transfer is received): net = {$m['transfer']['net']}", near($m['transfer']['net'], $c['transfer_in'] - $c['transfer_out']) && $m['reconciliation']['transfer_net_zero'] === (abs($m['transfer']['net']) <= 0.01));
+    }
     check("[$label] reconciliation.batch_* is null for a past period (cannot be compared with live batches)", $m['reconciliation']['batch_on_hand'] === null);
 
     // ---------------- C. drill-down == card, over all pages
-    $cards = ['opening_stock' => $m['opening_stock']['value'], 'closing_stock' => $m['closing_stock']['value'], 'purchase_in' => $m['purchase_in']['value'], 'stock_out' => $m['stock_out']['value']];
+    $cards = ['opening_stock' => $m['opening_stock']['value'], 'closing_stock' => $m['closing_stock']['value'], 'stock_in' => $m['stock_in']['value'], 'stock_out' => $m['stock_out']['value']];
     foreach ($cards as $type => $cardValue) {
         [$all, $last] = allRows($pdo, $type, $wh, 'custom', $R['from'], $R['to']);
         $sumRows = round(array_sum(array_column($all, 'value')), 4);
@@ -115,13 +126,19 @@ foreach ($scopes as $label => $wh) {
         check("[$label] {$type}: grand_total == card_total == card (no filter)", near($last['grand_total']['value'], $cardValue) && near($last['card_total']['value'], $cardValue));
         check("[$label] {$type}: pagination total == real row count", $last['pagination']['total'] === count($all));
     }
-    foreach ($m['other_movements']['items'] as $it) {
+    [$adjRows, $adjLast] = allRows($pdo, 'adjustment', $wh, 'custom', $R['from'], $R['to']);
+    check("[$label] adjustment card: Σ detail rows (all pages) == Adjustment", near(round(array_sum(array_column($adjRows, 'value')), 4), $m['adjustment']['value']), 'rows ' . round(array_sum(array_column($adjRows, 'value')), 4) . " vs {$m['adjustment']['value']}");
+    foreach (['move_transfer_in' => $m['transfer']['in']['value'], 'move_transfer_out' => -$m['transfer']['out']['value']] as $type => $val) {
+        [$all, $last] = allRows($pdo, $type, $wh, 'custom', $R['from'], $R['to']);
+        check("[$label] {$type}: Σ detail == transfer card", near(round(array_sum(array_column($all, 'value')), 4), $val), 'rows ' . round(array_sum(array_column($all, 'value')), 4) . " vs {$val}");
+    }
+    foreach ($m['adjustment_breakdown']['items'] as $it) {
         $type = 'move_' . $it['key'];
         [$all, $last] = allRows($pdo, $type, $wh, 'custom', $R['from'], $R['to']);
         $sumRows = round(array_sum(array_column($all, 'value')), 4);
         check("[$label] {$type}: Σ detail == card ({$it['value']})", near($sumRows, $it['value']), "rows {$sumRows}");
     }
-    check("[$label] card tx counts: purchase_in.tx_count == distinct reference rows", $m['purchase_in']['tx_count'] === count(array_unique(array_column(allRows($pdo, 'purchase_in', $wh, 'custom', $R['from'], $R['to'])[0], 'transaction_id'))));
+    check("[$label] card tx counts: stock_in.tx_count == distinct reference rows", $m['stock_in']['tx_count'] === count(array_unique(array_column(allRows($pdo, 'stock_in', $wh, 'custom', $R['from'], $R['to'])[0], 'transaction_id'))));
 }
 
 // ---------------- C2. filters narrow rows, never the card
@@ -138,21 +155,21 @@ $dWh = D::detail($pdo, 'closing_stock', null, 'custom', $R['from'], $R['to'], ['
 check('company-wide + row warehouse filter == that warehouse alone', near($dWh['grand_total']['value'], D::overview($pdo, $W['B'], 'custom', $R['from'], $R['to'])['movement']['closing_stock']['value']));
 $dWhScoped = D::detail($pdo, 'closing_stock', $W['A'], 'custom', $R['from'], $R['to'], ['warehouse_id' => $W['B'], 'page' => 1, 'per_page' => 100]);
 check('inside a single-warehouse scope the row warehouse filter can NEVER widen the scope', near($dWhScoped['grand_total']['value'], D::overview($pdo, $W['A'], 'custom', $R['from'], $R['to'])['movement']['closing_stock']['value']));
-$d25 = D::detail($pdo, 'purchase_in', null, 'custom', $R['from'], $R['to'], ['page' => 1, 'per_page' => 25]);
-check('per_page outside {25,50,100} falls back to 50', D::detail($pdo, 'purchase_in', null, 'custom', $R['from'], $R['to'], ['page' => 1, 'per_page' => 7])['pagination']['per_page'] === 50 && $d25['pagination']['per_page'] === 25);
+$d25 = D::detail($pdo, 'stock_in', null, 'custom', $R['from'], $R['to'], ['page' => 1, 'per_page' => 25]);
+check('per_page outside {25,50,100} falls back to 50', D::detail($pdo, 'stock_in', null, 'custom', $R['from'], $R['to'], ['page' => 1, 'per_page' => 7])['pagination']['per_page'] === 50 && $d25['pagination']['per_page'] === 25);
 $pg = D::detail($pdo, 'closing_stock', null, 'custom', $R['from'], $R['to'], ['page' => 2, 'per_page' => 25]);
 check('page 2 of a 25-row page returns the NEXT rows (or none)', $pg['pagination']['page'] === 2);
-$dRef = D::detail($pdo, 'purchase_in', null, 'custom', $R['from'], $R['to'], ['q' => 'PO-A-1', 'page' => 1, 'per_page' => 25]);
-check('purchase_in search by reference number', $dRef['pagination']['total'] === 1 && $dRef['rows'][0]['reference_no'] === 'PO-A-1');
+$dRef = D::detail($pdo, 'stock_in', null, 'custom', $R['from'], $R['to'], ['q' => 'PO-A-1', 'page' => 1, 'per_page' => 25]);
+check('stock_in search by reference number', $dRef['pagination']['total'] === 1 && $dRef['rows'][0]['reference_no'] === 'PO-A-1');
 $poRow = $dRef['rows'][0];
-check('purchase_in row carries date/ref/sku/name/warehouse/qty/unit/qty_base/hpp/value (100 kg @ 1.100 = 110.000)', near($poRow['qty'], 100.0) && $poRow['unit'] === 'KG' && near($poRow['qty_base'], 100.0) && near($poRow['hpp'], 1100.0) && near($poRow['value'], 110000.0) && $poRow['warehouse'] !== '' && $poRow['type'] === 'IN');
+check('stock_in row carries date/ref/sku/name/warehouse/qty/unit/qty_base/hpp/value (100 kg @ 1.100 = 110.000)', near($poRow['qty'], 100.0) && $poRow['unit'] === 'KG' && near($poRow['qty_base'], 100.0) && near($poRow['hpp'], 1100.0) && near($poRow['value'], 110000.0) && $poRow['warehouse'] !== '' && $poRow['type'] === 'IN');
 $outRows = allRows($pdo, 'stock_out', null, 'custom', $R['from'], $R['to'])[0];
 check('stock_out lists only OUT lines (no TRANSFER_OUT) — transfer out is NOT double counted', count(array_filter($outRows, static fn ($r) => $r['type'] !== 'OUT')) === 0 && count($outRows) === 4);
 check('stock_out row magnitudes are positive and VOID status is visible', count(array_filter($outRows, static fn ($r) => $r['value'] <= 0)) === 0);
-$purchRows = allRows($pdo, 'purchase_in', null, 'custom', $R['from'], $R['to'])[0];
-check('purchase_in excludes TRANSFER_IN receipts, the voided IN and OPENING rows', count(array_filter($purchRows, static fn ($r) => $r['type'] !== 'IN' || $r['status'] !== 'POSTED')) === 0 && !in_array('PO-VOIDED', array_column($purchRows, 'reference_no'), true));
-$otherRows = allRows($pdo, 'move_other', null, 'custom', $R['from'], $R['to'])[0];
-check('the voided purchase is disclosed under "Lainnya" with status VOID', count($otherRows) === 1 && $otherRows[0]['reference_no'] === 'PO-VOIDED' && $otherRows[0]['status'] === 'VOID');
+$purchRows = allRows($pdo, 'stock_in', null, 'custom', $R['from'], $R['to'])[0];
+check('stock_in excludes TRANSFER_IN receipts, the voided IN and OPENING rows', count(array_filter($purchRows, static fn ($r) => $r['type'] !== 'IN' || $r['status'] !== 'POSTED')) === 0 && !in_array('PO-VOIDED', array_column($purchRows, 'reference_no'), true));
+$otherRows = allRows($pdo, 'move_in_void', null, 'custom', $R['from'], $R['to'])[0];
+check('the voided purchase is disclosed under its own ledger type "Stock IN yang di-void" with status VOID', count($otherRows) === 1 && $otherRows[0]['reference_no'] === 'PO-VOIDED' && $otherRows[0]['status'] === 'VOID');
 
 // ---------------- D/E. today / month, batch reconciliation, Nilai Stok
 echo "\n===== today / month · batch + Nilai Stok =====\n";
@@ -164,8 +181,13 @@ foreach ($scopes as $label => $wh) {
         check("[$label/$period] period resolved ({$o['period']['start_date']}..{$o['period']['end_date']}), ends today", $o['period']['end_date'] === $today && ($period === 'today' ? $o['period']['start_date'] === $today : $o['period']['start_date'] === date('Y-m-01')));
         check("[$label/$period] Stok Akhir == live inventory_batches valuation (on-hand)", $m['reconciliation']['batch_ok'] === true && near($m['closing_stock']['value'], $s['stock_value']['on_hand']), "{$m['closing_stock']['value']} vs {$s['stock_value']['on_hand']} diff {$m['reconciliation']['batch_diff']}");
         check("[$label/$period] identity holds", $m['reconciliation']['ok'] === true);
+        $c = $m['components'];
+        $v3 = MovementReportV3Service::overview($pdo, $o['period']['start_date'], $o['period']['end_date'], $wh)['split_totals'];
+        check("[$label/$period] the SAME date boundaries and rules as Reports v3: every component == the report's for {$o['period']['start_date']}..{$o['period']['end_date']}",
+            near($c['opening'], $v3['opening']) && near($c['in'], $v3['in']) && near($c['out'], $v3['out']) && near($c['transfer_in'], $v3['tin']) && near($c['transfer_out'], $v3['tout']) && near($c['adjustment'], $v3['adjustment']) && near($c['closing'], $v3['closing']));
+        check("[$label/$period] Stok Awal + IN − OUT + Transfer IN − Transfer OUT + Adjustment = Stok Akhir", near($c['opening'] + $c['in'] - $c['out'] + $c['transfer_in'] - $c['transfer_out'] + $c['adjustment'], $c['closing']));
         $sum = InventorySummaryReportService::summary($pdo, $o['period']['start_date'], $o['period']['end_date'], $wh);
-        check("[$label/$period] cards == Ringkasan Inventory for the same period", near($m['opening_stock']['value'], $sum['beginning_inventory_value']) && near($m['purchase_in']['value'], $sum['external_purchase']) && near($m['stock_out']['value'], $sum['out_usage']) && near($m['closing_stock']['value'], $sum['ending_inventory_value']));
+        check("[$label/$period] cards == Ringkasan Inventory for the same period", near($m['opening_stock']['value'], $sum['beginning_inventory_value']) && near($m['stock_in']['value'], $sum['external_purchase']) && near($m['stock_out']['value'], $sum['out_usage']) && near($m['closing_stock']['value'], $sum['ending_inventory_value']));
     }
     $s = D::overview($pdo, $wh)['summary'];
     $ref = $wh === null ? InventoryService::companyTotalValue($pdo) : InventoryService::warehouseDashboardSummary($pdo, $wh);
@@ -237,7 +259,7 @@ check('a period after go-live is NOT clamped and carries no go-live note (cutove
 $bad = static function (callable $fn): bool { try { $fn(); return false; } catch (App\Services\ValidationException $e) { return true; } };
 check('invalid period / missing custom dates / reversed / future / > 400 days → ValidationException', $bad(fn () => D::overview($pdo, null, 'week')) && $bad(fn () => D::overview($pdo, null, 'custom')) && $bad(fn () => D::overview($pdo, null, 'custom', '2026-06-20', '2026-06-10')) && $bad(fn () => D::overview($pdo, null, 'custom', '2026-06-10', date('Y-m-d', strtotime('+3 day')))) && $bad(fn () => D::overview($pdo, null, 'custom', '2024-01-01', '2026-06-01')) && $bad(fn () => D::overview($pdo, null, 'custom', 'abc', 'def')));
 check('unknown detail type → ValidationException; unknown warehouse → NotFound', $bad(fn () => D::detail($pdo, 'drop_table', null, 'month', null, null, [])) && (function () use ($pdo) { try { D::overview($pdo, 987654); return false; } catch (App\Services\NotFoundException $e) { return true; } })());
-$empty = D::detail($pdo, 'purchase_in', $W['C'], 'custom', $R['from'], $R['to'], ['page' => 1, 'per_page' => 25]);
+$empty = D::detail($pdo, 'stock_in', $W['C'], 'custom', $R['from'], $R['to'], ['page' => 1, 'per_page' => 25]);
 check('empty state: a warehouse with no purchase in the period returns 0 rows and a 0 grand total', $empty['rows'] === [] && $empty['grand_total']['value'] == 0.0 && $empty['pagination']['total_pages'] === 1);
 
 // ---------------- G. read-only
@@ -301,7 +323,7 @@ try {
     check('detail endpoint: row_warehouse_id can never widen a STOCK user beyond their own warehouse', $r['status'] === 200 && count(array_filter($r['body']['data']['rows'], static fn ($x) => $x['warehouse'] !== 'Gudang SCM / Gudang Besar')) === 0);
     $r = http('GET', "{$base}/dashboard/inventory/detail?type=closing_stock&{$q}&per_page=25&page=1", null, $stockA['jar']);
     check('detail: STOCK A "all" → only A rows, Σ == A card', $r['status'] === 200 && near($r['body']['data']['grand_total']['value'], D::overview($pdo, $W['A'], 'custom', $R['from'], $R['to'])['movement']['closing_stock']['value']) && count(array_filter($r['body']['data']['rows'], static fn ($x) => $x['warehouse'] !== 'Gudang SCM / Gudang Besar')) === 0);
-    $r = http('GET', "{$base}/dashboard/inventory/detail?type=purchase_in&{$q}&q=PO-A-1&per_page=25", null, $admin['jar']);
+    $r = http('GET', "{$base}/dashboard/inventory/detail?type=stock_in&{$q}&q=PO-A-1&per_page=25", null, $admin['jar']);
     check('detail HTTP search works', $r['status'] === 200 && $r['body']['data']['pagination']['total'] === 1);
     check('unauthenticated → 401 (overview + detail)', http('GET', "{$base}/dashboard/inventory")['status'] === 401 && http('GET', "{$base}/dashboard/inventory/detail?type=closing_stock")['status'] === 401);
     check('bad period → 422, bad type → 422', http('GET', "{$base}/dashboard/inventory?period=week", null, $admin['jar'])['status'] === 422 && http('GET', "{$base}/dashboard/inventory/detail?type=nope", null, $admin['jar'])['status'] === 422);

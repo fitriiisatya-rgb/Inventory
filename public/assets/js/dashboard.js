@@ -9,10 +9,13 @@
  * the drill-down's GRAND TOTAL is the server's sum of the very rows listed.
  * Only GET requests are ever issued here (no write, no posting).
  *
- * The four stock-movement cards (Stok Awal / Pembelian-Stock IN / Barang Keluar-
- * Stock OUT / Stok Akhir) are nominal Rupiah — mixed-unit quantities are
- * deliberately never summed. "Pergerakan lain" discloses every remaining ledger
- * movement so the formula reconciles (see DashboardInventoryService).
+ * The stock-movement cards (Stok Awal / Stock IN / Stock OUT / Adjustment / Stok
+ * Akhir) are nominal Rupiah — mixed-unit quantities are deliberately never summed.
+ * Every figure is the one Laporan Pergerakan Stok (Reports v3) reports for the same
+ * filter: Stok Awal + Stock IN − Stock OUT + Transfer IN − Transfer OUT + Adjustment
+ * = Stok Akhir. Transfers are supporting detail (company-wide they net to zero once
+ * received); Adjustment is NAMED by ledger transaction type — there is no generic
+ * "Pergerakan lain" (see DashboardInventoryService).
  *
  * Self-contained styling: .dash-* rules ship with this file's app.css patch.
  * A warehouse-scoped STOCK user only ever sees their own warehouse (the server
@@ -292,10 +295,13 @@ const Dashboard = (() => {
 
     // ------------------------------------------------------- movement summary
     const MOVEMENT_CARDS = [
-        { key: 'opening_stock', type: 'opening_stock', label: 'Stok Awal', cls: 'is-open', icon: 'box', total: 'GRAND TOTAL STOK AWAL', title: 'Rincian Stok Awal', sub: (m) => `${num(m.sku_count)} SKU` },
-        { key: 'purchase_in', type: 'purchase_in', label: 'Pembelian / Stock IN', cls: 'is-in', icon: 'cart', total: 'GRAND TOTAL PEMBELIAN / STOCK IN', title: 'Rincian Pembelian / Stock IN', sub: (m) => `${num(m.tx_count)} transaksi` },
-        { key: 'stock_out', type: 'stock_out', label: 'Barang Keluar / Stock OUT', cls: 'is-out', icon: 'out', total: 'GRAND TOTAL BARANG KELUAR / STOCK OUT', title: 'Rincian Barang Keluar / Stock OUT', sub: (m) => `${num(m.tx_count)} transaksi` },
-        { key: 'closing_stock', type: 'closing_stock', label: 'Stok Akhir', cls: 'is-close', icon: 'box', total: 'GRAND TOTAL STOK AKHIR', title: 'Rincian Stok Akhir', sub: (m) => `${num(m.sku_count)} SKU` },
+        { key: 'opening_stock', type: 'opening_stock', label: 'Stok Awal', cls: 'is-open', icon: 'box', total: 'GRAND TOTAL STOK AWAL', title: 'Rincian Stok Awal', sub: (m) => `${num(m.sku_count)} SKU`, op: '+' },
+        { key: 'stock_in', type: 'stock_in', label: 'Stock IN', cls: 'is-in', icon: 'cart', total: 'GRAND TOTAL STOCK IN', title: 'Rincian Stock IN', sub: (m) => `${num(m.tx_count)} transaksi`, op: '−' },
+        { key: 'stock_out', type: 'stock_out', label: 'Stock OUT', cls: 'is-out', icon: 'out', total: 'GRAND TOTAL STOCK OUT', title: 'Rincian Stock OUT', sub: (m) => `${num(m.tx_count)} transaksi`, op: '+' },
+        { key: 'transfer_in', type: 'move_transfer_in', label: 'Transfer IN', cls: 'is-tin', icon: 'truck', total: 'GRAND TOTAL TRANSFER IN', title: 'Rincian Transfer IN', sub: (m) => `${num(m.tx_count)} transaksi`, op: '−', transfer: 'in', optional: true },
+        { key: 'transfer_out', type: 'move_transfer_out', label: 'Transfer OUT', cls: 'is-tout', icon: 'truck', total: 'GRAND TOTAL TRANSFER OUT', title: 'Rincian Transfer OUT', sub: (m) => `${num(m.tx_count)} transaksi`, op: '+', transfer: 'out', optional: true },
+        { key: 'adjustment', type: 'adjustment', label: 'Adjustment', cls: 'is-adj', icon: 'clipboard', total: 'GRAND TOTAL ADJUSTMENT', title: 'Rincian Adjustment (per jenis ledger)', sub: (m) => `${num(m.tx_count)} transaksi`, op: '=', signed: true },
+        { key: 'closing_stock', type: 'closing_stock', label: 'Stok Akhir', cls: 'is-close', icon: 'box', total: 'GRAND TOTAL STOK AKHIR', title: 'Rincian Stok Akhir', sub: (m) => `${num(m.sku_count)} SKU`, op: null },
     ];
 
     function periodLabel(d) {
@@ -320,23 +326,30 @@ const Dashboard = (() => {
 
         if (m.note) section.appendChild(UI.el('div', { class: 'dash-note', 'data-testid': 'dash-movement-note' }, m.note));
 
-        const cards = UI.el('div', { class: 'dash-mv-cards' }, [].concat(...MOVEMENT_CARDS.map((c, idx) => {
-            const node = m[c.key];
+        // Transfer joins the card row only when the arithmetic needs it (a warehouse that moved stock to / from another one, or company-wide value still in transit);
+        // otherwise it is supporting detail below, because company-wide Transfer IN − Transfer OUT nets to zero.
+        const tr = m.transfer;
+        const showTransfer = (Math.abs(tr.in.value) > 0.005 || Math.abs(tr.out.value) > 0.005) && (tr.scope === 'warehouse' || Math.abs(tr.net) > 0.005);
+        const shown = MOVEMENT_CARDS.filter((c) => !c.optional || showTransfer);
+        const cards = UI.el('div', { class: `dash-mv-cards${showTransfer ? ' has-transfer' : ''}`, 'data-testid': 'dash-mv-cards' }, [].concat(...shown.map((c) => {
+            const node = c.transfer ? tr[c.transfer] : m[c.key];
             const el = UI.el('div', { class: `dash-card dash-mv ${c.cls} dash-click`, role: 'button', tabindex: '0', 'data-testid': `dash-mv-${c.key}`, title: 'Klik untuk lihat rincian' }, [
                 tile(c.icon, c.cls.replace('is-', '')),
                 UI.el('div', { class: 'dash-mv-main' }, [
                     UI.el('div', { class: 'dash-label' }, c.label),
-                    UI.el('div', { class: 'dash-value dash-mv-value', 'data-testid': `dash-mv-${c.key}-value` }, money(node.value)),
+                    UI.el('div', { class: `dash-value dash-mv-value${c.signed ? (node.value < 0 ? ' neg' : (node.value > 0 ? ' pos' : '')) : ''}`, 'data-testid': `dash-mv-${c.key}-value` }, money(node.value)),
                     UI.el('div', { class: 'dash-sub' }, c.sub(node)),
                 ]),
                 chev(),
             ]);
             activate(el, () => openDetail({ type: c.type, title: c.title, totalLabel: c.total, columnsFor: c.key }));
-            return idx < MOVEMENT_CARDS.length - 1 ? [el, UI.el('div', { class: 'dash-mv-arrow', 'aria-hidden': 'true' }, [icon('arrow')])] : [el];
+            return c.op ? [el, UI.el('div', { class: 'dash-mv-arrow dash-mv-op', 'aria-hidden': 'true' }, c.op)] : [el];
         })));
         section.appendChild(cards);
 
-        section.appendChild(buildOtherMovements(d));
+        section.appendChild(buildArithmetic(d));
+        section.appendChild(buildTransferStrip(d));
+        section.appendChild(buildAdjustmentBreakdown(d));
         section.appendChild(buildReconciliationNote(d));
         return section;
     }
@@ -376,25 +389,63 @@ const Dashboard = (() => {
         return bar;
     }
 
-    function buildOtherMovements(d) {
-        const o = d.movement.other_movements;
-        const wrap = UI.el('div', { class: 'dash-other', 'data-testid': 'dash-other' });
-        const toggle = UI.el('button', { class: 'dash-other-toggle', type: 'button', 'aria-expanded': 'false', 'data-testid': 'dash-other-toggle' }, [
-            UI.el('span', {}, 'Pergerakan lain: '),
-            UI.el('strong', { class: o.net < 0 ? 'neg' : (o.net > 0 ? 'pos' : ''), 'data-testid': 'dash-other-net' }, money(o.net)),
-            UI.el('span', { class: 'dash-other-hint' }, ' · Stok Awal + Pembelian − Barang Keluar ± Pergerakan lain = Stok Akhir  ▾'),
+    // The arithmetic under the cards: exactly the report's identity, every term a server figure.
+    function buildArithmetic(d) {
+        const m = d.movement;
+        const c = m.components;
+        const parts = [
+            ['Stok Awal', money(c.opening)], ['+ Stock IN', money(c.in)], ['− Stock OUT', money(c.out)],
+            ['+ Transfer IN', money(c.transfer_in)], ['− Transfer OUT', money(c.transfer_out)], ['± Adjustment', money(c.adjustment)],
+        ];
+        const line = UI.el('div', { class: 'dash-arith', 'data-testid': 'dash-arith' });
+        parts.forEach(([l, v], i) => line.appendChild(UI.el('span', { class: 'dash-arith-t', 'data-testid': `dash-arith-${['opening', 'in', 'out', 'tin', 'tout', 'adj'][i]}` }, [UI.el('span', { class: 'dash-arith-l' }, l), ' ', UI.el('strong', {}, v)])));
+        line.appendChild(UI.el('span', { class: 'dash-arith-t dash-arith-eq', 'data-testid': 'dash-arith-closing' }, [UI.el('span', { class: 'dash-arith-l' }, '= Stok Akhir'), ' ', UI.el('strong', {}, money(c.closing))]));
+        return line;
+    }
+
+    // Transfer: supporting detail. Per warehouse each side stands alone; company-wide the two sides net to zero (a non-zero net is value still in transit and is labelled so).
+    function buildTransferStrip(d) {
+        const t = d.movement.transfer;
+        const company = t.scope === 'company';
+        const wrap = UI.el('div', { class: 'dash-transfer', 'data-testid': 'dash-transfer' });
+        const side = (key, label, node, type) => {
+            const clickable = node.tx_count > 0;
+            const el = UI.el('span', { class: `dash-tr-item${clickable ? ' dash-click' : ' is-zero'}`, role: clickable ? 'button' : null, tabindex: clickable ? '0' : null, 'data-testid': `dash-tr-${key}` }, [
+                UI.el('span', { class: 'dash-tr-l' }, label), ' ', UI.el('strong', {}, money(node.value)), UI.el('span', { class: 'dash-tr-n' }, ` · ${num(node.tx_count)} transaksi`),
+            ]);
+            if (clickable) activate(el, () => openDetail({ type, title: `Rincian ${label}`, totalLabel: `GRAND TOTAL ${label.toUpperCase()}` }));
+            return el;
+        };
+        wrap.appendChild(UI.el('span', { class: 'dash-tr-title' }, 'Transfer antar gudang'));
+        wrap.appendChild(side('in', 'Transfer IN', t.in, 'move_transfer_in'));
+        wrap.appendChild(side('out', 'Transfer OUT', t.out, 'move_transfer_out'));
+        if (company) {
+            const zero = Math.abs(t.net) <= 0.01;
+            wrap.appendChild(UI.el('span', { class: `dash-tr-net ${zero ? 'ok' : 'warn'}`, 'data-testid': 'dash-tr-net' },
+                zero ? `Netto semua gudang ${money(0)} (transfer antar gudang saling meniadakan)` : `Netto ${money(t.net)} = transfer dalam perjalanan (belum diterima)`));
+        }
+        return wrap;
+    }
+
+    // Adjustment named by ledger transaction type (no catch-all). Each row drills into the ledger lines behind it.
+    function buildAdjustmentBreakdown(d) {
+        const b = d.movement.adjustment_breakdown;
+        const wrap = UI.el('div', { class: 'dash-other', 'data-testid': 'dash-adjustment' });
+        const toggle = UI.el('button', { class: 'dash-other-toggle', type: 'button', 'aria-expanded': 'false', 'data-testid': 'dash-adjustment-toggle' }, [
+            UI.el('span', {}, 'Rincian Adjustment per jenis ledger: '),
+            UI.el('strong', { class: b.net < 0 ? 'neg' : (b.net > 0 ? 'pos' : ''), 'data-testid': 'dash-adjustment-net' }, money(b.net)),
+            UI.el('span', { class: 'dash-other-hint' }, ` · ${num(b.items.length)} jenis  ▾`),
         ]);
-        const list = UI.el('div', { class: 'dash-other-list', 'data-testid': 'dash-other-list', hidden: 'hidden' });
-        o.items.forEach((it) => {
+        const list = UI.el('div', { class: 'dash-other-list', 'data-testid': 'dash-adjustment-list', hidden: 'hidden' });
+        if (!b.items.length) list.appendChild(UI.el('div', { class: 'dash-other-row is-zero' }, [UI.el('span', {}, 'Tidak ada adjustment / koreksi pada periode ini'), UI.el('span', {}, ''), UI.el('strong', {}, money(0))]));
+        b.items.forEach((it) => {
             const clickable = it.tx_count > 0;
-            const row = UI.el('div', { class: `dash-other-row${clickable ? ' dash-click' : ' is-zero'}`, role: clickable ? 'button' : null, tabindex: clickable ? '0' : null, 'data-testid': `dash-other-${it.key}` }, [
+            const row = UI.el('div', { class: `dash-other-row${clickable ? ' dash-click' : ' is-zero'}`, role: clickable ? 'button' : null, tabindex: clickable ? '0' : null, 'data-testid': `dash-adj-${it.key}` }, [
                 UI.el('span', {}, it.label),
                 UI.el('span', { class: 'dash-other-tx' }, `${num(it.tx_count)} transaksi`),
                 UI.el('strong', { class: it.value < 0 ? 'neg' : (it.value > 0 ? 'pos' : '') }, money(it.value)),
             ]);
-            if (clickable) {
-                activate(row, () => openDetail({ type: `move_${it.key}`, title: `Pergerakan Lain — ${it.label}`, totalLabel: `GRAND TOTAL ${it.label.toUpperCase()}` }));
-            }
+            if (clickable) activate(row, () => openDetail({ type: `move_${it.key}`, title: `Adjustment — ${it.label}`, totalLabel: `GRAND TOTAL ${it.label.toUpperCase()}` }));
             list.appendChild(row);
         });
         toggle.addEventListener('click', () => {
@@ -412,7 +463,8 @@ const Dashboard = (() => {
         const frag = UI.el('div', { class: 'dash-recon' });
         if (!r.ok) {
             frag.appendChild(UI.el('div', { class: 'alert alert-warning', 'data-testid': 'dash-recon-warning' },
-                `Peringatan rekonsiliasi: Stok Awal + Pembelian − Keluar ± Lain berbeda ${money(r.identity_diff)} dari Stok Akhir. Mohon dilaporkan.`));
+                `Peringatan rekonsiliasi: Stok Awal + Stock IN − Stock OUT + Transfer IN − Transfer OUT + Adjustment berbeda ${money(r.identity_diff)} dari Stok Akhir`
+                + (r.adjustment_explained === false ? `; Adjustment tidak seluruhnya terjelaskan per jenis ledger (selisih ${money(r.adjustment_explained_diff)})` : '') + '. Mohon dilaporkan.'));
         }
         if (r.batch_ok === false) {
             frag.appendChild(UI.el('div', { class: 'alert alert-warning', 'data-testid': 'dash-batch-warning' },
@@ -560,7 +612,7 @@ const Dashboard = (() => {
     // rows (every page) and, when filtered, the unfiltered card total too.
     const COLUMNS = {
         balance: (label) => [['SKU', 'sku'], ['Nama Barang', 'name'], ['Kategori', 'category'], ['Gudang', 'warehouse'], ['Satuan Base', 'unit'], [label, 'qty', 'qty'], ['HPP', 'hpp', 'money'], ['Nilai', 'value', 'money']],
-        purchase_in: [['Tanggal', 'date', 'date'], ['No Referensi', 'reference_no'], ['SKU', 'sku'], ['Nama Barang', 'name'], ['Supplier', 'supplier'], ['Gudang', 'warehouse'], ['Qty', 'qty', 'qty'], ['Satuan', 'unit'], ['Qty Base', 'qty_base', 'qty'], ['Harga / HPP', 'hpp', 'money'], ['Nilai', 'value', 'money']],
+        stock_in: [['Tanggal', 'date', 'date'], ['No Referensi', 'reference_no'], ['SKU', 'sku'], ['Nama Barang', 'name'], ['Supplier', 'supplier'], ['Gudang', 'warehouse'], ['Qty', 'qty', 'qty'], ['Satuan', 'unit'], ['Qty Base', 'qty_base', 'qty'], ['Harga / HPP', 'hpp', 'money'], ['Nilai', 'value', 'money']],
         stock_out: [['Tanggal', 'date', 'date'], ['No Referensi', 'reference_no'], ['SKU', 'sku'], ['Nama Barang', 'name'], ['Gudang', 'warehouse'], ['Tujuan / Keterangan', 'destination'], ['Qty', 'qty', 'qty'], ['Satuan', 'unit'], ['Qty Base', 'qty_base', 'qty'], ['HPP', 'hpp', 'money'], ['Nilai', 'value', 'money']],
         other: [['Tanggal', 'date', 'date'], ['No Referensi', 'reference_no'], ['Jenis', 'type_label'], ['SKU', 'sku'], ['Nama Barang', 'name'], ['Gudang', 'warehouse'], ['Qty Base', 'qty_base', 'qty'], ['Nilai', 'value', 'smoney']],
         pending_transfers: [['No', 'reference_no'], ['Tanggal Kirim', 'date', 'date'], ['Dari', 'from'], ['Ke', 'to'], ['Jumlah Item', 'item_count', 'int'], ['Nilai', 'value', 'money']],
@@ -571,7 +623,8 @@ const Dashboard = (() => {
 
     function columnsFor(type, kind) {
         if (kind === 'balance') return COLUMNS.balance(type === 'opening_stock' ? 'Qty Awal' : (type === 'closing_stock' ? 'Qty Akhir' : 'Qty'));
-        if (type === 'purchase_in') return COLUMNS.purchase_in;
+        if (type === 'stock_in' || type === 'purchase_in') return COLUMNS.stock_in;
+        if (type === 'adjustment') return COLUMNS.other;
         if (type === 'stock_out') return COLUMNS.stock_out;
         if (type.startsWith('move_')) return COLUMNS.other;
         return COLUMNS[kind] || COLUMNS.other;
@@ -627,7 +680,7 @@ const Dashboard = (() => {
         search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { ds.q = search.value.trim(); ds.page = 1; fetchPage(); }, 300); });
         toolbar.appendChild(search);
 
-        const needsFilters = ['opening_stock', 'closing_stock', 'current_stock', 'purchase_in', 'stock_out', 'rusak', 'deadstock'].includes(spec.type) || spec.type.startsWith('move_');
+        const needsFilters = ['opening_stock', 'closing_stock', 'current_stock', 'stock_in', 'adjustment', 'stock_out', 'rusak', 'deadstock'].includes(spec.type) || spec.type.startsWith('move_');
         if (needsFilters && spec.type !== 'rusak' && spec.type !== 'deadstock') {
             const cats = (typeof Master !== 'undefined' && Master.categories) ? Master.categories() : [];
             const catSel = UI.el('select', { 'data-testid': 'dash-drawer-category', style: 'flex:0 0 200px; width:200px;' }, [UI.el('option', { value: '' }, 'Semua Kategori')].concat(cats.map((c) => UI.el('option', { value: String(c.id) }, c.name))));

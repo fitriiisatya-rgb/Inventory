@@ -98,7 +98,8 @@ const api = (page, p, params) => page.evaluate(async ([pp, qq]) => {
     return (await (await fetch(`/api${pp}?${qs}`, { credentials: 'include' })).json()).data;
 }, [p, params]);
 const txt = async (page, tid) => (await page.locator(`[data-testid="${tid}"]`).first().innerText()).replace(/\s+/g, ' ').trim();
-const mvText = async (page, key) => txt(page, `dash-mv-${key}-value`);
+// the EXACT figure: a card may show it compact (Rp 2,55 M) when five cards share the row; the full value stays in data-full / title and in the arithmetic line
+const mvText = async (page, key) => page.locator(`[data-testid="dash-mv-${key}-value"]`).first().evaluate((e) => (e.dataset.full || e.innerText).replace(/\s+/g, ' ').trim());
 async function selectWh(page, value) {
     await page.selectOption('[data-testid="dash-warehouse"]', value);
     await waitDash(page);
@@ -133,8 +134,9 @@ async function sumAllPages(page, params, type) {
 
 const CARDS = [
     ['opening_stock', 'Rincian Stok Awal', 'GRAND TOTAL STOK AWAL'],
-    ['purchase_in', 'Rincian Pembelian / Stock IN', 'GRAND TOTAL PEMBELIAN / STOCK IN'],
-    ['stock_out', 'Rincian Barang Keluar / Stock OUT', 'GRAND TOTAL BARANG KELUAR / STOCK OUT'],
+    ['stock_in', 'Rincian Stock IN', 'GRAND TOTAL STOCK IN'],
+    ['stock_out', 'Rincian Stock OUT', 'GRAND TOTAL STOCK OUT'],
+    ['adjustment', 'Rincian Adjustment (per jenis ledger)', 'GRAND TOTAL ADJUSTMENT'],
     ['closing_stock', 'Rincian Stok Akhir', 'GRAND TOTAL STOK AKHIR'],
 ];
 const baseP = (extra = {}) => ({ warehouse_id: '', period: 'month', ...extra });
@@ -146,7 +148,7 @@ try {
 
     // ============================================ 1. page, scripts, top bar
     const scripts = await page.evaluate(() => Array.from(document.scripts).map((s) => s.getAttribute('src') || ''));
-    check('dashboard.js + app.css carry the new cache token', scripts.some((s) => s.includes('dashboard.js?v=20261011-ui2')) && (await page.evaluate(() => Array.from(document.querySelectorAll('link[rel=stylesheet]')).some((l) => /app\.css\?v=\d{8}-\w+/.test(l.href)))));
+    check('dashboard.js + app.css carry the new cache token', scripts.some((s) => /dashboard\.js\?v=\d{8}-\w+/.test(s)) && (await page.evaluate(() => Array.from(document.querySelectorAll('link[rel=stylesheet]')).some((l) => /app\.css\?v=\d{8}-\w+/.test(l.href)))));
     const whOptions = (await page.locator('[data-testid="dash-warehouse"] option').allTextContents()).map((s) => s.trim());
     check('Gudang filter lists Semua Gudang + the three warehouses', whOptions[0] === 'Semua Gudang' && ['Gudang SCM / Gudang Besar', 'Gudang Cibadak', 'Gudang Karang Tengah'].every((n) => whOptions.includes(n)), whOptions.join('|'));
     check('Refresh button + "Data diperbarui" timestamp present', (await txt(page, 'dash-updated')).startsWith('Data diperbarui:') && !(await txt(page, 'dash-updated')).endsWith('—') && await page.locator('[data-testid="dash-refresh"]').count() === 1);
@@ -182,10 +184,22 @@ try {
     // ============================================ 3. movement cards + reconciliation
     const m = ov.movement;
     for (const [key] of CARDS) check(`month: card ${key} shows server value ${rp(m[key].value)}`, (await mvText(page, key)) === await fm(m[key].value), await mvText(page, key));
-    check('month: Awal + Pembelian − Keluar ± Lain = Akhir (ledger identity, no forced formula)', close2(m.opening_stock.value + m.purchase_in.value - m.stock_out.value + m.other_movements.net, m.closing_stock.value) && m.reconciliation.ok, JSON.stringify(m.reconciliation));
-    check('month: "Pergerakan lain" nominal shown and equals server net', (await txt(page, 'dash-other-net')) === await fm(m.other_movements.net));
-    await page.click('[data-testid="dash-other-toggle"]');
-    check('month: Pergerakan lain breakdown lists items incl. transfer / adjustment rows', await page.locator('[data-testid="dash-other-list"] .dash-other-row').count() === m.other_movements.items.length && m.other_movements.items.length >= 3);
+    const cc = m.components;
+    check('month: Stok Awal + Stock IN − Stock OUT + Transfer IN − Transfer OUT + Adjustment = Stok Akhir (ledger identity, no forced formula)', close2(cc.opening + cc.in - cc.out + cc.transfer_in - cc.transfer_out + cc.adjustment, cc.closing) && m.reconciliation.ok, JSON.stringify(m.reconciliation));
+    const v3 = (await api(page, '/reports/movement/v3/overview', { start_date: ov.period.start_date, end_date: ov.period.end_date })).split_totals;
+    check('month: every dashboard component == Laporan Pergerakan Stok (Reports v3) for the same period (opening / IN / OUT / Transfer IN / OUT / Adjustment / closing)', close2(cc.opening, v3.opening) && close2(cc.in, v3.in) && close2(cc.out, v3.out) && close2(cc.transfer_in, v3.tin) && close2(cc.transfer_out, v3.tout) && close2(cc.adjustment, v3.adjustment) && close2(cc.closing, v3.closing), JSON.stringify([cc, v3]));
+    const showTr = (Math.abs(m.transfer.in.value) > 0.005 || Math.abs(m.transfer.out.value) > 0.005) && (m.transfer.scope === 'warehouse' || Math.abs(m.transfer.net) > 0.005);
+    check(`month: the cards are Stok Awal, Stock IN, Stock OUT${showTr ? ', Transfer IN, Transfer OUT' : ''}, Adjustment, Stok Akhir with the operators ${showTr ? '+ − + − + =' : '+ − + ='} between them (Transfer only joins the cards when the arithmetic needs it)`,
+        (await page.locator('.dash-mv-cards [data-testid^="dash-mv-"][role=button]').count()) === (showTr ? 7 : 5) && (await page.locator('.dash-mv-op').allTextContents()).join('') === (showTr ? '+−+−+=' : '+−+='), String(showTr));
+    const arith = await txt(page, 'dash-arith');
+    check('month: the arithmetic line shows every term (Awal, IN, OUT, Transfer IN, Transfer OUT, Adjustment, Akhir) with the server values', ['dash-arith-opening', 'dash-arith-in', 'dash-arith-out', 'dash-arith-tin', 'dash-arith-tout', 'dash-arith-adj', 'dash-arith-closing'].length === 7
+        && arith.includes(await fm(cc.opening)) && arith.includes(await fm(cc.in)) && arith.includes(await fm(cc.out)) && arith.includes(await fm(cc.closing)) && arith.includes(await fm(cc.transfer_in)) && arith.includes(await fm(cc.transfer_out)), arith);
+    check('month: NO generic "Pergerakan lain" anywhere on the dashboard', !(await page.locator('#dash-body').innerText()).toLowerCase().includes('pergerakan lain') && await page.locator('[data-testid="dash-other"]').count() === 0);
+    check('month: Transfer strip shows Transfer IN and Transfer OUT separately; company-wide it states the net (0 once received, otherwise labelled in-transit)', (await txt(page, 'dash-tr-in')).includes(await fm(m.transfer.in.value)) && (await txt(page, 'dash-tr-out')).includes(await fm(m.transfer.out.value)) && await page.locator('[data-testid="dash-tr-net"]').count() === 1);
+    check('month: Adjustment shown signed and equals the server figure', (await mvText(page, 'adjustment')).replace(/^\+/, '') === await fm(m.adjustment.value));
+    await page.click('[data-testid="dash-adjustment-toggle"]');
+    check('month: the Adjustment breakdown names ledger types (rows == server items; sum == Adjustment; no "lain" catch-all)', await page.locator('[data-testid="dash-adjustment-list"] .dash-other-row').count() === Math.max(1, m.adjustment_breakdown.items.length) && close2(m.adjustment_breakdown.net, m.adjustment.value) && close2(m.adjustment_breakdown.explained_diff, 0)
+        && !/lain(nya)?$/i.test(m.adjustment_breakdown.items.map((i) => i.label).join('|')));
     check('month: Stok Akhir reconciles with current batch valuation', m.reconciliation.batch_ok === true && close2(m.closing_stock.value, m.reconciliation.batch_on_hand), JSON.stringify(m.reconciliation));
     check('no reconciliation warning shown on clean data', await page.locator('[data-testid="dash-recon-warning"], [data-testid="dash-batch-warning"]').count() === 0);
     check('period label reads BULAN INI', (await txt(page, 'dash-period-label')).includes('BULAN INI'));
@@ -205,16 +219,17 @@ try {
         const heads = (await page.locator('[data-testid="dash-drawer-table"] thead th').allTextContents()).map((h) => h.trim());
         const want = {
             opening_stock: ['SKU', 'Nama Barang', 'Kategori', 'Gudang', 'Satuan Base', 'Qty Awal', 'HPP', 'Nilai'],
-            purchase_in: ['Tanggal', 'No Referensi', 'SKU', 'Nama Barang', 'Supplier', 'Gudang', 'Qty', 'Satuan', 'Qty Base', 'Harga / HPP', 'Nilai'],
+            stock_in: ['Tanggal', 'No Referensi', 'SKU', 'Nama Barang', 'Supplier', 'Gudang', 'Qty', 'Satuan', 'Qty Base', 'Harga / HPP', 'Nilai'],
             stock_out: ['Tanggal', 'No Referensi', 'SKU', 'Nama Barang', 'Gudang', 'Tujuan / Keterangan', 'Qty', 'Satuan', 'Qty Base', 'HPP', 'Nilai'],
+            adjustment: ['Tanggal', 'No Referensi', 'Jenis', 'SKU', 'Nama Barang', 'Gudang', 'Qty Base', 'Nilai'],
             closing_stock: ['SKU', 'Nama Barang', 'Kategori', 'Gudang', 'Satuan Base', 'Qty Akhir', 'HPP', 'Nilai'],
         }[key];
         check(`[${key}] columns = ${want.join(' | ')}`, heads.join('|') === want.join('|'), heads.join('|'));
         check(`[${key}] only GET requests were made opening the drawer`, requests.slice(reqBefore).every((r) => r.method === 'GET'));
         check(`[${key}] drawer has search + category + warehouse + per-page controls`, await page.locator('[data-testid="dash-drawer-search"]').count() === 1 && await page.locator('[data-testid="dash-drawer-category"]').count() === 1 && await page.locator('[data-testid="dash-drawer-warehouse"]').count() === 1 && await page.locator('[data-testid="dash-drawer-perpage"]').count() === 1);
-        if (key === 'purchase_in') {
+        if (key === 'stock_in') {
             const refs = await page.locator('[data-testid="dash-drawer-row"]').allInnerTexts();
-            check('[purchase_in] contains no transfer-receipt reference (true purchases only)', !refs.some((r) => /TRF|TRANSFER/i.test(r)), '');
+            check('[stock_in] contains no transfer-receipt reference (true purchases only)', !refs.some((r) => /TRF|TRANSFER/i.test(r)), '');
         }
         if (key === 'closing_stock') await page.screenshot({ path: path.join(shotDir, 'dashboard-drawer-closing-1440.png') });
         await closeDrawer(page);
@@ -273,7 +288,7 @@ try {
         check(`[${label}] selecting the warehouse sends warehouse_id=${id} (GET only)`, reqs.some((r) => r.url.includes(`warehouse_id=${id}`) && r.path === '/dashboard/inventory') && reqs.every((r) => r.method === 'GET'));
         let ok = true;
         for (const [key] of CARDS) ok = ok && (await mvText(page, key)) === await fm(o.movement[key].value);
-        check(`[${label}] all 4 movement cards == API for this warehouse`, ok);
+        check(`[${label}] all 5 movement cards == API for this warehouse`, ok);
         check(`[${label}] KPI Nilai Stok == API`, (await txt(page, 'dash-kpi-value-value')) === await fm(o.summary.stock_value.total));
         check(`[${label}] Perlu Perhatian + Top 5 + recent activity re-rendered`, await page.locator('[data-testid^="dash-attn-"]').count() === o.attention.length && await page.locator('[data-testid="dash-value-row"]').count() === o.top_inventory_value.length && await page.locator('[data-testid="dash-low-row"]').count() === o.top_low_stock.length && await page.locator('[data-testid="dash-recent-row"]').count() === o.recent_activity.length);
         // drawers follow the filter
@@ -285,7 +300,7 @@ try {
     }
     const sumWh = (k) => whs.reduce((a, [l]) => a + wApi[l].movement[k].value, 0);
     check('Σ per-warehouse Stok Awal == company-wide (no double count)', close2(sumWh('opening_stock'), m.opening_stock.value), `${sumWh('opening_stock')} vs ${m.opening_stock.value}`);
-    check('Σ per-warehouse Pembelian == company-wide', close2(sumWh('purchase_in'), m.purchase_in.value));
+    check('Σ per-warehouse Pembelian == company-wide', close2(sumWh('stock_in'), m.stock_in.value));
     check('Σ per-warehouse Barang Keluar == company-wide', close2(sumWh('stock_out'), m.stock_out.value));
     check('Σ per-warehouse Stok Akhir == company-wide', close2(sumWh('closing_stock'), m.closing_stock.value));
     check('warehouses differ from each other (filter really changes data)', new Set(whs.map(([l]) => wApi[l].movement.closing_stock.value)).size === 3);
@@ -296,18 +311,18 @@ try {
     const td = await api(page, '/dashboard/inventory', baseP({ period: 'today' }));
     let okT = true;
     for (const [key] of CARDS) okT = okT && (await mvText(page, key)) === await fm(td.movement[key].value);
-    check('Hari Ini: 4 cards == API; period label HARI INI', okT && (await txt(page, 'dash-period-label')).includes('HARI INI'));
-    check('Hari Ini: Pembelian today = PO-TODAY 25 × 2.200 = Rp 55.000', close2(td.movement.purchase_in.value, 55000), String(td.movement.purchase_in.value));
-    await openCard(page, 'purchase_in');
-    const ts = await sumAllPages(page, baseP({ period: 'today' }), 'purchase_in');
-    check('Hari Ini: Pembelian drawer Σ == card', close2(ts.sum, td.movement.purchase_in.value) && (await txt(page, 'dash-drawer-grand-value')) === await fm(td.movement.purchase_in.value));
+    check('Hari Ini: 5 cards == API; period label HARI INI', okT && (await txt(page, 'dash-period-label')).includes('HARI INI'));
+    check('Hari Ini: Pembelian today = PO-TODAY 25 × 2.200 = Rp 55.000', close2(td.movement.stock_in.value, 55000), String(td.movement.stock_in.value));
+    await openCard(page, 'stock_in');
+    const ts = await sumAllPages(page, baseP({ period: 'today' }), 'stock_in');
+    check('Hari Ini: Pembelian drawer Σ == card', close2(ts.sum, td.movement.stock_in.value) && (await txt(page, 'dash-drawer-grand-value')) === await fm(td.movement.stock_in.value));
     await closeDrawer(page);
     await page.click('[data-testid="dash-period-custom"]');
     await page.fill('[data-testid="dash-from"]', seed.range.from);
     await page.fill('[data-testid="dash-to"]', seed.range.to);
     await page.click('[data-testid="dash-apply"]');
     await waitDash(page);
-    check('Custom range: label shows the range; purchase_in = 110.000+126.000+26.000 = Rp 262.000 (hand-computed)', (await txt(page, 'dash-period-label')).includes(seed.range.from) && (await mvText(page, 'purchase_in')) === rp(262000), await mvText(page, 'purchase_in'));
+    check('Custom range: label shows the range; stock_in = 110.000+126.000+26.000 = Rp 262.000 (hand-computed)', (await txt(page, 'dash-period-label')).includes(seed.range.from) && (await mvText(page, 'stock_in')) === rp(262000), await mvText(page, 'stock_in'));
     const cu = await api(page, '/dashboard/inventory', { warehouse_id: '', period: 'custom', date_from: seed.range.from, date_to: seed.range.to });
     check('Custom range: identity holds and cards == API', cu.movement.reconciliation.ok && (await mvText(page, 'closing_stock')) === await fm(cu.movement.closing_stock.value) && (await mvText(page, 'opening_stock')) === await fm(cu.movement.opening_stock.value));
     for (const [key] of CARDS) {
@@ -361,15 +376,15 @@ try {
         });
         check(`[${name}] no horizontal page overflow`, geo.docOverflow <= 1, `overflow=${geo.docOverflow}`);
         check(`[${name}] every Rupiah KPI/movement figure fits inside its card (no overflow/clipping)`, geo.vals.every((v) => v.over <= 1 && v.inside), JSON.stringify(geo.vals.filter((v) => v.over > 1 || !v.inside)));
-        check(`[${name}] the 4 movement cards are rendered and readable`, geo.mv.length === 4 && geo.mv.every((c) => c.vis));
-        const stressSeen = await lp.evaluate((sv) => Array.from(document.querySelectorAll('.dash-value')).some((v) => v.innerText.replace(/\D/g, '').length >= 14), stressValue);
+        check(`[${name}] the movement cards (5, or 7 when transfers join the arithmetic) are rendered and readable`, (geo.mv.length === 5 || geo.mv.length === 7) && geo.mv.every((c) => c.vis));
+        const stressSeen = await lp.evaluate((sv) => Array.from(document.querySelectorAll('.dash-value')).some((v) => (v.dataset.full || v.innerText).replace(/\D/g, '').length >= 14), stressValue);
         check(`[${name}] 14-digit Rupiah value present in the page (stress case)`, stressSeen);
         await lp.screenshot({ path: path.join(shotDir, `dashboard-${name}.png`), fullPage: true });
         // vertical page scroll works
         const pageScrolls = await lp.evaluate(async () => { window.scrollTo(0, 400); await new Promise((r) => setTimeout(r, 100)); return window.scrollY > 0 || document.documentElement.scrollHeight <= window.innerHeight; });
         check(`[${name}] main page scrolls vertically`, pageScrolls);
         // drawer: layout, vertical scroll inside the drawer, horizontal table scroll, lock + cleanup
-        await openCard(lp, 'purchase_in').catch(() => {});
+        await openCard(lp, 'stock_in').catch(() => {});
         await lp.click('.drawer-close'); await lp.waitForTimeout(200);
         await openCard(lp, 'closing_stock');
         await lp.waitForTimeout(450); // slide-in transition
@@ -408,7 +423,7 @@ try {
     // ============================================ 10. empty state + error state
     await selectWh(page, String(seed.wh.D));
     await setPeriod(page, 'today');
-    await openCard(page, 'purchase_in');
+    await openCard(page, 'stock_in');
     const e = await txt(page, 'dash-drawer-empty').catch(() => '');
     check('Gudang kosong / Hari Ini / Pembelian: empty-state message, GRAND TOTAL Rp 0', e.includes('Tidak ada data untuk periode') && (await txt(page, 'dash-drawer-grand-value')) === 'Rp 0', e);
     await closeDrawer(page);
@@ -430,7 +445,7 @@ try {
     check('STOCK user without warehouse_id param still sees ONLY its warehouse (server forced), == SCM numbers', so.scope.warehouse_id === seed.wh.A && close2(so.movement.closing_stock.value, stockApiA.movement.closing_stock.value) && close2(so.movement.opening_stock.value, stockApiA.movement.opening_stock.value));
     const forged = await api(stock.page, '/dashboard/inventory', baseP({ warehouse_id: String(seed.wh.B) }));
     check('STOCK user asking for Cibadak gets its own warehouse, never Cibadak data', forged.scope.warehouse_id === seed.wh.A && !close2(forged.movement.closing_stock.value, wApi.Cibadak.movement.closing_stock.value));
-    check('STOCK user: 4 cards render and equal its API', (await mvText(stock.page, 'closing_stock')) === await fm(so.movement.closing_stock.value));
+    check('STOCK user: cards render and equal its API', (await mvText(stock.page, 'closing_stock')) === await fm(so.movement.closing_stock.value));
     await stock.context.close();
     const viewer = await newSession(browser, { viewport: { width: 1280, height: 900 }, __name: 'viewer' }, seed.viewer);
     check('VIEWER: dashboard readable, Quick Actions (write shortcuts) hidden', await viewer.page.locator('[data-testid="dash-mv-closing_stock"]').count() === 1 && await viewer.page.locator('[data-testid="dash-quick"]').count() === 0);

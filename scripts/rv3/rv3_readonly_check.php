@@ -148,6 +148,11 @@ $runs = [
     ['Laporan Pembelian', 'purchase_reconcile_check.php', ["--start={$start}", "--end={$end}"]],
     ['Laporan Nilai HPP (FIFO layers = ledger; Average analytical)', 'valuation_reconcile_check.php', ["--start={$start}", "--end={$end}"]],
 ];
+// the dashboard "Ringkasan Pergerakan Stok" must equal the report: checked whenever the package carries the dashboard service (pre-deploy: the payload copy) or is the dashboard package
+$withDash = ($mode === 'predeploy' && $payloadServices !== null && is_file("{$payloadServices}/DashboardInventoryService.php")) || ($mode === 'installed' && (($manifest['mode'] ?? '') === 'dash'));
+if ($withDash) {
+    $runs[] = ['Dashboard "Ringkasan Pergerakan Stok" == Laporan Pergerakan Stok (Reports v3)', 'dashboard_movement_reconcile_check.php', ['--periods=today,month,last7', "--custom={$start}:{$end}", '--label=' . ($mode === 'installed' ? 'INSTALLED' : 'CANDIDATE')]];
+}
 $rows = [];
 $bad = 0;
 foreach ($runs as [$label, $script, $args]) {

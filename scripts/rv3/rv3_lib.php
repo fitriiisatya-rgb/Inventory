@@ -661,6 +661,17 @@ function rv3_installed_assertions(string $app, array $manifest, string $payloadD
         }
     }
     foreach ($manifest['ops'] as $op) {
+        if ($op['type'] === 'require_file') {                      // a gate: the validated backend must be installed (never written by the package)
+            $cur = rv3_read("{$app}/{$op['target']}");
+            $check('INSTALLED required backend file exists in the application: ' . $op['target'], $cur !== null, $cur === null ? 'ABSENT at ' . "{$app}/{$op['target']}" : 'present');
+            if ($cur !== null) {
+                $check('INSTALLED required backend file is the validated version: ' . $op['target'], in_array(rv3_sha($cur), $op['accept'], true), 'installed ' . substr(rv3_sha($cur), 0, 12) . '…');
+            }
+        }
+        if ($op['type'] === 'require_marker') {
+            $idx = rv3_read("{$app}/{$op['target']}");
+            $check("INSTALLED {$op['target']} contains the marker \"{$op['marker']}\"", $idx !== null && str_contains($idx, $op['marker']));
+        }
         if ($op['type'] === 'php_include') {
             $idx = rv3_read("{$app}/{$op['target']}");
             $check("INSTALLED {$op['target']} contains the marker \"{$op['begin']}\" exactly once", $idx !== null && substr_count($idx, $op['begin']) === 1 && substr_count($idx, $op['end']) === 1, $idx === null ? 'ABSENT' : 'markers: ' . substr_count($idx, $op['begin']));

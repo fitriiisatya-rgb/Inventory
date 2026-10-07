@@ -472,7 +472,9 @@ if ($cmd === 'verify') {
             $nTab[$op['tab']] = substr_count($js, $op['statement']);
         }
     }
-    $check('app.js renders each of the five reports exactly once through the new pages', !array_diff($nTab, [1]) && count($nTab) >= 5, json_encode($nTab));
+    if ($nTab !== []) {                                              // only packages that re-point report routes (the dashboard package does not touch app.js)
+        $check('app.js renders each of the five reports exactly once through the new pages', !array_diff($nTab, [1]) && count($nTab) >= 5, json_encode($nTab));
+    }
     $applied = json_decode((string) rv3_read("{$stateDir}/applied.json"), true);
     if (is_array($applied)) {
         $mis = [];

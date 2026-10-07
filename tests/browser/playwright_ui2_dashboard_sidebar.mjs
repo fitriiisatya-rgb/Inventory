@@ -82,7 +82,7 @@ async function newSession(browser, contextOptions, user) {
             const j = await resp.json();
             const d = j.data;
             d.summary.stock_value.total = 2233226305.92;
-            d.movement.opening_stock.value = 2200000000.5; d.movement.purchase_in.value = 133226305.92;
+            d.movement.opening_stock.value = 2200000000.5; d.movement.stock_in.value = 133226305.92;
             d.movement.stock_out.value = 99999999.99; d.movement.closing_stock.value = 2233226305.92;
             await route.fulfill({ response: resp, json: j });
         });
@@ -172,7 +172,8 @@ const layout = (page) => page.evaluate(() => {
             if (b.width && (b.right > r.right + 1 || b.left < r.left - 1)) out.outside.push(e.textContent.slice(0, 20));
         });
     });
-    const rows = (sel) => new Set(Array.from(document.querySelectorAll(sel)).map((e) => Math.round(e.getBoundingClientRect().top / 8))).size;
+    // rows = clusters of tops closer than 8px (sub-pixel offsets must not split one row)
+    const rows = (sel) => { const t = Array.from(document.querySelectorAll(sel)).map((e) => e.getBoundingClientRect().top).sort((a, b) => a - b); let n = 0; t.forEach((v, i) => { if (i === 0 || v - t[i - 1] > 8) n++; }); return n; };
     out.mvRows = rows('.dash-mv'); out.attnRows = rows('.dash-attn'); out.kpiRows = rows('.dash-kpi');
     out.kpiH = Math.round(document.querySelector('.dash-kpi').getBoundingClientRect().height);
     out.vals = Array.from(document.querySelectorAll('.dash-kpi [data-testid="dash-kpi-value-value"], .dash-mv-value')).map((e) => ({ text: e.textContent, title: e.title, compact: e.dataset.compact === '1' }));
@@ -193,7 +194,7 @@ try {
         const f = await fonts(page); const l = await layout(page);
         check('A1 desktop expanded: sidebar ~232px, toggle aria-expanded=true', await sidebarW(page) === 232 && await page.getAttribute('#sidebar-toggle-btn', 'aria-expanded') === 'true' && (await page.getAttribute('#sidebar-toggle-btn', 'aria-label')).startsWith('Ciutkan'), String(await sidebarW(page)));
         check('A2 desktop type scale: KPI 28-32, movement 20-24, title 15-17, support 12-14, section 17-19', f.kpi >= 28 && f.kpi <= 32 && f.mv >= 20 && f.mv <= 24 && f.label >= 15 && f.label <= 17 && f.sub >= 12 && f.sub <= 14 && f.section >= 17 && f.section <= 19, JSON.stringify(f));
-        check('A3 desktop: 4 KPI + 4 movement + 4 attention cards each on ONE row', l.kpiRows === 1 && l.mvRows === 1 && l.attnRows === 1, `${l.kpiRows}/${l.mvRows}/${l.attnRows}`);
+        check('A3 desktop: 4 KPI + 5 movement + 4 attention cards each on ONE row', l.kpiRows === 1 && l.mvRows === 1 && l.attnRows === 1, `${l.kpiRows}/${l.mvRows}/${l.attnRows}`);
         check('A4 desktop big values: nothing clipped / overlapping / outside its card / wrapped', !l.clipped.length && !l.overlap.length && !l.outside.length && !l.wrappedVals.length && await hOverflow(page) <= 0, JSON.stringify(l));
         check('A5 KPI card is compact (<= 100px tall at 1536)', l.kpiH <= 100, String(l.kpiH));
         const nv = l.vals[0];
@@ -269,7 +270,7 @@ try {
         const expectedW = w <= 1200 ? 216 : 232;
         check(`D ${name}: default EXPANDED (${expectedW}px), collapsible, aria ok`, await sidebarW(page) === expectedW && await page.getAttribute('#sidebar-toggle-btn', 'aria-expanded') === 'true', String(await sidebarW(page)));
         if (w <= 1200) check(`D ${name}: iPad scale KPI 22-26, movement 17-20, title 13-15, support 11-13, section 15-17`, f.kpi >= 22 && f.kpi <= 26 && f.mv >= 17 && f.mv <= 20 && f.label >= 13 && f.label <= 15 && f.sub >= 11 && f.sub <= 13 && f.section >= 15 && f.section <= 17, JSON.stringify(f));
-        check(`D ${name}: movement 4-in-a-row, attention 4-in-a-row, KPI 4-in-a-row`, l.mvRows === 1 && l.attnRows === 1 && l.kpiRows === 1, `${l.mvRows}/${l.attnRows}/${l.kpiRows}`);
+        check(`D ${name}: movement 5-in-a-row, attention 4-in-a-row, KPI 4-in-a-row`, l.mvRows === 1 && l.attnRows === 1 && l.kpiRows === 1, `${l.mvRows}/${l.attnRows}/${l.kpiRows}`);
         check(`D ${name}: no clipped/overlapping/outside/wrapped figure, no page overflow`, !l.clipped.length && !l.overlap.length && !l.outside.length && !l.wrappedVals.length && await hOverflow(page) <= 0, JSON.stringify({ c: l.clipped, o: l.overlap, x: l.outside, w: l.wrappedVals }));
         const header = await page.evaluate(() => { const t = document.querySelector('.dash-top'); return Math.round(t.getBoundingClientRect().height); });
         check(`D ${name}: filter/header row compact (<= 2 lines)`, header <= 76, String(header));
@@ -293,7 +294,7 @@ try {
         await clean(page); await page.reload(); await waitDash(page); await settle(page);
         const l = await layout(page); const f = await fonts(page);
         check(`E ${name}: sidebar is an off-canvas drawer (closed), content full width`, await page.evaluate(() => document.getElementById('sidebar').getBoundingClientRect().right <= 1) && await contentLeft(page) === 0);
-        check(`E ${name}: movement 2x2, attention 2x2, no overflow/clipping/overlap`, l.mvRows === 2 && l.attnRows === 2 && !l.clipped.length && !l.overlap.length && !l.outside.length && await hOverflow(page) <= 0, JSON.stringify({ mv: l.mvRows, at: l.attnRows, c: l.clipped, o: l.overlap }));
+        check(`E ${name}: movement 2 columns (5 cards = 3 rows), attention 2x2, no overflow/clipping/overlap`, l.mvRows === 3 && l.attnRows === 2 && !l.clipped.length && !l.overlap.length && !l.outside.length && await hOverflow(page) <= 0, JSON.stringify({ mv: l.mvRows, at: l.attnRows, c: l.clipped, o: l.overlap }));
         check(`E ${name}: portrait scale KPI 20-26, movement 17-20`, f.kpi >= 20 && f.kpi <= 26 && f.mv >= 17 && f.mv <= 20, JSON.stringify(f));
         if (name === 'ipadP820') await shot(page, 'ipad-portrait');
         await toggle(page); await page.waitForTimeout(350);
@@ -307,7 +308,7 @@ try {
         const { page, context } = await newSession(browser, { viewport: { width: 1024, height: 1366 }, __name: 'ipadP1024', __big: true }, seed.admin);
         await clean(page); await page.reload(); await waitDash(page); await settle(page);
         const l = await layout(page);
-        check('E ipad Pro 1024 portrait: rail by default (<=76px), movement 2x2, no overflow', await sidebarW(page) <= 76 && l.mvRows === 2 && !l.clipped.length && await hOverflow(page) <= 0, `${await sidebarW(page)} mvRows=${l.mvRows}`);
+        check('E ipad Pro 1024 portrait: rail by default (<=76px), movement 2 columns (3 rows), no overflow', await sidebarW(page) <= 76 && l.mvRows === 3 && !l.clipped.length && await hOverflow(page) <= 0, `${await sidebarW(page)} mvRows=${l.mvRows}`);
         await toggle(page); await settle(page);
         check('E ipad Pro 1024 portrait: can be expanded manually', await sidebarW(page) === 216);
         await context.close();
@@ -338,14 +339,14 @@ try {
         await toggle(page); await settle(page); // rail
         const ov = await api(page, '/dashboard/inventory', baseP());
         const fmv = (v) => page.evaluate((x) => UI.formatMoney(x), v);
-        check('G1 rail: movement cards still show the server values', (await mvText(page, 'purchase_in')) === await fmv(ov.movement.purchase_in.value) && (await mvText(page, 'closing_stock')) === await fmv(ov.movement.closing_stock.value));
-        await openCard(page, 'purchase_in');
+        check('G1 rail: movement cards still show the server values', (await mvText(page, 'stock_in')) === await fmv(ov.movement.stock_in.value) && (await mvText(page, 'closing_stock')) === await fmv(ov.movement.closing_stock.value));
+        await openCard(page, 'stock_in');
         const grand = await txt(page, 'dash-drawer-grand-value');
-        check('G2 drill-down drawer opens from a card and GRAND TOTAL == card', grand === await fmv(ov.movement.purchase_in.value), grand);
+        check('G2 drill-down drawer opens from a card and GRAND TOTAL == card', grand === await fmv(ov.movement.stock_in.value), grand);
         await closeDrawer(page);
         await page.focus('[data-testid="dash-mv-stock_out"]'); await page.keyboard.press('Enter');
         await page.waitForSelector('.drawer.open [data-dash-title]', { timeout: 5000 });
-        check('G3 cards keep keyboard activation (Enter opens drill-down)', (await txt(page, 'dash-drawer-title')).startsWith('Rincian Barang Keluar'));
+        check('G3 cards keep keyboard activation (Enter opens drill-down)', (await txt(page, 'dash-drawer-title')).startsWith('Rincian Stock OUT'));
         await closeDrawer(page);
         const before = requests.length;
         const whs = await page.locator('[data-testid="dash-warehouse"] option').evaluateAll((o) => o.map((x) => x.value));

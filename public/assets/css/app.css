@@ -2365,3 +2365,25 @@ td.soa-aksi-col { background: #161e33; }
 @media (min-width: 761px) and (max-width: 1100px) { .val-filter-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } .val-filter-grid > .val-f:first-child { grid-column: span 2; } .val-filter-row2 { flex-wrap: nowrap; align-items: center; gap: 8px; } .val-filter-row2 .val-toggle-wrap { flex: 1 1 auto; min-width: 0; gap: 6px 10px; } .val-filter-actions { flex: 0 0 auto; margin-left: auto; } .val-filter-actions .btn { padding: 0 10px; } }
 @media (max-width: 1280px) { .rp-kpi-l, .io-kpi-label, .pur-kpi-label, .val-kpi-label { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; } }
 /* ===== RV3 UI CORRECTION 20261019 END ===== */
+
+/* ===== RV3 DASHBOARD MOVEMENT 20261020 BEGIN =====
+   Dashboard "Ringkasan Pergerakan Stok": five cards (Stok Awal + Stock IN − Stock OUT + Adjustment = Stok Akhir) with the arithmetic operators between them, the arithmetic line,
+   the transfer strip (supporting detail) and the Adjustment breakdown named by ledger type. Loaded after the earlier dashboard rules. */
+@media (min-width: 1101px) { .dash-mv-cards { display: flex; gap: 6px; align-items: stretch; } .dash-mv-cards > .dash-mv { flex: 1 1 0; min-width: 0; } .dash-mv-cards > .dash-mv-op { flex: 0 0 auto; } }
+.dash-mv.is-tin { background: linear-gradient(135deg, rgba(20,184,166,0.24), rgba(15,23,42,0.85)); border-color: #14b8a6; } .dash-mv.is-tin .dash-label { color: #5eead4; }
+.dash-mv.is-tout { background: linear-gradient(135deg, rgba(249,115,22,0.24), rgba(15,23,42,0.85)); border-color: #f97316; } .dash-mv.is-tout .dash-label { color: #fdba74; }
+.dash-mv-cards.has-transfer .dash-mv { padding: 10px 8px; gap: 6px; } .dash-mv-cards.has-transfer .dash-tile { width: 28px; height: 28px; }
+.dash-mv-op { justify-content: center; font-weight: 800; font-size: 1.15rem; padding: 0 2px; color: #dbe3f5; }
+.dash-mv.is-adj { background: linear-gradient(135deg, rgba(245,158,11,0.26), rgba(15,23,42,0.85)); border-color: #d99a1f; }
+.dash-mv.is-adj .dash-label { color: #fcd34d; }
+.dash-mv-value.neg { color: #ff8a73; } .dash-mv-value.pos { color: #3ddc97; }
+.dash-arith { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; padding: 7px 12px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; font-size: var(--dz-sub); line-height: 1.5; }
+.dash-arith-l { color: var(--text3); } .dash-arith-t strong { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dash-arith-eq { border-left: 1px solid var(--border); padding-left: 14px; }
+.dash-transfer { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; margin-top: 6px; font-size: var(--dz-sub); color: var(--text2); }
+.dash-tr-title { font-weight: 700; color: var(--text); } .dash-tr-n { color: var(--text3); }
+.dash-tr-item.dash-click { cursor: pointer; } .dash-tr-item.is-zero { opacity: 0.65; }
+.dash-tr-net.ok { color: #3ddc97; } .dash-tr-net.warn { color: #fbbf24; }
+@media (max-width: 1100px) { .dash-mv-op { display: none; } }
+.dash-tile.tone-adj { background: #b45309; } .dash-tile.tone-tin { background: #0f766e; } .dash-tile.tone-tout { background: #c2410c; }
+/* ===== RV3 DASHBOARD MOVEMENT 20261020 END ===== */

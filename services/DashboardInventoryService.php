@@ -34,26 +34,14 @@ use PDO;
  *              boundary-exact OPENING row counts as beginning inventory),
  *              grouped per item x warehouse, so the card total and the
  *              drill-down rows are the same set by construction.
- *  PEMBELIAN   type = IN, status = POSTED, in [start, end]   (== the
- *              "Pembelian Eksternal / IN" bucket; a TRANSFER_IN receipt
- *              is NOT a purchase and is listed under Pergerakan Lain).
- *  BARANG KELUAR type = OUT (status POSTED/VOID), in [start, end]
- *              (== "OUT / Pemakaian"; an outgoing TRANSFER_OUT leg is
- *              Pergerakan Lain, so it can never be counted twice).
- *  STOK AKHIR  ledger balance up to and including the period end,
- *              grouped per item x warehouse.
- *  PERGERAKAN LAIN  every remaining ledger line, partitioned by type and
- *              disclosed: Transfer IN / Transfer OUT (per warehouse) or
- *              Transfer dalam perjalanan (company scope, where a transfer
- *              nets to zero once received), Adjustment +/-, Saldo Awal
- *              Baru (a mid-period OPENING, e.g. a warehouse cutover), and
- *              Lainnya (REVERSAL, PRODUCTION_*, the original entry of a
- *              voided IN).
- *  Identity actually enforced and reported (never forced):
- *      Stok Awal + Pembelian - Barang Keluar + Σ Pergerakan Lain = Stok Akhir
- *  `reconciliation.identity_diff` is the measured difference (≈ 0) and
- *  `reconciliation.batch_*` compares Stok Akhir with the live
- *  inventory_batches valuation whenever the period ends today.
+ *  SINGLE SOURCE (production fix): the movement summary is NOT computed here. movement() takes every figure from MovementReportV3Service::overview() — the service behind
+ *  "Laporan Pergerakan Stok" — so the dashboard and the report can never hold two accounting interpretations:
+ *      STOK AWAL + STOCK IN - STOCK OUT + TRANSFER IN - TRANSFER OUT + ADJUSTMENT = STOK AKHIR
+ *  Company-wide, Transfer IN - Transfer OUT is the value still in transit (0 once every transfer is received); per warehouse each side stands alone.
+ *  ADJUSTMENT is the report's own figure; `adjustment_breakdown` NAMES it by ledger transaction type (Adjustment +/-, Saldo Awal Baru, Reversal, Produksi, IN yang di-void,
+ *  any other type by its code) and its `explained_diff` against the report is returned, never plugged. There is no generic "Pergerakan lain".
+ *  STOCK IN = type IN posted; STOCK OUT = type OUT; the drill-downs list the very ledger lines behind each figure.
+ *  The only dashboard-owned queries are the drill-down rows, the transaction counts and two cross-checks (ledger opening / closing balance == the report's).
  *
  *  Period: the requested start is clamped to the go-live (live opening)
  *  date exactly like every other report (cutoverContext()); a period that
@@ -210,7 +198,14 @@ final class DashboardInventoryService
 
     private static function movement(PDO $pdo, ?int $wh, array $p): array
     {
-        $cutover = InventoryHppReportService::cutoverContext($pdo, $p['start_date'], $p['end_date']);
+        // ONE accounting interpretation: the very service behind "Laporan Pergerakan Stok" (Reports v3). It owns the go-live clamp, the VOID rules, the FIFO ledger values and the split
+        //   Stok Awal + IN - OUT + Transfer IN - Transfer OUT + Adjustment = Stok Akhir
+        // The dashboard only presents its figures; it never recomputes opening / in / out / transfer / adjustment / closing itself.
+        if (!class_exists(MovementReportV3Service::class)) {
+            throw new \RuntimeException('MovementReportV3Service belum terpasang: ringkasan pergerakan dashboard memakai sumber yang sama dengan Laporan Pergerakan Stok (Reports V3).');
+        }
+        $v = MovementReportV3Service::overview($pdo, $p['start_date'], $p['end_date'], $wh);
+        $cutover = $v['cutover'];
         $eff = $cutover['effective_start_date'];
         $note = null;
         if ($cutover['live_opening_date'] !== null && $cutover['effective_start_date'] > $p['start_date']) {
@@ -221,110 +216,159 @@ final class DashboardInventoryService
             $zero = ['value' => 0.0, 'sku_count' => 0, 'tx_count' => 0, 'line_count' => 0];
             return [
                 'cutover' => $cutover, 'effective_start_date' => $eff, 'note' => 'Periode ini sebelum Opening Go-Live — tidak ada aktivitas ekonomi.',
-                'is_pre_go_live' => true,
-                'opening_stock' => $zero, 'purchase_in' => $zero, 'stock_out' => $zero, 'closing_stock' => $zero,
-                'other_movements' => ['net' => 0.0, 'items' => []],
-                'reconciliation' => ['ok' => true, 'identity_diff' => 0.0, 'ledger_closing' => 0.0, 'batch_on_hand' => null, 'batch_diff' => null, 'batch_ok' => null],
+                'is_pre_go_live' => true, 'source' => 'MovementReportV3Service',
+                'opening_stock' => $zero, 'stock_in' => $zero, 'stock_out' => $zero, 'adjustment' => $zero, 'closing_stock' => $zero,
+                'transfer' => ['scope' => $wh === null ? 'company' : 'warehouse', 'in' => ['value' => 0.0, 'tx_count' => 0], 'out' => ['value' => 0.0, 'tx_count' => 0], 'net' => 0.0],
+                'components' => ['opening' => 0.0, 'in' => 0.0, 'out' => 0.0, 'transfer_in' => 0.0, 'transfer_out' => 0.0, 'adjustment' => 0.0, 'closing' => 0.0, 'difference' => 0.0],
+                'adjustment_breakdown' => ['net' => 0.0, 'items' => [], 'explained_diff' => 0.0],
+                'reconciliation' => ['ok' => true, 'identity_diff' => 0.0, 'ledger_closing' => 0.0, 'transfer_net_zero' => true, 'adjustment_explained' => true, 'batch_on_hand' => null, 'batch_diff' => null, 'batch_ok' => null],
             ];
         }
 
+        $t = $v['split_totals'];
+        $c = $v['totals'];
         $opening = self::balanceTotals($pdo, $eff, true, $wh, []);
         $endExcl = date('Y-m-d', strtotime($p['end_date'] . ' +1 day'));
         $closing = self::balanceTotals($pdo, $endExcl, false, $wh, []);
-        $m = self::periodComponents($pdo, $eff, $p['end_date'], $wh);
+        $tr = self::transferTx($pdo, $eff, $p['end_date'], $wh);
+        $cnt = self::inOutCounts($pdo, $eff, $p['end_date'], $wh);
+        $items = self::adjustmentBreakdown($pdo, $eff, $p['end_date'], $wh);
+        $breakdownNet = round(array_sum(array_column($items, 'value')), 4);
+        $explainedDiff = round((float) $t['adjustment'] - $breakdownNet, 4);
 
-        $items = [];
-        if ($wh !== null) {
-            $items[] = ['key' => 'transfer_in', 'label' => 'Transfer Diterima (IN)', 'value' => $m['transfer_in'], 'tx_count' => $m['transfer_in_tx']];
-            $items[] = ['key' => 'transfer_out', 'label' => 'Transfer Keluar (OUT)', 'value' => -$m['transfer_out'] + 0.0, 'tx_count' => $m['transfer_out_tx']];
-        } else {
-            $items[] = ['key' => 'transfer_net', 'label' => 'Transfer dalam perjalanan (in-transit)', 'value' => round($m['transfer_in'] - $m['transfer_out'], 4), 'tx_count' => $m['transfer_in_tx'] + $m['transfer_out_tx']];
-        }
-        $items[] = ['key' => 'adjustment_positive', 'label' => 'Adjustment Positif', 'value' => $m['adjustment_positive'], 'tx_count' => $m['adjustment_pos_tx']];
-        $items[] = ['key' => 'adjustment_negative', 'label' => 'Adjustment Negatif', 'value' => -$m['adjustment_negative'] + 0.0, 'tx_count' => $m['adjustment_neg_tx']];
-        $items[] = ['key' => 'opening_in', 'label' => 'Saldo Awal Baru (Opening gudang)', 'value' => $m['opening'], 'tx_count' => $m['opening_tx']];
-        $items[] = ['key' => 'other', 'label' => 'Lainnya (reversal / produksi / IN yang di-void)', 'value' => $m['other'], 'tx_count' => $m['other_tx']];
-        $otherNet = round(array_sum(array_column($items, 'value')), 4);
-
-        $identity = round($opening['value'] + $m['purchase'] - $m['out_usage'] + $otherNet - $closing['value'], 4);
-
+        $identity = (float) $t['difference'];
+        // the drill-down balances come from the ledger directly: they must equal the report's opening / closing (shown, never hidden, when they do not)
+        $drillOpen = round($opening['value'] - (float) $t['opening'], 4);
+        $drillClose = round($closing['value'] - (float) $t['closing'], 4);
         $recon = [
-            'ok' => abs($identity) <= 0.01,
+            'ok' => abs($identity) <= 0.01 && !empty($v['reconciliation']['ok']) && abs($drillOpen) <= 0.01 && abs($drillClose) <= 0.01 && abs($explainedDiff) <= 0.01,
             'identity_diff' => $identity,
-            'ledger_closing' => $closing['value'],
+            'ledger_closing' => (float) $t['closing'],
+            'report_ok' => !empty($v['reconciliation']['ok']),
+            'drill_opening_diff' => $drillOpen, 'drill_closing_diff' => $drillClose,
+            'adjustment_explained' => abs($explainedDiff) <= 0.01, 'adjustment_explained_diff' => $explainedDiff,
+            // company-wide Transfer IN - Transfer OUT is the value still in transit (0 once every transfer is received)
+            'transfer_net_zero' => $wh !== null || abs((float) $t['transfer_net']) <= 0.01,
             'batch_on_hand' => null, 'batch_diff' => null, 'batch_ok' => null,
         ];
         if ($p['end_date'] >= date('Y-m-d')) {
             $s = self::summary($pdo, $wh);
             $recon['batch_on_hand'] = $s['stock_value']['on_hand'];
-            $recon['batch_diff'] = round($closing['value'] - $s['stock_value']['on_hand'], 4);
+            $recon['batch_diff'] = round((float) $t['closing'] - $s['stock_value']['on_hand'], 4);
             $recon['batch_ok'] = abs($recon['batch_diff']) <= 0.01;
         }
 
         return [
-            'cutover' => $cutover, 'effective_start_date' => $eff, 'note' => $note, 'is_pre_go_live' => false,
-            'opening_stock' => ['value' => $opening['value'], 'sku_count' => $opening['sku_count'], 'row_count' => $opening['row_count']],
-            'purchase_in' => ['value' => $m['purchase'], 'tx_count' => $m['purchase_tx'], 'line_count' => $m['purchase_lines']],
-            'stock_out' => ['value' => $m['out_usage'], 'tx_count' => $m['out_tx'], 'line_count' => $m['out_lines']],
-            'closing_stock' => ['value' => $closing['value'], 'sku_count' => $closing['sku_count'], 'row_count' => $closing['row_count']],
-            'other_movements' => ['net' => $otherNet, 'items' => $items],
+            'cutover' => $cutover, 'effective_start_date' => $eff, 'note' => $note, 'is_pre_go_live' => false, 'source' => 'MovementReportV3Service',
+            'opening_stock' => ['value' => (float) $t['opening'], 'sku_count' => (int) $c['sku_opening'], 'row_count' => $opening['row_count']],
+            'stock_in' => ['value' => (float) $t['in'], 'tx_count' => $cnt['in_tx'], 'sku_count' => $cnt['in_sku']],
+            'stock_out' => ['value' => (float) $t['out'], 'tx_count' => $cnt['out_tx'], 'sku_count' => $cnt['out_sku']],
+            'adjustment' => ['value' => (float) $t['adjustment'], 'tx_count' => array_sum(array_column($items, 'tx_count'))],
+            'closing_stock' => ['value' => (float) $t['closing'], 'sku_count' => (int) $c['sku_closing'], 'row_count' => $closing['row_count']],
+            'transfer' => ['scope' => $wh === null ? 'company' : 'warehouse', 'in' => ['value' => (float) $t['tin'], 'tx_count' => $tr['in_tx']], 'out' => ['value' => (float) $t['tout'], 'tx_count' => $tr['out_tx']], 'net' => (float) $t['transfer_net']],
+            'components' => ['opening' => (float) $t['opening'], 'in' => (float) $t['in'], 'out' => (float) $t['out'], 'transfer_in' => (float) $t['tin'], 'transfer_out' => (float) $t['tout'],
+                'adjustment' => (float) $t['adjustment'], 'closing' => (float) $t['closing'], 'difference' => $identity],
+            'adjustment_breakdown' => ['net' => $breakdownNet, 'items' => $items, 'explained_diff' => $explainedDiff],
             'reconciliation' => $recon,
         ];
     }
 
     /**
-     * One aggregate query over [effStart, end]: every ledger line partitioned
-     * by transaction type (so the parts provably add up to the net).
-     *
-     * @return array<string,float|int>
+     * Transaction / SKU counts of Stock IN (type IN, posted) and Stock OUT (type OUT) only. The report's own tx_in / tx_out also fold a transfer receipt / dispatch in when ONE
+     * warehouse is selected, so they are not "Stock IN / OUT" counts; the VALUES still come from the report.
      */
-    private static function periodComponents(PDO $pdo, string $effStart, string $end, ?int $wh): array
+    private static function inOutCounts(PDO $pdo, string $effStart, string $end, ?int $wh): array
+    {
+        $where = ["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', 't.transaction_date >= :start', 't.transaction_date < :end_excl', "t.transaction_type IN ('IN','OUT')"];
+        $bind = ['start' => $effStart . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($end . ' +1 day')) . ' 00:00:00'];
+        if ($wh !== null) {
+            $where[] = 'l.warehouse_id = :wh';
+            $bind['wh'] = $wh;
+        }
+        $in = "t.transaction_type = 'IN' AND t.status = 'POSTED'";
+        $st = $pdo->prepare("SELECT COUNT(DISTINCT CASE WHEN {$in} THEN t.id END) AS it, COUNT(DISTINCT CASE WHEN {$in} THEN l.item_id END) AS isk,
+                                    COUNT(DISTINCT CASE WHEN t.transaction_type = 'OUT' THEN t.id END) AS ot, COUNT(DISTINCT CASE WHEN t.transaction_type = 'OUT' THEN l.item_id END) AS osk
+                               FROM inventory_transaction_lines l JOIN inventory_transactions t ON t.id = l.transaction_id WHERE " . implode(' AND ', $where));
+        $st->execute($bind);
+        $r = $st->fetch();
+        return ['in_tx' => (int) $r['it'], 'in_sku' => (int) $r['isk'], 'out_tx' => (int) $r['ot'], 'out_sku' => (int) $r['osk']];
+    }
+
+    /** Transfer transaction counts for the card detail (the VALUES come from the report). */
+    private static function transferTx(PDO $pdo, string $effStart, string $end, ?int $wh): array
+    {
+        $where = ["t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', 't.transaction_date >= :start', 't.transaction_date < :end_excl', "t.transaction_type IN ('TRANSFER_IN','TRANSFER_OUT')"];
+        $bind = ['start' => $effStart . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($end . ' +1 day')) . ' 00:00:00'];
+        if ($wh !== null) {
+            $where[] = 'l.warehouse_id = :wh';
+            $bind['wh'] = $wh;
+        }
+        $st = $pdo->prepare("SELECT COUNT(DISTINCT CASE WHEN t.transaction_type = 'TRANSFER_IN' THEN t.id END) AS i, COUNT(DISTINCT CASE WHEN t.transaction_type = 'TRANSFER_OUT' THEN t.id END) AS o
+                               FROM inventory_transaction_lines l JOIN inventory_transactions t ON t.id = l.transaction_id WHERE " . implode(' AND ', $where));
+        $st->execute($bind);
+        $r = $st->fetch();
+        return ['in_tx' => (int) $r['i'], 'out_tx' => (int) $r['o']];
+    }
+
+    /**
+     * What the report calls "Adjustment", NAMED by ledger transaction type (no catch-all): every ledger line of the period that is not IN (posted), OUT or a transfer, partitioned by
+     * transaction_type (and status / sign). Their sum must equal the report's Adjustment — the difference is returned as `explained_diff`, never plugged.
+     * @return list<array{key:string,label:string,value:float,tx_count:int,types:string}>
+     */
+    private static function adjustmentBreakdown(PDO $pdo, string $effStart, string $end, ?int $wh): array
     {
         $signed = InventoryHppReportService::SIGNED_VALUE_SQL;
         $where = [
-            "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1',
-            't.transaction_date >= :start', 't.transaction_date < :end_excl',
-            // the boundary-exact OPENING is beginning inventory (already in Stok Awal), same exclusion dailyMovement() applies
+            "t.status IN ('POSTED','VOID')", 't.inventory_effect = 1', 't.transaction_date >= :start', 't.transaction_date < :end_excl',
             "NOT (t.transaction_type = 'OPENING' AND t.transaction_date = :start_boundary)",
+            "NOT (t.transaction_type = 'IN' AND t.status = 'POSTED')", "t.transaction_type NOT IN ('OUT','TRANSFER_IN','TRANSFER_OUT')",
         ];
         $bind = ['start' => $effStart . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($end . ' +1 day')) . ' 00:00:00', 'start_boundary' => $effStart . ' 00:00:00'];
         if ($wh !== null) {
             $where[] = 'l.warehouse_id = :wh';
             $bind['wh'] = $wh;
         }
-        $isPurchase = "t.transaction_type = 'IN' AND t.status = 'POSTED'";
-        $isOther = "NOT (t.transaction_type = 'IN' AND t.status = 'POSTED') AND t.transaction_type NOT IN ('OUT','TRANSFER_IN','TRANSFER_OUT','ADJUSTMENT','OPENING')";
-        $stmt = $pdo->prepare(
-            "SELECT
-                COALESCE(SUM(CASE WHEN {$isPurchase} THEN {$signed} END), 0) AS purchase,
-                COUNT(DISTINCT CASE WHEN {$isPurchase} THEN t.id END) AS purchase_tx,
-                COUNT(CASE WHEN {$isPurchase} THEN 1 END) AS purchase_lines,
-                COALESCE(SUM(CASE WHEN t.transaction_type = 'OUT' THEN -({$signed}) END), 0) AS out_usage,
-                COUNT(DISTINCT CASE WHEN t.transaction_type = 'OUT' THEN t.id END) AS out_tx,
-                COUNT(CASE WHEN t.transaction_type = 'OUT' THEN 1 END) AS out_lines,
-                COALESCE(SUM(CASE WHEN t.transaction_type = 'TRANSFER_IN' THEN {$signed} END), 0) AS transfer_in,
-                COUNT(DISTINCT CASE WHEN t.transaction_type = 'TRANSFER_IN' THEN t.id END) AS transfer_in_tx,
-                COALESCE(SUM(CASE WHEN t.transaction_type = 'TRANSFER_OUT' THEN -({$signed}) END), 0) AS transfer_out,
-                COUNT(DISTINCT CASE WHEN t.transaction_type = 'TRANSFER_OUT' THEN t.id END) AS transfer_out_tx,
-                COALESCE(SUM(CASE WHEN t.transaction_type = 'ADJUSTMENT' AND l.subtotal > 0 THEN {$signed} END), 0) AS adjustment_positive,
-                COUNT(DISTINCT CASE WHEN t.transaction_type = 'ADJUSTMENT' AND l.subtotal > 0 THEN t.id END) AS adjustment_pos_tx,
-                COALESCE(SUM(CASE WHEN t.transaction_type = 'ADJUSTMENT' AND l.subtotal < 0 THEN -({$signed}) END), 0) AS adjustment_negative,
-                COUNT(DISTINCT CASE WHEN t.transaction_type = 'ADJUSTMENT' AND l.subtotal < 0 THEN t.id END) AS adjustment_neg_tx,
-                COALESCE(SUM(CASE WHEN t.transaction_type = 'OPENING' THEN {$signed} END), 0) AS opening,
-                COUNT(DISTINCT CASE WHEN t.transaction_type = 'OPENING' THEN t.id END) AS opening_tx,
-                COALESCE(SUM(CASE WHEN {$isOther} THEN {$signed} END), 0) AS other,
-                COUNT(DISTINCT CASE WHEN {$isOther} THEN t.id END) AS other_tx
-             FROM inventory_transaction_lines l
-             JOIN inventory_transactions t ON t.id = l.transaction_id
-             WHERE " . implode(' AND ', $where)
+        $st = $pdo->prepare(
+            "SELECT t.transaction_type AS ty, t.status AS st, (CASE WHEN l.subtotal < 0 THEN -1 ELSE 1 END) AS sg, SUM({$signed}) AS v, COUNT(DISTINCT t.id) AS n
+               FROM inventory_transaction_lines l JOIN inventory_transactions t ON t.id = l.transaction_id
+              WHERE " . implode(' AND ', $where) . ' GROUP BY t.transaction_type, t.status, (CASE WHEN l.subtotal < 0 THEN -1 ELSE 1 END)'
         );
-        $stmt->execute($bind);
-        $r = $stmt->fetch();
-        $out = [];
-        foreach ($r as $k => $v) {
-            $out[$k] = str_ends_with($k, '_tx') || str_ends_with($k, '_lines') ? (int) $v : round((float) $v, 4);
+        $st->execute($bind);
+        $rows = [];
+        foreach ($st->fetchAll() as $r) {
+            $ty = (string) $r['ty'];
+            $key = match (true) {
+                $ty === 'ADJUSTMENT' => (int) $r['sg'] > 0 ? 'adjustment_positive' : 'adjustment_negative',
+                $ty === 'OPENING' => 'opening_in',
+                $ty === 'REVERSAL' => 'reversal',
+                $ty === 'PRODUCTION_IN' => 'production_in',
+                $ty === 'PRODUCTION_OUT' => 'production_out',
+                $ty === 'IN' => 'in_void',
+                default => 'other',
+            };
+            $label = match ($key) {
+                'adjustment_positive' => 'Adjustment (+) — koreksi / Stock Opname',
+                'adjustment_negative' => 'Adjustment (−) — koreksi / Stock Opname',
+                'opening_in' => 'Saldo Awal Baru (OPENING di tengah periode)',
+                'reversal' => 'Reversal',
+                'production_in' => 'Produksi — bahan keluar (PRODUCTION_IN)',
+                'production_out' => 'Produksi — hasil masuk (PRODUCTION_OUT)',
+                'in_void' => 'Stock IN yang di-void (entri asli)',
+                default => 'Jenis ledger lain',
+            };
+            $rows[$key] ??= ['key' => $key, 'label' => $label, 'value' => 0.0, 'tx_count' => 0, 'types' => ''];
+            if (!in_array($ty, explode(',', $rows[$key]['types']), true)) {
+                $rows[$key]['types'] = ltrim($rows[$key]['types'] . ',' . $ty, ',');
+                if ($key === 'other') {
+                    $rows[$key]['label'] = 'Jenis ledger lain: ' . $rows[$key]['types'];
+                }
+            }
+            $rows[$key]['value'] = round($rows[$key]['value'] + (float) $r['v'], 4);
+            $rows[$key]['tx_count'] += (int) $r['n'];
         }
-        return $out;
+        $order = ['adjustment_positive', 'adjustment_negative', 'opening_in', 'reversal', 'production_in', 'production_out', 'in_void'];
+        uksort($rows, static fn ($a, $b) => (array_search($a, $order, true) === false ? 99 : array_search($a, $order, true)) <=> (array_search($b, $order, true) === false ? 99 : array_search($b, $order, true)) ?: strcmp((string) $a, (string) $b));
+        return array_values($rows);
     }
 
     // -------------------------------------------------- ledger balance (awal/akhir)
@@ -573,9 +617,10 @@ final class DashboardInventoryService
     // =====================================================================
 
     public const DETAIL_TYPES = [
-        'opening_stock', 'closing_stock', 'purchase_in', 'stock_out', 'current_stock',
-        'pending_transfers', 'active_opname', 'rusak', 'deadstock',
-        'move_transfer_in', 'move_transfer_out', 'move_transfer_net', 'move_adjustment_positive', 'move_adjustment_negative', 'move_opening_in', 'move_other',
+        'opening_stock', 'closing_stock', 'stock_in', 'purchase_in', 'stock_out', 'current_stock',
+        'pending_transfers', 'active_opname', 'rusak', 'deadstock', 'adjustment',
+        'move_transfer_in', 'move_transfer_out', 'move_transfer_net', 'move_adjustment_positive', 'move_adjustment_negative', 'move_opening_in',
+        'move_reversal', 'move_production_in', 'move_production_out', 'move_in_void', 'move_other',
     ];
 
     /**
@@ -616,8 +661,14 @@ final class DashboardInventoryService
                 }
                 return $base + self::balanceDetail($pdo, $before, $boundary, $wh, $filters, $page, $perPage);
 
+            case 'stock_in':
             case 'purchase_in':
             case 'stock_out':
+            case 'adjustment':
+            case 'move_reversal':
+            case 'move_production_in':
+            case 'move_production_out':
+            case 'move_in_void':
             case 'move_transfer_in':
             case 'move_transfer_out':
             case 'move_transfer_net':
@@ -736,15 +787,20 @@ final class DashboardInventoryService
         ];
         $bind = ['start' => $eff . ' 00:00:00', 'end_excl' => date('Y-m-d', strtotime($end . ' +1 day')) . ' 00:00:00', 'start_boundary' => $eff . ' 00:00:00'];
         $typeSql = match ($type) {
-            'purchase_in' => "t.transaction_type = 'IN' AND t.status = 'POSTED'",
+            'stock_in', 'purchase_in' => "t.transaction_type = 'IN' AND t.status = 'POSTED'",
             'stock_out' => "t.transaction_type = 'OUT'",
+            'adjustment' => "NOT (t.transaction_type = 'IN' AND t.status = 'POSTED') AND t.transaction_type NOT IN ('OUT','TRANSFER_IN','TRANSFER_OUT')",
+            'move_reversal' => "t.transaction_type = 'REVERSAL'",
+            'move_production_in' => "t.transaction_type = 'PRODUCTION_IN'",
+            'move_production_out' => "t.transaction_type = 'PRODUCTION_OUT'",
+            'move_in_void' => "t.transaction_type = 'IN' AND t.status = 'VOID'",
             'move_transfer_in' => "t.transaction_type = 'TRANSFER_IN'",
             'move_transfer_out' => "t.transaction_type = 'TRANSFER_OUT'",
             'move_transfer_net' => "t.transaction_type IN ('TRANSFER_IN','TRANSFER_OUT')",
             'move_adjustment_positive' => "t.transaction_type = 'ADJUSTMENT' AND l.subtotal > 0",
             'move_adjustment_negative' => "t.transaction_type = 'ADJUSTMENT' AND l.subtotal < 0",
             'move_opening_in' => "t.transaction_type = 'OPENING'",
-            default => "NOT (t.transaction_type = 'IN' AND t.status = 'POSTED') AND t.transaction_type NOT IN ('OUT','TRANSFER_IN','TRANSFER_OUT','ADJUSTMENT','OPENING')",
+            default => "t.transaction_type NOT IN ('IN','OUT','TRANSFER_IN','TRANSFER_OUT','ADJUSTMENT','OPENING','REVERSAL','PRODUCTION_IN','PRODUCTION_OUT')",
         };
         $where[] = "({$typeSql})";
         if ($wh !== null) {
@@ -779,7 +835,7 @@ final class DashboardInventoryService
                  LEFT JOIN divisions dv ON dv.id = t.division_id";
 
         // value sign: purchase/out lists show magnitudes (the card does); other-movement lists show the signed ledger value
-        $valueExpr = in_array($type, ['purchase_in', 'stock_out'], true) ? 'ABS(' . $signed . ')' : $signed;
+        $valueExpr = in_array($type, ['stock_in', 'purchase_in', 'stock_out'], true) ? 'ABS(' . $signed . ')' : $signed;
 
         $tot = $pdo->prepare("SELECT COUNT(*) AS n, COALESCE(SUM({$valueExpr}), 0) AS v, COUNT(DISTINCT l.item_id) AS skus {$from} WHERE {$whereSql}");
         $tot->execute($bind);
