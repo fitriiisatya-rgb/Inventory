@@ -211,7 +211,7 @@ if ($cmd === 'preflight' || $cmd === 'plan') {
     }
     $check('php -l on every payload PHP file', $lintBad === [], implode(' | ', $lintBad));
     $say();
-    $say('-- dependency self-check (production services + payload loaded together in a child process; no database access)');
+    $say('-- dependency self-check (production services + payload loaded together in this process; no child process, no database access)');
     [$ok, $info, $text] = rv3_selfcheck($app, $pkg, $manifest);
     $check('all services load; ReportsV3Routes returns ' . ($info['routes'] ?? '?') . ' routes; every required class / method / constant exists', $ok, $ok ? '' : (!empty($info['missing']) ? 'missing: ' . implode(', ', $info['missing']) : substr($text, 0, 400)));
     $say();
