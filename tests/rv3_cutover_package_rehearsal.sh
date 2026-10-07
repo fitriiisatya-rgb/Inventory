@@ -135,6 +135,13 @@ if [ "${RV3_VALIDATE:-0}" = 1 ]; then
   bash "$P/scripts/october_forecast.sh" "$T" --sessions=1,2 --cutoff=2026-09-30 >"$W/oct_fc.txt" 2>&1; rc=$?
   grep -q "PREDIKSI STOK AWAL OKTOBER" "$W/oct_fc.txt" && grep -q "SEMUA GUDANG" "$W/oct_fc.txt" && grep -q "PASS - No double counting" "$W/oct_fc.txt"; chk "[forecast] the October opening forecast prints every warehouse + SEMUA GUDANG with the invariants (exit $rc)" $?
   [ "$(tree_sum "$T")" = "$before" ]; chk "[forecast] the previews wrote nothing into the application" $?
+  bash "$P/scripts/scm_correction_interpret.sh" "$T" >"$W/scm_int.txt" 2>&1; rc=$?
+  [ $rc -eq 0 ] && grep -q "127 dengan Keterangan 2" "$W/scm_int.txt" && [ -s "$P/out/scm_keterangan2_interpretation.csv" ]; chk "[scm correction] interpretation of the 127 Keterangan 2 texts runs without a database write (exit $rc)" $?
+  mysql -uroot "${DB_DATABASE:-inventory_test}" -e "INSERT INTO warehouses (code, name, warehouse_type, is_active) VALUES ('SCM', 'Gudang SCM', 'MAIN', 1)"
+  bash "$P/scripts/scm_correction_preview.sh" "$T" >"$W/scm_prev.txt" 2>&1; rc=$?
+  grep -q "SCM OPENING CORRECTION — PREVIEW" "$W/scm_prev.txt" && grep -q "PREVIEW SHA256" "$W/scm_prev.txt" && [ -s "$P/out/scm_fifo_impact.csv" ] && [ -s "$P/out/scm_current_reconciliation.csv" ] && [ -s "$P/out/scm_admin_correction_summary.json" ] && [ -s "$P/out/scm_blockers.csv" ]; chk "[scm correction] preview runs read-only against the real tables (exit $rc), prints the sha and writes the output files" $?
+  [ "$(mysql -uroot -N "${DB_DATABASE:-inventory_test}" -e "SELECT COUNT(*) FROM inventory_transactions WHERE reference_no = 'SCM_ADMIN_CORRECTION_20261001'")" = 0 ]; chk "[scm correction] the preview posted nothing" $?
+  mysql -uroot "${DB_DATABASE:-inventory_test}" -e "DELETE FROM warehouses WHERE code = 'SCM'"
   bash "$P/scripts/period_cutoff_preview.sh" "$T" --sessions=1,2 --cutoff=2026-09-30 >"$W/pc_prev.txt" 2>&1; rc=$?
   grep -q "PERIOD CUTOFF — PREVIEW" "$W/pc_prev.txt" && grep -q "PREVIEW SHA256" "$W/pc_prev.txt"; chk "[period cutoff] preview runs against the real tables (exit $rc), prints the plan and the preview sha" $?
   [ "$(mysql -uroot -N "${DB_DATABASE:-inventory_test}" -e "SELECT COUNT(*) FROM inventory_effective_dates")" = 0 ]; chk "[period cutoff] preview wrote no override row" $?
