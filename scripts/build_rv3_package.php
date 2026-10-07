@@ -86,19 +86,23 @@ if ($cut) {
     $files = array_merge($cutOwned, ['public/assets/js/dashboard.js']);
 }
 if (!$ui) {
-    $files = array_merge($backendFiles, $files);
+    $files = array_merge($backendFiles, ['services/InventoryEffectiveDateService.php'], $files);   // the period-aware report services require it
 } else {
+    if ($dash) {
+        $files[] = 'services/InventoryEffectiveDateService.php';                                    // DashboardInventoryService requires it
+    }
     foreach ($backendFiles as $f) {                                  // GATE: the validated backend must already be installed (never written by this package)
         if ($cut && in_array($f, $cutOwned, true)) {
             continue;                                                // owned (replaced) by the cutover package: a file op with its known earlier versions
         }
         $accept = [$sha($show($f))];
-        if ($cut) {                                                  // the cutover package does not change this file: the validated recovery-package version (project history) is equally acceptable
-            foreach (array_keys($history($f)) as $hh) {
-                $accept[] = $hh;
-            }
-            $accept = array_slice(array_values(array_unique($accept)), 0, 4);
+        // the VALIDATED backend is the Reports v3 recovery package the owner installed (RV3_GATE_REV, default 58a72b2): its version of the file is equally acceptable (a later commit may have made
+        // the file period-aware; both behave identically while inventory_effective_dates is empty)
+        $gd = shell_exec('git show ' . escapeshellarg((getenv('RV3_GATE_REV') ?: '58a72b2') . ":{$f}") . ' 2>/dev/null');
+        if ($gd !== null && $gd !== '') {
+            $accept[] = $sha($gd);
         }
+        $accept = array_values(array_unique($accept));
         $ops[] = ['id' => 'gate:' . basename($f), 'type' => 'require_file', 'target' => $f, 'accept' => $accept];
     }
 }
@@ -207,8 +211,10 @@ if ($dashLike) {
     $v3Classes['App\\Services\\DashboardInventoryService'] = 'DashboardInventoryService.php';
 }
 if ($cut) {
-    $v3Classes['App\\Services\\InventoryEffectiveDateService'] = 'InventoryEffectiveDateService.php';
     $v3Classes['App\\Services\\InventoryHppReportService'] = 'InventoryHppReportService.php';
+}
+if ($cut || $dash || !$ui) {
+    $v3Classes['App\\Services\\InventoryEffectiveDateService'] = 'InventoryEffectiveDateService.php';
 }
 $tmpRoutes = tempnam(sys_get_temp_dir(), 'rv3routes');
 file_put_contents($tmpRoutes, $show('services/ReportsV3Routes.php'));

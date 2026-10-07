@@ -19,6 +19,11 @@ use PDO;
  * performance change — the feature is dormant until the controlled script writes the first row); with overrides it returns COALESCE((SELECT effective_at …), transaction_date).
  * Transaction history, audit trail and traces keep showing the original dates. The table is created / filled / emptied only by scripts/rv3/period_cutoff.php (dry-run by default).
  */
+/*
+ * Declared conditionally: the service files `require_once` this file by their OWN directory, so a deployment tool that loads the installed services and a package payload side by side
+ * (pre-flight self-check, validators) can reach it through two different paths. The first declaration wins; the second is skipped instead of a redeclared-class fatal error.
+ */
+if (!class_exists(__NAMESPACE__ . '\\InventoryEffectiveDateService', false)) {
 final class InventoryEffectiveDateService
 {
     public const TABLE = 'inventory_effective_dates';
@@ -60,4 +65,5 @@ final class InventoryEffectiveDateService
     {
         self::$active = [];
     }
+}
 }
