@@ -251,6 +251,29 @@ $auditRow = $pdo->query("SELECT after_data FROM audit_logs WHERE action_code='PU
 $audit = json_decode((string) $auditRow, true);
 check('invoice-level inputs are audited (mode/value/shipping/grand total/transaction ids)', is_array($audit) && isset($audit['invoice_discount_type'], $audit['grand_total'], $audit['transaction_ids']));
 
+// ============================================================ Q. INVOICE-LEVEL PPN (one rate at the end, on the DPP after the invoice discount)
+$qi = P::quote($pdo, entry($WH, $two, ['ppn_rate' => 11]));
+check('Q rows carry NO PPN: row totals = DPP 10.000 / 20.000; Subtotal 30.000; PPN 11% on the total = 3.300; Grand Total 33.300', near($qi['lines'][0]['ppn'], 0) && near($qi['lines'][0]['total'], 10000) && near($qi['lines'][1]['total'], 20000) && near($qi['totals']['subtotal'], 30000) && near($qi['totals']['ppn_total'], 3300) && near($qi['totals']['grand_total'], 33300) && $qi['totals']['ppn_mode'] === 'INVOICE' && near((float) $qi['totals']['ppn_rate'], 11), json_encode($qi['totals']));
+check('Q the PPN is split by net DPP (1.100 / 2.200); creditable PPN is not capitalised: inventory cost 10.000 / 20.000', near($qi['lines'][0]['ppn_final'], 1100) && near($qi['lines'][1]['ppn_final'], 2200) && near($qi['lines'][0]['inventory_cost'], 10000) && near($qi['lines'][1]['inventory_cost'], 20000));
+$qd2 = P::quote($pdo, entry($WH, $two, ['ppn_rate' => 11, 'invoice_discount_type' => 'PERCENT', 'invoice_discount_value' => 10, 'freight_amount' => 3000]));
+check('Q invoice discount 10% is taken from the DPP BEFORE PPN: subtotal 30.000 − 3.000 = 27.000; PPN 11% = 2.970; + shipping 3.000 = Grand 32.970', near($qd2['totals']['invoice_discount'], 3000) && near($qd2['totals']['dpp_after_invoice_discount'], 27000) && near($qd2['totals']['ppn_total'], 2970) && near($qd2['totals']['grand_total'], 32970), json_encode($qd2['totals']));
+check('Q the discount shares are on the DPP (1.000 / 2.000) and each row\'s PPN follows its net DPP: 990 / 1.980', near($qd2['lines'][0]['invoice_discount_share'], 1000) && near($qd2['lines'][1]['invoice_discount_share'], 2000) && near($qd2['lines'][0]['ppn_final'], 990) && near($qd2['lines'][1]['ppn_final'], 1980));
+check('Q identity: DPP after discount + PPN + Shipping = Grand Total', near($qd2['totals']['dpp_after_invoice_discount'] + $qd2['totals']['ppn_total'] + $qd2['totals']['freight_amount'], $qd2['totals']['grand_total'], 0.0001));
+$qn2 = P::quote($pdo, entry($WH, $two, ['ppn_rate' => 11, 'ppn_treatment' => 'NON_CREDITABLE', 'invoice_discount_type' => 'PERCENT', 'invoice_discount_value' => 10]));
+check('Q non-creditable PPN is capitalised per row: inventory cost 9.000 + 990 = 9.990 and 18.000 + 1.980 = 19.980', near($qn2['lines'][0]['inventory_cost'], 9990) && near($qn2['lines'][1]['inventory_cost'], 19980));
+$q0 = P::quote($pdo, entry($WH, [line($A, $kg, 10, 1000, 11), line($B, $kg, 20, 1000, 11)], ['ppn_rate' => 0]));
+check('Q a per-item ppn_rate in the lines is IGNORED when the invoice-level rate is given (rate 0 → PPN 0, grand 30.000)', near($q0['totals']['ppn_total'], 0) && near($q0['totals']['grand_total'], 30000));
+$qb = P::quote($pdo, entry($WH, $two, ['ppn_rate' => 150]));
+check('Q ppn_rate outside 0–100 is rejected', $qb['valid'] === false && str_contains(implode(' ', $qb['errors']), 'ppn_rate'));
+$ql = P::quote($pdo, entry($WH, $mixed, ['invoice_discount_type' => 'PERCENT', 'invoice_discount_value' => 10]));
+check('Q without a top-level ppn_rate the legacy per-item formula is unchanged (grand 27.990)', $ql['totals']['ppn_mode'] === 'PER_ITEM' && near($ql['totals']['grand_total'], 27990, 0.01));
+$ri = post($pdo, entry($WH, $two, ['ppn_rate' => 11, 'invoice_discount_type' => 'PERCENT', 'invoice_discount_value' => 10, 'freight_amount' => 3000, 'supplier_id' => $supplier]), $uid);
+$h1 = hdr($pdo, (int) $ri['transactions'][0]['transaction_id']);
+$h2 = hdr($pdo, (int) $ri['transactions'][1]['transaction_id']);
+check('Q posted: purchase_invoice_headers carry ppn_rate 11 and PPN 990 / 1.980 per line; grand total Rp 32.970; FIFO cost 9.000 / 18.000', near((float) $h1['ppn_rate'], 11) && near((float) $h1['ppn_amount'], 990) && near((float) $h2['ppn_amount'], 1980) && near($ri['totals']['grand_total'], 32970) && near((float) costRow($pdo, (int) $ri['transactions'][0]['transaction_id'])['final_inventory_cost'], 9000) && near((float) costRow($pdo, (int) $ri['transactions'][1]['transaction_id'])['final_inventory_cost'], 18000));
+$auditQ = json_decode((string) $pdo->query("SELECT after_data FROM audit_logs WHERE action_code='PURCHASE_INVOICE_POST' ORDER BY id DESC LIMIT 1")->fetchColumn(), true);
+check('Q the invoice-level PPN is audited (mode INVOICE, rate 11, PPN total 2.970)', ($auditQ['ppn_mode'] ?? '') === 'INVOICE' && near((float) ($auditQ['ppn_rate'] ?? 0), 11) && near((float) ($auditQ['ppn_total'] ?? 0), 2970));
+
 $fail = count(array_filter($results, fn ($r) => !$r));
 echo "\n" . (count($results) - $fail) . ' / ' . count($results) . ' PASSED' . ($fail ? " — {$fail} FAILED" : '') . "\n";
 exit($fail ? 1 : 0);

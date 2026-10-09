@@ -21,7 +21,16 @@ use PDO;
  *      reference_no and are posted inside ONE database transaction (all or
  *      nothing) with per-line idempotency keys derived from the request uuid.
  *
- * COMMERCIAL FORMULA (what the operator sees; matches the approved spec)
+ * INVOICE-LEVEL PPN (the sheet's current mode — request has a top-level `ppn_rate`): PPN is NOT chosen per item. Rows carry no PPN; the rate is applied ONCE
+ * at the end, on the DPP that is left after the invoice discount:
+ *   base_i = qty_i x price_i ; itemDisc_i (% or Rp, <= base_i) ; dpp_i = base_i - itemDisc_i ; row Total = dpp_i
+ *   Subtotal = SUM(dpp_i) ; InvDisc = Subtotal x pct | nominal (<= Subtotal)  [on the DPP, before PPN]
+ *   DPP after discount = Subtotal - InvDisc ; PPN = DPP after discount x rate ; Grand Total = DPP after discount + PPN + Shipping
+ * The invoice discount is split over the rows in proportion to dpp_i (exact), shipping in proportion to the net DPP, and each row's share of the PPN is
+ * (net DPP_i x rate) — the SAME per-line figures the unchanged V2.7 costing engine persists (purchase_line_costs), so reports / FIFO cost keep working.
+ * A request WITHOUT a top-level ppn_rate keeps the legacy per-item PPN formula below (older clients, imports, tests).
+ *
+ * LEGACY COMMERCIAL FORMULA (per-item PPN; used only when the request has no top-level ppn_rate)
  *   base_i      = qty_i x price_i
  *   itemDisc_i  = base_i x pct   |  nominal            (<= base_i)
  *   dpp_i       = base_i - itemDisc_i
@@ -106,6 +115,16 @@ final class PurchaseInvoiceService
             $errors[] = 'ppn_creditable_pct must be between 0 and 100';
         }
 
+        // invoice-level PPN rate: present → PPN is computed once at the end (see the class docblock); absent → legacy per-item PPN
+        $invoiceRate = null;
+        if (array_key_exists('ppn_rate', $in) && $in['ppn_rate'] !== null && $in['ppn_rate'] !== '') {
+            $invoiceRate = (float) $in['ppn_rate'];
+            if ($invoiceRate < 0 || $invoiceRate > 100) {
+                $errors[] = 'ppn_rate harus antara 0 dan 100';
+                $invoiceRate = 0.0;
+            }
+        }
+
         $freightAmount = self::round((float) ($in['freight_amount'] ?? 0));
         if ($freightAmount < 0) {
             $errors[] = 'freight_amount must not be negative';
@@ -133,7 +152,7 @@ final class PurchaseInvoiceService
             $unitId = (int) ($l['input_unit_id'] ?? 0);
             $qty = (float) ($l['input_qty'] ?? 0);
             $price = (float) ($l['unit_price_input'] ?? -1);
-            $rate = (float) ($l['ppn_rate'] ?? 0);
+            $rate = $invoiceRate !== null ? 0.0 : (float) ($l['ppn_rate'] ?? 0);   // invoice-level mode: no per-item PPN
             $dType = (string) ($l['discount_type'] ?? 'NONE');
             $dVal = (float) ($l['discount_value'] ?? 0);
 
@@ -197,7 +216,7 @@ final class PurchaseInvoiceService
                 'item_id' => $itemId, 'item_name' => $item['name'] ?? null,
                 'input_unit_id' => $unitId, 'input_qty' => $qty, 'unit_price_input' => $price,
                 'conversion_factor' => $factor, 'base_qty' => $factor !== null ? round($qty * $factor, 6) : null,
-                'ppn_rate' => $rate, 'discount_type' => $dType, 'discount_value' => $dVal,
+                'ppn_rate' => $invoiceRate ?? $rate, 'discount_type' => $dType, 'discount_value' => $dVal,
                 'base_amount' => $base, 'item_discount' => $itemDisc, 'dpp' => $dpp, 'ppn' => $ppn,
                 'total' => self::round($dpp + $ppn),
             ];
@@ -206,7 +225,7 @@ final class PurchaseInvoiceService
 
         $subtotal = self::round(array_sum(array_column($rows, 'total')));
 
-        // ---- step 2: invoice discount on the PPN-inclusive subtotal ----
+        // ---- step 2: invoice discount (legacy: on the PPN-inclusive subtotal; invoice-level PPN: on the DPP subtotal, before PPN) ----
         $invDisc = 0.0;
         if ($invType === 'PERCENT') {
             $invDisc = self::round($subtotal * $invValue / 100);
@@ -223,7 +242,7 @@ final class PurchaseInvoiceService
         $netDpp = [];
         foreach ($rows as $i => &$r) {
             $r['invoice_discount_share'] = $alloc[$i] ?? 0.0;
-            $d = round($r['invoice_discount_share'] / (1 + $r['ppn_rate'] / 100), self::MONEY_SCALE);
+            $d = $invoiceRate !== null ? $r['invoice_discount_share'] : round($r['invoice_discount_share'] / (1 + $r['ppn_rate'] / 100), self::MONEY_SCALE);
             $d = min($d, $r['dpp']);
             $r['invoice_discount_dpp'] = $d;
             $netDpp[$i] = self::round($r['dpp'] - $d);
@@ -297,10 +316,19 @@ final class PurchaseInvoiceService
         }
 
         $payableSum = self::round($payableSum);
-        // effective invoice discount: folds sub-rupiah rounding so that
-        // Subtotal - InvDisc + Shipping == Grand Total holds exactly.
-        $invDiscEffective = $errors === [] ? self::round($subtotal - $payableSum) : $invDisc;
-        $grandTotal = self::round($subtotal - $invDiscEffective + $freightAmount);
+        if ($invoiceRate !== null) {
+            // invoice-level PPN: Subtotal (DPP) - InvDisc = DPP after discount ; PPN on it ; Grand = DPP after discount + PPN + Shipping
+            $dppAfter = self::round(array_sum(array_map(static fn (array $r) => (float) ($r['net_dpp'] ?? $r['dpp']), $rows)));
+            $invDiscEffective = $errors === [] ? self::round($subtotal - $dppAfter) : $invDisc;
+            $ppnInvoice = self::round($ppnSum);
+            $grandTotal = self::round($dppAfter + $ppnInvoice + $freightAmount);
+        } else {
+            $dppAfter = null;
+            // effective invoice discount: folds sub-rupiah rounding so that
+            // Subtotal - InvDisc + Shipping == Grand Total holds exactly.
+            $invDiscEffective = $errors === [] ? self::round($subtotal - $payableSum) : $invDisc;
+            $grandTotal = self::round($subtotal - $invDiscEffective + $freightAmount);
+        }
 
         $dppTotal = self::round(array_sum(array_column($rows, 'dpp')));
         $itemDiscTotal = self::round(array_sum(array_column($rows, 'item_discount')));
@@ -325,6 +353,9 @@ final class PurchaseInvoiceService
                 'freight_amount' => $freightAmount,
                 'freight_treatment' => $freightTreatment,
                 'ppn_treatment' => $ppnTreatment,
+                'ppn_mode' => $invoiceRate !== null ? 'INVOICE' : 'PER_ITEM',
+                'ppn_rate' => $invoiceRate,
+                'dpp_after_invoice_discount' => $dppAfter,
                 'ppn_total' => self::round($ppnSum),
                 'grand_total' => $grandTotal,
                 'inventory_cost_total' => self::round($inventoryCostTotal),
@@ -397,7 +428,7 @@ final class PurchaseInvoiceService
                     'subtotal' => $t['subtotal'], 'invoice_discount_type' => $t['invoice_discount_type'],
                     'invoice_discount_value' => $t['invoice_discount_value'], 'invoice_discount' => $t['invoice_discount'],
                     'freight_amount' => $t['freight_amount'], 'freight_treatment' => $t['freight_treatment'],
-                    'ppn_treatment' => $t['ppn_treatment'], 'grand_total' => $t['grand_total'],
+                    'ppn_treatment' => $t['ppn_treatment'], 'ppn_mode' => $t['ppn_mode'], 'ppn_rate' => $t['ppn_rate'], 'ppn_total' => $t['ppn_total'], 'grand_total' => $t['grand_total'],
                     'inventory_cost_total' => $t['inventory_cost_total'],
                 ]
             );

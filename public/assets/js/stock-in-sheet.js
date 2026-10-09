@@ -2,10 +2,12 @@
  * STOCK IN V2 — the table-first purchase sheet (see transactions.js for the shell).
  *
  * Commercial formula (identical to PurchaseInvoiceService::quote(), which the
- * Review step and the POST use — this file only previews it live):
- *   base = qty x Harga Beli ; item discount (% or Rp, <= base) ; DPP = base - discount
- *   PPN  = DPP x rate ;  row Total = DPP + PPN ;  Subtotal = SUM(row Total)
- *   Invoice discount (% or Rp, <= Subtotal) ;  Grand Total = Subtotal - invoice discount + Biaya Kirim
+ * Review step and the POST use — this file only previews it live). PPN is NOT per item:
+ * it is chosen ONCE (in the summary at the bottom) and applied to the total at the end.
+ *   base = qty x Harga Beli ; item discount (% or Rp, <= base) ; row Total = DPP = base - discount
+ *   Subtotal = SUM(row Total) ;  Invoice discount (% or Rp, <= Subtotal, taken BEFORE PPN)
+ *   DPP after discount = Subtotal - invoice discount ;  PPN = DPP after discount x rate
+ *   Grand Total = DPP after discount + PPN + Biaya Kirim
  * Default "Harga Beli" = the reference price of the selected unit (ItemPriceService via
  * GET /items/{id}/units); editing it affects this transaction only — master data is
  * never written. SKU and Batch are not shown; the item id is kept internally.
@@ -18,25 +20,26 @@ const StockInSheet = (() => {
 
     function isStockUser() { const u = Auth.user(); return !!(u && u.role_code === 'STOCK' && u.warehouse_id); }
 
-    function blankRow(ppn) {
-        return { id: ++rowSeq, item: null, units: [], unitId: '', qty: '', price: '', refPrice: null, ppnMode: ppn || '11', ppnCustom: '', discMode: 'PERCENT', discValue: '', el: null };
+    function blankRow() {
+        return { id: ++rowSeq, item: null, units: [], unitId: '', qty: '', price: '', refPrice: null, discMode: 'PERCENT', discValue: '', el: null };
     }
     function fresh() {
         const u = Auth.user();
         return {
             phase: 'edit', warehouseId: isStockUser() ? String(u.warehouse_id) : '', supplierId: '', reference: '', date: today(), notes: '',
-            rows: [blankRow(), blankRow(), blankRow(), blankRow(), blankRow()], defaultPpn: '11',
+            rows: [blankRow(), blankRow(), blankRow(), blankRow(), blankRow()], ppnMode: '11', ppnCustom: '',
             invMode: 'PERCENT', invValue: '', freight: '', freightCap: false, ppnTreatment: 'CREDITABLE', ppnPct: '',
             uuid: null, quote: null, result: null, anomalyApproved: false,
         };
     }
 
     // ---------------------------------------------------------------- calculation (live preview)
-    const ppnRate = (r) => (r.ppnMode === 'custom' ? K.nz(r.ppnCustom) : Number(r.ppnMode));
+    /** ONE PPN rate for the whole invoice, applied at the end */
+    const ppnRate = () => (S.ppnMode === 'custom' ? K.nz(S.ppnCustom) : Number(S.ppnMode));
     const rowFilled = (r) => !!(r.item || K.nz(r.qty) > 0 || K.nz(r.price) > 0);
     function calc() {
         const rows = S.rows.map((r) => {
-            const out = { r, filled: rowFilled(r), errors: [], base: 0, disc: 0, dpp: 0, ppn: 0, total: 0 };
+            const out = { r, filled: rowFilled(r), errors: [], base: 0, disc: 0, dpp: 0, total: 0 };
             if (!out.filled) return out;
             const qty = K.nz(r.qty);
             const price = K.nz(r.price);
@@ -44,16 +47,13 @@ const StockInSheet = (() => {
             else if (!r.unitId) out.errors.push('Pilih satuan');
             if (!(qty > 0)) out.errors.push('Qty harus lebih dari 0');
             if (r.price === '' || Number.isNaN(Number(r.price)) || price < 0) out.errors.push('Harga beli wajib diisi (≥ 0)');
-            const rate = ppnRate(r);
-            if (rate < 0 || rate > 100 || Number.isNaN(rate)) out.errors.push('PPN harus 0–100');
             const dv = K.nz(r.discValue);
             if (dv < 0 || (r.discMode === 'PERCENT' && dv > 100)) out.errors.push('Diskon tidak valid');
             out.base = K.round4(Math.max(0, qty) * Math.max(0, price));
             out.disc = r.discMode === 'PERCENT' ? K.round4(out.base * dv / 100) : K.round4(dv);
             if (out.disc > out.base + 0.0001) { out.errors.push('Diskon melebihi nilai barang'); out.disc = out.base; }
             out.dpp = K.round4(out.base - out.disc);
-            out.ppn = K.round4(out.dpp * (rate || 0) / 100);
-            out.total = K.round4(out.dpp + out.ppn);
+            out.total = out.dpp;   // no PPN per item: the row Total is its DPP
             return out;
         });
         const filled = rows.filter((x) => x.filled);
@@ -61,6 +61,8 @@ const StockInSheet = (() => {
         const iv = K.nz(S.invValue);
         let invDisc = S.invMode === 'PERCENT' ? K.round4(subtotal * iv / 100) : K.round4(iv);
         const problems = [];
+        const rate = ppnRate();
+        if (rate < 0 || rate > 100 || Number.isNaN(rate)) problems.push('PPN harus 0–100');
         if (iv < 0 || (S.invMode === 'PERCENT' && iv > 100)) problems.push('Diskon invoice tidak valid');
         if (invDisc > subtotal + 0.0001) { problems.push('Diskon invoice melebihi subtotal'); invDisc = subtotal; }
         const freight = K.nz(S.freight);
@@ -71,7 +73,9 @@ const StockInSheet = (() => {
         const dupKeys = new Set();
         let dup = false;
         filled.forEach((x) => { if (x.r.item) { const k = `${x.r.item.id}:${x.r.unitId}`; if (dupKeys.has(k)) dup = true; dupKeys.add(k); } });
-        return { rows, filled, subtotal, invDisc, freight, grand: K.round4(subtotal - invDisc + Math.max(0, freight)), problems, duplicate: dup };
+        const dppAfter = K.round4(subtotal - invDisc);
+        const ppn = K.round4(dppAfter * (Number.isNaN(rate) ? 0 : rate) / 100);
+        return { rows, filled, subtotal, invDisc, dppAfter, ppn, freight, grand: K.round4(dppAfter + ppn + Math.max(0, freight)), problems, duplicate: dup };
     }
 
     // ---------------------------------------------------------------- mount / layout
@@ -132,12 +136,12 @@ const StockInSheet = (() => {
         };
         mountQuick();
         const addBtn = UI.el('button', { type: 'button', class: 'btn btn-primary tx2-add', 'data-testid': 'in-add-row' }, '+ Tambah Barang');
-        addBtn.addEventListener('click', () => { const r = blankRow(S.defaultPpn); S.rows.push(r); buildRows(); r.el.pick.focus(); });
+        addBtn.addEventListener('click', () => { const r = blankRow(); S.rows.push(r); buildRows(); r.el.pick.focus(); });
 
         ui.count = UI.el('span', { class: 'tx2-chip', 'data-testid': 'in-count' }, '0 item');
         ui.tbody = UI.el('tbody', { 'data-testid': 'in-rows' });
         const table = UI.el('table', { class: 'tx2-table', 'data-testid': 'in-table' }, [
-            UI.el('thead', {}, [UI.el('tr', {}, [['No', 'c w-no'], ['Nama Barang', 'w-name'], ['Satuan', 'w-unit'], ['Qty', 'w-qty'], ['Harga Beli', 'w-price'], ['PPN', 'w-ppn'], ['Diskon', 'w-disc'], ['Total', 'r w-total'], ['Aksi', 'c w-act']].map(([h, c]) => UI.el('th', { class: c }, h)))]),
+            UI.el('thead', {}, [UI.el('tr', {}, [['No', 'c w-no'], ['Nama Barang', 'w-name'], ['Satuan', 'w-unit'], ['Qty', 'w-qty'], ['Harga Beli', 'w-price'], ['Diskon', 'w-disc'], ['Total', 'r w-total'], ['Aksi', 'c w-act']].map(([h, c]) => UI.el('th', { class: c }, h)))]),
             ui.tbody,
         ]);
         const card = UI.el('div', { class: 'tx2-card' }, [
@@ -157,7 +161,7 @@ const StockInSheet = (() => {
 
     function addItem(item) {
         let r = S.rows.find((x) => !rowFilled(x));
-        if (!r) { r = blankRow(S.defaultPpn); S.rows.push(r); }
+        if (!r) { r = blankRow(); S.rows.push(r); }
         buildRows();
         pickItem(r, item, true);
     }
@@ -181,7 +185,7 @@ const StockInSheet = (() => {
         const u = r.units[0];
         r.unitId = u ? String(u.id) : '';
         applyUnitPrice(r);
-        if (S.rows[S.rows.length - 1] === r) { S.rows.push(blankRow(S.defaultPpn)); buildRows(); } else { syncRowControls(r); refresh(); }
+        if (S.rows[S.rows.length - 1] === r) { S.rows.push(blankRow()); buildRows(); } else { syncRowControls(r); refresh(); }
     }
 
     /** a price is only ever valid for the unit it was resolved for → replace on every unit change */
@@ -206,21 +210,19 @@ const StockInSheet = (() => {
         const qty = K.numInput({ value: r.qty, onValue: (n) => { r.qty = Number.isNaN(n) ? '' : n; refresh(); }, testid: 'in-qty' });
         const price = K.numInput({ value: r.price, prefix: 'Rp', onValue: (n) => { r.price = Number.isNaN(n) ? '' : n; refresh(); }, testid: 'in-price' });
         const refHint = UI.el('div', { class: 'tx2-refhint', 'data-testid': 'in-refhint' });
-        const ppnSel = K.select([['0', '0%'], ['11', '11%'], ['custom', 'Custom']], r.ppnMode, (v) => { r.ppnMode = v; S.defaultPpn = v === 'custom' ? S.defaultPpn : v; syncRowControls(r); refresh(); }, { testid: 'in-ppn' });
-        const ppnCustom = K.numInput({ value: r.ppnCustom, suffix: '%', onValue: (n) => { r.ppnCustom = Number.isNaN(n) ? '' : n; refresh(); }, testid: 'in-ppn-custom', cls: 'tx2-ppncustom' });
         const disc = K.numInput({ value: r.discValue, onValue: (n) => { r.discValue = Number.isNaN(n) ? '' : n; refresh(); }, testid: 'in-disc' });
         const discMode = K.select([['PERCENT', '%'], ['AMOUNT', 'Rp']], r.discMode, (v) => { r.discMode = v; refresh(); }, { testid: 'in-disc-mode', cls: 'tx2-mini' });
         const total = UI.el('td', { class: 'r tx2-total', 'data-testid': 'in-rowtotal' }, 'Rp 0');
         const dup = UI.el('button', { type: 'button', class: 'tx2-iconbtn', title: 'Duplikat baris', 'data-testid': 'in-dup' }, '⧉');
         const del = UI.el('button', { type: 'button', class: 'tx2-iconbtn danger', title: 'Hapus baris', 'data-testid': 'in-del' }, '🗑');
         dup.addEventListener('click', () => {
-            const c = Object.assign(blankRow(r.ppnMode), { item: r.item, units: r.units, unitId: r.unitId, qty: r.qty, price: r.price, refPrice: r.refPrice, ppnCustom: r.ppnCustom, discMode: r.discMode, discValue: r.discValue });
+            const c = Object.assign(blankRow(), { item: r.item, units: r.units, unitId: r.unitId, qty: r.qty, price: r.price, refPrice: r.refPrice, discMode: r.discMode, discValue: r.discValue });
             S.rows.splice(S.rows.indexOf(r) + 1, 0, c);
             buildRows();
         });
         del.addEventListener('click', () => {
             S.rows.splice(S.rows.indexOf(r), 1);
-            if (S.rows.length === 0 || rowFilled(S.rows[S.rows.length - 1])) S.rows.push(blankRow(S.defaultPpn));
+            if (S.rows.length === 0 || rowFilled(S.rows[S.rows.length - 1])) S.rows.push(blankRow());
             buildRows();
         });
         tr.appendChild(no);
@@ -228,11 +230,10 @@ const StockInSheet = (() => {
         tr.appendChild(UI.el('td', {}, [unit]));
         tr.appendChild(UI.el('td', {}, [qty]));
         tr.appendChild(UI.el('td', {}, [price, refHint]));
-        tr.appendChild(UI.el('td', {}, [UI.el('div', { class: 'tx2-inline' }, [ppnSel, ppnCustom])]));
         tr.appendChild(UI.el('td', {}, [UI.el('div', { class: 'tx2-inline' }, [disc, discMode])]));
         tr.appendChild(total);
         tr.appendChild(UI.el('td', { class: 'c' }, [UI.el('div', { class: 'tx2-inline c' }, [dup, del])]));
-        r.el = { tr, no, pick, err, unit, qty, price, refHint, ppnSel, ppnCustom, disc, discMode, total };
+        r.el = { tr, no, pick, err, unit, qty, price, refHint, disc, discMode, total };
         syncRowControls(r);
         return tr;
     }
@@ -246,8 +247,6 @@ const StockInSheet = (() => {
         e.unit.value = r.unitId;
         if (!r.item) e.unit.setAttribute('disabled', 'disabled'); else e.unit.removeAttribute('disabled');
         e.price.setValue(r.price);
-        e.ppnCustom.style.display = r.ppnMode === 'custom' ? '' : 'none';
-        e.ppnSel.value = r.ppnMode;
     }
 
     // ---------------------------------------------------------------- live refresh (cells only — never rebuilds inputs)
@@ -275,6 +274,8 @@ const StockInSheet = (() => {
             ui.sum.subtotal.textContent = K.money(c.subtotal);
             ui.sum.invLabel.textContent = `Diskon Invoice (${S.invMode === 'PERCENT' ? `${K.fmtNum(K.nz(S.invValue), 2)}%` : 'Rp'})`;
             ui.sum.inv.textContent = c.invDisc > 0 ? `- ${K.money(c.invDisc)}` : K.money(0);
+            ui.sum.ppnLabel.textContent = `PPN dihitung sekali dari total: ${K.fmtNum(Number.isNaN(ppnRate()) ? 0 : ppnRate(), 2)}% × ${K.money(c.dppAfter)} (subtotal setelah diskon)`;
+            ui.sum.ppn.textContent = K.money(c.ppn);
             ui.sum.freight.textContent = K.money(Math.max(0, c.freight));
             ui.sum.grand.textContent = K.money(c.grand);
         }
@@ -311,15 +312,21 @@ const StockInSheet = (() => {
         const pctWrap = UI.el('div', { class: 'tx2-field' }, [UI.el('label', {}, '% dikreditkan'), pct]);
         pctWrap.style.display = S.ppnTreatment === 'PARTIALLY_CREDITABLE' ? '' : 'none';
 
+        const ppnCustom = K.numInput({ value: S.ppnCustom, suffix: '%', onValue: (n) => { S.ppnCustom = Number.isNaN(n) ? '' : n; refresh(); }, testid: 'in-ppn-custom', cls: 'tx2-ppncustom' });
+        const ppnSel = K.select([['0', '0% (tanpa PPN)'], ['11', '11%'], ['custom', 'Custom']], S.ppnMode, (v) => { S.ppnMode = v; ppnCustom.style.display = v === 'custom' ? '' : 'none'; refresh(); }, { testid: 'in-ppn' });
+        ppnCustom.style.display = S.ppnMode === 'custom' ? '' : 'none';
+        ppnSel.style.width = '112px';
+        ppnCustom.style.width = '84px';
         ui.sum = {
             subtotal: UI.el('span', { 'data-testid': 'in-sum-subtotal' }, 'Rp 0'), invLabel: UI.el('span', {}, 'Diskon Invoice'), inv: UI.el('span', { 'data-testid': 'in-sum-inv' }, 'Rp 0'),
+            ppnLabel: UI.el('span', {}, ''), ppn: UI.el('span', { 'data-testid': 'in-sum-ppn' }, 'Rp 0'),
             freight: UI.el('span', { 'data-testid': 'in-sum-freight' }, 'Rp 0'), grand: UI.el('span', { 'data-testid': 'in-sum-grand' }, 'Rp 0'),
         };
         return UI.el('div', { class: 'tx2-card tx2-bottom' }, [
             UI.el('div', { class: 'tx2-bcol' }, [
                 UI.el('div', { class: 'tx2-btitle' }, ['Diskon Invoice ', UI.el('span', { class: 'tx2-opt' }, '(Opsional)')]),
                 UI.el('div', { class: 'tx2-inline wrap' }, [seg, invVal]),
-                UI.el('div', { class: 'tx2-hintline' }, 'Diskon diterapkan ke subtotal setelah diskon per item & PPN.'),
+                UI.el('div', { class: 'tx2-hintline' }, 'Diskon diterapkan ke subtotal setelah diskon per item, sebelum PPN.'),
             ]),
             UI.el('div', { class: 'tx2-bcol' }, [
                 UI.el('div', { class: 'tx2-btitle' }, ['Biaya Kirim ', UI.el('span', { class: 'tx2-opt' }, '(Opsional)')]),
@@ -331,6 +338,8 @@ const StockInSheet = (() => {
             UI.el('div', { class: 'tx2-sumbox', 'data-testid': 'in-summary' }, [
                 UI.el('div', { class: 'tx2-sumrow' }, [UI.el('span', {}, 'Subtotal'), ui.sum.subtotal]),
                 UI.el('div', { class: 'tx2-sumrow' }, [ui.sum.invLabel, ui.sum.inv]),
+                UI.el('div', { class: 'tx2-sumrow tx2-ppnrow', style: 'align-items:center' }, [UI.el('span', { class: 'tx2-ppnctl', style: 'display:inline-flex;align-items:center;gap:8px' }, ['PPN ', ppnSel, ppnCustom]), ui.sum.ppn]),
+                UI.el('div', { class: 'tx2-hintline tx2-ppnnote' }, [ui.sum.ppnLabel]),
                 UI.el('div', { class: 'tx2-sumrow' }, [UI.el('span', {}, 'Biaya Kirim'), ui.sum.freight]),
                 UI.el('div', { class: 'tx2-grand' }, [UI.el('span', {}, 'Grand Total'), ui.sum.grand]),
             ]),
@@ -363,13 +372,13 @@ const StockInSheet = (() => {
     function payload() {
         const lines = S.rows.filter(rowFilled).map((r) => ({
             item_id: r.item ? r.item.id : 0, input_unit_id: Number(r.unitId) || 0, input_qty: K.nz(r.qty), unit_price_input: r.price === '' ? -1 : K.nz(r.price),
-            ppn_rate: ppnRate(r) || 0, discount_type: K.nz(r.discValue) > 0 ? r.discMode : 'NONE', discount_value: K.nz(r.discValue),
+            discount_type: K.nz(r.discValue) > 0 ? r.discMode : 'NONE', discount_value: K.nz(r.discValue),
         }));
         return {
             warehouse_id: Number(S.warehouseId), supplier_id: S.supplierId ? Number(S.supplierId) : null, reference_no: S.reference || null, transaction_date: S.date, notes: S.notes || null,
             invoice_discount_type: K.nz(S.invValue) > 0 ? S.invMode : 'NONE', invoice_discount_value: K.nz(S.invValue),
             freight_amount: Math.max(0, K.nz(S.freight)), freight_capitalize: !!S.freightCap,
-            ppn_treatment: S.ppnTreatment, ppn_creditable_pct: K.nz(S.ppnPct), lines,
+            ppn_rate: ppnRate() || 0, ppn_treatment: S.ppnTreatment, ppn_creditable_pct: K.nz(S.ppnPct), lines,
         };
     }
 
@@ -407,11 +416,11 @@ const StockInSheet = (() => {
                 const disc = l.discount_type === 'PERCENT' ? `${K.fmtNum(l.discount_value, 2)}% (${K.money(l.item_discount)})` : (l.item_discount > 0 ? K.money(l.item_discount) : '-');
                 return UI.el('tr', { 'data-testid': 'in-review-row' }, [
                     UI.el('td', { class: 'c' }, String(l.line_no)), UI.el('td', {}, l.item_name || '-'), UI.el('td', { class: 'r' }, `${K.fmtNum(l.input_qty)} ${unitCode(r)}`),
-                    UI.el('td', { class: 'r' }, K.money(l.unit_price_input)), UI.el('td', { class: 'r' }, `${K.fmtNum(l.ppn_rate, 2)}% (${K.money(l.ppn)})`), UI.el('td', { class: 'r' }, disc), UI.el('td', { class: 'r strong' }, K.money(l.total)),
+                    UI.el('td', { class: 'r' }, K.money(l.unit_price_input)), UI.el('td', { class: 'r' }, disc), UI.el('td', { class: 'r strong' }, K.money(l.total)),
                 ]);
             });
             wrap.appendChild(UI.el('div', { class: 'tx2-tablewrap' }, [UI.el('table', { class: 'tx2-table tx2-reviewtable' }, [
-                UI.el('thead', {}, [UI.el('tr', {}, [['No', 'c'], ['Nama Barang', ''], ['Qty + Satuan', 'r'], ['Harga Beli', 'r'], ['PPN', 'r'], ['Diskon Item', 'r'], ['Total', 'r']].map(([h, c]) => UI.el('th', { class: c }, h)))]),
+                UI.el('thead', {}, [UI.el('tr', {}, [['No', 'c'], ['Nama Barang', ''], ['Qty + Satuan', 'r'], ['Harga Beli', 'r'], ['Diskon Item', 'r'], ['Total', 'r']].map(([h, c]) => UI.el('th', { class: c }, h)))]),
                 UI.el('tbody', {}, body),
             ])]));
             const t = q.totals;
@@ -420,6 +429,7 @@ const StockInSheet = (() => {
                 UI.el('div', { class: 'tx2-hintline' }, `Nilai masuk persediaan (HPP): ${K.money(t.inventory_cost_total)} · PPN ${t.ppn_treatment === 'CREDITABLE' ? 'dikreditkan (tidak masuk HPP)' : (t.ppn_treatment === 'NON_CREDITABLE' ? 'masuk HPP' : 'sebagian masuk HPP')} · Biaya kirim ${t.freight_treatment === 'CAPITALIZE' ? 'masuk HPP' : 'tidak masuk HPP'}`),
                 UI.el('div', { class: 'tx2-sumbox' }, [
                     row('Subtotal', K.money(t.subtotal)), row(`Diskon Invoice${t.invoice_discount_type === 'PERCENT' ? ` (${K.fmtNum(t.invoice_discount_value, 2)}%)` : ''}`, t.invoice_discount > 0 ? `- ${K.money(t.invoice_discount)}` : K.money(0)),
+                    row(`PPN (${K.fmtNum(t.ppn_rate || 0, 2)}% × ${K.money(t.dpp_after_invoice_discount)})`, K.money(t.ppn_total)),
                     row('Biaya Kirim', K.money(t.freight_amount)), UI.el('div', { class: 'tx2-grand' }, [UI.el('span', {}, 'Grand Total'), UI.el('span', { 'data-testid': 'in-review-grand' }, K.money(t.grand_total))]),
                 ]),
             ]));

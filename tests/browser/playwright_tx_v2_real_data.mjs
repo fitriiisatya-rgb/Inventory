@@ -101,12 +101,12 @@ try {
     // ================================================================ STOCK IN
     await openTx(page, 'in');
     const scripts = await page.evaluate(() => Array.from(document.scripts).map((s) => s.getAttribute('src') || ''));
-    check('new modules + cache tokens loaded', ['transactions.js', 'stock-in-sheet.js', 'stock-out-sheet.js'].every((n) => scripts.some((s) => s.includes(`${n}?v=20261010-tx2`))));
+    check('new modules + cache tokens loaded', ['transactions.js', 'stock-in-sheet.js', 'stock-out-sheet.js'].every((n) => scripts.some((s) => s.includes(`${n}?v=${n === 'stock-in-sheet.js' ? '20261010-tx2b' : '20261010-tx2'}`))));
     check('tabs Stock IN / Stock OUT; Stock IN active', await page.locator(tid('tx-tab-in')).count() === 1 && await page.locator(tid('tx-tab-out')).count() === 1 && await page.locator(`${tid('tx-tab-in')}.on`).count() === 1);
     const hdrTxt = (await page.locator(tid('in-header')).innerText()).replace(/\s+/g, ' ');
     check('header fields: Gudang, Vendor / Supplier, Referensi, Tanggal Transaksi, Tipe Transaksi, Catatan', ['Gudang', 'Vendor / Supplier', 'Referensi', 'Tanggal Transaksi', 'Tipe Transaksi', 'Catatan (Opsional)'].every((l) => hdrTxt.includes(l)), hdrTxt);
     const heads = (await page.locator(`${tid('in-table')} thead th`).allTextContents()).map((h) => h.trim());
-    check('item table columns = No | Nama Barang | Satuan | Qty | Harga Beli | PPN | Diskon | Total | Aksi (no SKU, no Batch)', heads.join('|') === 'No|Nama Barang|Satuan|Qty|Harga Beli|PPN|Diskon|Total|Aksi' && !/SKU|Batch/i.test(heads.join(' ')), heads.join('|'));
+    check('item table columns = No | Nama Barang | Satuan | Qty | Harga Beli | Diskon | Total | Aksi (NO per-item PPN, no SKU, no Batch)', heads.join('|') === 'No|Nama Barang|Satuan|Qty|Harga Beli|Diskon|Total|Aksi' && !/SKU|Batch/i.test(heads.join(' ')), heads.join('|'));
     check('starts compact: 5 blank rows, status asks for data', await page.locator(tid('in-row')).count() === 5 && (await txt(page, 'in-status-sub')).length > 0 && await page.locator(tid('in-next')).isDisabled());
 
     await page.selectOption(tid('in-warehouse'), String(seed.wh.B));
@@ -127,20 +127,21 @@ try {
     check('"+ Tambah Barang" adds a row', await page.locator(tid('in-row')).count() === 6);
     await page.locator(tid('in-row')).nth(5).locator(tid('in-del')).click();
     check('delete row removes it', await page.locator(tid('in-row')).count() === 5);
-    await page.locator(tid('in-row')).nth(0).locator(tid('in-ppn')).selectOption('0');
+    check('PPN is not a row control: no PPN select inside any row; ONE PPN selector in the summary area', await page.locator(`${tid('in-row')} ${tid('in-ppn')}`).count() === 0 && await page.locator(tid('in-ppn')).count() === 1);
+    await page.selectOption(tid('in-ppn'), '0');
     await fill(page.locator(tid('in-row')).nth(0).locator(tid('in-qty')), 10);
     check('A basic: 10 × 14.000 = Rp 140.000 (row, subtotal, grand)', await rowTxt(page, 'in', 0, 'in-rowtotal') === fmt(140000) && await txt(page, 'in-sum-subtotal') === fmt(140000) && await txt(page, 'in-sum-grand') === fmt(140000));
     check('A status "Data siap disimpan", Lanjut enabled', (await txt(page, 'in-status-title')) === 'Data siap disimpan' && await page.locator(tid('in-next')).isEnabled());
     // ---- B: PPN 11%
-    await page.locator(tid('in-row')).nth(0).locator(tid('in-ppn')).selectOption('11');
-    check('B PPN 11%: 140.000 + 15.400 = Rp 155.400', await rowTxt(page, 'in', 0, 'in-rowtotal') === fmt(155400) && await txt(page, 'in-sum-grand') === fmt(155400));
+    await page.selectOption(tid('in-ppn'), '11');
+    check('B PPN 11% at the END: row Total stays the DPP 140.000; PPN 15.400 on the total; Grand Rp 155.400', await rowTxt(page, 'in', 0, 'in-rowtotal') === fmt(140000) && await txt(page, 'in-sum-ppn') === fmt(15400) && await txt(page, 'in-sum-grand') === fmt(155400));
     // ---- C: item discount 5%
     await fill(page.locator(tid('in-row')).nth(0).locator(tid('in-disc')), 5);
-    check('C item discount 5%: DPP 133.000, PPN 14.630 → Rp 147.630', await rowTxt(page, 'in', 0, 'in-rowtotal') === fmt(147630));
+    check('C item discount 5%: row Total = DPP 133.000; PPN 14.630 → Grand Rp 147.630', await rowTxt(page, 'in', 0, 'in-rowtotal') === fmt(133000) && await txt(page, 'in-sum-grand') === fmt(147630));
     // ---- D: item discount nominal
     await page.locator(tid('in-row')).nth(0).locator(tid('in-disc-mode')).selectOption('AMOUNT');
     await fill(page.locator(tid('in-row')).nth(0).locator(tid('in-disc')), 10000);
-    check('D item discount Rp 10.000: DPP 130.000 → +11% → Rp 144.300', await rowTxt(page, 'in', 0, 'in-rowtotal') === fmt(144300));
+    check('D item discount Rp 10.000: DPP 130.000 → +11% at the end → Grand Rp 144.300', await rowTxt(page, 'in', 0, 'in-rowtotal') === fmt(130000) && await txt(page, 'in-sum-grand') === fmt(144300));
     // ---- K: invalid discount blocked, inline error
     await fill(page.locator(tid('in-row')).nth(0).locator(tid('in-disc')), 999999999);
     check('K discount > base amount → inline error, status blocking, Lanjut disabled', (await rowTxt(page, 'in', 0, 'in-rowerr')).includes('Diskon melebihi nilai barang') && await page.locator(tid('in-next')).isDisabled() && (await txt(page, 'in-status-title')).includes('perlu diperbaiki'));
@@ -148,12 +149,12 @@ try {
     await fill(page.locator(tid('in-row')).nth(0).locator(tid('in-disc')), 5);
     // ---- E/F/G: invoice discount % / Rp, shipping (single row 147.630)
     await fill(page.locator(tid('in-inv-value')), 10);
-    check('E invoice discount 10%: Subtotal 147.630 − 14.763 = Grand Rp 132.867', await txt(page, 'in-sum-subtotal') === fmt(147630) && await txt(page, 'in-sum-grand') === fmt(132867));
+    check('E invoice discount 10% BEFORE PPN: Subtotal (DPP) 133.000 − 13.300 = 119.700; PPN 11% = 13.167 → Grand Rp 132.867', await txt(page, 'in-sum-subtotal') === fmt(133000) && await txt(page, 'in-sum-ppn') === fmt(13167) && await txt(page, 'in-sum-grand') === fmt(132867));
     await page.locator(`${tid('in-inv-mode')} .tx2-segbtn[data-value="AMOUNT"]`).click();
     await fill(page.locator(tid('in-inv-value')), 10000);
-    check('F invoice discount Rp 10.000 (mutually exclusive with %): Grand Rp 137.630', await txt(page, 'in-sum-grand') === fmt(137630) && (await txt(page, 'in-sum-inv')).includes(fmt(10000)));
+    check('F invoice discount Rp 10.000 on the DPP (mutually exclusive with %): 123.000 + PPN 13.530 = Grand Rp 136.530', await txt(page, 'in-sum-grand') === fmt(136530) && (await txt(page, 'in-sum-inv')).includes(fmt(10000)));
     await fill(page.locator(tid('in-freight')), 5000);
-    check('G Biaya Kirim Rp 5.000 added after the invoice discount: Grand Rp 142.630', await txt(page, 'in-sum-freight') === fmt(5000) && await txt(page, 'in-sum-grand') === fmt(142630));
+    check('G Biaya Kirim Rp 5.000 added after PPN: Grand Rp 141.530', await txt(page, 'in-sum-freight') === fmt(5000) && await txt(page, 'in-sum-grand') === fmt(141530));
     await fill(page.locator(tid('in-inv-value')), 999999);
     check('K invoice discount > subtotal → blocked', (await txt(page, 'in-status-sub')).includes('melebihi subtotal') && await page.locator(tid('in-next')).isDisabled());
 
@@ -167,50 +168,47 @@ try {
     check('I units offered = approved ones only (KARTON conversion + base KG)', unitOpts.sort().join() === ['KARTON', 'KG'].join());
     await page.locator(tid('in-row')).nth(1).locator(tid('in-unit')).selectOption({ label: 'KARTON' });
     check('I choosing KARTON re-derives the price for that unit: 12.500/kg × 24 = Rp 300.000', (await page.locator(tid('in-row')).nth(1).locator(tid('in-price')).inputValue()).replace(/\D/g, '') === '300000');
-    await page.locator(tid('in-row')).nth(1).locator(tid('in-ppn')).selectOption('0');
-    await fill(page.locator(tid('in-row')).nth(1).locator(tid('in-qty')), 2);
+        await fill(page.locator(tid('in-row')).nth(1).locator(tid('in-qty')), 2);
     await pickItem(page, 'in', 2, 'Ragi Instan');
-    await page.locator(tid('in-row')).nth(2).locator(tid('in-ppn')).selectOption('11');
-    await fill(page.locator(tid('in-row')).nth(2).locator(tid('in-qty')), 5);
+        await fill(page.locator(tid('in-row')).nth(2).locator(tid('in-qty')), 5);
     // price override on Gula (14.000 → 15.000), master must stay untouched
     const itemsSum0 = sql('CHECKSUM TABLE items').split('\t')[1];
     await fill(page.locator(tid('in-row')).nth(0).locator(tid('in-price')), 15000);
-    check('J overriding Harga Beli shows the reference hint and drives the row: 10 × 15.000, 5%, 11% → Rp 158.175', (await rowTxt(page, 'in', 0, 'in-refhint')).includes('Ref. ' + fmt(14000)) && await rowTxt(page, 'in', 0, 'in-rowtotal') === fmt(158175), await rowTxt(page, 'in', 0, 'in-rowtotal'));
-    // expected: row1 = 10*15000=150000 - 5% = 142500 ; ppn 15675 → 158175 ; row2 = 600000 ; row3 = 40000*1.11 = 44400
-    check('H three rows: 158.175 + 600.000 + 44.400 → Subtotal Rp 802.575', await txt(page, 'in-sum-subtotal') === fmt(802575) && await txt(page, 'in-count') === '3 item');
+    check('J overriding Harga Beli shows the reference hint and drives the row: 10 × 15.000 − 5% → row Total (DPP) Rp 142.500', (await rowTxt(page, 'in', 0, 'in-refhint')).includes('Ref. ' + fmt(14000)) && await rowTxt(page, 'in', 0, 'in-rowtotal') === fmt(142500), await rowTxt(page, 'in', 0, 'in-rowtotal'));
+    // expected: row1 = 10*15000=150000 - 5% = 142500 ; row2 = 600000 ; row3 = 40000 ; Subtotal (DPP) 782.500 ; ONE PPN 11% at the end
+    check('H three rows: 142.500 + 600.000 + 40.000 → Subtotal (DPP) Rp 782.500', await txt(page, 'in-sum-subtotal') === fmt(782500) && await txt(page, 'in-count') === '3 item');
     await page.locator(`${tid('in-inv-mode')} .tx2-segbtn[data-value="AMOUNT"]`).click();
-    await fill(page.locator(tid('in-inv-value')), 12575);
+    await fill(page.locator(tid('in-inv-value')), 12500);
     await fill(page.locator(tid('in-freight')), 20000);
-    check('H invoice discount Rp 12.575 + Biaya Kirim 20.000 → Grand Total Rp 810.000 (802.575 − 12.575 + 20.000)', await txt(page, 'in-sum-grand') === fmt(810000), await txt(page, 'in-sum-grand'));
+    check('H invoice discount Rp 12.500 → DPP 770.000; PPN 11% = 84.700; + Biaya Kirim 20.000 → Grand Total Rp 874.700', await txt(page, 'in-sum-ppn') === fmt(84700) && await txt(page, 'in-sum-grand') === fmt(874700), await txt(page, 'in-sum-grand'));
     await page.screenshot({ path: path.join(shotDir, 'stockin-desktop-1440.png'), fullPage: true });
 
     // ---- review (server quote) then save
     const beforeIn = Number(sql("SELECT COUNT(*) FROM inventory_transactions WHERE transaction_type='IN'"));
     await page.click(tid('in-next'));
     await page.waitForSelector(tid('in-review-row'), { timeout: 15000 });
-    check('review: 3 lines, with Harga Beli / PPN / Diskon Item / Total columns', await page.locator(tid('in-review-row')).count() === 3 && (await page.locator('.tx2-reviewtable thead th').allTextContents()).join('|') === 'No|Nama Barang|Qty + Satuan|Harga Beli|PPN|Diskon Item|Total');
+    check('review: 3 lines, with Harga Beli / Diskon Item / Total columns (no per-item PPN)', await page.locator(tid('in-review-row')).count() === 3 && (await page.locator('.tx2-reviewtable thead th').allTextContents()).join('|') === 'No|Nama Barang|Qty + Satuan|Harga Beli|Diskon Item|Total');
     const revText = (await page.locator(tid('in-review')).innerText()).replace(/\s+/g, ' ');
     check('review shows Gudang, Supplier, Referensi, Tanggal, items, Diskon Invoice, Biaya Kirim, Grand Total', ['Gudang Cibadak'.replace('Cibadak', 'SCM'), 'PT Sinar Makmur', 'INV-SM-0042', 'Tepung Terigu Segitiga Biru', '2 KARTON', 'Diskon Invoice', 'Biaya Kirim', 'Grand Total'].every((t) => revText.includes(t)), revText.slice(0, 200));
-    check('review Grand Total (server) = live sheet Grand Total = Rp 810.000', (await page.locator(tid('in-review-grand')).last().innerText()).replace(/\s+/g, ' ') === fmt(810000));
+    check('review Grand Total (server) = live sheet Grand Total = Rp 874.700', (await page.locator(tid('in-review-grand')).last().innerText()).replace(/\s+/g, ' ') === fmt(874700));
     check('review states the inventory (HPP) effect: PPN recoverable not capitalised, shipping not capitalised', revText.includes('PPN dikreditkan (tidak masuk HPP)') && revText.includes('Biaya kirim tidak masuk HPP'));
     await page.click(tid('in-back'));
     await page.waitForSelector(tid('in-table'));
-    check('back to edit keeps every value (3 filled rows, totals identical)', await txt(page, 'in-sum-grand') === fmt(810000) && await txt(page, 'in-count') === '3 item');
+    check('back to edit keeps every value (3 filled rows, totals identical)', await txt(page, 'in-sum-grand') === fmt(874700) && await txt(page, 'in-count') === '3 item');
     await page.click(tid('in-next')); await page.waitForSelector(tid('in-review-row'));
     await page.click(tid('in-post'));
     await page.waitForSelector(tid('in-done'), { timeout: 20000 });
-    check('saved: "Transaksi Masuk berhasil disimpan (3 barang)" with Grand Total Rp 810.000', (await txt(page, 'in-done')).includes('3 barang') && await txt(page, 'in-done-grand') === fmt(810000));
+    check('saved: "Transaksi Masuk berhasil disimpan (3 barang)" with Grand Total Rp 874.700', (await txt(page, 'in-done')).includes('3 barang') && await txt(page, 'in-done-grand') === fmt(874700));
     // ---- DB truth
     const txs = sql("SELECT t.id, t.reference_no, t.supplier_id, t.warehouse_id, l.item_id, l.base_qty, l.unit_cost_base, l.notes FROM inventory_transactions t JOIN inventory_transaction_lines l ON l.transaction_id=t.id WHERE t.reference_no='INV-SM-0042' ORDER BY t.id").split('\n').map((l) => l.split('\t'));
     check('DB: three IN transactions, one per item, shared reference + supplier + warehouse, catatan on the lines', txs.length === 3 && txs.every((t) => t[2] === String(seed.supplier) && t[3] === String(seed.wh.B) && t[7] === 'Pembelian rutin mingguan') && Number(sql("SELECT COUNT(*) FROM inventory_transactions WHERE transaction_type='IN'")) === beforeIn + 3);
     const byItem = Object.fromEntries(txs.map((t) => [t[4], t]));
     check('DB: base qty gula 10 kg · terigu 2 karton = 48 kg · ragi 5 pack', near(byItem[I.gula.id][5], 10) && near(byItem[I.terigu.id][5], 48) && near(byItem[I.ragi.id][5], 5));
     const sumInvoice = Number(sql(`SELECT SUM(h.invoice_total) FROM purchase_invoice_headers h JOIN inventory_transactions t ON t.id=h.transaction_id WHERE t.reference_no='INV-SM-0042'`));
-    check('DB: Σ invoice_total of the rows = Grand Total shown = 810.000', near(sumInvoice, 810000, 0.05), String(sumInvoice));
+    check('DB: Σ invoice_total of the rows = Grand Total shown = 874.700', near(sumInvoice, 874700, 0.05), String(sumInvoice));
     const invCost = Number(sql(`SELECT SUM(c.final_inventory_cost) FROM purchase_line_costs c JOIN inventory_transactions t ON t.id=c.transaction_id WHERE t.reference_no='INV-SM-0042'`));
-    // hand computation: invoice discount 12.575 split by row total (158.175 / 600.000 / 44.400) and re-expressed on the DPP (÷ 1,11 / 1 / 1,11)
-    const tot = [158175, 600000, 44400]; const rate = [1.11, 1, 1.11]; const dpp = [142500, 600000, 40000];
-    const expectCost = dpp.reduce((a, d, i) => a + d - (12575 * tot[i] / 802575) / rate[i], 0);
+    // hand computation: DPP 782.500 − invoice discount 12.500 = 770.000 (PPN is recoverable and shipping is expensed → neither is capitalised)
+    const expectCost = 770000;
     check('DB: inventory (FIFO) cost = DPP after item + invoice discount; PPN recoverable and shipping are NOT capitalised', near(invCost, expectCost, 0.1), `${invCost} vs ${expectCost.toFixed(4)}`);
     check('J master data untouched by the price override (items checksum unchanged); price history appended', sql('CHECKSUM TABLE items').split('\t')[1] === itemsSum0 && sql(`SELECT COUNT(*) FROM item_price_history WHERE item_id=${I.gula.id}`) === '2');
     check('only the two new endpoints were used for the entry (quote ×≥1, post ×1) — no write elsewhere', requests.filter((r) => r.method !== 'GET').every((r) => ['/stock-in/quote', '/stock-in'].includes(r.path)) && requests.filter((r) => r.path === '/stock-in').length === 1);
