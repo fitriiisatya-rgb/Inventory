@@ -27,7 +27,7 @@ const StockInSheet = (() => {
         const u = Auth.user();
         return {
             phase: 'edit', warehouseId: isStockUser() ? String(u.warehouse_id) : '', supplierId: '', reference: '', date: today(), notes: '',
-            rows: [blankRow(), blankRow(), blankRow(), blankRow(), blankRow()], ppnMode: '11', ppnCustom: '',
+            rows: [blankRow(), blankRow(), blankRow(), blankRow(), blankRow()], ppnMode: '11', ppnCustom: '', ppnAdj: '',
             invMode: 'PERCENT', invValue: '', freight: '', freightCap: false, ppnTreatment: 'CREDITABLE', ppnPct: '',
             uuid: null, quote: null, result: null, anomalyApproved: false,
         };
@@ -74,8 +74,12 @@ const StockInSheet = (() => {
         let dup = false;
         filled.forEach((x) => { if (x.r.item) { const k = `${x.r.item.id}:${x.r.unitId}`; if (dupKeys.has(k)) dup = true; dupKeys.add(k); } });
         const dppAfter = K.round4(subtotal - invDisc);
-        const ppn = K.round4(dppAfter * (Number.isNaN(rate) ? 0 : rate) / 100);
-        return { rows, filled, subtotal, invDisc, dppAfter, ppn, freight, grand: K.round4(dppAfter + ppn + Math.max(0, freight)), problems, duplicate: dup };
+        const ppnCalc = K.round4(dppAfter * (Number.isNaN(rate) ? 0 : rate) / 100);
+        // PPN follows the rate until the user types the exact amount printed on the supplier's invoice
+        const adjusted = S.ppnAdj !== '' && S.ppnAdj !== null && !Number.isNaN(Number(S.ppnAdj));
+        const ppn = adjusted ? K.round4(Number(S.ppnAdj)) : ppnCalc;
+        if (adjusted && (ppn < 0 || ppn > dppAfter + 0.0001)) problems.push('Nominal PPN tidak valid (0 s/d subtotal setelah diskon)');
+        return { rows, filled, subtotal, invDisc, dppAfter, ppn, ppnCalc, adjusted, freight, grand: K.round4(dppAfter + ppn + Math.max(0, freight)), problems, duplicate: dup };
     }
 
     // ---------------------------------------------------------------- mount / layout
@@ -274,8 +278,13 @@ const StockInSheet = (() => {
             ui.sum.subtotal.textContent = K.money(c.subtotal);
             ui.sum.invLabel.textContent = `Diskon Invoice (${S.invMode === 'PERCENT' ? `${K.fmtNum(K.nz(S.invValue), 2)}%` : 'Rp'})`;
             ui.sum.inv.textContent = c.invDisc > 0 ? `- ${K.money(c.invDisc)}` : K.money(0);
-            ui.sum.ppnLabel.textContent = `PPN dihitung sekali dari total: ${K.fmtNum(Number.isNaN(ppnRate()) ? 0 : ppnRate(), 2)}% × ${K.money(c.dppAfter)} (subtotal setelah diskon)`;
-            ui.sum.ppn.textContent = K.money(c.ppn);
+            const diff = K.round4(c.ppn - c.ppnCalc);
+            ui.sum.ppnLabel.textContent = c.adjusted
+                ? `PPN disesuaikan sesuai invoice supplier · hitungan otomatis ${K.money(c.ppnCalc)} (${K.fmtNum(Number.isNaN(ppnRate()) ? 0 : ppnRate(), 2)}% × ${K.money(c.dppAfter)}) · selisih ${diff > 0 ? '+' : (diff < 0 ? '-' : '')}${K.money(Math.abs(diff))}`
+                : `PPN dihitung sekali dari total: ${K.fmtNum(Number.isNaN(ppnRate()) ? 0 : ppnRate(), 2)}% × ${K.money(c.dppAfter)} (subtotal setelah diskon) · ketik nominal untuk menyesuaikan dengan invoice supplier`;
+            ui.sum.ppnLabel.style.color = c.adjusted ? '#b45309' : '';
+            ui.sum.ppn.setValue(c.ppn);
+            ui.sum.ppnReset.style.display = c.adjusted ? '' : 'none';
             ui.sum.freight.textContent = K.money(Math.max(0, c.freight));
             ui.sum.grand.textContent = K.money(c.grand);
         }
@@ -312,16 +321,21 @@ const StockInSheet = (() => {
         const pctWrap = UI.el('div', { class: 'tx2-field' }, [UI.el('label', {}, '% dikreditkan'), pct]);
         pctWrap.style.display = S.ppnTreatment === 'PARTIALLY_CREDITABLE' ? '' : 'none';
 
-        const ppnCustom = K.numInput({ value: S.ppnCustom, suffix: '%', onValue: (n) => { S.ppnCustom = Number.isNaN(n) ? '' : n; refresh(); }, testid: 'in-ppn-custom', cls: 'tx2-ppncustom' });
-        const ppnSel = K.select([['0', '0% (tanpa PPN)'], ['11', '11%'], ['custom', 'Custom']], S.ppnMode, (v) => { S.ppnMode = v; ppnCustom.style.display = v === 'custom' ? '' : 'none'; refresh(); }, { testid: 'in-ppn' });
+        const ppnCustom = K.numInput({ value: S.ppnCustom, suffix: '%', onValue: (n) => { S.ppnCustom = Number.isNaN(n) ? '' : n; S.ppnAdj = ''; refresh(); }, testid: 'in-ppn-custom', cls: 'tx2-ppncustom' });
+        const ppnSel = K.select([['0', '0% (tanpa PPN)'], ['11', '11%'], ['custom', 'Custom']], S.ppnMode, (v) => { S.ppnMode = v; S.ppnAdj = ''; ppnCustom.style.display = v === 'custom' ? '' : 'none'; refresh(); }, { testid: 'in-ppn' });
         ppnCustom.style.display = S.ppnMode === 'custom' ? '' : 'none';
         ppnSel.style.width = '112px';
         ppnCustom.style.width = '84px';
         ui.sum = {
             subtotal: UI.el('span', { 'data-testid': 'in-sum-subtotal' }, 'Rp 0'), invLabel: UI.el('span', {}, 'Diskon Invoice'), inv: UI.el('span', { 'data-testid': 'in-sum-inv' }, 'Rp 0'),
-            ppnLabel: UI.el('span', {}, ''), ppn: UI.el('span', { 'data-testid': 'in-sum-ppn' }, 'Rp 0'),
+            ppnLabel: UI.el('span', {}, ''),
+            ppn: K.numInput({ value: '', prefix: 'Rp', onValue: (n) => { S.ppnAdj = Number.isNaN(n) ? '' : n; refresh(); }, testid: 'in-sum-ppn', cls: 'tx2-ppnamt' }),
+            ppnReset: UI.el('button', { type: 'button', class: 'btn btn-sm', 'data-testid': 'in-ppn-reset', title: 'Kembali ke hitungan otomatis', style: 'display:none;margin-top:6px;padding:2px 10px;background:transparent;color:#93c5fd;border:1px solid currentColor;border-radius:6px;font-size:12px;cursor:pointer' }, '↺ Otomatis'),
             freight: UI.el('span', { 'data-testid': 'in-sum-freight' }, 'Rp 0'), grand: UI.el('span', { 'data-testid': 'in-sum-grand' }, 'Rp 0'),
         };
+        ui.sum.ppn.style.width = '150px';
+        ui.sum.ppnReset.addEventListener('click', () => { S.ppnAdj = ''; refresh(); });
+        ui.sum.ppn.input.addEventListener('blur', () => refresh());   // an emptied field falls back to the automatic amount
         return UI.el('div', { class: 'tx2-card tx2-bottom' }, [
             UI.el('div', { class: 'tx2-bcol' }, [
                 UI.el('div', { class: 'tx2-btitle' }, ['Diskon Invoice ', UI.el('span', { class: 'tx2-opt' }, '(Opsional)')]),
@@ -339,7 +353,7 @@ const StockInSheet = (() => {
                 UI.el('div', { class: 'tx2-sumrow' }, [UI.el('span', {}, 'Subtotal'), ui.sum.subtotal]),
                 UI.el('div', { class: 'tx2-sumrow' }, [ui.sum.invLabel, ui.sum.inv]),
                 UI.el('div', { class: 'tx2-sumrow tx2-ppnrow', style: 'align-items:center' }, [UI.el('span', { class: 'tx2-ppnctl', style: 'display:inline-flex;align-items:center;gap:8px' }, ['PPN ', ppnSel, ppnCustom]), ui.sum.ppn]),
-                UI.el('div', { class: 'tx2-hintline tx2-ppnnote' }, [ui.sum.ppnLabel]),
+                UI.el('div', { class: 'tx2-hintline tx2-ppnnote' }, [ui.sum.ppnLabel, UI.el('div', {}, [ui.sum.ppnReset])]),
                 UI.el('div', { class: 'tx2-sumrow' }, [UI.el('span', {}, 'Biaya Kirim'), ui.sum.freight]),
                 UI.el('div', { class: 'tx2-grand' }, [UI.el('span', {}, 'Grand Total'), ui.sum.grand]),
             ]),
@@ -378,7 +392,7 @@ const StockInSheet = (() => {
             warehouse_id: Number(S.warehouseId), supplier_id: S.supplierId ? Number(S.supplierId) : null, reference_no: S.reference || null, transaction_date: S.date, notes: S.notes || null,
             invoice_discount_type: K.nz(S.invValue) > 0 ? S.invMode : 'NONE', invoice_discount_value: K.nz(S.invValue),
             freight_amount: Math.max(0, K.nz(S.freight)), freight_capitalize: !!S.freightCap,
-            ppn_rate: ppnRate() || 0, ppn_treatment: S.ppnTreatment, ppn_creditable_pct: K.nz(S.ppnPct), lines,
+            ppn_rate: ppnRate() || 0, ...(calc().adjusted ? { ppn_amount: calc().ppn } : {}), ppn_treatment: S.ppnTreatment, ppn_creditable_pct: K.nz(S.ppnPct), lines,
         };
     }
 
@@ -429,7 +443,7 @@ const StockInSheet = (() => {
                 UI.el('div', { class: 'tx2-hintline' }, `Nilai masuk persediaan (HPP): ${K.money(t.inventory_cost_total)} · PPN ${t.ppn_treatment === 'CREDITABLE' ? 'dikreditkan (tidak masuk HPP)' : (t.ppn_treatment === 'NON_CREDITABLE' ? 'masuk HPP' : 'sebagian masuk HPP')} · Biaya kirim ${t.freight_treatment === 'CAPITALIZE' ? 'masuk HPP' : 'tidak masuk HPP'}`),
                 UI.el('div', { class: 'tx2-sumbox' }, [
                     row('Subtotal', K.money(t.subtotal)), row(`Diskon Invoice${t.invoice_discount_type === 'PERCENT' ? ` (${K.fmtNum(t.invoice_discount_value, 2)}%)` : ''}`, t.invoice_discount > 0 ? `- ${K.money(t.invoice_discount)}` : K.money(0)),
-                    row(`PPN (${K.fmtNum(t.ppn_rate || 0, 2)}% × ${K.money(t.dpp_after_invoice_discount)})`, K.money(t.ppn_total)),
+                    row(t.ppn_adjusted ? `PPN (disesuaikan sesuai invoice supplier; hitungan ${K.fmtNum(t.ppn_rate || 0, 2)}% = ${K.money(t.ppn_calculated)})` : `PPN (${K.fmtNum(t.ppn_rate || 0, 2)}% × ${K.money(t.dpp_after_invoice_discount)})`, K.money(t.ppn_total)),
                     row('Biaya Kirim', K.money(t.freight_amount)), UI.el('div', { class: 'tx2-grand' }, [UI.el('span', {}, 'Grand Total'), UI.el('span', { 'data-testid': 'in-review-grand' }, K.money(t.grand_total))]),
                 ]),
             ]));

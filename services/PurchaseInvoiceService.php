@@ -125,6 +125,17 @@ final class PurchaseInvoiceService
             }
         }
 
+        // optional exact PPN amount typed from the supplier's invoice (implies invoice-level mode)
+        $ppnAdjusted = null;
+        if (array_key_exists('ppn_amount', $in) && $in['ppn_amount'] !== null && $in['ppn_amount'] !== '') {
+            $ppnAdjusted = self::round((float) $in['ppn_amount']);
+            if ($ppnAdjusted < 0) {
+                $errors[] = 'nominal PPN tidak boleh negatif';
+                $ppnAdjusted = null;
+            }
+            $invoiceRate ??= 0.0;
+        }
+
         $freightAmount = self::round((float) ($in['freight_amount'] ?? 0));
         if ($freightAmount < 0) {
             $errors[] = 'freight_amount must not be negative';
@@ -249,6 +260,19 @@ final class PurchaseInvoiceService
         }
         unset($r);
         $freightShares = PurchaseCostingService::allocateProportionally($netDpp, $freightAmount);
+
+        // PPN computed once on the DPP after discount; an adjusted amount (supplier invoice) replaces it and is spread over the rows by DPP
+        $dppAfterPre = self::round(array_sum($netDpp));
+        $ppnCalculated = $invoiceRate !== null ? self::round($dppAfterPre * $invoiceRate / 100) : null;
+        $ppnShares = null;
+        if ($ppnAdjusted !== null) {
+            if ($ppnAdjusted > $dppAfterPre) {
+                $errors[] = 'nominal PPN tidak boleh melebihi subtotal setelah diskon';
+                $ppnAdjusted = null;
+            } else {
+                $ppnShares = PurchaseCostingService::allocateProportionally($netDpp, $ppnAdjusted);
+            }
+        }
         $freightTreatment = $freightAmount > 0 ? ($freightCapitalize ? 'CAPITALIZE' : 'EXPENSE') : 'NONE';
 
         $costingByLine = [];
@@ -265,8 +289,9 @@ final class PurchaseInvoiceService
                 'line_discount_type' => $r['discount_type'], 'line_discount_value' => $r['discount_value'],
                 'invoice_discount_type' => $r['invoice_discount_dpp'] > 0 ? 'AMOUNT' : 'NONE',
                 'invoice_discount_value' => $r['invoice_discount_dpp'],
-                'ppn_treatment' => $r['ppn_rate'] > 0 ? $ppnTreatment : 'NONE',
+                'ppn_treatment' => ($r['ppn_rate'] > 0 || ($ppnShares !== null && $ppnShares[$i] > 0)) ? $ppnTreatment : 'NONE',
                 'ppn_rate' => $r['ppn_rate'], 'ppn_creditable_pct' => $ppnCreditablePct,
+                'ppn_amount_override' => $ppnShares !== null ? $ppnShares[$i] : null,
                 'freight_treatment' => $freightShares[$i] > 0 ? $freightTreatment : 'NONE',
                 'freight_amount' => $freightShares[$i],
             ];
@@ -355,6 +380,9 @@ final class PurchaseInvoiceService
                 'ppn_treatment' => $ppnTreatment,
                 'ppn_mode' => $invoiceRate !== null ? 'INVOICE' : 'PER_ITEM',
                 'ppn_rate' => $invoiceRate,
+                'ppn_adjusted' => $ppnShares !== null,
+                'ppn_calculated' => $ppnCalculated,
+                'ppn_difference' => $ppnShares !== null ? self::round($ppnSum - $ppnCalculated) : 0.0,
                 'dpp_after_invoice_discount' => $dppAfter,
                 'ppn_total' => self::round($ppnSum),
                 'grand_total' => $grandTotal,
@@ -428,7 +456,7 @@ final class PurchaseInvoiceService
                     'subtotal' => $t['subtotal'], 'invoice_discount_type' => $t['invoice_discount_type'],
                     'invoice_discount_value' => $t['invoice_discount_value'], 'invoice_discount' => $t['invoice_discount'],
                     'freight_amount' => $t['freight_amount'], 'freight_treatment' => $t['freight_treatment'],
-                    'ppn_treatment' => $t['ppn_treatment'], 'ppn_mode' => $t['ppn_mode'], 'ppn_rate' => $t['ppn_rate'], 'ppn_total' => $t['ppn_total'], 'grand_total' => $t['grand_total'],
+                    'ppn_treatment' => $t['ppn_treatment'], 'ppn_mode' => $t['ppn_mode'], 'ppn_rate' => $t['ppn_rate'], 'ppn_adjusted' => $t['ppn_adjusted'], 'ppn_calculated' => $t['ppn_calculated'], 'ppn_total' => $t['ppn_total'], 'grand_total' => $t['grand_total'],
                     'inventory_cost_total' => $t['inventory_cost_total'],
                 ]
             );

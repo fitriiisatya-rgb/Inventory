@@ -41,7 +41,7 @@ final class PurchaseCostingService
     /**
      * @param array{
      *   invoice_discount_type: string, invoice_discount_value: float,
-     *   ppn_treatment: string, ppn_rate: float, ppn_creditable_pct: float,
+     *   ppn_treatment: string, ppn_rate: float, ppn_creditable_pct: float, ppn_amount_override?: ?float,
      *   freight_treatment: string, freight_amount: float
      * } $header
      * @param list<array{qty: float, gross_unit_price: float, base_qty: float,
@@ -109,7 +109,12 @@ final class PurchaseCostingService
         $netPurchaseBeforeTax = self::round(array_sum(array_column($lineRows, 'net_purchase_before_tax')));
 
         // ---- Step 3: PPN — computed on net purchase before tax, allocated to lines, then split creditable/non-creditable PER LINE (so the split always reconciles exactly, never just in aggregate) ----
-        $ppnAmount = self::round($netPurchaseBeforeTax * $ppnRate / 100);
+        // optional exact PPN amount (matches the supplier's printed invoice); absent → rate x net purchase
+        $ppnOverride = $header['ppn_amount_override'] ?? null;
+        if ($ppnOverride !== null && (float) $ppnOverride < 0) {
+            throw new ValidationException(['ppn_amount_override must not be negative']);
+        }
+        $ppnAmount = $ppnOverride !== null ? self::round((float) $ppnOverride) : self::round($netPurchaseBeforeTax * $ppnRate / 100);
         $ppnAllocated = self::allocateProportionally(array_column($lineRows, 'net_purchase_before_tax'), $ppnAmount);
 
         foreach ($lineRows as $i => &$row) {

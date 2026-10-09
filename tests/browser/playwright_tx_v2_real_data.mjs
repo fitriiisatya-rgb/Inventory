@@ -90,6 +90,7 @@ const txt = async (page, id) => (await page.locator(tid(id)).first().innerText()
 const rowTxt = async (page, prefix, idx, id) => (await page.locator(tid(`${prefix}-row`)).nth(idx).locator(tid(id)).innerText()).replace(/\s+/g, ' ').trim();
 const fill = async (loc, v) => { await loc.fill(String(v)); };
 const fmt = (n) => rp(n);
+const ppnTxt = async (page) => `Rp ${await page.locator(tid('in-sum-ppn')).inputValue()}`;
 
 let browser;
 try {
@@ -101,7 +102,7 @@ try {
     // ================================================================ STOCK IN
     await openTx(page, 'in');
     const scripts = await page.evaluate(() => Array.from(document.scripts).map((s) => s.getAttribute('src') || ''));
-    check('new modules + cache tokens loaded', ['transactions.js', 'stock-in-sheet.js', 'stock-out-sheet.js'].every((n) => scripts.some((s) => s.includes(`${n}?v=${n === 'stock-in-sheet.js' ? '20261010-tx2b' : '20261010-tx2'}`))));
+    check('new modules + cache tokens loaded', ['transactions.js', 'stock-in-sheet.js', 'stock-out-sheet.js'].every((n) => scripts.some((s) => s.includes(`${n}?v=${n === 'stock-in-sheet.js' ? '20261010-tx2c' : '20261010-tx2'}`))));
     check('tabs Stock IN / Stock OUT; Stock IN active', await page.locator(tid('tx-tab-in')).count() === 1 && await page.locator(tid('tx-tab-out')).count() === 1 && await page.locator(`${tid('tx-tab-in')}.on`).count() === 1);
     const hdrTxt = (await page.locator(tid('in-header')).innerText()).replace(/\s+/g, ' ');
     check('header fields: Gudang, Vendor / Supplier, Referensi, Tanggal Transaksi, Tipe Transaksi, Catatan', ['Gudang', 'Vendor / Supplier', 'Referensi', 'Tanggal Transaksi', 'Tipe Transaksi', 'Catatan (Opsional)'].every((l) => hdrTxt.includes(l)), hdrTxt);
@@ -134,7 +135,7 @@ try {
     check('A status "Data siap disimpan", Lanjut enabled', (await txt(page, 'in-status-title')) === 'Data siap disimpan' && await page.locator(tid('in-next')).isEnabled());
     // ---- B: PPN 11%
     await page.selectOption(tid('in-ppn'), '11');
-    check('B PPN 11% at the END: row Total stays the DPP 140.000; PPN 15.400 on the total; Grand Rp 155.400', await rowTxt(page, 'in', 0, 'in-rowtotal') === fmt(140000) && await txt(page, 'in-sum-ppn') === fmt(15400) && await txt(page, 'in-sum-grand') === fmt(155400));
+    check('B PPN 11% at the END: row Total stays the DPP 140.000; PPN 15.400 on the total; Grand Rp 155.400', await rowTxt(page, 'in', 0, 'in-rowtotal') === fmt(140000) && await ppnTxt(page) === fmt(15400) && await txt(page, 'in-sum-grand') === fmt(155400));
     // ---- C: item discount 5%
     await fill(page.locator(tid('in-row')).nth(0).locator(tid('in-disc')), 5);
     check('C item discount 5%: row Total = DPP 133.000; PPN 14.630 → Grand Rp 147.630', await rowTxt(page, 'in', 0, 'in-rowtotal') === fmt(133000) && await txt(page, 'in-sum-grand') === fmt(147630));
@@ -149,7 +150,7 @@ try {
     await fill(page.locator(tid('in-row')).nth(0).locator(tid('in-disc')), 5);
     // ---- E/F/G: invoice discount % / Rp, shipping (single row 147.630)
     await fill(page.locator(tid('in-inv-value')), 10);
-    check('E invoice discount 10% BEFORE PPN: Subtotal (DPP) 133.000 − 13.300 = 119.700; PPN 11% = 13.167 → Grand Rp 132.867', await txt(page, 'in-sum-subtotal') === fmt(133000) && await txt(page, 'in-sum-ppn') === fmt(13167) && await txt(page, 'in-sum-grand') === fmt(132867));
+    check('E invoice discount 10% BEFORE PPN: Subtotal (DPP) 133.000 − 13.300 = 119.700; PPN 11% = 13.167 → Grand Rp 132.867', await txt(page, 'in-sum-subtotal') === fmt(133000) && await ppnTxt(page) === fmt(13167) && await txt(page, 'in-sum-grand') === fmt(132867));
     await page.locator(`${tid('in-inv-mode')} .tx2-segbtn[data-value="AMOUNT"]`).click();
     await fill(page.locator(tid('in-inv-value')), 10000);
     check('F invoice discount Rp 10.000 on the DPP (mutually exclusive with %): 123.000 + PPN 13.530 = Grand Rp 136.530', await txt(page, 'in-sum-grand') === fmt(136530) && (await txt(page, 'in-sum-inv')).includes(fmt(10000)));
@@ -180,8 +181,23 @@ try {
     await page.locator(`${tid('in-inv-mode')} .tx2-segbtn[data-value="AMOUNT"]`).click();
     await fill(page.locator(tid('in-inv-value')), 12500);
     await fill(page.locator(tid('in-freight')), 20000);
-    check('H invoice discount Rp 12.500 → DPP 770.000; PPN 11% = 84.700; + Biaya Kirim 20.000 → Grand Total Rp 874.700', await txt(page, 'in-sum-ppn') === fmt(84700) && await txt(page, 'in-sum-grand') === fmt(874700), await txt(page, 'in-sum-grand'));
+    check('H invoice discount Rp 12.500 → DPP 770.000; PPN 11% = 84.700; + Biaya Kirim 20.000 → Grand Total Rp 874.700', await ppnTxt(page) === fmt(84700) && await txt(page, 'in-sum-grand') === fmt(874700), await txt(page, 'in-sum-grand'));
+    // ---- adjustable PPN: type the exact amount printed on the supplier invoice
     await page.screenshot({ path: path.join(shotDir, 'stockin-desktop-1440.png'), fullPage: true });
+    await fill(page.locator(tid('in-sum-ppn')), 84750);
+    await page.locator(tid('in-sum-ppn')).blur();
+    check('PPN adjusted to the supplier invoice: PPN Rp 84.750, Grand Total = 770.000 + 84.750 + 20.000 = Rp 874.750; note shows auto 84.700 and diff +Rp 50', await ppnTxt(page) === fmt(84750) && await txt(page, 'in-sum-grand') === fmt(874750) && (await txt(page, 'in-summary')).includes('disesuaikan sesuai invoice supplier') && (await txt(page, 'in-summary')).includes('selisih +' + fmt(50)), await txt(page, 'in-sum-grand'));
+    await page.screenshot({ path: path.join(shotDir, 'stockin-ppn-adjusted.png'), fullPage: true });
+    check('reset button appears; clicking it returns to the automatic PPN 84.700 / Grand 874.700', await page.locator(tid('in-ppn-reset')).isVisible());
+    await page.click(tid('in-ppn-reset'));
+    check('reset → automatic PPN again', await ppnTxt(page) === fmt(84700) && await txt(page, 'in-sum-grand') === fmt(874700));
+    await fill(page.locator(tid('in-sum-ppn')), 84750);
+    await page.click(tid('in-next'));
+    await page.waitForSelector(tid('in-review-row'), { timeout: 15000 });
+    check('review (server quote) keeps the adjusted PPN: label "disesuaikan", Grand Total Rp 874.750', (await page.locator(tid('in-review')).innerText()).includes('disesuaikan sesuai invoice supplier') && (await page.locator(tid('in-review-grand')).last().innerText()).replace(/\s+/g, ' ') === fmt(874750));
+    await page.click(tid('in-back'));
+    await page.waitForSelector(tid('in-table'));
+    await page.click(tid('in-ppn-reset'));
 
     // ---- review (server quote) then save
     const beforeIn = Number(sql("SELECT COUNT(*) FROM inventory_transactions WHERE transaction_type='IN'"));

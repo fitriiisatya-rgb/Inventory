@@ -274,6 +274,30 @@ check('Q posted: purchase_invoice_headers carry ppn_rate 11 and PPN 990 / 1.980 
 $auditQ = json_decode((string) $pdo->query("SELECT after_data FROM audit_logs WHERE action_code='PURCHASE_INVOICE_POST' ORDER BY id DESC LIMIT 1")->fetchColumn(), true);
 check('Q the invoice-level PPN is audited (mode INVOICE, rate 11, PPN total 2.970)', ($auditQ['ppn_mode'] ?? '') === 'INVOICE' && near((float) ($auditQ['ppn_rate'] ?? 0), 11) && near((float) ($auditQ['ppn_total'] ?? 0), 2970));
 
+// ============================================================ R. ADJUSTABLE PPN (exact amount from the supplier invoice)
+$ra = P::quote($pdo, entry($WH, $two, ['ppn_rate' => 11, 'ppn_amount' => 3310]));
+check('R adjusted PPN 3.310 replaces the 3.300 calculation: PPN total 3.310, Grand 33.310, flagged adjusted, calculated 3.300, difference +10', $ra['valid'] && near($ra['totals']['ppn_total'], 3310) && near($ra['totals']['grand_total'], 33310) && $ra['totals']['ppn_adjusted'] === true && near($ra['totals']['ppn_calculated'], 3300) && near($ra['totals']['ppn_difference'], 10), json_encode($ra['totals']));
+check('R the adjusted PPN is spread over the rows by DPP and sums exactly to 3.310', near($ra['lines'][0]['ppn_final'] + $ra['lines'][1]['ppn_final'], 3310, 0.0001) && near($ra['lines'][0]['ppn_final'], 3310 / 3, 0.0001));
+check('R without ppn_amount nothing is adjusted (ppn_adjusted false, difference 0)', $qi['totals']['ppn_adjusted'] === false && near($qi['totals']['ppn_difference'], 0));
+$rd = P::quote($pdo, entry($WH, $two, ['ppn_rate' => 11, 'ppn_amount' => 2975, 'invoice_discount_type' => 'PERCENT', 'invoice_discount_value' => 10, 'freight_amount' => 3000]));
+check('R with invoice discount: DPP after discount 27.000 + adjusted PPN 2.975 + shipping 3.000 = Grand 32.975 (calculated 2.970, +5)', near($rd['totals']['dpp_after_invoice_discount'], 27000) && near($rd['totals']['ppn_total'], 2975) && near($rd['totals']['grand_total'], 32975) && near($rd['totals']['ppn_difference'], 5), json_encode($rd['totals']));
+$rn = P::quote($pdo, entry($WH, $two, ['ppn_rate' => 11, 'ppn_amount' => 3310, 'ppn_treatment' => 'NON_CREDITABLE']));
+check('R non-creditable: the adjusted PPN is capitalised — inventory cost total 30.000 + 3.310 = 33.310', near(array_sum(array_column($rn['lines'], 'inventory_cost')), 33310, 0.01), json_encode(array_column($rn['lines'], 'inventory_cost')));
+$rz = P::quote($pdo, entry($WH, $two, ['ppn_rate' => 0, 'ppn_amount' => 3000]));
+check('R a supplier-printed PPN can be entered even when the rate selector is 0%: PPN 3.000, Grand 33.000', $rz['valid'] && near($rz['totals']['ppn_total'], 3000) && near($rz['totals']['grand_total'], 33000));
+$r0 = P::quote($pdo, entry($WH, $two, ['ppn_rate' => 11, 'ppn_amount' => 0]));
+check('R an explicit PPN of Rp 0 is honoured (not treated as "empty"): PPN 0, Grand 30.000', $r0['valid'] && near($r0['totals']['ppn_total'], 0) && near($r0['totals']['grand_total'], 30000) && $r0['totals']['ppn_adjusted'] === true);
+$rneg = P::quote($pdo, entry($WH, $two, ['ppn_rate' => 11, 'ppn_amount' => -5]));
+check('R negative PPN amount is rejected', $rneg['valid'] === false && str_contains(implode(' ', $rneg['errors']), 'PPN'));
+$rbig = P::quote($pdo, entry($WH, $two, ['ppn_rate' => 11, 'ppn_amount' => 30001]));
+check('R PPN above the DPP after discount is rejected', $rbig['valid'] === false && str_contains(implode(' ', $rbig['errors']), 'PPN'));
+$rp = post($pdo, entry($WH, $two, ['ppn_rate' => 11, 'ppn_amount' => 3310, 'supplier_id' => $supplier]), $uid);
+$p1 = hdr($pdo, (int) $rp['transactions'][0]['transaction_id']);
+$p2 = hdr($pdo, (int) $rp['transactions'][1]['transaction_id']);
+check('R posted: purchase_invoice_headers PPN amounts sum to 3.310; grand total Rp 33.310', near((float) $p1['ppn_amount'] + (float) $p2['ppn_amount'], 3310, 0.001) && near($rp['totals']['grand_total'], 33310));
+$auditR = json_decode((string) $pdo->query("SELECT after_data FROM audit_logs WHERE action_code='PURCHASE_INVOICE_POST' ORDER BY id DESC LIMIT 1")->fetchColumn(), true);
+check('R the adjustment is audited (ppn_adjusted true, calculated 3.300, total 3.310)', ($auditR['ppn_adjusted'] ?? false) === true && near((float) ($auditR['ppn_calculated'] ?? 0), 3300) && near((float) ($auditR['ppn_total'] ?? 0), 3310));
+
 $fail = count(array_filter($results, fn ($r) => !$r));
 echo "\n" . (count($results) - $fail) . ' / ' . count($results) . ' PASSED' . ($fail ? " — {$fail} FAILED" : '') . "\n";
 exit($fail ? 1 : 0);

@@ -47,6 +47,7 @@ final class PurchaseCostingGateway
                 'invoice_discount_value' => (float) ($input['invoice_discount_value'] ?? 0),
                 'ppn_treatment' => $input['ppn_treatment'] ?? 'NONE',
                 'ppn_rate' => (float) ($input['ppn_rate'] ?? 0),
+                'ppn_amount_override' => isset($input['ppn_amount_override']) ? (float) $input['ppn_amount_override'] : null,
                 'ppn_creditable_pct' => (float) ($input['ppn_creditable_pct'] ?? 0),
                 'freight_treatment' => $input['freight_treatment'] ?? 'NONE',
                 'freight_amount' => (float) ($input['freight_amount'] ?? 0),
